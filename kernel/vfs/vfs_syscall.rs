@@ -528,6 +528,23 @@ pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
     }
 }
 
+/// Core logic behind [`sys_vfs_read`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Only `EBADF` (unresolvable `fd`) is
+/// this function's own failure; `vfs_fileread`'s `isize` result (byte
+/// count on success, or a cross-file negative errno on failure) passes
+/// through as `Ok` unconditionally, matching the original's unconditional
+/// `ret as u64`.
+fn read_inner(fd: c_int, p: u64, n: c_int) -> KResult<isize> {
+    let f = vfs_argfd(fd);
+    if f.is_null() {
+        return Err(Errno::BadF);
+    }
+
+    let ret = vfs_fileread(f, p as *mut c_void, n as usize, 1);
+    vfs_fput(f);
+    Ok(ret)
+}
+
 pub(crate) extern "C" fn sys_vfs_read() -> u64 {
     let mut fd: c_int = 0;
     let mut n: c_int = 0;
@@ -537,14 +554,24 @@ pub(crate) extern "C" fn sys_vfs_read() -> u64 {
     argaddr(1, &mut p);
     argint(2, &mut n);
 
+    match read_inner(fd, p, n) {
+        Ok(v) => v as u64,
+        Err(e) => ret64(e.neg()),
+    }
+}
+
+/// Core logic behind [`sys_vfs_write`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5) — same shape/rationale as
+/// [`read_inner`].
+fn write_inner(fd: c_int, p: u64, n: c_int) -> KResult<isize> {
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
-    let ret = vfs_fileread(f, p as *mut c_void, n as usize, 1);
+    let ret = vfs_filewrite(f, p as *const c_void, n as usize, 1);
     vfs_fput(f);
-    ret as u64
+    Ok(ret)
 }
 
 pub(crate) extern "C" fn sys_vfs_write() -> u64 {
@@ -556,14 +583,10 @@ pub(crate) extern "C" fn sys_vfs_write() -> u64 {
     argaddr(1, &mut p);
     argint(2, &mut n);
 
-    let f = vfs_argfd(fd);
-    if f.is_null() {
-        return ret64(neg(EBADF));
+    match write_inner(fd, p, n) {
+        Ok(v) => v as u64,
+        Err(e) => ret64(e.neg()),
     }
-
-    let ret = vfs_filewrite(f, p as *const c_void, n as usize, 1);
-    vfs_fput(f);
-    ret as u64
 }
 
 /// Core logic behind [`sys_vfs_close`], factored out as a private helper
@@ -800,13 +823,20 @@ fn vfs_inode_stat_fallback(inode: *mut vfs_inode, kst: *mut stat) -> c_int {
     0
 }
 
-pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
+/// Core logic behind [`sys_vfs_stat`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Bad path copy-in is `Err(Errno::Fault)`;
+/// the symlink-following loop's `vfs_namei` failures stay `Err(Errno::Raw)`/
+/// `Err(Errno::NoEnt)` (same precedent as `chdir_inner`); `vfs_readlink`'s
+/// already-negative `isize` result, the `ELOOP` cap, the fallback-getattr
+/// failure, and the copyout failure are all ordinary `Err`s; the success
+/// path carries no value.
+fn stat_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut st_addr: u64 = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     argaddr(1, &mut st_addr);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let mut inode: IRef;
@@ -815,10 +845,10 @@ pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
     loop {
         let raw_inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
         if is_err(raw_inode) {
-            return ptr_err(raw_inode) as u64;
+            return Err(Errno::Raw(ptr_err(raw_inode)));
         }
         if raw_inode.is_null() {
-            return ret64(neg(ENOENT));
+            return Err(Errno::NoEnt);
         }
         // `IRef::from_raw`: `vfs_namei` succeeded (non-null, non-error),
         // whose postcondition is an owned, already-held reference.
@@ -834,43 +864,51 @@ pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
 
         let link_len = vfs_readlink(IRef::as_ptr(&inode), path.as_mut_ptr(), MAXPATH - 1);
         if link_len < 0 {
-            return link_len as u64;
+            return Err(Errno::Raw(link_len as c_int));
         }
         unsafe { path[link_len as usize] = 0 };
 
         symloop_count += 1;
         if symloop_count >= VFS_SYMLOOP_MAX {
-            return ret64(neg(ELOOP));
+            return Err(Errno::Loop);
         }
     }
 
     let mut kst: stat = unsafe { core::mem::zeroed() };
     let ret = vfs_inode_stat_fallback(IRef::as_ptr(&inode), &mut kst);
     if ret != 0 {
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
     if either_copyout(1, st_addr, &mut kst as *mut stat as *mut c_void, core::mem::size_of::<stat>() as u64) < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
-    0
+    Ok(())
 }
 
-pub(crate) extern "C" fn sys_vfs_lstat() -> u64 {
+pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
+    ret64(result_to_neg_errno(stat_inner()))
+}
+
+/// Core logic behind [`sys_vfs_lstat`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5) — same shape as [`stat_inner`] but
+/// resolving the *parent* + a single non-following `vfs_ilookup`
+/// (no symlink loop: `lstat` reports the link itself).
+fn lstat_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut st_addr: u64 = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     argaddr(1, &mut st_addr);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
@@ -879,46 +917,56 @@ pub(crate) extern "C" fn sys_vfs_lstat() -> u64 {
     let ret = vfs_ilookup(parent, &mut dentry, name.as_ptr(), unsafe { strlen(name.as_ptr()) });
     if ret != 0 {
         vfs_iput(parent);
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     let inode = vfs_get_dentry_inode(&mut dentry);
     vfs_release_dentry(&mut dentry);
     vfs_iput(parent);
     if is_err(inode) {
-        return ptr_err(inode) as u64;
+        return Err(Errno::Raw(ptr_err(inode)));
     }
     if inode.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let mut kst: stat = unsafe { core::mem::zeroed() };
     let ret = vfs_inode_stat_fallback(inode, &mut kst);
     vfs_iput(inode);
     if ret != 0 {
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
     if either_copyout(1, st_addr, &mut kst as *mut stat as *mut c_void, core::mem::size_of::<stat>() as u64) < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
-    0
+    Ok(())
 }
 
-pub(crate) extern "C" fn sys_vfs_access() -> u64 {
+pub(crate) extern "C" fn sys_vfs_lstat() -> u64 {
+    ret64(result_to_neg_errno(lstat_inner()))
+}
+
+/// Core logic behind [`sys_vfs_access`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Bad path copy-in and unresolvable path
+/// are ordinary `Err`s; the three `EACCES` permission-bit checks (each
+/// gated by a different `mode` bit) are unchanged in shape, just `Err`
+/// returns instead of `ret64(neg(EACCES))`; the success path carries no
+/// value.
+fn access_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut mode: c_int = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     argint(1, &mut mode);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let inode = vfs_namei(path.as_ptr(), n as usize);
     if is_err(inode) {
-        return ptr_err(inode) as u64;
+        return Err(Errno::Raw(ptr_err(inode)));
     }
     if inode.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
     // `IRef::from_raw`: `vfs_namei` succeeded (non-null, non-error),
     // whose postcondition is an owned, already-held reference -- this
@@ -931,20 +979,29 @@ pub(crate) extern "C" fn sys_vfs_access() -> u64 {
     if mode != 0 {
         let perm = inode.mode;
         if (mode & 4) != 0 && (perm & (S_IRUSR | S_IRGRP | S_IROTH)) == 0 {
-            return ret64(neg(EACCES));
+            return Err(Errno::Access);
         }
         if (mode & 2) != 0 && (perm & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0 {
-            return ret64(neg(EACCES));
+            return Err(Errno::Access);
         }
         if (mode & 1) != 0 && (perm & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 {
-            return ret64(neg(EACCES));
+            return Err(Errno::Access);
         }
     }
 
-    0
+    Ok(())
 }
 
-pub(crate) extern "C" fn sys_vfs_readlink() -> u64 {
+pub(crate) extern "C" fn sys_vfs_access() -> u64 {
+    ret64(result_to_neg_errno(access_inner()))
+}
+
+/// Core logic behind [`sys_vfs_readlink`], factored out as a private
+/// helper returning [`KResult`] (P3-CS5). Every early-return site keeps
+/// its exact errno (`Fault`/`Inval`/`Raw`/`NoEnt`/`NoMem`); the success
+/// path's return value is the byte count `vfs_readlink` wrote, matching
+/// the original's unconditional `len as u64`.
+fn readlink_inner() -> KResult<isize> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut buf_addr: u64 = 0;
@@ -954,18 +1011,18 @@ pub(crate) extern "C" fn sys_vfs_readlink() -> u64 {
     argaddr(1, &mut buf_addr);
     argint(2, &mut bufsz);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
     if bufsz <= 0 {
-        return ret64(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
@@ -974,41 +1031,53 @@ pub(crate) extern "C" fn sys_vfs_readlink() -> u64 {
     let ret = vfs_ilookup(parent, &mut dentry, name.as_ptr(), unsafe { strlen(name.as_ptr()) });
     if ret != 0 {
         vfs_iput(parent);
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     let inode = vfs_get_dentry_inode(&mut dentry);
     vfs_release_dentry(&mut dentry);
     vfs_iput(parent);
     if is_err(inode) {
-        return ptr_err(inode) as u64;
+        return Err(Errno::Raw(ptr_err(inode)));
     }
     if inode.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let kbuf = kmm_alloc(bufsz as usize);
     if kbuf.is_null() {
         vfs_iput(inode);
-        return ret64(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
 
     let len = vfs_readlink(inode, kbuf as *mut c_char, bufsz as usize);
     vfs_iput(inode);
     if len < 0 {
         kmm_free(kbuf);
-        return len as u64;
+        return Err(Errno::Raw(len as c_int));
     }
 
     if either_copyout(1, buf_addr, kbuf, len as u64) < 0 {
         kmm_free(kbuf);
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
     kmm_free(kbuf);
-    len as u64
+    Ok(len)
 }
 
-pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
+pub(crate) extern "C" fn sys_vfs_readlink() -> u64 {
+    match readlink_inner() {
+        Ok(v) => v as u64,
+        Err(e) => ret64(e.neg()),
+    }
+}
+
+/// Core logic behind [`sys_vfs_rename`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno; `vfs_move`'s own `c_int` result (0 or a cross-file
+/// negative errno) passes through as `Ok` unconditionally, matching the
+/// original's unconditional `ret64(ret)`.
+fn rename_inner() -> KResult<c_int> {
     let mut oldpath: [c_char; MAXPATH] = [0; MAXPATH];
     let mut newpath: [c_char; MAXPATH] = [0; MAXPATH];
     let mut oldname: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
@@ -1016,25 +1085,25 @@ pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
     let n1 = argstr(0, oldpath.as_mut_ptr(), MAXPATH as c_int);
     let n2 = argstr(1, newpath.as_mut_ptr(), MAXPATH as c_int);
     if n1 < 0 || n2 < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let old_parent = vfs_nameiparent(oldpath.as_ptr(), n1 as usize, oldname.as_mut_ptr(), DIRSIZ + 1);
     if is_err(old_parent) {
-        return ptr_err(old_parent) as u64;
+        return Err(Errno::Raw(ptr_err(old_parent)));
     }
     if old_parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let new_parent = vfs_nameiparent(newpath.as_ptr(), n2 as usize, newname.as_mut_ptr(), DIRSIZ + 1);
     if is_err(new_parent) {
         vfs_iput(old_parent);
-        return ptr_err(new_parent) as u64;
+        return Err(Errno::Raw(ptr_err(new_parent)));
     }
     if new_parent.is_null() {
         vfs_iput(old_parent);
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let mut old_dentry: vfs_dentry = unsafe { core::mem::zeroed() };
@@ -1044,7 +1113,7 @@ pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
     if ret != 0 {
         vfs_iput(old_parent);
         vfs_iput(new_parent);
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     let ret = vfs_move(
@@ -1057,7 +1126,14 @@ pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
     vfs_release_dentry(&mut old_dentry);
     vfs_iput(old_parent);
     vfs_iput(new_parent);
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
+    match rename_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
@@ -1297,37 +1373,43 @@ pub(crate) extern "C" fn sys_vfs_unlink() -> u64 {
     }
 }
 
-pub(crate) extern "C" fn sys_vfs_link() -> u64 {
+/// Core logic behind [`sys_vfs_link`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno (the directory-hardlink rejection is now `Err(Errno::Perm)`
+/// instead of `ret64(neg(EPERM))`); `vfs_link`'s own `c_int` result
+/// passes through as `Ok` unconditionally, matching the original's
+/// unconditional `ret64(ret)`.
+fn link_inner() -> KResult<c_int> {
     let mut old: [c_char; MAXPATH] = [0; MAXPATH];
     let mut new: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let n1 = argstr(0, old.as_mut_ptr(), MAXPATH as c_int);
     let n2 = argstr(1, new.as_mut_ptr(), MAXPATH as c_int);
     if n1 < 0 || n2 < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let src = vfs_namei(old.as_ptr(), n1 as usize);
     if is_err(src) {
-        return ptr_err(src) as u64;
+        return Err(Errno::Raw(ptr_err(src)));
     }
     if src.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     if is_dir(unsafe { (*src).mode }) {
         vfs_iput(src);
-        return ret64(neg(EPERM));
+        return Err(Errno::Perm);
     }
 
     let parent = vfs_nameiparent(new.as_ptr(), n2 as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         vfs_iput(src);
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
         vfs_iput(src);
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
@@ -1341,7 +1423,14 @@ pub(crate) extern "C" fn sys_vfs_link() -> u64 {
     vfs_iput(src);
     vfs_iput(parent);
 
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_vfs_link() -> u64 {
+    match link_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /// Convert a relative path to absolute based on the current thread's cwd.
@@ -1448,28 +1537,33 @@ fn vfs_make_absolute_path(relpath: &[c_char], relpath_len: c_int, abspath: &mut 
     pathlen as c_int
 }
 
-pub(crate) extern "C" fn sys_vfs_symlink() -> u64 {
+/// Core logic behind [`sys_vfs_symlink`], factored out as a private
+/// helper returning [`KResult`] (P3-CS5). `vfs_make_absolute_path`'s own
+/// already-negative `c_int` result is preserved via `Errno::Raw`; every
+/// other early-return site keeps its exact errno; the success path
+/// carries no value.
+fn symlink_inner() -> KResult<()> {
     let mut target: [c_char; MAXPATH] = [0; MAXPATH];
     let mut linkpath: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let n1 = argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
     let n2 = argstr(1, linkpath.as_mut_ptr(), MAXPATH as c_int);
     if n1 < 0 || n2 < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let mut abs_target: [c_char; MAXPATH] = [0; MAXPATH];
     let abs_len = vfs_make_absolute_path(&target, n1, &mut abs_target);
     if abs_len < 0 {
-        return ret64(abs_len);
+        return Err(Errno::Raw(abs_len));
     }
 
     let parent = vfs_nameiparent(linkpath.as_ptr(), n2 as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
@@ -1478,11 +1572,15 @@ pub(crate) extern "C" fn sys_vfs_symlink() -> u64 {
     vfs_iput(parent);
 
     if is_err(sym) {
-        return ptr_err(sym) as u64;
+        return Err(Errno::Raw(ptr_err(sym)));
     }
 
     vfs_iput(sym);
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn sys_vfs_symlink() -> u64 {
+    ret64(result_to_neg_errno(symlink_inner()))
 }
 
 /// Core logic behind [`sys_vfs_chdir`], factored out as a private helper
@@ -1546,15 +1644,14 @@ pub(crate) extern "C" fn sys_vfs_chdir() -> u64 {
  * Getcwd Syscall
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_getcwd() -> u64 {
-    let mut buf_addr: u64 = 0;
-    let mut size: c_int = 0;
-
-    argaddr(0, &mut buf_addr);
-    argint(1, &mut size);
-
+/// Core logic behind [`sys_getcwd`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno; the success path returns `buf_addr` (the user pointer
+/// just copied into, not a byte count), matching the original's
+/// unconditional final `buf_addr`.
+fn getcwd_inner(buf_addr: u64, size: c_int) -> KResult<u64> {
     if size <= 0 {
-        return ret64(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
@@ -1569,7 +1666,7 @@ pub(crate) extern "C" fn sys_getcwd() -> u64 {
     };
 
     if cwd.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let mut names: [*mut c_char; MAXPATH / 2] = [ptr::null_mut(); MAXPATH / 2];
@@ -1612,7 +1709,7 @@ pub(crate) extern "C" fn sys_getcwd() -> u64 {
         // SAFETY: `names[i]` is a live, NUL-terminated inode/mountpoint name.
         let len = unsafe { strlen(names[i]) };
         if pathlen + len + 1 >= MAXPATH {
-            return ret64(neg(ENAMETOOLONG));
+            return Err(Errno::NameTooLong);
         }
         unsafe {
             memmove(path.as_mut_ptr().add(pathlen) as *mut c_void, names[i] as *const c_void, len);
@@ -1626,29 +1723,44 @@ pub(crate) extern "C" fn sys_getcwd() -> u64 {
     path[pathlen] = 0;
 
     if pathlen + 1 > size as usize {
-        return ret64(neg(ERANGE));
+        return Err(Errno::Range);
     }
 
     if vm_copyout(unsafe { (*p).vm }, buf_addr, path.as_ptr() as *const c_void, (pathlen + 1) as u64) < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
-    buf_addr
+    Ok(buf_addr)
+}
+
+pub(crate) extern "C" fn sys_getcwd() -> u64 {
+    let mut buf_addr: u64 = 0;
+    let mut size: c_int = 0;
+
+    argaddr(0, &mut buf_addr);
+    argint(1, &mut size);
+
+    match getcwd_inner(buf_addr, size) {
+        Ok(v) => v,
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
  * Pipe Syscall
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
-    let mut fdarray: u64 = 0;
-    argaddr(0, &mut fdarray);
-
+/// Core logic behind [`sys_vfs_pipe`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). `vfs_pipealloc`'s/`vfs_fdalloc`'s own
+/// already-negative `c_int` results are preserved via `Errno::Raw`; the
+/// final userspace-copyout failure is `Err(Errno::Fault)`; the success
+/// path carries no value.
+fn pipe_inner(fdarray: u64) -> KResult<()> {
     let mut rf: *mut vfs_file = ptr::null_mut();
     let mut wf: *mut vfs_file = ptr::null_mut();
     let ret = vfs_pipealloc(&mut rf, &mut wf);
     if ret != 0 {
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     let fd0;
@@ -1660,7 +1772,7 @@ pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
             drop(_g);
             vfs_fput(rf);
             vfs_fput(wf);
-            return ret64(fd0);
+            return Err(Errno::Raw(fd0));
         }
 
         fd1 = vfs_fdalloc(wf);
@@ -1670,7 +1782,7 @@ pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
             vfs_fput(rf);
             vfs_fput(wf);
             vfs_fput_call_rcu(rf);
-            return ret64(fd1);
+            return Err(Errno::Raw(fd1));
         }
     }
 
@@ -1695,7 +1807,7 @@ pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
         vfs_fput(wf);
         vfs_fput_call_rcu(rf);
         vfs_fput_call_rcu(wf);
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     // Release the references from vfs_pipealloc - fdtable holds its own
@@ -1704,26 +1816,31 @@ pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
     vfs_fput(rf);
     vfs_fput(wf);
 
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
+    let mut fdarray: u64 = 0;
+    argaddr(0, &mut fdarray);
+
+    ret64(result_to_neg_errno(pipe_inner(fdarray)))
 }
 
 /******************************************************************************
  * Socket Syscall
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_vfs_connect() -> u64 {
-    let mut raddr: c_int = 0;
-    let mut lport: c_int = 0;
-    let mut rport: c_int = 0;
-
-    argint(0, &mut raddr);
-    argint(1, &mut lport);
-    argint(2, &mut rport);
-
+/// Core logic behind [`sys_vfs_connect`], factored out as a private
+/// helper returning [`KResult`] (P3-CS5). `vfs_sockalloc`'s own
+/// already-negative `c_int` result is preserved via `Errno::Raw`;
+/// `vfs_fdalloc`'s result (an fd, or itself a negative errno) passes
+/// through as `Ok` unconditionally, matching the original's
+/// unconditional `ret64(fd)`.
+fn connect_inner(raddr: c_int, lport: c_int, rport: c_int) -> KResult<c_int> {
     let mut f: *mut vfs_file = ptr::null_mut();
     let ret = vfs_sockalloc(&mut f, raddr as u32, lport as u16, rport as u16);
     if ret != 0 {
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     let fd;
@@ -1735,7 +1852,22 @@ pub(crate) extern "C" fn sys_vfs_connect() -> u64 {
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
     vfs_fput(f);
-    ret64(fd)
+    Ok(fd)
+}
+
+pub(crate) extern "C" fn sys_vfs_connect() -> u64 {
+    let mut raddr: c_int = 0;
+    let mut lport: c_int = 0;
+    let mut rport: c_int = 0;
+
+    argint(0, &mut raddr);
+    argint(1, &mut lport);
+    argint(2, &mut rport);
+
+    match connect_inner(raddr, lport, rport) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
@@ -1753,31 +1885,27 @@ fn mode_to_dtype(mode: mode_t) -> u8 {
     DT_UNKNOWN
 }
 
-pub(crate) extern "C" fn sys_getdents() -> u64 {
-    let mut fd: c_int = 0;
-    let mut dirp: u64 = 0;
-    let mut count: c_int = 0;
-
-    argint(0, &mut fd);
-    argaddr(1, &mut dirp);
-    argint(2, &mut count);
-
+/// Core logic behind [`sys_getdents`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno; the success path returns the total byte count written,
+/// matching the original's unconditional final `bytes_written as u64`.
+fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     // SAFETY: non-null `f`.
     let inode = vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) });
     if inode.is_null() || !is_dir(unsafe { (*inode).mode }) {
         vfs_fput(f);
-        return ret64(neg(ENOTDIR));
+        return Err(Errno::NotDir);
     }
 
     let kbuf = kmm_alloc(count as usize);
     if kbuf.is_null() {
         vfs_fput(f);
-        return ret64(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
 
     let mut bytes_written: usize = 0;
@@ -1794,7 +1922,7 @@ pub(crate) extern "C" fn sys_getdents() -> u64 {
         if ret != 0 {
             kmm_free(kbuf);
             vfs_fput(f);
-            return ret64(ret);
+            return Err(Errno::Raw(ret));
         }
 
         if dentry.name.is_null() {
@@ -1848,49 +1976,76 @@ pub(crate) extern "C" fn sys_getdents() -> u64 {
         if vm_copyout(unsafe { (*current()).vm }, dirp, kbuf, bytes_written as u64) < 0 {
             kmm_free(kbuf);
             vfs_fput(f);
-            return ret64(neg(EFAULT));
+            return Err(Errno::Fault);
         }
     }
 
     kmm_free(kbuf);
     vfs_fput(f);
-    bytes_written as u64
+    Ok(bytes_written)
+}
+
+pub(crate) extern "C" fn sys_getdents() -> u64 {
+    let mut fd: c_int = 0;
+    let mut dirp: u64 = 0;
+    let mut count: c_int = 0;
+
+    argint(0, &mut fd);
+    argaddr(1, &mut dirp);
+    argint(2, &mut count);
+
+    match getdents_inner(fd, dirp, count) {
+        Ok(v) => v as u64,
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
  * chroot - Change root directory
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_chroot() -> u64 {
+/// Core logic behind [`sys_chroot`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno; `vfs_chdir`'s own `c_int` result (0 or a cross-file
+/// negative errno) passes through as `Ok` unconditionally, matching the
+/// original's unconditional final `ret64(ret)`.
+fn chroot_inner() -> KResult<c_int> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let new_root = vfs_namei(path.as_ptr(), n as usize);
     if is_err(new_root) {
-        return ptr_err(new_root) as u64;
+        return Err(Errno::Raw(ptr_err(new_root)));
     }
     if new_root.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     if !is_dir(unsafe { (*new_root).mode }) {
         vfs_iput(new_root);
-        return ret64(neg(ENOTDIR));
+        return Err(Errno::NotDir);
     }
 
     let ret = vfs_chroot(new_root);
     if ret < 0 {
         vfs_iput(new_root);
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     let ret = vfs_chdir(new_root);
     vfs_iput(new_root);
 
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_chroot() -> u64 {
+    match chroot_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
@@ -1958,7 +2113,12 @@ pub(crate) extern "C" fn vfs_mount_path(
     ret
 }
 
-pub(crate) extern "C" fn sys_mount() -> u64 {
+/// Core logic behind [`sys_mount`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). The three `argstr` copy-ins are
+/// `Err(Errno::Fault)`; `vfs_mount_path`'s own `c_int` result passes
+/// through as `Ok` unconditionally, matching the original's unconditional
+/// `ret64(vfs_mount_path(...))`.
+fn mount_inner() -> KResult<c_int> {
     let mut source: [c_char; MAXPATH] = [0; MAXPATH];
     let mut target: [c_char; MAXPATH] = [0; MAXPATH];
     let mut fstype: [c_char; 32] = [0; 32];
@@ -1966,10 +2126,17 @@ pub(crate) extern "C" fn sys_mount() -> u64 {
     let n1 = argstr(0, source.as_mut_ptr(), MAXPATH as c_int);
     let n2 = argstr(1, target.as_mut_ptr(), MAXPATH as c_int);
     if n1 < 0 || n2 < 0 || argstr(2, fstype.as_mut_ptr(), 32) < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
-    ret64(vfs_mount_path(fstype.as_ptr(), target.as_ptr(), n2, source.as_ptr(), n1))
+    Ok(vfs_mount_path(fstype.as_ptr(), target.as_ptr(), n2, source.as_ptr(), n1))
+}
+
+pub(crate) extern "C" fn sys_mount() -> u64 {
+    match mount_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
@@ -2042,34 +2209,50 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     0
 }
 
-pub(crate) extern "C" fn sys_umount() -> u64 {
+/// Core logic behind [`sys_umount`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5) — same shape/rationale as
+/// [`mount_inner`].
+fn umount_inner() -> KResult<c_int> {
     let mut target: [c_char; MAXPATH] = [0; MAXPATH];
     let n = argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
-    ret64(vfs_umount_path(target.as_ptr(), n))
+    Ok(vfs_umount_path(target.as_ptr(), n))
+}
+
+pub(crate) extern "C" fn sys_umount() -> u64 {
+    match umount_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /******************************************************************************
  * Debug: Dump active inodes
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_dumpinode() -> u64 {
+/// Core logic behind [`sys_dumpinode`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Note this debug syscall's original
+/// never checked `is_err(inode)` (only null) -- preserved as-is rather
+/// than tightened, since that's an existing-behavior boundary this wave
+/// doesn't own. Both `Ok` returns carry no value (the "dump every
+/// superblock" no-path case, and the found-path case).
+fn dumpinode_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
 
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
         // No path argument: dump every superblock.
         vfs_dump_inodes();
-        return 0;
+        return Ok(());
     }
 
     let inode = vfs_namei(path.as_ptr(), n as usize);
     if inode.is_null() {
         crate::kprintln!("dumpinode: cannot find path '{}'", crate::printf::Cs(path.as_ptr()));
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     // SAFETY: non-null `inode`.
@@ -2078,26 +2261,28 @@ pub(crate) extern "C" fn sys_dumpinode() -> u64 {
 
     if sb.is_null() {
         crate::kprintln!("dumpinode: inode has no superblock");
-        return ret64(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     vfs_dump_sb_inodes(sb);
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn sys_dumpinode() -> u64 {
+    ret64(result_to_neg_errno(dumpinode_inner()))
 }
 
 /******************************************************************************
  * TTY / ioctl Syscalls
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_vfs_ioctl() -> u64 {
-    let mut fd: c_int = 0;
-    let mut cmd_raw: u64 = 0;
-    let mut arg: u64 = 0;
-
-    argint(0, &mut fd);
-    argaddr(1, &mut cmd_raw);
-    argaddr(2, &mut arg);
-
+/// Core logic behind [`sys_vfs_ioctl`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Only `EBADF` (unresolvable `fd`) is
+/// this function's own failure; the per-command `match` below computes
+/// `ret` exactly as before (may itself already be a negative `E*` value
+/// for a driver-rejected `cmd`/`arg`) and passes it through as `Ok`,
+/// matching the original's unconditional final `ret64(ret)`.
+fn ioctl_inner(fd: c_int, cmd_raw: u64, arg: u64) -> KResult<c_int> {
     // Normalize `cmd` to its zero-extended 32-bit form -- see the module
     // doc's "TIOCGPTN sign-extension fix" section. `argaddr` returns the
     // raw a1 register, which the RISC-V calling convention sign-extends
@@ -2110,7 +2295,7 @@ pub(crate) extern "C" fn sys_vfs_ioctl() -> u64 {
 
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     let mut ret: c_int;
@@ -2190,19 +2375,33 @@ pub(crate) extern "C" fn sys_vfs_ioctl() -> u64 {
     }
 
     vfs_fput(f);
-    ret64(ret)
+    Ok(ret)
 }
 
-pub(crate) extern "C" fn sys_tcgetattr() -> u64 {
+pub(crate) extern "C" fn sys_vfs_ioctl() -> u64 {
     let mut fd: c_int = 0;
-    let mut termios_p: u64 = 0;
+    let mut cmd_raw: u64 = 0;
+    let mut arg: u64 = 0;
 
     argint(0, &mut fd);
-    argaddr(1, &mut termios_p);
+    argaddr(1, &mut cmd_raw);
+    argaddr(2, &mut arg);
 
+    match ioctl_inner(fd, cmd_raw, arg) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
+}
+
+/// Core logic behind [`sys_tcgetattr`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Only `EBADF` is this function's own
+/// failure; `vfs_ioctl`'s result (0, its own negative errno, or
+/// overridden to `EFAULT` on a failed copyout) passes through as `Ok`
+/// unconditionally, matching the original's unconditional `ret64(ret)`.
+fn tcgetattr_inner(fd: c_int, termios_p: u64) -> KResult<c_int> {
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     let mut kt: termios = unsafe { core::mem::zeroed() };
@@ -2213,7 +2412,49 @@ pub(crate) extern "C" fn sys_tcgetattr() -> u64 {
         }
     }
     vfs_fput(f);
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_tcgetattr() -> u64 {
+    let mut fd: c_int = 0;
+    let mut termios_p: u64 = 0;
+
+    argint(0, &mut fd);
+    argaddr(1, &mut termios_p);
+
+    match tcgetattr_inner(fd, termios_p) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
+}
+
+/// Core logic behind [`sys_tcsetattr`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). The invalid-`optional_actions` early
+/// return is now `Err(Errno::Inval)`; `EBADF`/`EFAULT` keep their exact
+/// errno; `vfs_ioctl`'s own `c_int` result passes through as `Ok`
+/// unconditionally, matching the original's unconditional `ret64(ret)`.
+fn tcsetattr_inner(fd: c_int, optional_actions: c_int, termios_p: u64) -> KResult<c_int> {
+    let cmd: u64 = match optional_actions {
+        TCSANOW => TCSETS,
+        TCSADRAIN => TCSETSW,
+        TCSAFLUSH => TCSETSF,
+        _ => return Err(Errno::Inval),
+    };
+
+    let f = vfs_argfd(fd);
+    if f.is_null() {
+        return Err(Errno::BadF);
+    }
+
+    let mut kt: termios = unsafe { core::mem::zeroed() };
+    if either_copyin(&mut kt as *mut termios as *mut c_void, 1, termios_p, core::mem::size_of::<termios>() as u64) < 0 {
+        vfs_fput(f);
+        return Err(Errno::Fault);
+    }
+
+    let ret = vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
+    vfs_fput(f);
+    Ok(ret)
 }
 
 pub(crate) extern "C" fn sys_tcsetattr() -> u64 {
@@ -2225,52 +2466,38 @@ pub(crate) extern "C" fn sys_tcsetattr() -> u64 {
     argint(1, &mut optional_actions);
     argaddr(2, &mut termios_p);
 
-    let cmd: u64 = match optional_actions {
-        TCSANOW => TCSETS,
-        TCSADRAIN => TCSETSW,
-        TCSAFLUSH => TCSETSF,
-        _ => return ret64(neg(EINVAL)),
-    };
-
-    let f = vfs_argfd(fd);
-    if f.is_null() {
-        return ret64(neg(EBADF));
+    match tcsetattr_inner(fd, optional_actions, termios_p) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
     }
-
-    let mut kt: termios = unsafe { core::mem::zeroed() };
-    if either_copyin(&mut kt as *mut termios as *mut c_void, 1, termios_p, core::mem::size_of::<termios>() as u64) < 0 {
-        vfs_fput(f);
-        return ret64(neg(EFAULT));
-    }
-
-    let ret = vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
-    vfs_fput(f);
-    ret64(ret)
 }
 
-/// `sys_statfs` - get filesystem statistics.
-pub(crate) extern "C" fn sys_statfs() -> u64 {
+/// Core logic behind [`sys_statfs`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno (including the driver `statfs` callback's own negative
+/// `c_int`, via `Errno::Raw`); the success path carries no value.
+fn statfs_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut buf_addr: u64 = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     argaddr(1, &mut buf_addr);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
     if is_err(inode) {
-        return ptr_err(inode) as u64;
+        return Err(Errno::Raw(ptr_err(inode)));
     }
     if inode.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     // SAFETY: non-null `inode`.
     let sb = unsafe { (*inode).sb };
     if sb.is_null() {
         vfs_iput(inode);
-        return ret64(neg(ENOSYS));
+        return Err(Errno::NoSys);
     }
 
     let mut kbuf: statfs = unsafe { core::mem::zeroed() };
@@ -2299,7 +2526,7 @@ pub(crate) extern "C" fn sys_statfs() -> u64 {
             let ret = unsafe { statfs_cb(sb, &mut kbuf) };
             if ret < 0 {
                 vfs_iput(inode);
-                return ret64(ret);
+                return Err(Errno::Raw(ret));
             }
         }
     }
@@ -2307,9 +2534,13 @@ pub(crate) extern "C" fn sys_statfs() -> u64 {
     vfs_iput(inode);
 
     if either_copyout(1, buf_addr, &mut kbuf as *mut statfs as *mut c_void, core::mem::size_of::<statfs>() as u64) < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn sys_statfs() -> u64 {
+    ret64(result_to_neg_errno(statfs_inner()))
 }
 
 /// Report requested events as ready based on the file's access mode.
@@ -2405,22 +2636,20 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
     ready
 }
 
-pub(crate) extern "C" fn sys_vfs_poll() -> u64 {
-    let mut fds_addr: u64 = 0;
-    let mut nfds: c_int = 0;
-    let mut timeout_ms: c_int = 0;
-
-    argaddr(0, &mut fds_addr);
-    argint(1, &mut nfds);
-    argint(2, &mut timeout_ms);
-
+/// Core logic behind [`sys_vfs_poll`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5). Every early-return site keeps its
+/// exact errno; the `nfds == 0` timed-wait path's two `Ok`s both carry
+/// `0` (matching the original's two bare `return 0` statements); the
+/// general path's success value is the `ready` count `vfs_poll_scan`
+/// computed, matching the original's unconditional final `ready as u64`.
+fn poll_inner(fds_addr: u64, nfds: c_int, timeout_ms: c_int) -> KResult<c_int> {
     if nfds < 0 || nfds as usize > NOFILE {
-        return ret64(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     if nfds == 0 {
         if timeout_ms == 0 {
-            return 0;
+            return Ok(0);
         }
         let timeout_ticks = if timeout_ms > 0 { crate::machine::ms_to_rawticks(timeout_ms as u64) } else { 0 };
         let start = crate::machine::read_time();
@@ -2430,21 +2659,21 @@ pub(crate) extern "C" fn sys_vfs_poll() -> u64 {
             }
             sleep_ms(1);
             if signal_pending(current()) != 0 {
-                return ret64(neg(EINTR));
+                return Err(Errno::Intr);
             }
         }
-        return 0;
+        return Ok(0);
     }
 
     let bytes = nfds as usize * core::mem::size_of::<PollfdK>();
     let pfds_raw = kmm_alloc(bytes) as *mut PollfdK;
     if pfds_raw.is_null() {
-        return ret64(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
 
     if either_copyin(pfds_raw as *mut c_void, 1, fds_addr, bytes as u64) < 0 {
         kmm_free(pfds_raw as *mut c_void);
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     // SAFETY: `pfds_raw` is a fresh, exclusively-owned `nfds`-element
@@ -2474,14 +2703,29 @@ pub(crate) extern "C" fn sys_vfs_poll() -> u64 {
 
     if ready == neg(EINTR) {
         kmm_free(pfds_raw as *mut c_void);
-        return ret64(neg(EINTR));
+        return Err(Errno::Intr);
     }
 
     if either_copyout(1, fds_addr, pfds_raw as *mut c_void, bytes as u64) < 0 {
         kmm_free(pfds_raw as *mut c_void);
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     kmm_free(pfds_raw as *mut c_void);
-    ready as u64
+    Ok(ready)
+}
+
+pub(crate) extern "C" fn sys_vfs_poll() -> u64 {
+    let mut fds_addr: u64 = 0;
+    let mut nfds: c_int = 0;
+    let mut timeout_ms: c_int = 0;
+
+    argaddr(0, &mut fds_addr);
+    argint(1, &mut nfds);
+    argint(2, &mut timeout_ms);
+
+    match poll_inner(fds_addr, nfds, timeout_ms) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }

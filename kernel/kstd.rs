@@ -191,6 +191,25 @@ pub enum Errno {
     NoEnt,
     /// `ENOTDIR`: not a directory (added for P3-CS4, `sys_vfs_chdir`).
     NotDir,
+    /// `EINTR`: interrupted system call (added for P3-CS5,
+    /// `vfs/vfs_syscall.rs`'s `sys_vfs_poll`/`sys_getdents`-adjacent
+    /// signal-pending checks).
+    Intr,
+    /// `ELOOP`: too many symbolic links encountered (added for P3-CS5,
+    /// `sys_vfs_stat`/`sys_vfs_lstat`/`sys_vfs_open`'s symlink-following
+    /// loops).
+    Loop,
+    /// `EISDIR`: is a directory (added for P3-CS5, `sys_vfs_open`).
+    IsDir,
+    /// `EPERM`: operation not permitted (added for P3-CS5,
+    /// `sys_vfs_link`'s directory-hardlink rejection).
+    Perm,
+    /// `ENOSYS`: function not implemented (added for P3-CS5,
+    /// `sys_statfs`'s no-superblock fallback).
+    NoSys,
+    /// `EEXIST`: file already exists (added for P3-CS5, `sys_vfs_open`'s
+    /// `O_CREAT | O_EXCL` path).
+    Exist,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -232,6 +251,12 @@ impl Errno {
             Errno::MFile => crate::bindings::EMFILE as c_int,
             Errno::NoEnt => crate::bindings::ENOENT as c_int,
             Errno::NotDir => crate::bindings::ENOTDIR as c_int,
+            Errno::Intr => crate::bindings::EINTR as c_int,
+            Errno::Loop => crate::bindings::ELOOP as c_int,
+            Errno::IsDir => crate::bindings::EISDIR as c_int,
+            Errno::Perm => crate::bindings::EPERM as c_int,
+            Errno::NoSys => crate::bindings::ENOSYS as c_int,
+            Errno::Exist => crate::bindings::EEXIST as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`
