@@ -81,6 +81,15 @@ only SlabBox carries Deref (data-carrying guards = biggest unsafe lever);
   documented timer retry_limit bug in the same pass); MaybeUninit statics →
   KOnceCell (36 sites); Result migration beyond mm (proc/vfs/tty/dev
   internal chains; syscall boundary keeps -errno).
+- **P3-CS (USER-MANDATED, 2026-07-14, priority)**: (a) centralize the
+  scattered std/libc-like helpers into one `kernel/kstd.rs` module — the
+  ERR_PTR family (30 per-file copies!), container_of, Errno/neg_errno, one
+  kassert!, one u!; per-file copies deleted. (b) **Result over ERR_PTR**:
+  fallible Rust-internal fns migrate to `KResult<T> = Result<T, Errno>`
+  (or Result<NonNull<T>, Errno>); the kstd ERR_PTR family is a
+  TRANSITIONAL shim for C-ABI/storage boundaries only. This upgrades
+  P3-11's Result item to a user directive and supersedes any wave design
+  that would spread err-pointer returns further.
 - **P3-12 (acceptance)**: re-run the unsafe census + clippy count, diff vs
   baseline — the measured "how much unsafe did we remove" report.
 
