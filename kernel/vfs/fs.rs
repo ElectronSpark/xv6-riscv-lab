@@ -190,17 +190,9 @@ use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
 // `vfs_get_fs_type`/two-conditional-`vfs_put_fs_type` pairing.
 use crate::kobject::{HasKobject, KArc, Kobject};
 
-/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`) with
-/// its format arguments dropped — see the module doc's "Style notes" for
-/// why (already-established `inode.rs`/`file.rs`/`pipe.rs`/`fdtable.rs`
-/// precedent).
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
+// centralization).
+use crate::kassert;
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, mode bits,
@@ -212,35 +204,17 @@ const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
 
-/// `MAX_ERRNO`/`IS_ERR_VALUE`/`ERR_PTR`/`PTR_ERR`/`IS_ERR`/`IS_ERR_OR_NULL`
-/// (`kernel/inc/errno.h`), generic over the pointee type. Reimplemented
-/// locally per this file's established per-file-self-contained
-/// convention (see the externs-block doc).
-const MAX_ERRNO: isize = 4095;
+// `err_ptr`/`is_err`/`is_err_or_null`/`ptr_err`'s canonical home is
+// `crate::kstd` (P3-CS2 centralization). Note `kstd::ptr_err` returns
+// `c_int`, not `isize` — every call site below already casts its result
+// to `c_int`/`u64` or compares it against another `c_int` (`neg(...)`),
+// so the narrower return type is a no-op change (see `is_eagain_ptr`,
+// whose `as isize` comparison cast is dropped accordingly).
+use crate::kstd::{err_ptr, is_err, is_err_or_null, ptr_err};
 
 #[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    is_err_value(p as usize)
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
-#[inline(always)]
-fn ptr_err<T>(p: *mut T) -> isize {
-    p as isize
-}
-#[inline(always)]
 fn is_eagain_ptr<T>(p: *mut T) -> bool {
-    ptr_err(p) == neg(EAGAIN) as isize
+    ptr_err(p) == neg(EAGAIN)
 }
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros (full set — `__inode_mode_str`
@@ -2217,7 +2191,7 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
             vfs_iunlock(inode);
             return inode;
         }
-        if ptr_err(inode) != neg(ENOENT) as isize {
+        if ptr_err(inode) != neg(ENOENT) {
             return inode;
         }
 
@@ -2236,7 +2210,7 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
             vfs_iunlock(inode);
             return inode;
         }
-        if ptr_err(inode) != neg(ENOENT) as isize {
+        if ptr_err(inode) != neg(ENOENT) {
             return inode;
         }
 

@@ -2048,15 +2048,9 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
 // Top-level init -- spawns a kthread for post-init probing.
 // ===========================================================================
 
-/// Mirror of `IS_ERR_OR_NULL` from `kernel/inc/errno.h`.
-#[inline]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    if p.is_null() {
-        return true;
-    }
-    let n = p as usize;
-    (n as isize) < 0 && (n.wrapping_neg()) <= 4095
-}
+// `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::is_err_or_null;
 
 /// Per-instance init kthread: initialises one SDHCI slot.
 extern "C" fn x1_sdhci_init_one_kthread(idx: u64, _arg2: u64) {

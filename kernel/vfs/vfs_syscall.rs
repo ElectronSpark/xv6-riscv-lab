@@ -181,27 +181,12 @@ const fn ret64(v: c_int) -> u64 {
     v as i64 as u64
 }
 
-/// `MAX_ERRNO`/`ERR_PTR`/`PTR_ERR`/`IS_ERR`/`IS_ERR_OR_NULL`
-/// (`kernel/inc/errno.h`), generic over the pointee type. Reimplemented
-/// locally per the established per-file convention (see `vfs/inode.rs`).
-const MAX_ERRNO: isize = 4095;
-
-#[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    is_err_value(p as usize)
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
-#[inline(always)]
-fn ptr_err<T>(p: *mut T) -> isize {
-    p as isize
-}
+// `is_err`/`is_err_or_null`/`ptr_err`'s canonical home is `crate::kstd`
+// (P3-CS2 centralization). Note `kstd::ptr_err` returns `c_int`, not
+// `isize` — every call site below already casts its result to `c_int`/
+// `u64` or compares it against another `c_int` (`neg(...)`), so the
+// narrower return type is a no-op change.
+use crate::kstd::{is_err, is_err_or_null, ptr_err};
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros and permission bits.
 const S_IFMT: u32 = 0o170000;
@@ -1010,7 +995,7 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
         vfs_iput(parent);
 
         if is_err(inode) {
-            if ptr_err(inode) == neg(EEXIST) as isize && omode & O_EXCL == 0 {
+            if ptr_err(inode) == neg(EEXIST) && omode & O_EXCL == 0 {
                 inode = vfs_namei(path.as_ptr(), n as usize);
                 if !is_err_or_null(inode) && is_dir(unsafe { (*inode).mode }) {
                     vfs_iput(inode);

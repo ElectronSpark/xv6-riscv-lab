@@ -1301,15 +1301,9 @@ extern "C" fn x1_emac_init_kthread(idx: u64, _arg2: u64) {
     }
 }
 
-/// Mirror of `IS_ERR_OR_NULL` from `kernel/inc/errno.h`.
-#[inline]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    if p.is_null() {
-        return true;
-    }
-    let n = p as usize;
-    (n as isize) < 0 && (n.wrapping_neg()) <= 4095
-}
+// `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::is_err_or_null;
 
 /// Main EMAC kthread: spawns per-instance init threads in parallel,
 /// waits for all to complete, then enters the link-polling loop.

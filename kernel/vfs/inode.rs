@@ -151,18 +151,9 @@ use crate::vfs::fs::{
     vfs_superblock_rlock, vfs_superblock_unlock, vfs_superblock_wholding, vfs_superblock_wlock,
 };
 
-/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
-/// panic the kernel if `$cond` is false. Fixed message, no `printf`-style
-/// formatting — every `assert()` call site in the C original for this
-/// file uses a plain string (verified by inspection), same convention
-/// already used by `kernel/kobject.rs`/`kernel/proc/thread.rs`.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
+// centralization).
+use crate::kassert;
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, mode bits,
@@ -174,36 +165,20 @@ const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
 
-/// `MAX_ERRNO`/`IS_ERR_VALUE`/`ERR_PTR`/`PTR_ERR`/`IS_ERR`/`IS_ERR_OR_NULL`
-/// (`kernel/inc/errno.h`), generic over the pointee type. Reimplemented
-/// locally (rather than reusing `kernel/proc/access.rs`'s equivalents)
-/// to keep this module's C-ABI surface self-contained, matching the
-/// established per-file convention (see the externs block doc above).
-const MAX_ERRNO: isize = 4095;
+// `err_ptr`/`is_err`/`is_err_or_null`/`ptr_err`'s canonical home is now
+// `crate::kstd` (P3-CS2 centralization; this file's old doc comment here
+// used to explain why it kept its own copy "rather than reusing
+// `kernel/proc/access.rs`'s equivalents" — see `kstd.rs`'s module doc for
+// the full history). Note `kstd::ptr_err` returns `c_int`, not `isize` —
+// every call site below already casts its result to `c_int` or compares
+// it against another `c_int` (`neg(...)`), so the narrower return type is
+// a no-op change (see `is_eagain_ptr`, whose `as isize` comparison cast
+// is dropped accordingly).
+use crate::kstd::{err_ptr, is_err, is_err_or_null, ptr_err};
 
 #[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    is_err_value(p as usize)
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
-#[inline(always)]
-fn ptr_err<T>(p: *mut T) -> isize {
-    p as isize
-}
-#[inline(always)]
 fn is_eagain_ptr<T>(p: *mut T) -> bool {
-    ptr_err(p) == neg(EAGAIN) as isize
+    ptr_err(p) == neg(EAGAIN)
 }
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros.
@@ -2160,7 +2135,7 @@ pub(crate) extern "C" fn vfs_namei(path: *const c_char, path_len: usize) -> *mut
     let mut retries = 0;
     loop {
         let result = vfs_namei_once(path, path_len);
-        if !(is_err(result) && ptr_err(result) == neg(EAGAIN) as isize) {
+        if !(is_err(result) && ptr_err(result) == neg(EAGAIN)) {
             return result;
         }
         // Transient race condition, yield and retry.

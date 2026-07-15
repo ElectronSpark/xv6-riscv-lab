@@ -138,23 +138,9 @@ const EINVAL: c_int = 22;
 const SIGHUP: c_int = 1;
 const SIGCONT: c_int = 18;
 
-// ===========================================================================
-// `IS_ERR`/`ERR_PTR` (`kernel/inc/errno.h`), specialised to pointers.
-// Duplicated locally -- matches `kernel/tty/tty.rs`/`kernel/tty/pty.rs`'s
-// identical local `is_err`/`err_ptr` helpers.
-// ===========================================================================
-
-const MAX_ERRNO: usize = 4095;
-
-#[inline]
-fn is_err<T>(p: *mut T) -> bool {
-    (p as usize) >= usize::MAX - MAX_ERRNO + 1
-}
-
-#[inline]
-fn err_ptr<T>(err: c_int) -> *mut T {
-    err as isize as *mut T
-}
+// `is_err`/`err_ptr`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::{err_ptr, is_err};
 
 // ===========================================================================
 // Panic helper -- replicates the C `assert(expr, fmt, ...)` macro

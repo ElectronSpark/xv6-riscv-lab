@@ -108,7 +108,6 @@ use crate::sync::{KMutex, KSpinlock};
 unsafe extern "C" {
     // proc module.
     safe fn xv6_current_thread() -> *mut thread;
-    safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
 
@@ -165,21 +164,9 @@ use crate::vfs::fs::{vfs_inode_deref, vfs_inode_get_ref, vfs_inode_put_ref};
 use crate::vfs::inode::{vfs_ilock, vfs_itruncate, vfs_iunlock};
 use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_open};
 
-/// Mirrors the C `assert(expr, fmt, ...)` macro (`kernel/inc/printf.h`)
-/// for this file's two call sites, both fixed-message `slab_cache_init`
-/// invariant checks. The C original's `errno=%d` format argument is
-/// dropped (this crate's `xv6_panic` takes a single fixed message, no
-/// variadic formatting — see `vfs/inode.rs`'s identical `kassert!` for
-/// the same, already-established deviation); the failure itself
-/// (`slab_cache_init` running out of static slab storage at boot) is
-/// unrecoverable either way.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
+// centralization).
+use crate::kassert;
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, mode/open-flag
@@ -191,28 +178,11 @@ const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
 
-/// `MAX_ERRNO`/`IS_ERR_VALUE`/`ERR_PTR`/`PTR_ERR`/`IS_ERR` (`errno.h`),
-/// generic over the pointee type. Reimplemented locally rather than
-/// reused from `vfs/inode.rs` — see this file's module doc / the
-/// externs-block doc precedent for why each file keeps its own copy.
-const MAX_ERRNO: isize = 4095;
-
-#[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    is_err_value(p as usize)
-}
-#[inline(always)]
-fn ptr_err<T>(p: *mut T) -> isize {
-    p as isize
-}
+// `err_ptr`/`is_err`/`ptr_err`'s canonical home is `crate::kstd` (P3-CS2
+// centralization). Note `kstd::ptr_err` returns `c_int`, not `isize` —
+// this file's two call sites already cast the result to `c_int` at the
+// use site, so the narrower return type is a no-op there.
+use crate::kstd::{err_ptr, is_err, ptr_err};
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros (full set — this file touches
 // every file type `vfs/inode.rs` didn't need).

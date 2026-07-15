@@ -209,48 +209,34 @@ pub fn copy_out<T: Copy>(dst: *mut T, src: *const T) {
     }
 }
 
-pub const MAX_ERRNO_ABS: usize = 4095;
+// `err_ptr`/`is_err`/`is_err_or_null`/`ptr_err`/`is_err_value`'s canonical
+// home is `crate::kstd` (P3-CS2 centralization). Re-exported under their
+// original `proc::access::*` paths (incl. the `*_const` alias) so every
+// existing call site (`thread.rs`, `sched.rs`, `thread_group.rs`,
+// `signal.rs`, `rq.rs`, `rq_test.rs`, `workqueue.rs`, `thread_queue.rs`,
+// `pgroup.rs`, `exit.rs`, ...) needed zero changes -- this module is the
+// one file in the P3-CS2 handoff list with real external consumers of its
+// local helpers, unlike the other 17 self-contained files.
+pub use crate::kstd::{err_ptr, is_err, is_err_or_null, is_err_value, ptr_err};
+pub use crate::kstd::is_err as is_err_const;
 
-#[inline]
-pub fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO_ABS as isize)) as usize
-}
-
-#[inline]
-pub fn is_err<T>(p: *mut T) -> bool {
-    is_err_value(p as usize)
-}
-
-#[inline]
-pub fn is_err_const<T>(p: *const T) -> bool {
-    is_err_value(p as usize)
-}
-
-#[inline]
-pub fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
-
-#[inline]
-pub fn err_ptr<T>(err: c_int) -> *mut T {
-    err as isize as *mut T
-}
-
+/// `err_ptr(-errno)` -- local convenience wrapper (positive-errno calling
+/// convention) kept for `thread_queue.rs`'s `err_ptr_errno as err_ptr`
+/// import; `kstd::err_ptr` itself expects an already-negative `errno`.
 #[inline]
 pub fn err_ptr_errno<T>(errno: c_int) -> *mut T {
     err_ptr(-errno)
 }
 
-#[inline]
-pub fn ptr_err<T>(p: *mut T) -> c_int {
-    p as isize as c_int
-}
-
+/// `-ptr_err(p)` -- the positive-errno counterpart of [`err_ptr_errno`],
+/// kept for the same `thread_queue.rs` call site.
 #[inline]
 pub fn ptr_err_errno<T>(p: *mut T) -> c_int {
     -ptr_err(p)
 }
 
+/// `workqueue.rs`'s local convenience: the pointer's encoded errno if it
+/// carries one, else the caller-supplied fallback `err`.
 #[inline]
 pub fn ptr_err_or<T>(p: *mut T, err: c_int) -> c_int {
     if is_err(p) { ptr_err(p) } else { err }

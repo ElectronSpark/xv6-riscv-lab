@@ -409,14 +409,9 @@ unsafe extern "C" {
     safe fn wakeup(p: *mut crate::bindings::thread);
 }
 
-#[inline]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    if p.is_null() {
-        return true;
-    }
-    let n = p as usize;
-    (n as isize) < 0 && (n.wrapping_neg() as usize) <= 4095
-}
+// `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::is_err_or_null;
 
 /// Spawns the workqueue test-suite master kthread. Entry point called
 /// from `kernel/start_kernel.rs` (crate-path `use`, not an `extern`

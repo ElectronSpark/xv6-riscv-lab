@@ -42,15 +42,9 @@ const KERNEL_STACK_ORDER: c_int = 2;
 // Matches `SEM_VALUE_MAX` in kernel/inc/lock/semaphore.h.
 const SEM_VALUE_MAX: c_int = 2_147_483_640;
 
-/// Mirror of `IS_ERR_OR_NULL` from `kernel/inc/errno.h`.
-#[inline]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    if p.is_null() {
-        return true;
-    }
-    let n = p as usize;
-    (n as isize) < 0 && (n.wrapping_neg() as usize) <= 4095
-}
+// `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::is_err_or_null;
 
 /// `Sync` newtype for `static` storage of a POD C struct that is
 /// initialised at runtime via a `*_init` call (mirrors `rcu.rs`'s

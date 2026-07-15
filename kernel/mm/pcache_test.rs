@@ -169,14 +169,9 @@ unsafe fn pg_unlock(p: *mut Page) {
     unsafe { page_lock_release(p.cast()) };
 }
 
-#[inline]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    if p.is_null() {
-        return true;
-    }
-    let n = p as usize;
-    (n as isize) < 0 && (n.wrapping_neg() as usize) <= 4095
-}
+// `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::is_err_or_null;
 
 fn spawn(name: &'static core::ffi::CStr, entry: extern "C" fn(u64, u64), a1: u64, a2: u64) -> bool {
     let np = kthread_create(name.as_ptr(), entry as *mut c_void, a1, a2, KERNEL_STACK_ORDER);

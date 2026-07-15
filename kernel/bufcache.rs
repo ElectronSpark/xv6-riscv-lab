@@ -233,22 +233,9 @@ const PAGE_MASK: u64 = (PGSIZE as u64) - 1;
 /// `GOLDEN_RATIO_PRIME_64` (`dev/hlist.h`).
 const GOLDEN_RATIO_PRIME_64: u64 = 0x9e37fffffffc0001;
 
-/// `ERR_PTR`/`IS_ERR`/`IS_ERR_OR_NULL` (`kernel/inc/errno.h`), generic
-/// over the pointee type. Reimplemented locally, matching this crate's
-/// established per-file convention (see `kernel/dev/blkdev.rs`).
-const MAX_ERRNO: isize = 4095;
-#[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    is_err_value(p as usize)
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
+// `is_err`/`is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::{is_err, is_err_or_null};
 
 /// Mirrors `major(dev)` (`kernel/inc/defs.h`).
 #[inline(always)]

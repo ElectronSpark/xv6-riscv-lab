@@ -155,24 +155,9 @@ const POLLOUT: c_short = 0x0004;
 const POLLRDNORM: c_short = 0x0040;
 const POLLWRNORM: c_short = 0x0100;
 
-// ===========================================================================
-// `IS_ERR`/`ERR_PTR`/`PTR_ERR` (`kernel/inc/errno.h`), specialised to
-// pointers (the only use in this file). Duplicated locally rather than
-// shared cross-module -- matches the established per-file convention
-// (see e.g. `kernel/tty/pty.rs`'s identical local `is_err`/`ptr_err`).
-// ===========================================================================
-
-const MAX_ERRNO: usize = 4095;
-
-#[inline]
-fn is_err<T>(p: *mut T) -> bool {
-    (p as usize) >= usize::MAX - MAX_ERRNO + 1
-}
-
-#[inline]
-fn err_ptr<T>(err: c_int) -> *mut T {
-    err as isize as *mut T
-}
+// `is_err`/`err_ptr`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::{err_ptr, is_err};
 
 // ===========================================================================
 // Panic helper -- replicates the C `assert(expr, fmt, arg)` macro

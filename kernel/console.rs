@@ -162,12 +162,9 @@ unsafe extern "C" {
 // pattern behind a signature that can no longer be generic over its
 // message.
 
-/// `IS_ERR_OR_NULL(ptr)` (`kernel/inc/errno.h`).
-#[inline]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    const MAX_ERRNO: usize = 4095;
-    p.is_null() || (p as usize) >= usize::MAX - MAX_ERRNO + 1
-}
+// `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
+// centralization).
+use crate::kstd::is_err_or_null;
 
 // ===========================================================================
 // State.
