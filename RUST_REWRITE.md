@@ -868,6 +868,38 @@ qemu_pcache 30/30 + qemu_rwsem, panic legibility + ps/free format
 fidelity confirmed. Remaining Phase 3: P3-3..P3-12 (bindgen retirement,
 ref params, Deref guards, KArc, dyn/enum dispatch, unsafe census).
 
+### Phase 3 cont. — 2026-07-14 — bindgen nativization + unsafe reduction (goal items 2-4)
+
+Bindgen retirement (native #[repr(C)] + direct-against-bindgen size/align/
+offset_of! asserts as the layout gate):
+- P3-3A (fdf2813): 7 lock type families (RawSpinlock/Mutex/Rwsem/Semaphore/
+  Completion/Rwlock/RcuHead); rwlock dual-atomic-reinterpret consolidated.
+- P3-3B (0ec37c7): mm slab/page asserts strengthened (were literal-only,
+  now direct-vs-bindgen); kalloc pools native.
+- P3-3C (e3784b5): leaf types list/hlist/rb; unified 2 divergent ListNode
+  mirrors into one canonical native type.
+- P3-3D (4295fba): tier-1 aggregates work_struct/tq_t/ttree/tnode (union
+  arms independently asserted) → unblocks pcache aggregate.
+
+Unsafe reduction / RAII (goal items 2-4):
+- P3-8 vm.rs (b536311): VmRead/Write/PgtableGuard → data-carrying Deref/
+  DerefMut; 5 functions fully safe.
+- P3-8 pcache.rs (717d35f): PcLocal/PcTreeRead/PcTreeWrite guards →
+  Deref<PcacheHandle>; 7 functions fully safe.
+- P3-8b (29e87d6): NEW idiomatic `sync::SpinLock<T>` (lock-owns-data,
+  Deref/DerefMut guards, const-init, std::sync::Mutex-style safety);
+  migrated ptmx PTY_TABLE + ramdisk RAMDISK off static-mut+separate-lock.
+- P3-8c (0ffc840): bufcache BCACHE → SpinLock<T> (lock ordering vs per-buf
+  sleeplocks preserved; verified under stressfs concurrency).
+
+Method note: `grep -c unsafe` is a poor metric (Deref RELOCATES unsafe
+into few centralized impls); the real win is fully-safe functions +
+per-guard SAFETY vs per-site. P3-12 census will count blocks + fully-safe
+deltas. Baseline unsafe occurrences: 5088 (4593c1a) → 4925 (4295fba).
+Every wave: split verification (light worker gate + orchestrator full
+battery — testsig/stressfs/usertests/ctest) under the account
+spend-limit throttle; all green + committed.
+
 ### Iteration 38 — 2026-07-13 — Wave 28 (FINAL PORTING WAVE) → kernel C eliminated
 
 - virtio_disk.rs (virtqueue barriers 7/7 exact incl. the
