@@ -78,7 +78,7 @@ mod raw {
     // stays unchanged. The "valid live kernel pointer" precondition from
     // the module header is unchanged — it is documented on the shims
     // themselves.
-    pub use crate::proc::proc_shims::{
+    pub(crate) use crate::proc::proc_shims::{
         t_parent, t_pid, t_session, t_thread_group, xv6_current_thread,
         xv6_either_copyout_int, xv6_exit_find_stopped_child, xv6_exit_find_zombie_child,
         xv6_exit_reap_zombie, xv6_exit_reparent_do, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,

@@ -52,6 +52,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use crate::bindings::{mbuf, spinlock_t, thread, vm, EFAULT, EINTR, ENOMEM};
+use crate::proc::proc_shims::xv6_current_thread;
 use crate::net::mbufq;
 use crate::sync::SpinLock;
 
@@ -69,8 +70,7 @@ unsafe extern "C" {
     // string.rs.
     fn kfree(pa: *mut c_void);
 
-    // proc/proc_shims.rs, proc/signal.rs, proc/sched.rs.
-    safe fn xv6_current_thread() -> *mut thread;
+    // proc/signal.rs, proc/sched.rs.
     safe fn killed(p: *mut thread) -> c_int;
     safe fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int;
     safe fn wakeup_on_chan(chan: *mut c_void);

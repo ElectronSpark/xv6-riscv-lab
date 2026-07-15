@@ -99,6 +99,7 @@ use crate::bindings::{
     spinlock_t, stat, thread, vfs_fdtable, vfs_file, vfs_file_ops, vfs_inode, vfs_inode_ref,
     EAGAIN, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
+use crate::proc::proc_shims::xv6_current_thread;
 use crate::sync::{KMutex, KSpinlock};
 
 // ===========================================================================
@@ -111,9 +112,6 @@ use crate::sync::{KMutex, KSpinlock};
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_current_thread() -> *mut thread;
-
     // printf.rs — C-variadic.
 
     // lock/mutex.rs — `file->lock`.

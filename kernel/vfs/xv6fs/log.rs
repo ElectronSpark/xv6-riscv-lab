@@ -41,6 +41,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::bindings::{buf, spinlock_t, thread, tq_t, xv6fs_log, xv6fs_logheader, xv6fs_superblock};
+use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
 
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
@@ -48,9 +49,6 @@ use crate::bindings::{buf, spinlock_t, thread, tq_t, xv6fs_log, xv6fs_logheader,
 
 unsafe extern "C" {
     // proc module.
-    safe fn xv6_panic(msg: *const c_char) -> !;
-    safe fn xv6_current_thread() -> *mut thread;
-    safe fn xv6_thread_state_set(p: *mut thread, s: c_int);
     safe fn signal_pending(p: *mut thread) -> crate::bindings::bool_;
 
     // string.rs.

@@ -68,11 +68,11 @@ unsafe extern "C" {
     /// `kernel/inc/mm/vm.h`: `int either_copyout(int user_dst, uint64
     /// dst, void *src, uint64 len)`.
     pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_int;
-
-    /// `xv6_current_thread()` -- C-ABI shim for the `current` macro
-    /// (same precedent as every other Rust module reading `current`).
-    pub safe fn xv6_current_thread() -> *mut core::ffi::c_void;
 }
+
+// `xv6_current_thread()` -- shim for the `current` macro (same precedent
+// as every other Rust module reading `current`).
+use crate::proc::proc_shims::xv6_current_thread;
 
 /// Replicates the C `assert(expr, fmt, ret)` expansion used three times
 /// in `nullranddevinit()`. Same special-casing precedent as

@@ -67,6 +67,8 @@ use super::{xv6fs_mode_to_type, DIRSIZ};
 // convention -- see `truncate.rs`'s module doc ("Intra-driver calls") for
 // the precedent (`tmpfs/superblock.rs`'s own `super::inode::
 // tmpfs_make_directory` call).
+use crate::proc::proc_shims::xv6_panic;
+
 use super::log::xv6fs_log_write;
 use super::truncate::{xv6fs_bmap, xv6fs_bmap_read, xv6fs_itrunc, xv6fs_truncate};
 
@@ -76,9 +78,6 @@ use super::truncate::{xv6fs_bmap, xv6fs_bmap_read, xv6fs_itrunc, xv6fs_truncate}
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     safe fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;

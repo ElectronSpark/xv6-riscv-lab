@@ -165,30 +165,8 @@ use crate::machine;
 use crate::mm::cffi::container_of;
 use crate::sync::SpinLock;
 
-// ---------------------------------------------------------------------------
-// Externs -- local per-file `unsafe extern "C"` block, matching the
-// established convention (`kernel/dev/blkdev.rs`, `kernel/vfs/inode.rs`,
-// `kernel/vfs/xv6fs/superblock.rs`) of declaring cross-module C-ABI
-// calls locally rather than reaching through a shared facade, even for
-// symbols defined elsewhere in this same crate.
-// ---------------------------------------------------------------------------
+use crate::proc::proc_shims::xv6_panic;
 
-unsafe extern "C" {
-    safe fn xv6_panic(msg: *const core::ffi::c_char) -> !;
-
-    // kernel/hlist.rs (Phase 2 Wave 1). Non-RCU variants: this file uses
-    // `bcache.lock` for mutual exclusion, not RCU (matches the C
-    // original -- `kernel/dev/fdt.c`, still C, is the only other live
-    // caller of these same three entry points, via the RCU-agnostic
-    // non-`_rcu` names).
-
-    // kernel/lock/mutex.rs.
-
-    // kernel/lock/completion.rs.
-
-    // kernel/mm/page.rs.
-
-}
 // P3-1D mesh sweep: kernel/dev/{dev,blkdev,bio}.rs are in scope for this
 // wave; signatures are identical, so these become plain crate-path
 // imports instead of `extern "C"` redeclarations.

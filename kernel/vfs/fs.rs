@@ -86,6 +86,7 @@ use crate::bindings::{
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
 };
+use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
@@ -98,9 +99,7 @@ use crate::bindings::{
 
 unsafe extern "C" {
     // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
-    safe fn xv6_current_thread() -> *mut thread;
     safe fn scheduler_yield();
-    safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
 

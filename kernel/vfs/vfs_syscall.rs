@@ -84,6 +84,7 @@ use crate::bindings::{
     EACCES, EBADF, EEXIST, EFAULT, EINTR, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENODEV,
     ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
 };
+use crate::proc::proc_shims::xv6_current_thread;
 use crate::sync::KSpinlock;
 
 // ===========================================================================
@@ -104,7 +105,6 @@ unsafe extern "C" {
     safe fn kmm_free(ptr: *mut c_void);
 
     // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
-    safe fn xv6_current_thread() -> *mut thread;
     safe fn signal_pending(p: *mut thread) -> c_int;
     safe fn sleep_ms(ms: u64);
 

@@ -369,13 +369,10 @@ pub fn errptr_to_result<T>(p: *mut T) -> Result<*mut T, c_int> {
 // `kassert!` — canonical panic-on-false call-site marker.
 // ===========================================================================
 
-unsafe extern "C" {
-    /// The kernel panic entry point (`#[no_mangle]`,
-    /// `kernel/proc/proc_shims.rs`). Declared once here so `kassert!`
-    /// doesn't require every call-site file to carry its own copy of
-    /// this extern block just to use the macro.
-    pub(crate) safe fn xv6_panic(msg: *const c_char) -> !;
-}
+/// The kernel panic entry point (`kernel/proc/proc_shims.rs`).
+/// Re-exported once here so `kassert!` doesn't require every call-site
+/// file to carry its own import just to use the macro.
+pub(crate) use crate::proc::proc_shims::xv6_panic;
 
 /// `assert!`-with-kernel-panic-path call-site marker:
 /// `kassert!(cond, "msg")` expands to

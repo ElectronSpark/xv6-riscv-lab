@@ -34,9 +34,7 @@ use crate::sync::KSpinlock;
 
 pub type Kobject = kobject;
 
-unsafe extern "C" {
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-}
+use crate::proc::proc_shims::xv6_panic;
 pub(crate) use crate::kmm_free;
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):

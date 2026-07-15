@@ -109,6 +109,7 @@ use crate::bindings::{
 // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
 // (only caller anywhere in the tree is this file), referenced directly
 // instead of via their own `extern "C"` redeclarations.
+use crate::proc::proc_shims::xv6_current_thread;
 use crate::proc::sigacts_exec;
 use crate::proc::vfork_done as raw_vfork_done;
 // P3-1C mesh sweep: vfs/{inode,file,fdtable}.rs are in scope for this wave,
@@ -173,11 +174,6 @@ unsafe extern "C" {
         pa: *mut c_void,
     ) -> c_int;
     safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-
-    // proc module (kernel/proc/proc_shims.rs). Kept as its own `extern`:
-    // `xv6_current_thread` isn't being demoted (plenty of out-of-scope
-    // callers elsewhere).
-    safe fn xv6_current_thread() -> *mut thread;
 
     // irq/syscall.rs — arg-fetch helpers (`sys_exec` only).
     safe fn argaddr(n: c_int, ip: *mut u64);

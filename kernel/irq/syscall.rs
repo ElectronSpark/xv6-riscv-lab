@@ -91,6 +91,7 @@ use crate::exec::sys_exec;
 // accordingly (each still keeps its `extern "C" fn() -> u64` *type*, since
 // this table stores them as `SyscallFn` function-pointer values, not calls
 // by name).
+use crate::proc::proc_shims::xv6_panic;
 use crate::vfs::vfs_syscall::{
     sys_chroot, sys_dumpinode, sys_getcwd, sys_getdents, sys_mount, sys_statfs, sys_tcgetattr,
     sys_tcsetattr, sys_umount, sys_vfs_access, sys_vfs_chdir, sys_vfs_close, sys_vfs_connect,
@@ -103,14 +104,6 @@ use crate::vfs::vfs_syscall::{
 unsafe extern "C" {
     // printf.rs panic/print infra
     // printf is variadic, so it cannot be declared `safe`.
-
-    // proc/proc_shims.rs. Kept as a local `extern` (not a `crate::proc::`
-    // path): `xv6_panic` isn't being demoted (it has plenty of
-    // out-of-scope callers), and several other `proc/*.rs` files declare
-    // their own separate `xv6_panic` extern item too -- resolving through
-    // `proc/mod.rs`'s glob re-export would hit the same `E0659`
-    // name-ambiguity class documented in `timer/sched_timer.rs`.
-    safe fn xv6_panic(msg: *const c_char) -> !;
 
     // string.rs
     fn strlen(s: *const c_char) -> usize;

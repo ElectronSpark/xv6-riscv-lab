@@ -25,6 +25,8 @@ use crate::bindings::{
     vfs_inode, vma, EFAULT, EFBIG, EINVAL, EIO, ENOMEM,
 };
 
+use crate::proc::proc_shims::xv6_current_thread;
+
 use super::{s_isdir, s_islnk, s_isreg, TMPFS_MAX_FILE_SIZE};
 
 // P3-1C mesh sweep: vfs/{inode,fs}.rs are in scope for this wave;
@@ -38,9 +40,6 @@ use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_current_thread() -> *mut thread;
-
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;

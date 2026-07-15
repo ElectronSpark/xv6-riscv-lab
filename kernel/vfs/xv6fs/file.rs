@@ -43,6 +43,8 @@ use crate::bindings::{
     EINVAL, EIO, ENOMEM, ENOSPC,
 };
 
+use crate::proc::proc_shims::xv6_current_thread;
+
 use super::log::{xv6fs_begin_op, xv6fs_end_op};
 use super::truncate::xv6fs_bmap;
 
@@ -53,7 +55,6 @@ use super::truncate::xv6fs_bmap;
 
 unsafe extern "C" {
     // proc module.
-    safe fn xv6_current_thread() -> *mut thread;
     safe fn signal_pending(p: *mut thread) -> bool_;
 
     // string.rs.

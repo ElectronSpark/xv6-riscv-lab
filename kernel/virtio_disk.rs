@@ -114,6 +114,7 @@ use crate::bindings::{
 };
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 use crate::machine;
+use crate::proc::proc_shims::xv6_current_thread;
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -138,9 +139,6 @@ unsafe extern "C" {
     safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
     safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int;
     safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
-
-    // proc/proc_shims.rs.
-    safe fn xv6_current_thread() -> *mut thread;
 
     // mm/kalloc.rs, string.rs.
     fn kalloc() -> *mut c_void;

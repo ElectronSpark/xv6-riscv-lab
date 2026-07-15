@@ -27,9 +27,9 @@ use core::ptr;
 
 // SAFETY: `$ptr` must be a valid, non-null, properly-aligned pointer to a
 // live value of the pointee struct type for the duration of the read.
-// Every call site in this file passes either (a) a `#[no_mangle] extern
-// "C"` parameter, whose non-nullness/liveness is guaranteed by the C
-// caller / kernel convention that produced it (e.g. `current`, a proc-table
+// Every call site in this file passes either (a) a shim-entry-point
+// parameter, whose non-nullness/liveness is guaranteed by the kernel
+// convention that produced it (e.g. `current`, a proc-table
 // lookup result, a list-iteration callback argument), or (b) a pointer
 // derived from such a parameter via field projection. Reading a plain
 // (non-atomic) field like this additionally requires that no other thread
@@ -174,18 +174,17 @@ use crate::proc::{tg_signal_send, tcb_lock, tcb_unlock};
 // halt sequence natively: `__panic_start` (disables interrupts, takes the
 // panic message lock, prints a backtrace), the caller's message, then
 // `__panic_end` (releases the lock and tail-calls `trigger_panic`, which
-// sends a crash IPI to every hart and never returns). Exported under the
-// original symbol name so the ~14 existing
-// `unsafe extern "C" { safe fn xv6_panic(...) -> !; }` declarations
-// scattered across kernel/proc/*.rs resolve unchanged.
+// sends a crash IPI to every hart and never returns). P3-D1b/c: every
+// consumer now reaches it as a plain crate-path item (directly or via the
+// `kstd::xv6_panic` re-export that `kassert!` uses); the former
+// `#[no_mangle]` C-ABI export is gone.
 // ===========================================================================
 unsafe extern "C" {
     fn __panic_start();
     fn __panic_end() -> !;
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_panic(msg: *const c_char) -> ! {
+pub(crate) fn xv6_panic(msg: *const c_char) -> ! {
     // SAFETY: `__panic_start`/`__panic_end` are the real kernel panic
     // sequence and take no arguments beyond implicit global state.
     // `kprintln!` with `Cs(msg)` only reads `msg`, which every caller
@@ -201,9 +200,9 @@ pub extern "C" fn xv6_panic(msg: *const c_char) -> ! {
 
 // ===========================================================================
 // SECTION 6: pgroup slab cache (was static in pgroup.c, then in
-// proc_rust_shims.c). The cache itself moves to Rust file scope; the public
-// xv6_pgroup_slab_{init,alloc,free} entry points keep their C ABI names so
-// that pgroup.rs (and any future C caller) link unchanged.
+// proc_rust_shims.c). The cache itself moves to Rust file scope; the
+// xv6_pgroup_slab_{init,alloc,free} entry points are crate-internal fns
+// (P3-D1c) called by pgroup.rs via crate paths.
 // ===========================================================================
 
 /// Thin `Sync` wrapper for the file-scope pgroup slab cache. The C kernel
@@ -222,8 +221,7 @@ fn pgroup_slab_ptr() -> *mut slab_cache_t {
     PGROUP_SLAB.0.get() as *mut slab_cache_t
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_pgroup_slab_init() -> c_int {
+pub(crate) fn xv6_pgroup_slab_init() -> c_int {
     const NAME: &[u8] = b"pgroup_cache\0";
     // SAFETY: NAME is a valid 'static NUL-terminated string; the cache
     // pointer is a unique, properly-aligned static.
@@ -237,14 +235,12 @@ pub extern "C" fn xv6_pgroup_slab_init() -> c_int {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_pgroup_slab_alloc() -> *mut crate::bindings::pgroup {
+pub(crate) fn xv6_pgroup_slab_alloc() -> *mut crate::bindings::pgroup {
     // SAFETY: cache was initialised via xv6_pgroup_slab_init at boot.
     u! { slab_alloc(pgroup_slab_ptr()) as *mut crate::bindings::pgroup }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_pgroup_slab_free(pg: *mut crate::bindings::pgroup) {
+pub(crate) fn xv6_pgroup_slab_free(pg: *mut crate::bindings::pgroup) {
     // SAFETY: caller guarantees `pg` came from xv6_pgroup_slab_alloc.
     u! { slab_free(pg as *mut c_void) }
 }
@@ -254,8 +250,7 @@ pub extern "C" fn xv6_pgroup_slab_free(pg: *mut crate::bindings::pgroup) {
 // only meaningful field is `signo` and forwards to the thread-group signal
 // path.
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
+pub(crate) fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
     // SAFETY: ksiginfo is a plain C struct (no destructor, all-bit-pattern
     // valid fields); zero-init via MaybeUninit::zeroed().assume_init() is
     // layout-equivalent to the C `memset(&info, 0, sizeof(info))`.
@@ -275,43 +270,37 @@ pub extern "C" fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_in
 // wrappers are still useful as the documented Rust-facing names.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn xv6_rcu_read_lock() {
+pub(crate) fn xv6_rcu_read_lock() {
     // SAFETY: rcu_read_lock just bumps a per-thread depth counter and
     // disables preemption; no preconditions beyond "in kernel context".
     u! { rcu_read_lock() }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_rcu_read_unlock() {
+pub(crate) fn xv6_rcu_read_unlock() {
     // SAFETY: must be balanced with a prior xv6_rcu_read_lock; caller's
     // responsibility, same as the C wrapper this replaces.
     u! { rcu_read_unlock() }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_tcb_lock(p: *mut crate::bindings::thread) {
+pub(crate) fn xv6_tcb_lock(p: *mut crate::bindings::thread) {
     tcb_lock(p)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_tcb_unlock(p: *mut crate::bindings::thread) {
+pub(crate) fn xv6_tcb_unlock(p: *mut crate::bindings::thread) {
     tcb_unlock(p)
 }
 
 // SECTION 1 leftover: xv6_current_thread — replaces the `current` macro,
 // which expands to an interrupt-safe load of `mycpu()->proc`. We replicate
 // the same sstatus.SIE save/restore dance in Rust inline asm.
-#[no_mangle]
-pub extern "C" fn xv6_current_thread() -> *mut thread {
+pub(crate) fn xv6_current_thread() -> *mut thread {
     crate::machine::current_thread_ptr()
 }
 
 // SECTION 1 leftovers: thread_state_short / thread_state_to_str. Pure
 // switch tables — direct ports of the static-inline definitions in
 // kernel/inc/proc/thread.h.
-#[no_mangle]
-pub extern "C" fn xv6_thread_state_to_str(st: c_int) -> *const c_char {
+pub(crate) fn xv6_thread_state_to_str(st: c_int) -> *const c_char {
     let s: &core::ffi::CStr = match st {
         0  => c"unused",
         1  => c"used",
@@ -330,8 +319,7 @@ pub extern "C" fn xv6_thread_state_to_str(st: c_int) -> *const c_char {
     s.as_ptr()
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_thread_state_short(st: c_int) -> *const c_char {
+pub(crate) fn xv6_thread_state_short(st: c_int) -> *const c_char {
     let s: &core::ffi::CStr = match st {
         8  => c"R",   // RUNNING
         2  => c"S",   // INTERRUPTIBLE
@@ -352,132 +340,83 @@ pub extern "C" fn xv6_thread_state_short(st: c_int) -> *const c_char {
 
 // --- SECTION 2: struct thread ---------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn t_pid(p: *mut thread) -> c_int { field_get!(p, pid) }
-#[no_mangle]
-pub extern "C" fn t_tgid(p: *mut thread) -> c_int { field_get!(p, tgid) }
-#[no_mangle]
-pub extern "C" fn t_pgid(p: *mut thread) -> c_int { field_get!(p, pgid) }
-#[no_mangle]
-pub extern "C" fn t_sid(p: *mut thread) -> c_int { field_get!(p, sid) }
-#[no_mangle]
-pub extern "C" fn t_set_pid(p: *mut thread, pid: c_int) { field_set!(p, pid, pid) }
-#[no_mangle]
-pub extern "C" fn t_set_pgid(p: *mut thread, v: c_int) { field_set!(p, pgid, v) }
+pub(crate) fn t_pid(p: *mut thread) -> c_int { field_get!(p, pid) }
+pub(crate) fn t_tgid(p: *mut thread) -> c_int { field_get!(p, tgid) }
+pub(crate) fn t_pgid(p: *mut thread) -> c_int { field_get!(p, pgid) }
+pub(crate) fn t_sid(p: *mut thread) -> c_int { field_get!(p, sid) }
+pub(crate) fn t_set_pid(p: *mut thread, pid: c_int) { field_set!(p, pid, pid) }
+pub(crate) fn t_set_pgid(p: *mut thread, v: c_int) { field_set!(p, pgid, v) }
 
-#[no_mangle]
-pub extern "C" fn t_parent(p: *mut thread) -> *mut thread { field_get!(p, parent) }
-#[no_mangle]
-pub extern "C" fn t_pgroup(p: *mut thread) -> *mut pgroup { field_get!(p, pgroup) }
-#[no_mangle]
-pub extern "C" fn t_session(p: *mut thread) -> *mut session { field_get!(p, session) }
-#[no_mangle]
-pub extern "C" fn t_thread_group(p: *mut thread) -> *mut thread_group {
+pub(crate) fn t_parent(p: *mut thread) -> *mut thread { field_get!(p, parent) }
+pub(crate) fn t_pgroup(p: *mut thread) -> *mut pgroup { field_get!(p, pgroup) }
+pub(crate) fn t_session(p: *mut thread) -> *mut session { field_get!(p, session) }
+pub(crate) fn t_thread_group(p: *mut thread) -> *mut thread_group {
     field_get!(p, thread_group)
 }
-#[no_mangle]
-pub extern "C" fn t_set_pgroup(p: *mut thread, pg: *mut pgroup) {
+pub(crate) fn t_set_pgroup(p: *mut thread, pg: *mut pgroup) {
     field_set!(p, pgroup, pg)
 }
 
-#[no_mangle]
-pub extern "C" fn t_vm(p: *mut thread) -> *mut crate::bindings::vm_t { field_get!(p, vm) }
-#[no_mangle]
-pub extern "C" fn t_fdtable(p: *mut thread) -> *mut crate::bindings::vfs_fdtable { field_get!(p, fdtable) }
-#[no_mangle]
-pub extern "C" fn t_sigacts(p: *mut thread) -> *mut crate::bindings::sigacts_t { field_get!(p, sigacts) }
-#[no_mangle]
-pub extern "C" fn t_trapframe(p: *mut thread) -> *mut crate::bindings::utrapframe { field_get!(p, trapframe) }
-#[no_mangle]
-pub extern "C" fn t_set_vm(p: *mut thread, v: *mut crate::bindings::vm_t) { field_set!(p, vm, v) }
-#[no_mangle]
-pub extern "C" fn t_set_fdtable(p: *mut thread, v: *mut crate::bindings::vfs_fdtable) { field_set!(p, fdtable, v) }
-#[no_mangle]
-pub extern "C" fn t_set_sigacts(p: *mut thread, v: *mut crate::bindings::sigacts_t) { field_set!(p, sigacts, v) }
-#[no_mangle]
-pub extern "C" fn t_set_trapframe(p: *mut thread, v: *mut crate::bindings::utrapframe) { field_set!(p, trapframe, v) }
-#[no_mangle]
-pub extern "C" fn t_set_parent(p: *mut thread, par: *mut thread) { field_set!(p, parent, par) }
-#[no_mangle]
-pub extern "C" fn t_set_thread_group(p: *mut thread, tg: *mut thread_group) { field_set!(p, thread_group, tg) }
-#[no_mangle]
-pub extern "C" fn t_set_session(p: *mut thread, s: *mut session) { field_set!(p, session, s) }
-#[no_mangle]
-pub extern "C" fn t_set_tgid(p: *mut thread, v: c_int) { field_set!(p, tgid, v) }
-#[no_mangle]
-pub extern "C" fn t_set_sid(p: *mut thread, v: c_int) { field_set!(p, sid, v) }
+pub(crate) fn t_vm(p: *mut thread) -> *mut crate::bindings::vm_t { field_get!(p, vm) }
+pub(crate) fn t_fdtable(p: *mut thread) -> *mut crate::bindings::vfs_fdtable { field_get!(p, fdtable) }
+pub(crate) fn t_sigacts(p: *mut thread) -> *mut crate::bindings::sigacts_t { field_get!(p, sigacts) }
+pub(crate) fn t_trapframe(p: *mut thread) -> *mut crate::bindings::utrapframe { field_get!(p, trapframe) }
+pub(crate) fn t_set_vm(p: *mut thread, v: *mut crate::bindings::vm_t) { field_set!(p, vm, v) }
+pub(crate) fn t_set_fdtable(p: *mut thread, v: *mut crate::bindings::vfs_fdtable) { field_set!(p, fdtable, v) }
+pub(crate) fn t_set_sigacts(p: *mut thread, v: *mut crate::bindings::sigacts_t) { field_set!(p, sigacts, v) }
+pub(crate) fn t_set_trapframe(p: *mut thread, v: *mut crate::bindings::utrapframe) { field_set!(p, trapframe, v) }
+pub(crate) fn t_set_parent(p: *mut thread, par: *mut thread) { field_set!(p, parent, par) }
+pub(crate) fn t_set_thread_group(p: *mut thread, tg: *mut thread_group) { field_set!(p, thread_group, tg) }
+pub(crate) fn t_set_session(p: *mut thread, s: *mut session) { field_set!(p, session, s) }
+pub(crate) fn t_set_tgid(p: *mut thread, v: c_int) { field_set!(p, tgid, v) }
+pub(crate) fn t_set_sid(p: *mut thread, v: c_int) { field_set!(p, sid, v) }
 
 // --- SECTION 3: struct pgroup ---------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pg_pgid(pg: *mut pgroup) -> c_int { field_get!(pg, pgid) }
-#[no_mangle]
-pub extern "C" fn pg_t_cnt(pg: *mut pgroup) -> c_int { field_get!(pg, t_cnt) }
-#[no_mangle]
-pub extern "C" fn pg_p_cnt(pg: *mut pgroup) -> c_int { field_get!(pg, p_cnt) }
-#[no_mangle]
-pub extern "C" fn pg_exited(pg: *mut pgroup) -> c_int {
+pub(crate) fn pg_pgid(pg: *mut pgroup) -> c_int { field_get!(pg, pgid) }
+pub(crate) fn pg_t_cnt(pg: *mut pgroup) -> c_int { field_get!(pg, t_cnt) }
+pub(crate) fn pg_p_cnt(pg: *mut pgroup) -> c_int { field_get!(pg, p_cnt) }
+pub(crate) fn pg_exited(pg: *mut pgroup) -> c_int {
     bit_get!(pg, __bindgen_anon_1, exited) as c_int
 }
-#[no_mangle]
-pub extern "C" fn pg_is_kernel(pg: *mut pgroup) -> c_int {
+pub(crate) fn pg_is_kernel(pg: *mut pgroup) -> c_int {
     bit_get!(pg, __bindgen_anon_1, is_kernel) as c_int
 }
-#[no_mangle]
-pub extern "C" fn pg_session(pg: *mut pgroup) -> *mut session { field_get!(pg, session) }
+pub(crate) fn pg_session(pg: *mut pgroup) -> *mut session { field_get!(pg, session) }
 
-#[no_mangle]
-pub extern "C" fn pg_set_pgid(pg: *mut pgroup, v: c_int) { field_set!(pg, pgid, v) }
-#[no_mangle]
-pub extern "C" fn pg_set_leader(pg: *mut pgroup, tg: *mut thread_group) {
+pub(crate) fn pg_set_pgid(pg: *mut pgroup, v: c_int) { field_set!(pg, pgid, v) }
+pub(crate) fn pg_set_leader(pg: *mut pgroup, tg: *mut thread_group) {
     field_set!(pg, leader, tg)
 }
-#[no_mangle]
-pub extern "C" fn pg_set_session(pg: *mut pgroup, s: *mut session) {
+pub(crate) fn pg_set_session(pg: *mut pgroup, s: *mut session) {
     field_set!(pg, session, s)
 }
-#[no_mangle]
-pub extern "C" fn pg_set_exited(pg: *mut pgroup, v: c_int) {
+pub(crate) fn pg_set_exited(pg: *mut pgroup, v: c_int) {
     bit_set!(pg, __bindgen_anon_1, set_exited, if v != 0 { 1 } else { 0 })
 }
-#[no_mangle]
-pub extern "C" fn pg_set_t_cnt(pg: *mut pgroup, v: c_int) { field_set!(pg, t_cnt, v) }
-#[no_mangle]
-pub extern "C" fn pg_set_p_cnt(pg: *mut pgroup, v: c_int) { field_set!(pg, p_cnt, v) }
-#[no_mangle]
-pub extern "C" fn pg_inc_t_cnt(pg: *mut pgroup) { field_add_assign!(pg, t_cnt, 1) }
-#[no_mangle]
-pub extern "C" fn pg_dec_t_cnt(pg: *mut pgroup) { field_sub_assign!(pg, t_cnt, 1) }
-#[no_mangle]
-pub extern "C" fn pg_inc_p_cnt(pg: *mut pgroup) { field_add_assign!(pg, p_cnt, 1) }
-#[no_mangle]
-pub extern "C" fn pg_dec_p_cnt(pg: *mut pgroup) { field_sub_assign!(pg, p_cnt, 1) }
+pub(crate) fn pg_set_t_cnt(pg: *mut pgroup, v: c_int) { field_set!(pg, t_cnt, v) }
+pub(crate) fn pg_set_p_cnt(pg: *mut pgroup, v: c_int) { field_set!(pg, p_cnt, v) }
+pub(crate) fn pg_inc_t_cnt(pg: *mut pgroup) { field_add_assign!(pg, t_cnt, 1) }
+pub(crate) fn pg_dec_t_cnt(pg: *mut pgroup) { field_sub_assign!(pg, t_cnt, 1) }
+pub(crate) fn pg_inc_p_cnt(pg: *mut pgroup) { field_add_assign!(pg, p_cnt, 1) }
+pub(crate) fn pg_dec_p_cnt(pg: *mut pgroup) { field_sub_assign!(pg, p_cnt, 1) }
 
 // --- SECTION 4: struct thread_group ---------------------------------------
 
-#[no_mangle]
-pub extern "C" fn tg_pgroup(tg: *mut thread_group) -> *mut pgroup { field_get!(tg, pgroup) }
-#[no_mangle]
-pub extern "C" fn tg_tgid(tg: *mut thread_group) -> c_int { field_get!(tg, tgid) }
-#[no_mangle]
-pub extern "C" fn tg_set_pgroup(tg: *mut thread_group, pg: *mut pgroup) {
+pub(crate) fn tg_pgroup(tg: *mut thread_group) -> *mut pgroup { field_get!(tg, pgroup) }
+pub(crate) fn tg_tgid(tg: *mut thread_group) -> c_int { field_get!(tg, tgid) }
+pub(crate) fn tg_set_pgroup(tg: *mut thread_group, pg: *mut pgroup) {
     field_set!(tg, pgroup, pg)
 }
-#[no_mangle]
-pub extern "C" fn tg_group_leader(tg: *mut thread_group) -> *mut thread { field_get!(tg, group_leader) }
-#[no_mangle]
-pub extern "C" fn tg_set_tgid(tg: *mut thread_group, v: c_int) { field_set!(tg, tgid, v) }
+pub(crate) fn tg_group_leader(tg: *mut thread_group) -> *mut thread { field_get!(tg, group_leader) }
+pub(crate) fn tg_set_tgid(tg: *mut thread_group, v: c_int) { field_set!(tg, tgid, v) }
 
 // --- SECTION 5: struct session --------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn session_sid(s: *mut session) -> c_int { field_get!(s, sid) }
-#[no_mangle]
-pub extern "C" fn session_t_cnt(s: *mut session) -> c_int { field_get!(s, t_cnt) }
-#[no_mangle]
-pub extern "C" fn session_pg_cnt(s: *mut session) -> c_int { field_get!(s, pg_cnt) }
-#[no_mangle]
-pub extern "C" fn session_fg_pgrp(s: *mut session) -> *mut pgroup {
+pub(crate) fn session_sid(s: *mut session) -> c_int { field_get!(s, sid) }
+pub(crate) fn session_t_cnt(s: *mut session) -> c_int { field_get!(s, t_cnt) }
+pub(crate) fn session_pg_cnt(s: *mut session) -> c_int { field_get!(s, pg_cnt) }
+pub(crate) fn session_fg_pgrp(s: *mut session) -> *mut pgroup {
     field_get!(s, fg_pgrp)
 }
 
@@ -503,7 +442,7 @@ use crate::bindings::list_node_t;
 ///
 /// SAFETY (caller of this `unsafe fn`): `e` must be a valid, non-null,
 /// properly-aligned pointer to a live `list_node_t` (typically obtained via
-/// `field_ptr_mut!`/`list_init_field!` from a `#[no_mangle]` C parameter).
+/// `field_ptr_mut!`/`list_init_field!` from a shim-entry-point parameter).
 /// Called either before the node is linked into any list or right after
 /// unlinking it, so there is nothing else concurrently traversing it.
 #[inline]
@@ -670,120 +609,81 @@ unsafe fn thread_state_load(p: *mut thread) -> c_int {
 // SECTION 2 — remaining accessors (macros / atomics / lists).
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn t_pg_entry_init(t: *mut thread) {
+pub(crate) fn t_pg_entry_init(t: *mut thread) {
     list_init_field!(t, pg_entry)
 }
-#[no_mangle]
-pub extern "C" fn t_pg_entry_detach(t: *mut thread) {
-    list_detach_field!(t, pg_entry)
-}
-#[no_mangle]
-pub extern "C" fn t_pg_entry_is_detached(t: *mut thread) -> c_int {
+pub(crate) fn t_pg_entry_is_detached(t: *mut thread) -> c_int {
     list_is_detached_field!(t, pg_entry)
 }
 
-#[no_mangle]
-pub extern "C" fn t_user_space(p: *mut thread) -> c_int {
+pub(crate) fn t_user_space(p: *mut thread) -> c_int {
     // SAFETY: `thread_user_space` null-checks internally; `p` is a
-    // caller-supplied thread pointer per this `#[no_mangle]` fn's C ABI
-    // contract (non-null when meaningful, otherwise treated as "not
+    // caller-supplied thread pointer per this shim's contract
+    // (non-null when meaningful, otherwise treated as "not
     // user-space").
     u! { thread_user_space(p) as c_int }
 }
 
-#[no_mangle]
-pub extern "C" fn t_dmp_list_entry_is_detached(t: *mut thread) -> c_int {
+pub(crate) fn t_dmp_list_entry_is_detached(t: *mut thread) -> c_int {
     list_is_detached_field!(t, dmp_list_entry)
-}
-
-// Iterate `p->children` (safe traversal — caller-provided callback may delete
-// the current child, so we snapshot `next` before invoking).
-#[no_mangle]
-pub extern "C" fn t_for_each_child(
-    p: *mut thread,
-    fn_cb: Option<unsafe extern "C" fn(*mut thread, *mut c_void)>,
-    arg: *mut c_void,
-) {
-    let Some(cb) = fn_cb else { return };
-    let off = core::mem::offset_of!(thread, siblings);
-    // SAFETY: `p` is a caller-supplied, live `*mut thread`; `off` is a
-    // genuine `offset_of!` constant for `thread::siblings`, matching
-    // `list_foreach_safe`'s contract. `cb` is an opaque C callback that may
-    // detach the *current* child (that's what the "safe"/next-snapshotting
-    // walk tolerates) but per that same contract must not relink nodes
-    // further ahead in the list.
-    u! {
-        list_foreach_safe::<thread>(&raw mut (*p).children, off, |child| {
-            cb(child, arg);
-        })
-    }
 }
 
 // ===========================================================================
 // SECTION 3 — remaining pgroup accessors.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn pg_atomic_dec_t_cnt(pg: *mut pgroup) -> c_int {
+pub(crate) fn pg_atomic_dec_t_cnt(pg: *mut pgroup) -> c_int {
     // C `atomic_dec` returns the new value.
     atomic_fetch_sub_i32_field!(pg, t_cnt, 1) - 1
 }
 
-#[no_mangle]
-pub extern "C" fn pg_list_entry_init(pg: *mut pgroup) {
+pub(crate) fn pg_list_entry_init(pg: *mut pgroup) {
     list_init_field!(pg, list_entry)
 }
-#[no_mangle]
-pub extern "C" fn pg_list_entry_detach(pg: *mut pgroup) {
+pub(crate) fn pg_list_entry_detach(pg: *mut pgroup) {
     list_detach_field!(pg, list_entry)
 }
-#[no_mangle]
-pub extern "C" fn pg_list_entry_is_detached(pg: *mut pgroup) -> c_int {
+pub(crate) fn pg_list_entry_is_detached(pg: *mut pgroup) -> c_int {
     list_is_detached_field!(pg, list_entry)
 }
 
-#[no_mangle]
-pub extern "C" fn pg_threads_init(pg: *mut pgroup) {
+pub(crate) fn pg_threads_init(pg: *mut pgroup) {
     list_init_field!(pg, threads)
 }
-#[no_mangle]
-pub extern "C" fn pg_tgs_init(pg: *mut pgroup) {
+pub(crate) fn pg_tgs_init(pg: *mut pgroup) {
     list_init_field!(pg, thread_groups)
 }
 
-#[no_mangle]
-pub extern "C" fn pg_threads_push_back(pg: *mut pgroup, t: *mut thread) {
+pub(crate) fn pg_threads_push_back(pg: *mut pgroup, t: *mut thread) {
     list_push_back_fields!(pg, threads, t, pg_entry)
 }
-#[no_mangle]
-pub extern "C" fn pg_threads_detach(t: *mut thread) {
+pub(crate) fn pg_threads_detach(t: *mut thread) {
     list_detach_field!(t, pg_entry)
 }
 
-#[no_mangle]
-pub extern "C" fn pg_tgs_push_back(pg: *mut pgroup, tg: *mut thread_group) {
+pub(crate) fn pg_tgs_push_back(pg: *mut pgroup, tg: *mut thread_group) {
     list_push_back_fields!(pg, thread_groups, tg, list_entry)
 }
-#[no_mangle]
-pub extern "C" fn pg_tgs_detach(tg: *mut thread_group) {
+pub(crate) fn pg_tgs_detach(tg: *mut thread_group) {
     list_detach_field!(tg, list_entry)
 }
-#[no_mangle]
-pub extern "C" fn pg_tg_list_entry_is_detached(tg: *mut thread_group) -> c_int {
+pub(crate) fn pg_tg_list_entry_is_detached(tg: *mut thread_group) -> c_int {
     list_is_detached_field!(tg, list_entry)
 }
 
-#[no_mangle]
-pub extern "C" fn pg_for_each_tg(
+pub(crate) fn pg_for_each_tg(
     pg: *mut pgroup,
     fn_cb: Option<unsafe extern "C" fn(*mut thread_group, *mut c_void)>,
     arg: *mut c_void,
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(thread_group, list_entry);
-    // SAFETY: see `t_for_each_child`; `pg` is caller-supplied and live,
-    // `off` is a genuine `offset_of!` for `thread_group::list_entry`.
+    // SAFETY: `pg` is a caller-supplied, live `*mut pgroup`; `off` is a
+    // genuine `offset_of!` constant for `thread_group::list_entry`,
+    // matching `list_foreach_safe`'s contract. `cb` is an opaque C
+    // callback that may detach the *current* node (that's what the
+    // "safe"/next-snapshotting walk tolerates) but per that same contract
+    // must not relink nodes further ahead in the list.
     u! {
         list_foreach_safe::<thread_group>(&raw mut (*pg).thread_groups, off, |tg| {
             cb(tg, arg);
@@ -795,32 +695,18 @@ pub extern "C" fn pg_for_each_tg(
 // SECTION 4 — remaining thread_group accessors.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn tg_live_threads(tg: *mut thread_group) -> c_int {
-    atomic_load_i32_field!(tg, live_threads)
-}
-#[no_mangle]
-pub extern "C" fn tg_refcount(tg: *mut thread_group) -> c_int {
-    atomic_load_i32_field!(tg, refcount)
-}
-#[no_mangle]
-pub extern "C" fn tg_group_exit(tg: *mut thread_group) -> c_int {
-    atomic_load_i32_field!(tg, group_exit)
-}
-#[no_mangle]
-pub extern "C" fn tg_list_entry_init(tg: *mut thread_group) {
+pub(crate) fn tg_list_entry_init(tg: *mut thread_group) {
     list_init_field!(tg, list_entry)
 }
 
-#[no_mangle]
-pub extern "C" fn tg_for_each_thread(
+pub(crate) fn tg_for_each_thread(
     tg: *mut thread_group,
     fn_cb: Option<unsafe extern "C" fn(*mut thread, *mut c_void)>,
     arg: *mut c_void,
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(thread, tg_entry);
-    // SAFETY: see `t_for_each_child`; `tg` is caller-supplied and live,
+    // SAFETY: see `pg_for_each_tg`; `tg` is caller-supplied and live,
     // `off` is a genuine `offset_of!` for `thread::tg_entry`.
     u! {
         list_foreach_safe::<thread>(&raw mut (*tg).thread_list, off, |t| {
@@ -830,49 +716,24 @@ pub extern "C" fn tg_for_each_thread(
 }
 
 // ===========================================================================
-// SECTION 5 — remaining session accessors.
-// ===========================================================================
-
-#[no_mangle]
-pub extern "C" fn session_for_each_pg(
-    s: *mut session,
-    fn_cb: Option<unsafe extern "C" fn(*mut pgroup, *mut c_void)>,
-    arg: *mut c_void,
-) {
-    let Some(cb) = fn_cb else { return };
-    let off = core::mem::offset_of!(pgroup, list_entry);
-    // SAFETY: see `t_for_each_child`; `s` is caller-supplied and live,
-    // `off` is a genuine `offset_of!` for `pgroup::list_entry`.
-    u! {
-        list_foreach_safe::<pgroup>(&raw mut (*s).pgrps, off, |pg| {
-            cb(pg, arg);
-        })
-    }
-}
-
-// ===========================================================================
 // SECTION 11/12 helpers — minimal accessors common to clone/exit support.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn xv6_thread_is_zombie(t: *mut thread) -> c_int {
+pub(crate) fn xv6_thread_is_zombie(t: *mut thread) -> c_int {
     // SAFETY: see `thread_state_load`; `t` is caller-supplied, null-checked
     // internally by `thread_state_load`.
     u! { (thread_state_load(t) == THREAD_STATE_ZOMBIE) as c_int }
 }
-#[no_mangle]
-pub extern "C" fn xv6_thread_is_stopped(t: *mut thread) -> c_int {
+pub(crate) fn xv6_thread_is_stopped(t: *mut thread) -> c_int {
     // SAFETY: see `xv6_thread_is_zombie`.
     u! { (thread_state_load(t) == THREAD_STATE_STOPPED) as c_int }
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_user_space(t: *mut thread) {
+pub(crate) fn xv6_t_set_user_space(t: *mut thread) {
     // SAFETY: see `thread_set_flag`; `t` is caller-supplied, null-checked
     // internally by `thread_set_flag`.
     u! { thread_set_flag(t, THREAD_FLAG_USER_SPACE) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_self_reap(t: *mut thread) {
+pub(crate) fn xv6_t_set_self_reap(t: *mut thread) {
     // SAFETY: see `xv6_t_set_user_space`.
     u! { thread_set_flag(t, THREAD_FLAG_SELF_REAP) }
 }
@@ -886,77 +747,59 @@ pub extern "C" fn xv6_t_set_self_reap(t: *mut thread) {
 
 use crate::bindings::{thread_signal_t, utrapframe};
 
-#[no_mangle]
-pub extern "C" fn xv6_t_kstack_order(t: *mut thread) -> c_int {
+pub(crate) fn xv6_t_kstack_order(t: *mut thread) -> c_int {
     field_get!(t, kstack_order)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_vm(t: *mut thread) -> *mut c_void {
+pub(crate) fn xv6_t_vm(t: *mut thread) -> *mut c_void {
     field_get!(t, vm) as *mut c_void
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_vm(t: *mut thread, v: *mut c_void) {
+pub(crate) fn xv6_t_set_vm(t: *mut thread, v: *mut c_void) {
     field_set!(t, vm, v as *mut crate::bindings::vm_t)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_fs(t: *mut thread) -> *mut c_void {
+pub(crate) fn xv6_t_fs(t: *mut thread) -> *mut c_void {
     field_get!(t, fs) as *mut c_void
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_fs(t: *mut thread, f: *mut c_void) {
+pub(crate) fn xv6_t_set_fs(t: *mut thread, f: *mut c_void) {
     field_set!(t, fs, f as *mut crate::bindings::fs_struct)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_fdtable(t: *mut thread) -> *mut c_void {
+pub(crate) fn xv6_t_fdtable(t: *mut thread) -> *mut c_void {
     field_get!(t, fdtable) as *mut c_void
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_fdtable(t: *mut thread, f: *mut c_void) {
+pub(crate) fn xv6_t_set_fdtable(t: *mut thread, f: *mut c_void) {
     field_set!(t, fdtable, f as *mut crate::bindings::vfs_fdtable)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_sigacts(t: *mut thread) -> *mut c_void {
+pub(crate) fn xv6_t_sigacts(t: *mut thread) -> *mut c_void {
     field_get!(t, sigacts) as *mut c_void
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_sigacts(t: *mut thread, s: *mut c_void) {
+pub(crate) fn xv6_t_set_sigacts(t: *mut thread, s: *mut c_void) {
     field_set!(t, sigacts, s as *mut crate::bindings::sigacts_t)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_signal_ptr(t: *mut thread) -> *mut c_void {
+pub(crate) fn xv6_t_signal_ptr(t: *mut thread) -> *mut c_void {
     field_ptr_mut!(t, signal) as *mut c_void
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_sched_entity(t: *mut thread) -> *mut c_void {
+pub(crate) fn xv6_t_sched_entity(t: *mut thread) -> *mut c_void {
     field_get!(t, sched_entity) as *mut c_void
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_clone_flags(t: *mut thread, f: u64) {
+pub(crate) fn xv6_t_set_clone_flags(t: *mut thread, f: u64) {
     field_set!(t, clone_flags, f)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_vfork_parent(t: *mut thread, p: *mut thread) {
+pub(crate) fn xv6_t_set_vfork_parent(t: *mut thread, p: *mut thread) {
     field_set!(t, vfork_parent, p)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_vfork_parent(t: *mut thread) -> *mut thread {
+pub(crate) fn xv6_t_vfork_parent(t: *mut thread) -> *mut thread {
     field_get!(t, vfork_parent)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_tgid(t: *mut thread, tgid: c_int) {
+pub(crate) fn xv6_t_set_tgid(t: *mut thread, tgid: c_int) {
     field_set!(t, tgid, tgid)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_parent(t: *mut thread, p: *mut thread) {
+pub(crate) fn xv6_t_set_parent(t: *mut thread, p: *mut thread) {
     field_set!(t, parent, p)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_thread_group(t: *mut thread, tg: *mut thread_group) {
+pub(crate) fn xv6_t_set_thread_group(t: *mut thread, tg: *mut thread_group) {
     field_set!(t, thread_group, tg)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_t_copy_trapframe(dst: *mut thread, src: *mut thread) {
+pub(crate) fn xv6_t_copy_trapframe(dst: *mut thread, src: *mut thread) {
     // C: *(dst->trapframe) = *(src->trapframe);  // copy utrapframe by value.
     // SAFETY: `dst`/`src` are caller-supplied, live `*mut thread`s (per the
     // clone.c call sites that use this shim); `.trapframe` is a non-null
@@ -967,20 +810,17 @@ pub extern "C" fn xv6_t_copy_trapframe(dst: *mut thread, src: *mut thread) {
     // is concurrently touching it.
     u! { ptr::copy_nonoverlapping((*src).trapframe, (*dst).trapframe, 1usize) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_trapframe_set_sepc(t: *mut thread, v: u64) {
+pub(crate) fn xv6_t_trapframe_set_sepc(t: *mut thread, v: u64) {
     // SAFETY: see `xv6_t_copy_trapframe`; `t->trapframe` is non-null and
     // live, and only `t` itself (or its clone-time parent, before `t` is
     // published) writes these fields.
     u! { (*(*t).trapframe).trapframe.sepc = v }
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_trapframe_set_sp(t: *mut thread, v: u64) {
+pub(crate) fn xv6_t_trapframe_set_sp(t: *mut thread, v: u64) {
     // SAFETY: see `xv6_t_trapframe_set_sepc`.
     u! { (*(*t).trapframe).trapframe.sp = v }
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_trapframe_set_a0(t: *mut thread, v: u64) {
+pub(crate) fn xv6_t_trapframe_set_a0(t: *mut thread, v: u64) {
     // SAFETY: see `xv6_t_trapframe_set_sepc`.
     u! { (*(*t).trapframe).trapframe.a0 = v }
 }
@@ -996,38 +836,24 @@ const _SIGNAL_SIZE_PROBE: usize = core::mem::size_of::<thread_signal_t>();
 // SECTION 12 — exit.c field accessors.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn xv6_t_xstate(t: *mut thread) -> c_int {
-    field_get!(t, xstate)
-}
-#[no_mangle]
-pub extern "C" fn xv6_t_set_xstate(t: *mut thread, v: c_int) {
+pub(crate) fn xv6_t_set_xstate(t: *mut thread, v: c_int) {
     field_set!(t, xstate, v)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_clone_flags(t: *mut thread) -> u64 {
+pub(crate) fn xv6_t_clone_flags(t: *mut thread) -> u64 {
     field_get!(t, clone_flags)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_signal_esignal(t: *mut thread) -> c_int {
+pub(crate) fn xv6_t_signal_esignal(t: *mut thread) -> c_int {
     // C field is uint64; cast to int matches the C shim's return type.
     field_get!(t, signal.esignal) as c_int
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_set_signal_esignal(t: *mut thread, v: c_int) {
-    field_set!(t, signal.esignal, v as u64)
-}
-#[no_mangle]
-pub extern "C" fn xv6_t_signal_stop_signal(t: *mut thread) -> c_int {
+pub(crate) fn xv6_t_signal_stop_signal(t: *mut thread) -> c_int {
     field_get!(t, signal.stop_signal)
 }
-#[no_mangle]
-pub extern "C" fn xv6_t_children_count(t: *mut thread) -> c_int {
+pub(crate) fn xv6_t_children_count(t: *mut thread) -> c_int {
     field_get!(t, children_count)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_tg_group_exit_task_is(
+pub(crate) fn xv6_tg_group_exit_task_is(
     tg: *mut thread_group,
     t: *mut thread,
 ) -> c_int {
@@ -1036,17 +862,14 @@ pub extern "C" fn xv6_tg_group_exit_task_is(
     // the pointer value (no deref of `t`).
     u! { ((*tg).group_exit_task == t) as c_int }
 }
-#[no_mangle]
-pub extern "C" fn xv6_tg_group_exit_code(tg: *mut thread_group) -> c_int {
+pub(crate) fn xv6_tg_group_exit_code(tg: *mut thread_group) -> c_int {
     field_get!(tg, group_exit_code)
 }
-#[no_mangle]
-pub extern "C" fn xv6_tg_group_leader(tg: *mut thread_group) -> *mut thread {
+pub(crate) fn xv6_tg_group_leader(tg: *mut thread_group) -> *mut thread {
     field_get!(tg, group_leader)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_tg_is_exiting(tg: *mut thread_group) -> c_int {
+pub(crate) fn xv6_tg_is_exiting(tg: *mut thread_group) -> c_int {
     // C inline: __atomic_load_n(&tg->group_exit, ACQUIRE) != 0.
     if tg.is_null() {
         return 0;
@@ -1072,8 +895,7 @@ pub(crate) extern "C" fn thread_sched_entity(
     field_get!(t, sched_entity)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_thread_state_set(p: *mut thread, s: c_int) {
+pub(crate) fn xv6_thread_state_set(p: *mut thread, s: c_int) {
     // C inline: __atomic_store_n(&p->state, state, SEQ_CST); NULL-safe.
     if p.is_null() {
         return;
@@ -1085,20 +907,7 @@ pub extern "C" fn xv6_thread_state_set(p: *mut thread, s: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_thread_state_get(p: *mut thread) -> c_int {
-    // C inline: __atomic_load_n(&p->state, SEQ_CST); NULL → THREAD_UNUSED (0).
-    if p.is_null() {
-        return 0;
-    }
-    // SAFETY: `p` was just checked non-null above; plain atomic load.
-    u! {
-        AtomicI32::from_ptr(&raw mut (*p).state as *mut i32).load(Ordering::SeqCst)
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn xv6_sizeof_sigaction() -> u64 {
+pub(crate) fn xv6_sizeof_sigaction() -> u64 {
     // _Static_assert in the C side enforced sizeof(struct sigaction) == 24.
     24
 }
@@ -1106,8 +915,7 @@ pub extern "C" fn xv6_sizeof_sigaction() -> u64 {
 // IS_ERR / ERR_PTR / PTR_ERR — match the macros in kernel/inc/errno.h.
 const MAX_ERRNO: u64 = 4095;
 
-#[no_mangle]
-pub extern "C" fn xv6_is_err(p: *const c_void) -> c_int {
+pub(crate) fn xv6_is_err(p: *const c_void) -> c_int {
     // C: (unsigned long)x >= (unsigned long)-MAX_ERRNO.
     // -MAX_ERRNO as u64 is a very large value just below 2^64; the comparison
     // is true exactly when (i64)p ∈ [-MAX_ERRNO, -1].
@@ -1116,38 +924,12 @@ pub extern "C" fn xv6_is_err(p: *const c_void) -> c_int {
     (v >= threshold) as c_int
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_err_ptr(err: i64) -> *mut c_void {
+pub(crate) fn xv6_err_ptr(err: i64) -> *mut c_void {
     err as *mut c_void
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_ptr_err(p: *const c_void) -> i64 {
+pub(crate) fn xv6_ptr_err(p: *const c_void) -> i64 {
     p as i64
-}
-
-// ===========================================================================
-// SECTION 4 leftover: tg_is_group_leader — inlined here so the
-// xv6_tgport_thread_is_group_leader FFI hop disappears.
-// ===========================================================================
-
-#[no_mangle]
-pub extern "C" fn tg_is_group_leader(p: *mut thread) -> c_int {
-    // SAFETY: both derefs (`(*p).thread_group`, `(*tg).group_leader`) are
-    // preceded by their own null check inside this block, so by the time
-    // either pointer is dereferenced it is known non-null; both `p` and
-    // `tg` come from the live kernel object graph (caller-supplied thread,
-    // its own `thread_group` pointer).
-    u! {
-        if p.is_null() {
-            return 1;
-        }
-        let tg = (*p).thread_group;
-        if tg.is_null() {
-            return 1;
-        }
-        ((*tg).group_leader == p) as c_int
-    }
 }
 
 // ===========================================================================
@@ -1160,14 +942,13 @@ pub extern "C" fn tg_is_group_leader(p: *mut thread) -> c_int {
 // `extern "C"` redeclaration (identical `list_node_t` type).
 use crate::tty::session::session_list;
 
-#[no_mangle]
-pub extern "C" fn session_for_each_all(
+pub(crate) fn session_for_each_all(
     fn_cb: Option<unsafe extern "C" fn(*mut session, *mut c_void)>,
     arg: *mut c_void,
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(session, global_entry);
-    // SAFETY: see `t_for_each_child`. `session_list` is the kernel-global
+    // SAFETY: see `pg_for_each_tg`. `session_list` is the kernel-global
     // sentinel `list_node_t` (declared in the `unsafe extern "C"` block
     // above), valid for `'static`; `off` is a genuine `offset_of!` for
     // `session::global_entry`.
@@ -1182,23 +963,19 @@ pub extern "C" fn session_for_each_all(
 // SECTION 11/12 trivial wrappers (cpu_relax, intr_on, smp_mb, either_copyout_int).
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn xv6_cpu_relax() {
+pub(crate) fn xv6_cpu_relax() {
     crate::machine::cpu_relax();
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_smp_mb() {
+pub(crate) fn xv6_smp_mb() {
     crate::machine::smp_mb();
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_intr_on() {
+pub(crate) fn xv6_intr_on() {
     crate::machine::intr_on();
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_mycpu_clear_noff() {
+pub(crate) fn xv6_mycpu_clear_noff() {
     let mut cpu = crate::machine::CpuLocal::current();
     cpu.set_noff(0);
 }
@@ -1209,8 +986,7 @@ pub extern "C" fn xv6_mycpu_clear_noff() {
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
 use crate::printf::trigger_panic;
 
-#[no_mangle]
-pub extern "C" fn xv6_forkret_assert_user(p: *mut thread) {
+pub(crate) fn xv6_forkret_assert_user(p: *mut thread) {
     // SAFETY: `thread_user_space` itself tolerates a null `p` (returns
     // `false`), but the subsequent `(*p).pid` read does not — this
     // function mirrors the C `assert(THREAD_USER_SPACE(p), ...)` call in
@@ -1228,8 +1004,7 @@ pub extern "C" fn xv6_forkret_assert_user(p: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_either_copyout_int(dst: u64, v: c_int) -> c_int {
+pub(crate) fn xv6_either_copyout_int(dst: u64, v: c_int) -> c_int {
     // C: either_copyout(1 /*user_dst*/, dst, &v, sizeof(v))
     let local = v;
     // SAFETY: `either_copyout` validates `dst` against the current
@@ -1253,8 +1028,7 @@ pub extern "C" fn xv6_either_copyout_int(dst: u64, v: c_int) -> c_int {
 
 use crate::bindings::sched_entity;
 
-#[no_mangle]
-pub extern "C" fn xv6_thread_from_context(
+pub(crate) fn xv6_thread_from_context(
     ctx: *mut c_void,
 ) -> *mut thread {
     // C: thread_from_context(ctx) = container_of(ctx, sched_entity, context)->thread
@@ -1263,8 +1037,7 @@ pub extern "C" fn xv6_thread_from_context(
     field_get!(se, thread)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_exit_find_zombie_child(
+pub(crate) fn xv6_exit_find_zombie_child(
     p: *mut thread,
 ) -> *mut thread {
     let off_siblings = core::mem::offset_of!(thread, siblings);
@@ -1287,8 +1060,7 @@ pub extern "C" fn xv6_exit_find_zombie_child(
     found
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_exit_find_stopped_child(
+pub(crate) fn xv6_exit_find_stopped_child(
     p: *mut thread,
 ) -> *mut thread {
     let off_siblings = core::mem::offset_of!(thread, siblings);
@@ -1343,8 +1115,7 @@ fn proctab_proc_remove(p: *mut thread) {
     crate::proc::pid::proctab_proc_remove(p as *mut c_void as *mut crate::proc::pid::Thread);
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_exit_reparent_do(
+pub(crate) fn xv6_exit_reparent_do(
     p: *mut thread,
     initproc: *mut thread,
 ) -> c_int {
@@ -1386,8 +1157,7 @@ pub extern "C" fn xv6_exit_reparent_do(
 const THREAD_STATE_RUNNING: c_int = 8;
 const THREAD_STATE_INTERRUPTIBLE: c_int = 2;
 
-#[no_mangle]
-pub extern "C" fn xv6_exit_reap_zombie(
+pub(crate) fn xv6_exit_reap_zombie(
     parent: *mut thread,
     child: *mut thread,
     xstate_out: *mut c_int,
@@ -1706,10 +1476,9 @@ unsafe extern "C" fn proctab_hash_get_node(entry: *mut hlist_entry_t) -> *mut c_
     (entry as *mut u8).wrapping_sub(off) as *mut c_void
 }
 
-// --- Public xv6_* entry points (preserve original C ABI symbol names) ------
+// --- Crate-internal xv6_* entry points (former C-ABI exports, demoted) -----
 
-#[no_mangle]
-pub extern "C" fn xv6_proctab_init_storage() {
+pub(crate) fn xv6_proctab_init_storage() {
     // SAFETY: see `pt()` for pointer validity. Called exactly once at boot
     // before any other thread can observe `PROC_TABLE`, so no lock is
     // needed for this one-time initialisation (mirrors the C boot sequence).
@@ -1733,8 +1502,7 @@ pub extern "C" fn xv6_proctab_init_storage() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_pid_wlock() {
+pub(crate) fn xv6_pid_wlock() {
     // SAFETY: see `pt()`. These four are the `pid_lock` primitives
     // themselves; `rwlock_w{,un}lock`/`rwlock_r{,un}lock` handle concurrent
     // access to the lock's own state internally, so no external
@@ -1742,23 +1510,19 @@ pub extern "C" fn xv6_pid_wlock() {
     // validity and the usual lock/unlock balancing the caller owes.
     u! { rwlock_wlock(&raw mut (*pt()).pid_lock) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_pid_wunlock() {
+pub(crate) fn xv6_pid_wunlock() {
     // SAFETY: see `xv6_pid_wlock`.
     u! { rwlock_wunlock(&raw mut (*pt()).pid_lock) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_pid_rlock() {
+pub(crate) fn xv6_pid_rlock() {
     // SAFETY: see `xv6_pid_wlock`.
     u! { rwlock_rlock(&raw mut (*pt()).pid_lock) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_pid_runlock() {
+pub(crate) fn xv6_pid_runlock() {
     // SAFETY: see `xv6_pid_wlock`.
     u! { rwlock_runlock(&raw mut (*pt()).pid_lock) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_pid_try_lock_upgrade() -> c_int {
+pub(crate) fn xv6_pid_try_lock_upgrade() -> c_int {
     // SAFETY: see `xv6_pid_wlock`; `__rwl_try_update` is the primitive
     // implementing a read-to-write lock upgrade attempt.
     if u! { __rwl_try_update(&raw mut (*pt()).pid_lock) } {
@@ -1767,8 +1531,7 @@ pub extern "C" fn xv6_pid_try_lock_upgrade() -> c_int {
         0
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_pid_wholding() -> c_int {
+pub(crate) fn xv6_pid_wholding() -> c_int {
     // SAFETY: see `xv6_pid_wlock`; `__rwl_w_holding` only inspects the
     // lock's own internally-synchronised state.
     if u! { __rwl_w_holding(&raw mut (*pt()).pid_lock) } {
@@ -1778,60 +1541,48 @@ pub extern "C" fn xv6_pid_wholding() -> c_int {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_proctab_initproc_load() -> *mut thread {
+pub(crate) fn xv6_proctab_initproc_load() -> *mut thread {
     // SAFETY: see `pt()` and `rcu_dereference`'s fn-level contract; callers
     // of this shim are expected to be inside a matching RCU read-side
     // section before dereferencing the returned pointer, mirroring the C
     // `rcu_dereference(initproc)` usage this replaces.
     u! { rcu_dereference(&raw mut (*pt()).initproc) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_initproc_store(p: *mut thread) {
+pub(crate) fn xv6_proctab_initproc_store(p: *mut thread) {
     // SAFETY: see `pt()` and `rcu_assign_pointer`'s fn-level contract;
     // callers hold `pid_lock` (writer) to serialise against other writers
     // of `initproc`, matching the C convention for this assignment.
     u! { rcu_assign_pointer(&raw mut (*pt()).initproc, p) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_initproc_raw() -> *mut thread {
+pub(crate) fn xv6_proctab_initproc_raw() -> *mut thread {
     // SAFETY: see `pt()`. Plain non-atomic read, used only where the
     // caller has an independent guarantee of no concurrent writer (e.g.
     // single-threaded boot-time access), unlike `xv6_proctab_initproc_load`.
     u! { (*pt()).initproc }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_proctab_nextpid_get() -> c_int {
+pub(crate) fn xv6_proctab_nextpid_get() -> c_int {
     // SAFETY: see `pt()`; `nextpid` is a plain field protected by
     // `pid_lock`, which the caller is expected to hold (matching the C
     // convention for this field).
     u! { (*pt()).nextpid }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_nextpid_set(v: c_int) {
+pub(crate) fn xv6_proctab_nextpid_set(v: c_int) {
     // SAFETY: see `xv6_proctab_nextpid_get`; caller holds `pid_lock` as a
     // writer for this mutation.
     u! {
         (*pt()).nextpid = v;
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_registered_cnt() -> i64 {
+pub(crate) fn xv6_proctab_registered_inc() {
     // SAFETY: see `xv6_proctab_nextpid_get` — `registered_cnt` is likewise
-    // a plain field protected by `pid_lock`.
-    u! { (*pt()).registered_cnt }
-}
-#[no_mangle]
-pub extern "C" fn xv6_proctab_registered_inc() {
-    // SAFETY: see `xv6_proctab_registered_cnt`; caller holds `pid_lock` as
+    // a plain field protected by `pid_lock`; caller holds `pid_lock` as
     // a writer for this non-atomic `+= 1`.
     u! {
         (*pt()).registered_cnt += 1;
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_registered_dec() {
+pub(crate) fn xv6_proctab_registered_dec() {
     // SAFETY: see `xv6_proctab_registered_inc`.
     u! {
         (*pt()).registered_cnt -= 1;
@@ -1840,8 +1591,7 @@ pub extern "C" fn xv6_proctab_registered_dec() {
 
 const EAGAIN: c_int = 11;
 
-#[no_mangle]
-pub extern "C" fn xv6_proctab_alloc_pid_slot() -> c_int {
+pub(crate) fn xv6_proctab_alloc_pid_slot() -> c_int {
     // SAFETY: see `pt()` and `atomic_inc_unless_i64`'s fn-level contract;
     // no `pid_lock` needed since the CAS loop is self-synchronising.
     if u! { atomic_inc_unless_i64(&raw mut (*pt()).allocated_cnt, NR_THREAD) } {
@@ -1850,16 +1600,14 @@ pub extern "C" fn xv6_proctab_alloc_pid_slot() -> c_int {
         -EAGAIN
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_free_pid_slot() {
+pub(crate) fn xv6_proctab_free_pid_slot() {
     // SAFETY: see `xv6_proctab_alloc_pid_slot`; `atomic_sub_i64` is
     // likewise self-synchronising.
     u! {
         let _ = atomic_sub_i64(&raw mut (*pt()).allocated_cnt, 1);
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_allocated_cnt() -> i64 {
+pub(crate) fn xv6_proctab_allocated_cnt() -> i64 {
     // SAFETY: see `pt()`. This is a plain (non-atomic) read of a counter
     // that `xv6_proctab_alloc_pid_slot`/`_free_pid_slot` mutate atomically;
     // it mirrors the original C code's informational/best-effort read of
@@ -1869,8 +1617,7 @@ pub extern "C" fn xv6_proctab_allocated_cnt() -> i64 {
     u! { (*pt()).allocated_cnt }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
+pub(crate) fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
     // Pass a `struct thread` lookup key. Bindgen-generated `thread` is `Copy`
     // and large; using `MaybeUninit::zeroed()` keeps the discriminator fields
     // (only `pid`) deterministic and matches the C side's stack-allocated
@@ -1887,8 +1634,7 @@ pub extern "C" fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
         hlist_get(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
+pub(crate) fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
     // SAFETY: see `xv6_proctab_get_locked`, except this is the RCU-read
     // variant: caller must be inside a matching RCU read-side critical
     // section instead of holding `pid_lock`.
@@ -1898,16 +1644,14 @@ pub extern "C" fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
         hlist_get_rcu(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_put_rcu(p: *mut thread) -> *mut thread {
+pub(crate) fn xv6_proctab_put_rcu(p: *mut thread) -> *mut thread {
     // SAFETY: see `pt()`; `p` is a caller-supplied, live `*mut thread`
     // being published into the table. Structural mutation of the hlist
     // requires the caller hold `pid_lock` (writer) even though readers use
     // RCU, matching the C convention for `hlist_put_rcu`.
     u! { hlist_put_rcu(&raw mut (*pt()).procs, p as *mut c_void, false) as *mut thread }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_pop_rcu(p: *mut thread) -> *mut thread {
+pub(crate) fn xv6_proctab_pop_rcu(p: *mut thread) -> *mut thread {
     // SAFETY: see `xv6_proctab_put_rcu`.
     u! { hlist_pop_rcu(&raw mut (*pt()).procs, p as *mut c_void) as *mut thread }
 }
@@ -1992,16 +1736,14 @@ unsafe fn list_entry_del_init_rcu(entry: *mut list_node_t) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_proctab_dmplist_add(p: *mut thread) {
+pub(crate) fn xv6_proctab_dmplist_add(p: *mut thread) {
     // SAFETY: see `pt()` and `list_entry_add_tail_rcu`'s fn-level contract;
     // `p` is a caller-supplied, live `*mut thread` not yet in the dump
     // list; caller holds `pid_lock` (writer) around this structural
     // mutation of `procs_list`.
     u! { list_entry_add_tail_rcu(&raw mut (*pt()).procs_list, &raw mut (*p).dmp_list_entry) }
 }
-#[no_mangle]
-pub extern "C" fn xv6_proctab_dmplist_del(p: *mut thread) {
+pub(crate) fn xv6_proctab_dmplist_del(p: *mut thread) {
     // SAFETY: see `xv6_proctab_dmplist_add`; `p` is currently linked into
     // `procs_list`.
     u! { list_entry_del_init_rcu(&raw mut (*p).dmp_list_entry) }
@@ -2160,8 +1902,7 @@ pub fn for_each_proctab_thread(mut f: impl FnMut(*mut thread)) {
 /// Copy `src->name` into `dst->name` with the same bounds-check semantics
 /// as the C `safestrcpy`: copies at most `len-1` non-NUL bytes, then writes
 /// a terminating NUL. `len` is the fixed size of `thread.name` (16).
-#[no_mangle]
-pub extern "C" fn xv6_t_copy_name(dst: *mut thread, src: *mut thread) {
+pub(crate) fn xv6_t_copy_name(dst: *mut thread, src: *mut thread) {
     let dn = field_ptr_mut!(dst, name) as *mut u8;
     let sn = field_ptr_const!(src, name) as *const u8;
     let n = 16usize;
@@ -2294,8 +2035,7 @@ unsafe fn safestr(dst: &mut [u8], src: *const c_char) -> usize {
     i
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_header() {
+pub(crate) fn xv6_procdump_header() {
     crate::kprintln!(
         "{:<20} {:<5} {:<2} {:<3} {}",
         "SID:PGID:TGID:TID",
@@ -2306,17 +2046,14 @@ pub extern "C" fn xv6_procdump_header() {
     );
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_bt_header() {
+pub(crate) fn xv6_procdump_bt_header() {
     crate::kprintln!("\n=== Blocked Process Backtraces ===");
 }
-#[no_mangle]
-pub extern "C" fn xv6_procdump_bt_footer() {
+pub(crate) fn xv6_procdump_bt_footer() {
     crate::kprintln!("\n=== End Backtraces ===");
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_one(p: *mut thread) -> c_int {
+pub(crate) fn xv6_procdump_one(p: *mut thread) -> c_int {
     // SAFETY: `p` is a caller-supplied, live `*mut thread` (from proc-table
     // iteration). `tcb_lock(p)`/`tcb_unlock(p)` bracket every access
     // to `p`'s (and `p->parent`'s) fields below, matching the C locking
@@ -2409,8 +2146,7 @@ fn fmt_id(buf: &mut [u8], a: c_int, b: c_int, c: c_int, d: c_int) -> usize {
     pos
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
+pub(crate) fn xv6_procdump_bt_one(p: *mut thread) {
     // SAFETY: see `xv6_procdump_one`. `p->sched_entity` is non-null for a
     // live thread (see `se_on_cpu`'s contract); `print_thread_backtrace` is
     // an extern C helper given the thread's own `context`/`kstack`/
@@ -2446,8 +2182,7 @@ pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
+pub(crate) fn xv6_procdump_bt_pid(pid: c_int) {
     use core::mem::MaybeUninit;
     // SAFETY: see `pt()`, `xv6_proctab_get_rcu` (same lookup pattern, under
     // `_rcu`'s RCU read-side section), and `xv6_procdump_one` for the
@@ -2489,8 +2224,7 @@ pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
+pub(crate) fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
     // SAFETY: `p` is a caller-supplied, live `*mut thread` (root of a
     // debug tree dump). Unlike `xv6_procdump_one`/`_bt_one`, this reads
     // `p`'s fields without `tcb_lock`, matching the original C tree-dump
@@ -2526,8 +2260,7 @@ pub extern "C" fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_procdump_tree_recursive(p: *mut thread, depth: c_int) {
+pub(crate) fn xv6_procdump_tree_recursive(p: *mut thread, depth: c_int) {
     // SAFETY: see `xv6_procdump_tree_node`; `sib_off` is a genuine
     // `offset_of!` for `thread::siblings`, matching `list_foreach_safe`'s
     // contract. Recursion depth is bounded by the actual process tree
@@ -2542,8 +2275,7 @@ pub extern "C" fn xv6_procdump_tree_recursive(p: *mut thread, depth: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_dump_session(s: *mut Session) {
+pub(crate) fn xv6_dump_session(s: *mut Session) {
     // SAFETY: `s` is a caller-supplied, live `*mut Session`. Each nested
     // `list_foreach_safe` walk uses a genuine `offset_of!` for the
     // relevant embedded `list_node_t` (`Pgroup::list_entry`,
@@ -2619,65 +2351,35 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
 use crate::bindings::sigacts_t as sa_sigacts_t;
 use crate::bindings::ksiginfo as sa_ksiginfo;
 
-#[no_mangle]
-pub extern "C" fn sa_refcount(s: *mut sa_sigacts_t) -> c_int { field_get!(s, refcount) }
-#[no_mangle]
-pub extern "C" fn sa_set_refcount(s: *mut sa_sigacts_t, v: c_int) { field_set!(s, refcount, v) }
-#[no_mangle]
-pub extern "C" fn sa_sigterm(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigterm) }
-#[no_mangle]
-pub extern "C" fn sa_set_sigterm(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigterm, v) }
-#[no_mangle]
-pub extern "C" fn sa_sigstop(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigstop) }
-#[no_mangle]
-pub extern "C" fn sa_set_sigstop(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigstop, v) }
-#[no_mangle]
-pub extern "C" fn sa_sigcont(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigcont) }
-#[no_mangle]
-pub extern "C" fn sa_set_sigcont(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigcont, v) }
-#[no_mangle]
-pub extern "C" fn sa_sigignore(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigignore) }
-#[no_mangle]
-pub extern "C" fn sa_set_sigignore(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigignore, v) }
+pub(crate) fn sa_refcount(s: *mut sa_sigacts_t) -> c_int { field_get!(s, refcount) }
+pub(crate) fn sa_set_refcount(s: *mut sa_sigacts_t, v: c_int) { field_set!(s, refcount, v) }
+pub(crate) fn sa_sigterm(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigterm) }
+pub(crate) fn sa_set_sigterm(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigterm, v) }
+pub(crate) fn sa_sigstop(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigstop) }
+pub(crate) fn sa_set_sigstop(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigstop, v) }
+pub(crate) fn sa_sigcont(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigcont) }
+pub(crate) fn sa_set_sigcont(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigcont, v) }
+pub(crate) fn sa_sigignore(s: *mut sa_sigacts_t) -> u64 { field_get!(s, sa_sigignore) }
+pub(crate) fn sa_set_sigignore(s: *mut sa_sigacts_t, v: u64) { field_set!(s, sa_sigignore, v) }
 
-#[no_mangle]
-pub extern "C" fn ksi_signo(k: *mut sa_ksiginfo) -> c_int { field_get!(k, signo) }
-#[no_mangle]
-pub extern "C" fn ksi_set_signo(k: *mut sa_ksiginfo, v: c_int) { field_set!(k, signo, v) }
-#[no_mangle]
-pub extern "C" fn ksi_receiver(k: *mut sa_ksiginfo) -> *mut thread { field_get!(k, receiver) }
-#[no_mangle]
-pub extern "C" fn ksi_set_receiver(k: *mut sa_ksiginfo, v: *mut thread) { field_set!(k, receiver, v) }
-#[no_mangle]
-pub extern "C" fn ksi_sender(k: *mut sa_ksiginfo) -> *mut thread { field_get!(k, sender) }
-#[no_mangle]
-pub extern "C" fn ksi_set_sender(k: *mut sa_ksiginfo, v: *mut thread) { field_set!(k, sender, v) }
+pub(crate) fn ksi_signo(k: *mut sa_ksiginfo) -> c_int { field_get!(k, signo) }
+pub(crate) fn ksi_set_signo(k: *mut sa_ksiginfo, v: c_int) { field_set!(k, signo, v) }
+pub(crate) fn ksi_receiver(k: *mut sa_ksiginfo) -> *mut thread { field_get!(k, receiver) }
+pub(crate) fn ksi_set_receiver(k: *mut sa_ksiginfo, v: *mut thread) { field_set!(k, receiver, v) }
+pub(crate) fn ksi_sender(k: *mut sa_ksiginfo) -> *mut thread { field_get!(k, sender) }
+pub(crate) fn ksi_set_sender(k: *mut sa_ksiginfo, v: *mut thread) { field_set!(k, sender, v) }
 
-#[no_mangle]
-pub extern "C" fn ts_sig_mask(p: *mut thread) -> u64 { field_get!(p, signal.sig_mask) }
-#[no_mangle]
-pub extern "C" fn ts_set_sig_mask(p: *mut thread, v: u64) { field_set!(p, signal.sig_mask, v) }
-#[no_mangle]
-pub extern "C" fn ts_sig_saved_mask(p: *mut thread) -> u64 { field_get!(p, signal.sig_saved_mask) }
-#[no_mangle]
-pub extern "C" fn ts_set_sig_saved_mask(p: *mut thread, v: u64) { field_set!(p, signal.sig_saved_mask, v) }
-#[no_mangle]
-pub extern "C" fn ts_sig_pending_mask(p: *mut thread) -> u64 { field_get!(p, signal.sig_pending_mask) }
-#[no_mangle]
-pub extern "C" fn ts_set_sig_pending_mask(p: *mut thread, v: u64) { field_set!(p, signal.sig_pending_mask, v) }
-#[no_mangle]
-pub extern "C" fn ts_sig_ucontext(p: *mut thread) -> u64 { field_get!(p, signal.sig_ucontext) }
-#[no_mangle]
-pub extern "C" fn ts_set_sig_ucontext(p: *mut thread, v: u64) { field_set!(p, signal.sig_ucontext, v) }
-#[no_mangle]
-pub extern "C" fn ts_esignal(p: *mut thread) -> u64 { field_get!(p, signal.esignal) }
-#[no_mangle]
-pub extern "C" fn ts_set_esignal(p: *mut thread, v: u64) { field_set!(p, signal.esignal, v) }
-#[no_mangle]
-pub extern "C" fn ts_stop_signal(p: *mut thread) -> c_int { field_get!(p, signal.stop_signal) }
-#[no_mangle]
-pub extern "C" fn ts_set_stop_signal(p: *mut thread, v: c_int) { field_set!(p, signal.stop_signal, v) }
-#[no_mangle]
-pub extern "C" fn ts_term_signal(p: *mut thread) -> c_int { field_get!(p, signal.term_signal) }
-#[no_mangle]
-pub extern "C" fn ts_set_term_signal(p: *mut thread, v: c_int) { field_set!(p, signal.term_signal, v) }
+pub(crate) fn ts_sig_mask(p: *mut thread) -> u64 { field_get!(p, signal.sig_mask) }
+pub(crate) fn ts_set_sig_mask(p: *mut thread, v: u64) { field_set!(p, signal.sig_mask, v) }
+pub(crate) fn ts_sig_saved_mask(p: *mut thread) -> u64 { field_get!(p, signal.sig_saved_mask) }
+pub(crate) fn ts_set_sig_saved_mask(p: *mut thread, v: u64) { field_set!(p, signal.sig_saved_mask, v) }
+pub(crate) fn ts_sig_pending_mask(p: *mut thread) -> u64 { field_get!(p, signal.sig_pending_mask) }
+pub(crate) fn ts_set_sig_pending_mask(p: *mut thread, v: u64) { field_set!(p, signal.sig_pending_mask, v) }
+pub(crate) fn ts_sig_ucontext(p: *mut thread) -> u64 { field_get!(p, signal.sig_ucontext) }
+pub(crate) fn ts_set_sig_ucontext(p: *mut thread, v: u64) { field_set!(p, signal.sig_ucontext, v) }
+pub(crate) fn ts_esignal(p: *mut thread) -> u64 { field_get!(p, signal.esignal) }
+pub(crate) fn ts_set_esignal(p: *mut thread, v: u64) { field_set!(p, signal.esignal, v) }
+pub(crate) fn ts_stop_signal(p: *mut thread) -> c_int { field_get!(p, signal.stop_signal) }
+pub(crate) fn ts_set_stop_signal(p: *mut thread, v: c_int) { field_set!(p, signal.stop_signal, v) }
+pub(crate) fn ts_term_signal(p: *mut thread) -> c_int { field_get!(p, signal.term_signal) }
+pub(crate) fn ts_set_term_signal(p: *mut thread, v: c_int) { field_set!(p, signal.term_signal, v) }

@@ -41,6 +41,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use crate::bindings::{buf, loff_t, vfs_inode, xv6fs_inode, xv6fs_superblock, EFBIG, EINVAL, ENOSPC};
+use crate::proc::proc_shims::xv6_panic;
 
 use super::block_cache::{xv6fs_bcache_find_free_block, xv6fs_bcache_find_free_block_near, xv6fs_bcache_mark_free};
 use super::inode::xv6fs_iupdate;
@@ -52,9 +53,6 @@ use super::log::{xv6fs_begin_op, xv6fs_begin_op_nointr, xv6fs_end_op, xv6fs_log_
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_panic(msg: *const core::ffi::c_char) -> !;
-
     // string.rs.
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 

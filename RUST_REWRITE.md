@@ -1523,6 +1523,31 @@ guards are already done (8a–8d).
   rebuild; boot gate; testsig **21/21**; forkfork + killstatus OK; stressfs;
   ENOENT smoke; no panics. (Worker additionally: reparent OK, boot ×2.)
 
+### Iteration 51 — 2026-07-15 — Wave P3-D1b+c: proc_shims C-ABI surface DISMANTLED (`#[no_mangle]` 204→0 in-file)
+
+- **D1b**: the 18 non-proc consumers converted (22 redeclarations — mostly
+  `xv6_current_thread`/`xv6_panic`) to direct crate-path calls, same
+  8e4fcc0 pattern. kstd.rs's `kassert!` path kept via `pub(crate) use`
+  re-export; nullrand's divergent `*mut c_void` decl unified to the real
+  `*mut thread` signature. Enablers: `mod proc_shims` → `pub(crate) mod`;
+  exit.rs `mod raw` re-exports → `pub(crate) use`.
+- **D1c**: 11 dead exports deleted (0-ref verified incl. .c/.h/.S); 3 of
+  the original 14 dead-list survivors demoted instead (live in-file
+  callers); **193 exports demoted `#[no_mangle] pub extern "C" fn` →
+  `pub(crate) fn`** (11+193 = the exact 204). Zero kept-`extern "C"`
+  exceptions among exports (the only address-taken fns are the 4
+  already-private `proctab_hash*` hlist-ops callbacks, which keep
+  `extern "C"` and never had no_mangle). Stale ABI-era comments updated.
+- **proc_shims.rs `#[no_mangle]`: 0.** Crate-wide: 571→367. Demoted names
+  nm-verified ABSENT from the linked kernel (t_pid/xv6_panic/
+  xv6_current_thread/pg_pgid/tg_tgid/session_sid) while the keep-set
+  (kerneltrap/usertrap/memcpy/start) remains. RUST_FORCE_UNDEFINED
+  untouched.
+- Verified (orchestrator): 0-warning `cargo clean`+full rebuild; cache
+  clean; boot gate; `ls /dev` clean; **testsig 21/21**; symlinktest both
+  ok; createdelete OK; stressfs; ENOENT; no panics. (Worker: boot ×2 +
+  forkfork OK additionally.) Net diff 21 files, +249/−596.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

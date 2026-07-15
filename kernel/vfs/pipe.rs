@@ -110,6 +110,7 @@ use crate::bindings::{
     bool_, pipe, slab_cache_t, thread, thread_state_THREAD_INTERRUPTIBLE, tq_t, vfs_file,
     vfs_file_ops, vfs_inode, vm, EAGAIN, EINTR, SLAB_FLAG_STATIC,
 };
+use crate::proc::proc_shims::xv6_current_thread;
 use crate::sync::KSpinlock;
 
 // ===========================================================================
@@ -120,7 +121,6 @@ use crate::sync::KSpinlock;
 
 unsafe extern "C" {
     // proc module.
-    safe fn xv6_current_thread() -> *mut thread;
     safe fn killed(p: *mut thread) -> c_int;
     safe fn signal_pending(p: *mut thread) -> c_int;
 

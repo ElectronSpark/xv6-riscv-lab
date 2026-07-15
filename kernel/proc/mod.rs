@@ -14,7 +14,7 @@
 //! * [`sched_fifo`] — port of `sched_fifo.c` (FIFO scheduler class).
 
 mod cffi;
-mod proc_shims;
+pub(crate) mod proc_shims;
 pub mod access;
 mod sched_idle;
 mod sched_fifo;
