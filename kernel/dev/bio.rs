@@ -53,6 +53,7 @@
 use core::ffi::{c_int, c_void};
 
 use crate::bindings::{bio, bio_vec, blkdev_t, bool_, completion_t, kobject, page_t, PGSIZE};
+use crate::kobject::{HasKobject, Kobject};
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block, matching the
@@ -109,6 +110,26 @@ fn is_err_value(p: usize) -> bool {
 #[inline(always)]
 fn err_ptr<T>(errno: c_int) -> *mut T {
     errno as isize as *mut T
+}
+
+// ---------------------------------------------------------------------------
+// KArc<bio> plumbing (Phase 3 P3-9b).
+// ---------------------------------------------------------------------------
+
+// `struct bio` embeds a `struct kobject` as its *first* field (see the
+// module doc's "already real bindgen types" paragraph), so this is a
+// plain reinterpret cast, not `container_of` arithmetic -- identical
+// reasoning to `kernel/dev/dev.rs`'s `device_t` impl.
+// SAFETY: `bio.kobj` is a stable, non-moving offset-0 field, initialised
+// by `kobject_init` in `bio_alloc` below before any pointer to the `bio`
+// is ever handed out, and live for as long as any reference to that
+// `bio` is held (`bio_release`/`kobject_put` is the only thing that can
+// invalidate it, and only once the count reaches zero) -- exactly
+// `HasKobject`'s contract.
+unsafe impl HasKobject for bio {
+    fn kobj_ptr(this: *mut Self) -> *mut Kobject {
+        this as *mut Kobject
+    }
 }
 
 // ---------------------------------------------------------------------------

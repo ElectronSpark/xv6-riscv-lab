@@ -88,8 +88,14 @@ unsafe extern "C" {
 // P3-1D mesh sweep: dev/bio.rs + dev/blkdev.rs (block I/O submission
 // path) are in scope for this wave; signatures are identical, so these
 // become plain crate-path imports instead of `extern "C"` redeclarations.
-use crate::dev::bio::{bio_add_seg, bio_alloc, bio_release};
+use crate::dev::bio::{bio_add_seg, bio_alloc};
 use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
+// P3-9b: `KArc<bio>` replaces the manual `bio_alloc`/`bio_release` pairing
+// in `xv6fs_pcache_read_page`/`xv6fs_pcache_write_page` below -- see
+// `kernel/kobject.rs`'s `KArc` doc and `kernel/dev/bio.rs`'s `HasKobject`
+// impl (P3-9's device family precedent, applied to the highest
+// leak-density call site flagged by that wave).
+use crate::kobject::KArc;
 
 // P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
@@ -223,22 +229,32 @@ extern "C" fn xv6fs_pcache_read_page(pc: *mut pcache, page: *mut page_t) -> c_in
             if is_err_or_null(b) {
                 return neg(ENOMEM);
             }
-            (*b).blkno = addr as u64 * BLK512_PER_BSIZE;
-            let ret = bio_add_seg(b, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
+            // SAFETY: `bio_alloc`'s success postcondition (one held
+            // kobject reference) is exactly `KArc::from_raw`'s
+            // precondition -- see `kernel/dev/bio.rs`'s `HasKobject`
+            // impl. `b` (the KArc) now owns that reference; every exit
+            // path below (the two error `return`s and the fallthrough to
+            // the next loop iteration) drops it automatically, replacing
+            // the three manual `bio_release(b)` calls the pre-P3-9b code
+            // needed on this same set of paths.
+            let b = KArc::<bio>::from_raw(b);
+            let bp = KArc::as_ptr(&b);
+            (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
+            let ret = bio_add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
             if ret != 0 {
-                bio_release(b);
-                return ret;
+                return ret; // `b` drops here, releasing the reference.
             }
-            let ret = blkdev_submit_bio(xv6_sb_blkdev(xv6_sb), b);
+            let ret = blkdev_submit_bio(xv6_sb_blkdev(xv6_sb), bp);
             if ret != 0 {
-                bio_release(b);
-                return ret;
+                return ret; // `b` drops here, releasing the reference.
             }
-            let ret = bio_await(b);
-            bio_release(b);
+            let ret = bio_await(bp);
             if ret != 0 {
-                return ret;
+                return ret; // `b` drops here (release either way).
             }
+            // `b` drops at the end of this loop iteration -- releases the
+            // reference exactly where the old unconditional
+            // `bio_release(b)` after `bio_await` ran.
         }
         0
     }
@@ -271,22 +287,27 @@ extern "C" fn xv6fs_pcache_write_page(pc: *mut pcache, page: *mut page_t) -> c_i
             if is_err_or_null(b) {
                 return neg(ENOMEM);
             }
-            (*b).blkno = addr as u64 * BLK512_PER_BSIZE;
-            let ret = bio_add_seg(b, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
+            // SAFETY: see the identical comment in
+            // `xv6fs_pcache_read_page` above -- same postcondition, same
+            // `HasKobject` impl.
+            let b = KArc::<bio>::from_raw(b);
+            let bp = KArc::as_ptr(&b);
+            (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
+            let ret = bio_add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
             if ret != 0 {
-                bio_release(b);
-                return ret;
+                return ret; // `b` drops here, releasing the reference.
             }
-            let ret = blkdev_submit_bio(xv6_sb_blkdev(xv6_sb), b);
+            let ret = blkdev_submit_bio(xv6_sb_blkdev(xv6_sb), bp);
             if ret != 0 {
-                bio_release(b);
-                return ret;
+                return ret; // `b` drops here, releasing the reference.
             }
-            let ret = bio_await(b);
-            bio_release(b);
+            let ret = bio_await(bp);
             if ret != 0 {
-                return ret;
+                return ret; // `b` drops here (release either way).
             }
+            // `b` drops at the end of this loop iteration -- releases the
+            // reference exactly where the old unconditional
+            // `bio_release(b)` after `bio_await` ran.
         }
         0
     }
