@@ -100,8 +100,8 @@ use crate::irq::irq_core::irq_desc_init;
 use crate::irq::plic::{plicinit, plicinithart};
 use crate::irq::trap::{trapinit, trapinithart};
 use crate::proc::{
-    install_user_root, scheduler_init, signal_init, thread_init, userinit, workqueue_init,
-    workqueue_runtime_smoke_test, workqueue_test_launch_tests,
+    install_user_root, scheduler_init, scheduler_yield, signal_init, thread_init, userinit,
+    workqueue_init, workqueue_runtime_smoke_test, workqueue_test_launch_tests,
 };
 use crate::timer::sched_timer::sched_timer_init;
 // P3-1C mesh sweep: printf.rs/vfs/tty/console.rs are in scope for this
@@ -195,12 +195,9 @@ unsafe extern "C" {
     fn rcu_cpu_init(cpu: c_int);
     fn rcu_kthread_start_cpu(cpu: c_int);
 
-    // proc/thread.rs, proc/sched.rs, proc/signal.rs, proc/workqueue.rs.
-    // `idle_thread_init`/`scheduler_yield` stay `extern`: not demoted (each
-    // still has an out-of-scope caller elsewhere -- `vfs/fs.rs` and a wide
-    // cross-crate set respectively).
+    // proc/thread.rs. `idle_thread_init` stays `extern`: not demoted (it
+    // still has an out-of-scope caller elsewhere -- `vfs/fs.rs`).
     fn idle_thread_init();
-    fn scheduler_yield();
 
     // kernel/bufcache.rs (Wave 22)
     fn binit();
@@ -398,11 +395,10 @@ pub extern "C" fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_har
 
     // Idle loop
     loop {
-        // SAFETY: `scheduler_yield` is safe to call from any hart once the
-        // scheduler is initialized (true on both paths above).
-        unsafe {
-            scheduler_yield();
-        }
+        // `scheduler_yield` (kernel/proc/sched.rs) is a safe Rust fn,
+        // callable from any hart once the scheduler is initialized (true
+        // on both paths above).
+        scheduler_yield();
         machine::intr_on();
         machine::wfi();
         machine::intr_off();

@@ -65,16 +65,14 @@ use crate::printf::trigger_panic;
 // External C symbols
 // ---------------------------------------------------------------------------
 
+// P3-D2a: the thread-queue primitives (`kernel/proc/thread_queue.rs`)
+// and scheduler entry points (`kernel/proc/sched.rs`) are ordinary Rust
+// fns, reached as plain crate-path items instead of `extern "C"`
+// redeclarations.
+use crate::proc::{scheduler_yield, tq_init, tq_wakeup_all, wakeup, wakeup_interruptible};
+
 unsafe extern "C" {
-    pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    pub safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
-
-
     pub safe fn sleep_ms(ms: u64);
-
-    pub safe fn wakeup(p: *mut thread);
-    pub safe fn wakeup_interruptible(p: *mut thread);
-    pub safe fn scheduler_yield();
 
     pub safe fn kthread_create(
         name: *const c_char,
@@ -128,25 +126,13 @@ fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
 }
 
 
-// `sched_attr` is not in `bindings` (rq_types.h is not pulled in via
-// wrapper.h). Mirror the layout from `kernel/inc/proc/rq_types.h`.
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct sched_attr {
-    size: u32,
-    affinity_mask: u64,
-    time_slice: u32,
-    priority: c_int,
-    flags: u32,
-}
-
-unsafe extern "C" {
-    safe fn sched_attr_init(attr: *mut sched_attr);
-    safe fn sched_setattr(
-        se: *mut crate::bindings::sched_entity,
-        attr: *const sched_attr,
-    ) -> c_int;
-}
+// P3-D2a: `sched_attr` *is* generated into `bindings` (rq_types.h
+// reaches the bindgen wrapper via rq.h), so the former local mirror
+// struct is gone, and `sched_attr_init`/`sched_setattr` are ordinary
+// Rust fns in `kernel/proc/rq.rs`, reached as plain crate-path items
+// instead of `extern "C"` redeclarations.
+use crate::bindings::sched_attr;
+use crate::proc::{sched_attr_init, sched_setattr};
 
 // ---------------------------------------------------------------------------
 // `cpus[]` — kernel global array of per-CPU records.

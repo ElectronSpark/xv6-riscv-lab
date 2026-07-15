@@ -91,17 +91,22 @@ mod raw {
         xv6_thread_is_zombie, xv6_thread_state_set,
     };
 
+    // P3-D2a: the scheduler entry points are ordinary Rust fns in
+    // `kernel/proc/sched.rs`; re-exported here so every `raw::NAME`
+    // call site stays unchanged (`Thread` is a plain alias of
+    // `crate::bindings::thread`, so the signatures are identical).
+    pub(crate) use crate::proc::{
+        scheduler_wakeup, scheduler_wakeup_interruptible, scheduler_yield,
+    };
+
     unsafe extern "C" {
         // Zero-arg, no-precondition entry points may be `safe`.
         pub safe fn __proctab_get_initproc() -> *mut Thread;
-        pub safe fn scheduler_yield();
 
         // Field accessors / kernel calls that take raw pointers.
         // SAFETY for every line below: the caller in `ffi::*` enforces
         // the "valid live kernel pointer" precondition documented in
         // the module header.
-        pub safe fn scheduler_wakeup(t: *mut Thread);
-        pub safe fn scheduler_wakeup_interruptible(t: *mut Thread);
         pub safe fn kill_thread(t: *mut Thread, signo: c_int) -> c_int;
 
         pub safe fn pgroup_remove_thread(p: *mut Thread);

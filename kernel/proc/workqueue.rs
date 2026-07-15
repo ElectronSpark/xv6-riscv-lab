@@ -113,9 +113,6 @@ unsafe extern "C" {
     safe fn tcb_lock(t: *mut thread);
     safe fn tcb_unlock(t: *mut thread);
 
-    safe fn scheduler_wakeup(t: *mut thread);
-    safe fn scheduler_yield();
-    safe fn wakeup(t: *mut thread);
     safe fn kill_thread(t: *mut thread, sig: c_int) -> c_int;
     pub safe fn exit(code: c_int) -> !;
 
@@ -127,16 +124,19 @@ unsafe extern "C" {
 
     pub safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
 
-    safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    safe fn tq_size(q: *mut tq_t) -> c_int;
-    safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, slot: *mut u64) -> c_int;
-    safe fn tq_wakeup(q: *mut tq_t, e: c_int, d: u64) -> *mut thread;
-    safe fn tq_wakeup_all(q: *mut tq_t, e: c_int, d: u64) -> c_int;
-
     safe fn kthread_create(
         name: *const c_char, entry: *mut c_void, arg: u64, prio: c_int, order: c_int,
     ) -> *mut thread;
 }
+
+// P3-D2a: the scheduler entry points (`kernel/proc/sched.rs`) and the
+// thread-queue primitives (`kernel/proc/thread_queue.rs`) are ordinary
+// Rust fns, reached as plain crate-path items instead of the `extern
+// "C"` redeclarations that used to sit in the block above.
+use crate::proc::{
+    scheduler_wakeup, scheduler_yield, tq_init, tq_size, tq_wait, tq_wakeup, tq_wakeup_all,
+    wakeup,
+};
 
 // =========================================================================
 // Wrapper-construction helpers. Each pointer constructor is null-safe.

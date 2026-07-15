@@ -204,21 +204,6 @@ fn sleep_lock_irqsave_impl() -> c_int { sleep_lock_ref().lock_irqsave() }
 fn sleep_unlock_irqrestore_impl(state: c_int) { sleep_lock_ref().unlock_irqrestore(state); }
 fn sched_holding_impl() -> c_int { rq_holding_current() }
 
-#[no_mangle]
-pub extern "C" fn chan_holding() -> c_int { chan_holding_impl() }
-
-#[no_mangle]
-pub extern "C" fn sleep_lock() { sleep_lock_impl() }
-
-#[no_mangle]
-pub extern "C" fn sleep_unlock() { sleep_unlock_impl() }
-
-#[no_mangle]
-pub extern "C" fn sleep_lock_irqsave() -> c_int { sleep_lock_irqsave_impl() }
-
-#[no_mangle]
-pub extern "C" fn sleep_unlock_irqrestore(state: c_int) { sleep_unlock_irqrestore_impl(state) }
-
 // P3-1B: only cross-file caller is `timer/timer_core.rs::clockintr` (now a
 // direct crate-path `use`, no more `extern` redeclaration) -- demoted.
 pub(crate) fn sched_holding() -> c_int { sched_holding_impl() }
@@ -302,11 +287,6 @@ fn switch_to_impl(cur: *mut thread, target: *mut thread) -> *mut thread {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn switch_to(cur: *mut thread, target: *mut thread) -> *mut thread {
-    switch_to_impl(cur, target)
-}
-
 fn switch_to_internal(p: *mut thread) -> *mut thread {
     sched_assert_holding();
     kassert!(!intr_get(), "Interrupts must be disabled before switching to a thread");
@@ -369,8 +349,7 @@ fn scheduler_yield_inner() {
     unsafe { rcu_check_callbacks(); }
 }
 
-#[no_mangle]
-pub extern "C" fn scheduler_yield() { scheduler_yield_inner() }
+pub(crate) fn scheduler_yield() { scheduler_yield_inner() }
 
 // ---------------- scheduler_sleep ---------------------------------------
 fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) {
@@ -389,11 +368,6 @@ fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) 
         lk.expect("BUG: scheduler_sleep lk_holding true but lk is None").lock();
     }
     intr_restore(intr);
-}
-
-#[no_mangle]
-pub extern "C" fn scheduler_sleep(lk: *mut spinlock_t, sleep_state: thread_state) {
-    scheduler_sleep_impl(lk_of(lk), sleep_state)
 }
 
 // ---------------- wakeup helpers ----------------------------------------
@@ -543,16 +517,10 @@ fn scheduler_wakeup_stopped_impl(p: *mut thread) {
     do_scheduler_wakeup_safe(p, true);
 }
 
-#[no_mangle]
-pub extern "C" fn scheduler_wakeup(p: *mut thread) { scheduler_wakeup_impl(p) }
-#[no_mangle]
-pub extern "C" fn scheduler_wakeup_timeout(p: *mut thread) { scheduler_wakeup_timeout_impl(p) }
-#[no_mangle]
-pub extern "C" fn scheduler_wakeup_killable(p: *mut thread) { scheduler_wakeup_killable_impl(p) }
-#[no_mangle]
-pub extern "C" fn scheduler_wakeup_interruptible(p: *mut thread) { scheduler_wakeup_interruptible_impl(p) }
-#[no_mangle]
-pub extern "C" fn scheduler_wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
+pub(crate) fn scheduler_wakeup(p: *mut thread) { scheduler_wakeup_impl(p) }
+
+pub(crate) fn scheduler_wakeup_interruptible(p: *mut thread) { scheduler_wakeup_interruptible_impl(p) }
+pub(crate) fn scheduler_wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
 
 // ---------------- sleep_on_chan / wakeup_on_chan ------------------------
 fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: thread_state) -> c_int {
@@ -599,18 +567,15 @@ fn wakeup_on_chan_impl(chan: *mut c_void) {
     sleep_unlock_impl();
 }
 
-#[no_mangle]
-pub extern "C" fn sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t) {
+pub(crate) fn sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t) {
     sleep_on_chan_impl(chan, lk_of(lk))
 }
 
-#[no_mangle]
-pub extern "C" fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int {
+pub(crate) fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int {
     sleep_on_chan_interruptible_impl(chan, lk_of(lk))
 }
 
-#[no_mangle]
-pub extern "C" fn wakeup_on_chan(chan: *mut c_void) { wakeup_on_chan_impl(chan) }
+pub(crate) fn wakeup_on_chan(chan: *mut c_void) { wakeup_on_chan_impl(chan) }
 
 // ---------------- dump --------------------------------------------------
 // Provide our own state-to-str (inline static in C header — re-implement).
@@ -636,8 +601,7 @@ fn state_str(s: thread_state) -> *const c_char {
     c"UNKNOWN".as_ptr()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn scheduler_dump_chan_queue() {
+pub(crate) unsafe fn scheduler_dump_chan_queue() {
     crate::kprintln!("Channel Queue Dump:");
     unsafe {
         let root = &raw mut (*chan_queue_ptr()).root;
@@ -684,14 +648,9 @@ fn wakeup_interruptible_impl(p: *mut thread) {
     scheduler_wakeup_interruptible_impl(p);
 }
 
-#[no_mangle]
-pub extern "C" fn wakeup(p: *mut thread) { wakeup_impl(p) }
-#[no_mangle]
-pub extern "C" fn wakeup_timeout(p: *mut thread) { wakeup_timeout_impl(p) }
-#[no_mangle]
-pub extern "C" fn wakeup_killable(p: *mut thread) { wakeup_killable_impl(p) }
-#[no_mangle]
-pub extern "C" fn wakeup_interruptible(p: *mut thread) { wakeup_interruptible_impl(p) }
+pub(crate) fn wakeup(p: *mut thread) { wakeup_impl(p) }
+
+pub(crate) fn wakeup_interruptible(p: *mut thread) { wakeup_interruptible_impl(p) }
 
 fn sys_dumpchan_impl() -> u64 {
     sleep_lock_impl();
@@ -721,11 +680,6 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
         // SAFETY: `prev` is proven non-null by the diverging `kassert!` above.
         rq_task_dead(unsafe { ThreadAccess::assume(prev) }.sched_entity_ptr());
     }
-}
-
-#[no_mangle]
-pub extern "C" fn context_switch_prepare(prev: *mut thread, next: *mut thread) {
-    context_switch_prepare_impl(prev, next)
 }
 
 fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int) {
@@ -767,8 +721,7 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
     rq_unlock_current_irqrestore(intr);
 }
 
-#[no_mangle]
-pub extern "C" fn context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int) {
+pub(crate) fn context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int) {
     context_switch_finish_impl(prev, next, intr)
 }
 

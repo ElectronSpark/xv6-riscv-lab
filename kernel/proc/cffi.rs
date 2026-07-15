@@ -166,15 +166,35 @@ const CONTEXT_BYTES: usize = 112;
 pub mod raw {
     use super::*;
 
-    unsafe extern "C" {
-        // run-queue glue
-        pub safe fn rq_init(rq: *mut Rq);
-        pub safe fn rq_register(rq: *mut Rq, cls_id: c_int, cpu_id: c_int);
-        pub safe fn rq_set_ready(cls_id: c_int, cpu_id: c_int);
-        pub safe fn rq_clear_ready(cls_id: c_int, cpu_id: c_int);
-        pub safe fn sched_class_register(id: c_int, cls: *mut SchedClass);
+    // P3-D2a: the run-queue glue entry points are ordinary Rust fns in
+    // `kernel/proc/rq.rs`; the former `extern "C"` redeclarations are
+    // gone. The two integer-only fns are plain re-exports; the pointer-
+    // taking ones keep this file's layout-pinned mirror types (`Rq`/
+    // `SchedClass`) at the call sites via thin cast adapters -- both
+    // mirrors describe the exact same C objects as their
+    // `crate::bindings` counterparts (`rq`/`sched_class` from
+    // `inc/proc/rq_types.h`; see the compile-time layout asserts at the
+    // bottom of this file), so the pointer casts are ABI-identity.
+    pub(crate) use crate::proc::{rq_clear_ready, rq_set_ready};
+
+    #[inline]
+    pub fn rq_init(rq: *mut Rq) {
+        // SAFETY: `rq_init`'s precondition (valid, writable, non-null
+        // `rq`) is enforced by its callers exactly as before, when this
+        // was a `safe fn` extern redeclaration of the same symbol; the
+        // cast is ABI-identity per the module comment above.
+        unsafe { crate::proc::rq_init(rq as *mut crate::bindings::rq) }
     }
 
+    #[inline]
+    pub fn rq_register(rq: *mut Rq, cls_id: c_int, cpu_id: c_int) {
+        crate::proc::rq_register(rq as *mut crate::bindings::rq, cls_id, cpu_id)
+    }
+
+    #[inline]
+    pub fn sched_class_register(id: c_int, cls: *mut SchedClass) {
+        crate::proc::sched_class_register(id, cls as *mut crate::bindings::sched_class)
+    }
 }
 
 pub use raw::*;

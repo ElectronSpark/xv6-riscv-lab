@@ -60,9 +60,11 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
-    // proc/sched.rs.
-    safe fn scheduler_yield();
 }
+
+// P3-D2a: proc/sched.rs entry point, reached as a plain crate-path item
+// instead of an `extern "C"` redeclaration.
+use crate::proc::scheduler_yield;
 
 // ===========================================================================
 // Register/bit constants -- redeclared locally per this crate's

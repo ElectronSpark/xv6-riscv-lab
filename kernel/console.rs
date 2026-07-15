@@ -58,6 +58,9 @@ use crate::bindings::{
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
 use crate::dev::cdev::cdev_register;
+// P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
+// crate-path items instead of `extern "C"` redeclarations.
+use crate::proc::{sleep_on_chan, wakeup, wakeup_on_chan};
 
 // ===========================================================================
 // Externs.
@@ -68,9 +71,6 @@ unsafe extern "C" {
     pub safe fn spin_lock(lk: *mut spinlock_t);
     pub safe fn spin_unlock(lk: *mut spinlock_t);
 
-    pub safe fn sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t);
-    pub safe fn wakeup_on_chan(chan: *mut c_void);
-    pub safe fn wakeup(p: *mut thread);
     pub safe fn sleep_ms(ms: u64);
 
     pub safe fn killed(p: *mut thread) -> c_int;

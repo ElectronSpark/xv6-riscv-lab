@@ -29,6 +29,10 @@ use crate::proc::proc_shims::{
     xv6_current_thread, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
 };
 use crate::proc::proc_assert_holding;
+// P3-D2a: the other scheduler wake/yield entry points join
+// `scheduler_wakeup_stopped` as plain crate-path imports (their former
+// `extern "C"` redeclarations in the block below are gone).
+use crate::proc::{scheduler_wakeup, scheduler_wakeup_interruptible, scheduler_yield};
 use crate::proc::scheduler_wakeup_stopped;
 use crate::proc::tg_dequeue_signal;
 use crate::proc::tg_signal_send;
@@ -133,11 +137,6 @@ const IPI_REASON_RESCHEDULE: c_int = 2;
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void;
-
-    // sched / wake
-    safe fn scheduler_wakeup(p: *mut thread);
-    safe fn scheduler_wakeup_interruptible(p: *mut thread);
-    safe fn scheduler_yield();
 
     // pid lookups
     safe fn get_pid_thread(pid: c_int) -> *mut thread;

@@ -94,17 +94,7 @@ mod ffi {
         pub safe fn get_jiffs() -> u64;
         pub safe fn sleep_ms(ms: u64);
 
-        // Thread / scheduling / tq / workqueue (kernel/proc/*.rs). These
-        // are pure-Rust and re-exported at the crate root, but the crate
-        // root glob-imports two independently-declared same-named
-        // symbols for several of them (a real definition plus a stray
-        // `extern` re-declaration elsewhere), making `crate::foo` an
-        // E0659 ambiguous-name error. Declaring them locally (as
-        // `pcache_shims.rs` used to) sidesteps that ambiguity.
-        pub safe fn wakeup(t: *mut thread);
-        pub safe fn wakeup_on_chan(chan: *mut c_void);
-        pub safe fn sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t);
-        pub safe fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int;
+        // Thread creation (kernel/proc/thread.rs).
         pub safe fn kthread_create(
             name: *const c_char,
             entry: *mut c_void,
@@ -112,15 +102,6 @@ mod ffi {
             a2: u64,
             stack_order: c_int,
         ) -> *mut thread;
-        pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-        pub safe fn tq_wait_cb(
-            q: *mut tq_t,
-            sleep_cb: sleep_callback_t,
-            wake_cb: wakeup_callback_t,
-            data: *mut c_void,
-            rdata: *mut u64,
-        ) -> c_int;
-        pub safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
         pub safe fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue;
         pub safe fn queue_work(wq: *mut workqueue, w: *mut work_struct) -> bool;
         pub safe fn init_work_struct(
@@ -138,6 +119,13 @@ mod ffi {
     }
 pub(crate) use crate::lock::completion::{complete_all, completion_init, completion_reinit, wait_for_completion};
 pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
+// P3-D2a: proc/sched.rs wake/sleep entry points and proc/thread_queue.rs
+// primitives, reached as plain crate-path items instead of the `extern
+// "C"` redeclarations that used to sit in the block above.
+pub(crate) use crate::proc::{
+    sleep_on_chan, sleep_on_chan_interruptible, tq_init, tq_wait_cb, tq_wakeup_all, wakeup,
+    wakeup_on_chan,
+};
 
 // The functions below (spinlock/rwlock/rbtree primitives) are all
 // genuinely `unsafe fn`/`unsafe extern "C" fn` in their canonical

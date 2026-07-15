@@ -25,9 +25,11 @@ use crate::bindings::{semaphore as sem_t, thread};
 use crate::lock::mutex::KMutex;
 use crate::lock::semaphore::{KSemaphore, SemError};
 
+// P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
+// instead of `extern "C"` redeclarations.
+use crate::proc::{scheduler_yield, wakeup};
+
 unsafe extern "C" {
-    pub safe fn wakeup(p: *mut thread);
-    pub safe fn scheduler_yield();
     pub safe fn kthread_create(
         name: *const c_char,
         entry: *mut c_void,

@@ -31,10 +31,12 @@ use crate::sync::KSpinlock;
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
 use crate::printf::trigger_panic;
 
+// P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
+// instead of `extern "C"` redeclarations.
+use crate::proc::{scheduler_yield, wakeup};
+
 unsafe extern "C" {
 
-    pub safe fn wakeup(p: *mut thread);
-    pub safe fn scheduler_yield();
     pub safe fn sleep_ms(ms: u64);
     pub safe fn get_jiffs() -> u64;
     pub safe fn kthread_create(

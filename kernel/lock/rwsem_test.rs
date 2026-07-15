@@ -23,9 +23,11 @@ use crate::bindings::{mutex_t, rwsem_t, spinlock_t, thread, tq_t};
 use crate::lock::mutex::KMutex;
 use crate::lock::rwsem::KRwSem;
 
+// P3-D2a: proc/sched.rs + proc/thread_queue.rs entry points, reached as
+// plain crate-path items instead of `extern "C"` redeclarations.
+use crate::proc::{scheduler_yield, tq_size, wakeup};
+
 unsafe extern "C" {
-    pub safe fn wakeup(p: *mut thread);
-    pub safe fn scheduler_yield();
     pub safe fn kthread_create(
         name: *const c_char,
         entry: *mut c_void,
@@ -33,7 +35,6 @@ unsafe extern "C" {
         arg2: u64,
         stack_order: c_int,
     ) -> *mut thread;
-    pub safe fn tq_size(q: *mut tq_t) -> c_int;
 }
 
 

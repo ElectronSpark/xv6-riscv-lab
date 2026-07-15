@@ -45,6 +45,9 @@ use core::mem::MaybeUninit;
 
 use crate::bindings::{pid_t, pipe, session, slab_cache_t, spinlock_t, termios, thread, tty, tty_ops};
 use crate::sync::{KSpinGuard, KSpinlock};
+// P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
+// items instead of `extern "C"` redeclarations.
+use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
 
 use super::session::{session_get_fg_pgid, session_set_ctrl_tty, session_set_fg_pgid};
 use super::termios::termios_init_default;
@@ -70,10 +73,6 @@ unsafe extern "C" {
 
     pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
     pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
-
-    pub safe fn tq_init(q: *mut crate::bindings::tq_t, name: *const c_char, lock: *mut spinlock_t);
-    pub safe fn tq_wait(q: *mut crate::bindings::tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int;
-    pub safe fn tq_wakeup_all(q: *mut crate::bindings::tq_t, error_no: c_int, rdata: u64) -> c_int;
 
     pub safe fn signal_pending(p: *mut thread) -> bool;
     pub safe fn kill_proc(p: *mut thread, signum: c_int) -> c_int;

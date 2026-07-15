@@ -159,10 +159,6 @@ unsafe extern "C" {
     pub safe fn spin_lock(lk: *mut spinlock_t);
     pub safe fn spin_unlock(lk: *mut spinlock_t);
 
-    pub safe fn sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t);
-    pub safe fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int;
-    pub safe fn wakeup_on_chan(chan: *mut c_void);
-
     pub safe fn xv6_push_off();
     pub safe fn xv6_pop_off();
 }
@@ -171,6 +167,9 @@ unsafe extern "C" {
 // `consoleintr` becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration (identical signature).
 use crate::console::consoleintr;
+// P3-D2a: proc/sched.rs chan sleep/wake entry points, reached as plain
+// crate-path items instead of `extern "C"` redeclarations.
+use crate::proc::{sleep_on_chan, sleep_on_chan_interruptible, wakeup_on_chan};
 
 const EINTR: c_int = 4;
 

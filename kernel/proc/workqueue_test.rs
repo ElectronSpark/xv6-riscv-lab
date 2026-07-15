@@ -88,11 +88,11 @@ use crate::proc::{
     workqueue_create_with_callbacks, workqueue_kill,
 };
 
+// P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
+// now that its `extern "C"` redeclaration is gone.
+use crate::proc::scheduler_yield;
+
 unsafe extern "C" {
-    // Not `pub`: shares a bare name with the real definition glob-
-    // reexported from `sched.rs` at `crate::proc` -- see the identical
-    // finding/fix on `kthread_create`/`wakeup` below (P3-1B2 sweep).
-    safe fn scheduler_yield();
     pub safe fn sleep_ms(ms: u64);
 }
 
@@ -391,13 +391,16 @@ extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
     }
 }
 
-// Not `pub`: both fns below share a bare name with a real definition
-// glob-reexported from `thread.rs`/`sched.rs` at `crate::proc`. Making
-// these crate-visible would trigger E0659 ambiguous-glob-reexport the
+// Not `pub`: `kthread_create` shares a bare name with a real definition
+// glob-reexported from `thread.rs` at `crate::proc`. Making it
+// crate-visible would trigger E0659 ambiguous-glob-reexport the
 // moment any other proc submodule imports the real one by its bare name
 // (P3-1B2 sweep, same finding as `clone.rs`/`workqueue.rs`). Only ever
 // called from within this file, so file-private is both sufficient and
-// correct.
+// correct. P3-D2a: `wakeup` (proc/sched.rs) is a plain crate-path item
+// now that its `extern "C"` redeclaration is gone.
+use crate::proc::wakeup;
+
 unsafe extern "C" {
     safe fn kthread_create(
         name: *const c_char,
@@ -406,7 +409,6 @@ unsafe extern "C" {
         arg2: u64,
         stack_order: c_int,
     ) -> *mut crate::bindings::thread;
-    safe fn wakeup(p: *mut crate::bindings::thread);
 }
 
 // `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2

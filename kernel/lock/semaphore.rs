@@ -23,17 +23,12 @@ const SEM_VALUE_MAX: c_int = 2_147_483_640;
 // Externs
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" {
+// P3-D2a: the thread-queue primitives (kernel/proc/thread_queue.rs) are
+// ordinary Rust fns, reached as plain crate-path items instead of
+// `extern "C"` redeclarations.
+use crate::proc::{tq_init, tq_wait, tq_wait_cb, tq_wakeup};
 
-    pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    pub safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t,
-                        rdata: *mut u64) -> c_int;
-    pub safe fn tq_wait_cb(q: *mut tq_t,
-                           sleep_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-                           wake_cb: Option<unsafe extern "C" fn(*mut c_void, c_int)>,
-                           data: *mut c_void,
-                           rdata: *mut u64) -> c_int;
-    pub safe fn tq_wakeup(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread;
+unsafe extern "C" {
 
     pub safe fn signal_pending(p: *mut thread) -> u32;
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;

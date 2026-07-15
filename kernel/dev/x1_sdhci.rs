@@ -95,6 +95,9 @@ use core::sync::atomic::{fence, AtomicI32, Ordering};
 use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, mutex_t, page_t, platform_info};
 use crate::machine;
 use crate::sync::KMutex;
+// P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
+// instead of `extern "C"` redeclarations.
+use crate::proc::{scheduler_yield, wakeup};
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -104,8 +107,6 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
-    // proc/sched.rs.
-    safe fn scheduler_yield();
     // proc/thread.rs.
     safe fn kthread_create(
         name: *const c_char,
@@ -114,7 +115,6 @@ unsafe extern "C" {
         arg2: u64,
         stack_order: c_int,
     ) -> *mut crate::bindings::thread;
-    safe fn wakeup(p: *mut crate::bindings::thread);
     // lock/mutex.rs.
     safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
     // string.rs.

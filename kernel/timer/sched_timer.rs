@@ -69,21 +69,20 @@ const THREAD_UNINTERRUPTIBLE: thread_state = 6;
 const THREAD_RUNNING: thread_state = 8;
 
 // ===========================================================================
-// `scheduler_yield`/`wakeup` (proc/sched.rs), `workqueue_create`/
-// `queue_work`/`init_work_struct` (proc/workqueue.rs) and the `slab_*`/
-// `__panic_*`/`printf` group all keep their own `extern "C"` declarations:
-// none of them are being demoted by this wave (each still has a genuine
-// out-of-scope caller elsewhere -- `workqueue_create`/`queue_work`/
-// `init_work_struct` in particular are also declared, as their own
-// separate items, by several other `proc/*.rs` files, so resolving them
-// here via `crate::proc::*` would risk `E0659` name-ambiguity through
-// `proc/mod.rs`'s glob re-exports; not worth the churn for symbols whose
-// ABI isn't changing).
+// `workqueue_create`/`queue_work`/`init_work_struct` (proc/workqueue.rs)
+// and the `slab_*`/`__panic_*`/`printf` group keep their own `extern "C"`
+// declarations: none of them are being demoted by this wave
+// (`workqueue_create`/`queue_work`/`init_work_struct` in particular are
+// also declared, as their own separate items, by several other
+// `proc/*.rs` files, so resolving them here via `crate::proc::*` would
+// risk `E0659` name-ambiguity through `proc/mod.rs`'s glob re-exports;
+// not worth the churn for symbols whose ABI isn't changing).
+// P3-D2a: `scheduler_yield`/`wakeup` (proc/sched.rs) ARE demoted by this
+// wave -- reached as plain crate-path items below.
 // ===========================================================================
-unsafe extern "C" {
-    pub safe fn scheduler_yield();
-    pub safe fn wakeup(p: *mut thread);
+use crate::proc::{scheduler_yield, wakeup};
 
+unsafe extern "C" {
     pub safe fn slab_cache_init(cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64) -> c_int;
     pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
     pub safe fn slab_free(obj: *mut c_void);

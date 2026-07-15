@@ -88,11 +88,8 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
-    // proc/sched.rs.
-    safe fn scheduler_yield();
     // proc/thread.rs.
     safe fn kthread_create(name: *const c_char, entry: *mut c_void, arg1: u64, arg2: u64, stack_order: c_int) -> *mut thread;
-    safe fn wakeup(p: *mut thread);
     // lock/spinlock.rs.
     safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
     // mm/kalloc.rs.
@@ -109,6 +106,9 @@ unsafe extern "C" {
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
 use crate::net::{mbufalloc, mbuffree, net_rx};
+// P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
+// instead of `extern "C"` redeclarations.
+use crate::proc::{scheduler_yield, wakeup};
 use super::netdev::{netdev_register, netdev_set_link};
 
 // ===========================================================================

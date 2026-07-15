@@ -113,6 +113,9 @@ use crate::bindings::{
     thread, tq_t, virtio_blk_req, virtq_avail, virtq_desc, virtq_used, EIO, PGSIZE,
 };
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
+// P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
+// items instead of `extern "C"` redeclarations.
+use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
 use crate::machine;
 use crate::proc::proc_shims::xv6_current_thread;
 
@@ -134,11 +137,6 @@ unsafe extern "C" {
     safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
     safe fn spin_lock(l: *mut spinlock_t);
     safe fn spin_unlock(l: *mut spinlock_t);
-
-    // proc/thread_queue.rs.
-    safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int;
-    safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
 
     // mm/kalloc.rs, string.rs.
     fn kalloc() -> *mut c_void;

@@ -1548,6 +1548,33 @@ guards are already done (8a–8d).
   ok; createdelete OK; stressfs; ENOENT; no panics. (Worker: boot ×2 +
   forkfork OK additionally.) Net diff 21 files, +249/−596.
 
+### Iteration 52 — 2026-07-15 — Wave P3-D2a: scheduler cluster C-ABI surface dismantled (rq/sched/thread_queue `no_mangle` 100→0)
+
+- Owner-driven mesh sweep, scheduler cluster: `rq.rs` 48→0, `sched.rs`
+  23→0, `thread_queue.rs` 29→0 `#[no_mangle]`. Crate-wide 367→**267**.
+- Consumer conversions across 33 files (ipi, rcu, clone, cffi, workqueue,
+  exit `mod raw`, signal, sys_signal, start_kernel, sched_timer, trap,
+  sysnet, uart, console, pcache, vfs inode/fs, dev x1_emac/x1_sdhci/yt8531,
+  lock completion/mutex/semaphore/rwsem, tty, pipe, xv6fs log, virtio_disk,
+  + 5 test modules). Special cases: cffi's layout-pinned `Rq`/`SchedClass`
+  mirrors got 3 thin `#[inline]` cast adapters in its `mod raw`; clone.rs's
+  divergent `*mut c_void` decl of `rq_task_fork` unified to the real
+  `*mut sched_entity`; rcu.rs's stale local `sched_attr` mirror deleted.
+- Demotions: 38+11+11 → `pub(crate) fn`. Kept-`extern "C"` exceptions among
+  the exports: ZERO (sched_class fn-pointer tables live in sched_idle/
+  sched_fifo/cffi, out of scope; thread_queue's rb comparator callbacks
+  already extern-without-no_mangle). **40 dead exports deleted** (0-ref
+  verified incl. .c/.h/.S + user/): 10 rq, 12 sched thin wrappers, 18
+  thread_queue wrappers + 8 orphaned `_impl`s. All live-path `_impl`s
+  (incl. `tq_wait_cb_impl` with the forkforkfork panic site) byte-identical.
+- nm: 16 demoted names ABSENT from linked kernel; keep-set present.
+  RUST_FORCE_UNDEFINED/CMakeLists untouched; no asm refs to any of the 101.
+- Verified (orchestrator): 0-warning clean rebuild; cache clean; boot gate;
+  testsig **21/21**; preempt OK; forkfork OK; **forkforkfork panics at the
+  byte-identical pre-existing site** (0x80c40000, "Failed to remove
+  interrupted waiter from queue"); ENOENT. (Worker: boot ×4, forktest OK,
+  stressfs, nm sweep.) Net diff 36 files, +296/−666.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

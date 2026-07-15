@@ -111,6 +111,9 @@ use crate::bindings::{
     vfs_file_ops, vfs_inode, vm, EAGAIN, EINTR, SLAB_FLAG_STATIC,
 };
 use crate::proc::proc_shims::xv6_current_thread;
+// P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
+// items instead of `extern "C"` redeclarations.
+use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
 use crate::sync::KSpinlock;
 
 // ===========================================================================
@@ -127,11 +130,6 @@ unsafe extern "C" {
     // lock/spinlock.rs — init only (lock/unlock go through
     // `crate::sync::KSpinlock` RAII, see the module doc).
     safe fn spin_init(l: *mut crate::bindings::spinlock_t, name: *mut c_char);
-
-    // proc/thread_queue.rs.
-    safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut crate::bindings::spinlock_t);
-    safe fn tq_wait(q: *mut tq_t, lock: *mut crate::bindings::spinlock_t, rdata: *mut u64) -> c_int;
-    safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
 
     // mm/vm.rs.
     safe fn vm_copyin(vm_ptr: *mut vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;

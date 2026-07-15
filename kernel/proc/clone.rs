@@ -99,9 +99,8 @@ use crate::proc::proc_shims::{
 
 unsafe extern "C" {
     // Existing kernel C symbols
-    // Not `pub`: `thread_create`/`sigpending_clone`/`rq_task_fork`/
-    // `attach_child`/`scheduler_wakeup`/`scheduler_yield`/
-    // `context_switch_finish`/`thread_destroy`/`thread_group_add`/
+    // Not `pub`: `thread_create`/`sigpending_clone`/`attach_child`/
+    // `thread_destroy`/`thread_group_add`/
     // `thread_group_alloc` below collide (same bare name, different
     // opaque-marker signature) with the real definitions glob-reexported
     // from `thread.rs`/`sched.rs`/`thread_group.rs` at `crate::proc` --
@@ -116,18 +115,23 @@ unsafe extern "C" {
     pub safe fn vm_copy(vm: *mut Vm) -> *mut Vm;
     pub safe fn sigacts_dup(psa: *mut Sigacts, flags: u64) -> *mut Sigacts;
     safe fn sigpending_clone(dst: *mut ThreadSignal, src: *mut ThreadSignal, flags: u64, esignal: u64);
-    safe fn rq_task_fork(se: *mut SchedEntity);
-    safe fn scheduler_wakeup(t: *mut Thread);
-    safe fn scheduler_yield();
     safe fn attach_child(parent: *mut Thread, child: *mut Thread);
     safe fn thread_group_add(tg: *mut ThreadGroup, t: *mut Thread);
     safe fn thread_group_alloc(t: *mut Thread) -> c_int;
     pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
     pub safe fn pgroup_add_thread(pg: *mut Pgroup, t: *mut Thread);
 
-    safe fn context_switch_finish(prev: *mut Thread, next: *mut Thread, intr: c_int);
     pub safe fn rcu_check_callbacks();
 }
+
+// P3-D2a: `rq_task_fork` (kernel/proc/rq.rs) and `scheduler_wakeup`/
+// `scheduler_yield`/`context_switch_finish` (kernel/proc/sched.rs) are
+// ordinary Rust fns, reached as plain crate-path items instead of the
+// `extern "C"` redeclarations that used to sit in the block above
+// (`Thread` is a plain alias of `crate::bindings::thread`, so the
+// signatures are identical; `rq_task_fork`'s one call site casts its
+// `*mut c_void` sched-entity handle to the real pointee type).
+use crate::proc::{context_switch_finish, rq_task_fork, scheduler_wakeup, scheduler_yield};
 
 // P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
 // referenced via a crate path instead of `extern "C"` redeclarations.
@@ -344,7 +348,7 @@ pub extern "C" fn thread_clone(args: *mut CloneArgs) -> c_int {
     xv6_tcb_lock(child);
     xv6_t_set_user_space(child);
     xv6_thread_state_set(child, THREAD_UNINTERRUPTIBLE);
-    rq_task_fork(xv6_t_sched_entity(child));
+    rq_task_fork(xv6_t_sched_entity(child) as *mut crate::bindings::sched_entity);
     if args.flags & CLONE_VFORK != 0 {
         xv6_t_set_vfork_parent(child, p);
         xv6_thread_state_set(p, THREAD_UNINTERRUPTIBLE);

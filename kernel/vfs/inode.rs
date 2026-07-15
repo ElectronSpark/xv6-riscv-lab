@@ -113,10 +113,11 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 // other printf-calling module in the crate.
 // ===========================================================================
 
-unsafe extern "C" {
-    // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
-    safe fn scheduler_yield();
+// P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
+// now that its `extern "C"` redeclaration is gone.
+use crate::proc::scheduler_yield;
 
+unsafe extern "C" {
     // printf.rs — C-variadic.
 
     // lock/mutex.rs — `inode->mutex`.

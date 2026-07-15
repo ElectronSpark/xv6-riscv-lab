@@ -33,20 +33,12 @@ const MAX_COMPLETIONS: c_int = 65535;
 // Non-variadic C symbols are declared `safe` so call sites do not need
 // to wrap each invocation in `u! { ... }`.
 
-unsafe extern "C" {
+// P3-D2a: the thread-queue primitives (kernel/proc/thread_queue.rs) are
+// ordinary Rust fns, reached as plain crate-path items instead of
+// `extern "C"` redeclarations.
+use crate::proc::{tq_bulk_move, tq_init, tq_size, tq_wait, tq_wait_cb, tq_wakeup, tq_wakeup_all};
 
-    pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    pub safe fn tq_size(q: *mut tq_t) -> c_int;
-    pub safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t,
-                        rdata: *mut u64) -> c_int;
-    pub safe fn tq_wait_cb(q: *mut tq_t,
-                           sleep_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-                           wake_cb: Option<unsafe extern "C" fn(*mut c_void, c_int)>,
-                           data: *mut c_void,
-                           rdata: *mut u64) -> c_int;
-    pub safe fn tq_wakeup(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread;
-    pub safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
-    pub safe fn tq_bulk_move(to: *mut tq_t, from: *mut tq_t) -> c_int;
+unsafe extern "C" {
 
     pub safe fn signal_pending(p: *mut thread) -> u32;
 

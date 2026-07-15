@@ -53,6 +53,9 @@ use core::ptr;
 
 use crate::bindings::{mbuf, spinlock_t, thread, vm, EFAULT, EINTR, ENOMEM};
 use crate::proc::proc_shims::xv6_current_thread;
+// P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
+// crate-path items instead of `extern "C"` redeclarations.
+use crate::proc::{sleep_on_chan_interruptible, wakeup_on_chan};
 use crate::net::mbufq;
 use crate::sync::SpinLock;
 
@@ -70,10 +73,8 @@ unsafe extern "C" {
     // string.rs.
     fn kfree(pa: *mut c_void);
 
-    // proc/signal.rs, proc/sched.rs.
+    // proc/signal.rs.
     safe fn killed(p: *mut thread) -> c_int;
-    safe fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int;
-    safe fn wakeup_on_chan(chan: *mut c_void);
 
     // mm/vm.rs.
     safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;

@@ -42,6 +42,9 @@ use core::ptr;
 
 use crate::bindings::{buf, spinlock_t, thread, tq_t, xv6fs_log, xv6fs_logheader, xv6fs_superblock};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
+// P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
+// items instead of `extern "C"` redeclarations.
+use crate::proc::{tq_bulk_move, tq_init, tq_wait, tq_wakeup_all};
 
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
@@ -58,12 +61,6 @@ unsafe extern "C" {
     safe fn spin_lock(l: *mut spinlock_t);
     safe fn spin_unlock(l: *mut spinlock_t);
     safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-
-    // proc/thread_queue.rs (100% Rust).
-    safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int;
-    safe fn tq_bulk_move(to: *mut tq_t, from: *mut tq_t) -> c_int;
-    safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
 
     // kernel/bio.c (classic xv6 buffer cache, unchanged C).
     safe fn bread(dev: u32, blockno: u32) -> *mut buf;

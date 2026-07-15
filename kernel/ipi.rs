@@ -120,12 +120,6 @@ unsafe extern "C" {
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
 
-    /// `kernel/proc/rq.rs` (SECTION 19 of the former `proc_rust_shims.c`).
-    /// Documented there as IRQ-safe (spinlock-guarded intrusive-list
-    /// splice, no sleep/alloc) -- see the module doc's interrupt-context
-    /// audit table.
-    fn rq_flush_wake_list(cpu_id: c_int);
-
     /// FDT-configured kernel physical memory bounds
     /// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros).
     /// Defined in `kernel/start_kernel.c` (still C); mirrored here exactly
@@ -136,6 +130,12 @@ unsafe extern "C" {
 }
 
 use crate::irq::irq_core::{register_irq_handler, IrqDesc};
+// P3-D2a: `kernel/proc/rq.rs` (SECTION 19 of the former
+// `proc_rust_shims.c`), now reached as a plain crate-path item instead
+// of an `extern "C"` redeclaration. Documented there as IRQ-safe
+// (spinlock-guarded intrusive-list splice, no sleep/alloc) -- see the
+// module doc's interrupt-context audit table.
+use crate::proc::rq_flush_wake_list;
 
 // ===========================================================================
 // Small ABI constants duplicated locally (same convention used throughout

@@ -62,8 +62,11 @@ unsafe extern "C" {
     safe fn tkill(tid: c_int, sig: c_int) -> c_int;
 
     safe fn signal_pending(p: *mut bindings::thread) -> c_int;
-    safe fn scheduler_yield();
 }
+
+// P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
+// now that its `extern "C"` redeclaration is gone.
+use crate::proc::scheduler_yield;
 
 #[inline(always)]
 fn current() -> *mut bindings::thread { xv6_current_thread() }

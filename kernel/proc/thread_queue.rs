@@ -3,10 +3,12 @@
 //! Provides list-based (`tq_t`) and red-black-tree-based (`ttree_t`)
 //! wait-queue primitives used throughout the kernel for sleep/wakeup.
 //!
-//! Canonical C ABI names (`tq_init`, `tq_wait`, `ttree_wakeup_key`, ...)
-//! are exported as `#[no_mangle]`, called directly by sibling Rust
-//! modules -- the backwards-compat `xv6_tqport_*` alias layer that used
-//! to front these was collapsed in the P3-1B2 sweep.
+//! The canonical entry points (`tq_init`, `tq_wait`, `ttree_wakeup_key`,
+//! ...) are crate-internal Rust fns called directly by sibling Rust
+//! modules via `crate::proc::*` paths -- the backwards-compat
+//! `xv6_tqport_*` alias layer that used to front these was collapsed in
+//! the P3-1B2 sweep, and the `#[no_mangle] extern "C"` export surface
+//! itself was dismantled in P3-D2a (dead exports deleted).
 
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
@@ -334,8 +336,7 @@ fn tq_init_impl(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t) {
     qr.set_lock_ptr(lock);
 }
 
-#[no_mangle]
-pub extern "C" fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t) {
+pub(crate) fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t) {
     tq_init_impl(q, name, lock);
 }
 
@@ -348,27 +349,8 @@ fn ttree_init_impl(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t) 
     qr.set_lock_ptr(lock);
 }
 
-#[no_mangle]
-pub extern "C" fn ttree_init(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t) {
+pub(crate) fn ttree_init(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t) {
     ttree_init_impl(q, name, lock);
-}
-
-fn tq_set_lock_impl(q: *mut tq_t, lock: *mut spinlock_t) {
-    if let Some(qr) = tq_of(q) { qr.set_lock_ptr(lock); }
-}
-
-#[no_mangle]
-pub extern "C" fn tq_set_lock(q: *mut tq_t, lock: *mut spinlock_t) {
-    tq_set_lock_impl(q, lock);
-}
-
-fn ttree_set_lock_impl(q: *mut ttree_t, lock: *mut spinlock_t) {
-    if let Some(qr) = tt_of(q) { qr.set_lock_ptr(lock); }
-}
-
-#[no_mangle]
-pub extern "C" fn ttree_set_lock(q: *mut ttree_t, lock: *mut spinlock_t) {
-    ttree_set_lock_impl(q, lock);
 }
 
 fn tnode_init_impl(node: *mut tnode_t) {
@@ -379,11 +361,6 @@ fn tnode_init_impl(node: *mut tnode_t) {
     nr.set_thread_ptr(xv6_current_thread());
 }
 
-#[no_mangle]
-pub extern "C" fn tnode_init(node: *mut tnode_t) {
-    tnode_init_impl(node);
-}
-
 fn tq_size_impl(q: *mut tq_t) -> c_int {
     match tq_of(q) {
         Some(qr) => qr.counter(),
@@ -391,43 +368,14 @@ fn tq_size_impl(q: *mut tq_t) -> c_int {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn tq_size(q: *mut tq_t) -> c_int {
+pub(crate) fn tq_size(q: *mut tq_t) -> c_int {
     tq_size_impl(q)
-}
-
-fn ttree_size_impl(q: *mut ttree_t) -> c_int {
-    match tt_of(q) {
-        Some(qr) => qr.counter(),
-        None => -EINVAL,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn ttree_size(q: *mut ttree_t) -> c_int {
-    ttree_size_impl(q)
 }
 
 fn tnode_get_queue_impl(node: *mut tnode_t) -> *mut tq_t {
     let Some(nr) = tn_of(node) else { return null_mut() };
     if nr.type_get() != TYPE_LIST { return null_mut(); }
     nr.list_queue_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn tnode_get_queue(node: *mut tnode_t) -> *mut tq_t {
-    tnode_get_queue_impl(node)
-}
-
-fn tnode_get_tree_impl(node: *mut tnode_t) -> *mut ttree_t {
-    let Some(nr) = tn_of(node) else { return null_mut() };
-    if nr.type_get() != TYPE_TREE { return null_mut(); }
-    nr.tree_queue_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn tnode_get_tree(node: *mut tnode_t) -> *mut ttree_t {
-    tnode_get_tree_impl(node)
 }
 
 fn tnode_get_thread_impl(node: *mut tnode_t) -> *mut thread {
@@ -437,21 +385,8 @@ fn tnode_get_thread_impl(node: *mut tnode_t) -> *mut thread {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn tnode_get_thread(node: *mut tnode_t) -> *mut thread {
+pub(crate) fn tnode_get_thread(node: *mut tnode_t) -> *mut thread {
     tnode_get_thread_impl(node)
-}
-
-fn tnode_get_errno_impl(node: *mut tnode_t, error_no: *mut c_int) -> c_int {
-    let Some(nr) = tn_of(node) else { return -EINVAL };
-    if error_no.is_null() { return -EINVAL; }
-    write_out(error_no, nr.error_no());
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn tnode_get_errno(node: *mut tnode_t, error_no: *mut c_int) -> c_int {
-    tnode_get_errno_impl(node, error_no)
 }
 
 // ---------------------------------------------------------------------------
@@ -470,11 +405,6 @@ fn tq_push_impl(q: *mut tq_t, node: *mut tnode_t) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn tq_push(q: *mut tq_t, node: *mut tnode_t) -> c_int {
-    tq_push_impl(q, node)
-}
-
 fn tq_first_impl(q: *mut tq_t) -> *mut tnode_t {
     let Some(qr) = tq_of(q) else { return err_ptr::<tnode_t>(EINVAL) };
     let c = qr.counter();
@@ -486,11 +416,6 @@ fn tq_first_impl(q: *mut tq_t) -> *mut tnode_t {
         xv6_panic(c"tq_first: queue is not empty but failed to get the first node".as_ptr());
     }
     tnode_from_list_entry(first)
-}
-
-#[no_mangle]
-pub extern "C" fn tq_first(q: *mut tq_t) -> *mut tnode_t {
-    tq_first_impl(q)
 }
 
 fn tq_remove_impl(q: *mut tq_t, node: *mut tnode_t) -> c_int {
@@ -508,11 +433,6 @@ fn tq_remove_impl(q: *mut tq_t, node: *mut tnode_t) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn tq_remove(q: *mut tq_t, node: *mut tnode_t) -> c_int {
-    tq_remove_impl(q, node)
-}
-
 fn tq_pop_impl(q: *mut tq_t) -> *mut tnode_t {
     if q.is_null() { return err_ptr::<tnode_t>(EINVAL); }
     let dequeued = tq_first_impl(q);
@@ -522,11 +442,6 @@ fn tq_pop_impl(q: *mut tq_t) -> *mut tnode_t {
     }
     let ret = tq_remove_impl(q, dequeued);
     if ret == 0 { dequeued } else { err_ptr::<tnode_t>(-ret) }
-}
-
-#[no_mangle]
-pub extern "C" fn tq_pop(q: *mut tq_t) -> *mut tnode_t {
-    tq_pop_impl(q)
 }
 
 fn tq_bulk_move_impl(to: *mut tq_t, from: *mut tq_t) -> c_int {
@@ -558,8 +473,7 @@ fn tq_bulk_move_impl(to: *mut tq_t, from: *mut tq_t) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn tq_bulk_move(to: *mut tq_t, from: *mut tq_t) -> c_int {
+pub(crate) fn tq_bulk_move(to: *mut tq_t, from: *mut tq_t) -> c_int {
     tq_bulk_move_impl(to, from)
 }
 
@@ -606,8 +520,7 @@ fn tq_wait_cb_impl(
     wr.error_no()
 }
 
-#[no_mangle]
-pub extern "C" fn tq_wait_cb(
+pub(crate) fn tq_wait_cb(
     q: *mut tq_t,
     sleep_callback: sleep_callback_t,
     wakeup_callback: wakeup_callback_t,
@@ -621,8 +534,7 @@ fn tq_wait_impl(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
     tq_wait_cb_impl(q, Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
 }
 
-#[no_mangle]
-pub extern "C" fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
+pub(crate) fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
     tq_wait_impl(q, lock, rdata)
 }
 
@@ -649,13 +561,11 @@ fn tq_wakeup_one(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread {
     do_wakeup(woken, error_no, rdata)
 }
 
-#[no_mangle]
-pub extern "C" fn tq_wakeup(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread {
+pub(crate) fn tq_wakeup(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread {
     tq_wakeup_one(q, error_no, rdata)
 }
 
-#[no_mangle]
-pub extern "C" fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int {
+pub(crate) fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int {
     let Some(qr) = tq_of(q) else { return -EINVAL };
     let mut counter: c_int = 0;
     loop {
@@ -716,38 +626,6 @@ fn ttree_add_impl(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn ttree_add(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
-    ttree_add_impl(q, node)
-}
-
-fn ttree_first_impl(q: *mut ttree_t) -> *mut tnode_t {
-    let Some(qr) = tt_of(q) else { return err_ptr::<tnode_t>(EINVAL) };
-    let first = rb_first_node(qr.root_ptr());
-    if is_err_or_null(first) { return err_cast::<rb_node, tnode_t>(first); }
-    tnode_from_tree_entry(first)
-}
-
-#[no_mangle]
-pub extern "C" fn ttree_first(q: *mut ttree_t) -> *mut tnode_t {
-    ttree_first_impl(q)
-}
-
-fn ttree_key_min_impl(q: *mut ttree_t, key: *mut u64) -> c_int {
-    let min_node = ttree_first_impl(q);
-    if min_node.is_null() { return -ENOENT; }
-    if is_err(min_node) { return ptr_err(min_node); }
-    let mr = match tn_of(min_node) { Some(r) => r, None => return -EINVAL };
-    if key.is_null() { return -EINVAL; }
-    write_out(key, mr.tree_key());
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn ttree_key_min(q: *mut ttree_t, key: *mut u64) -> c_int {
-    ttree_key_min_impl(q, key)
-}
-
 fn ttree_do_remove(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
     let Some(qr) = tt_of(q) else { return -EINVAL };
     let Some(nr) = tn_of(node) else { return -EINVAL };
@@ -763,11 +641,6 @@ fn ttree_remove_impl(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
     if q.is_null() || node.is_null() { return -EINVAL; }
     if !tnode_in_tree(q, node) { return -EINVAL; }
     ttree_do_remove(q, node)
-}
-
-#[no_mangle]
-pub extern "C" fn ttree_remove(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
-    ttree_remove_impl(q, node)
 }
 
 fn ttree_wait_cb_impl(
@@ -813,18 +686,6 @@ fn ttree_wait_cb_impl(
     wr.error_no()
 }
 
-#[no_mangle]
-pub extern "C" fn ttree_wait_cb(
-    q: *mut ttree_t,
-    key: uint64,
-    sleep_callback: sleep_callback_t,
-    wakeup_callback: wakeup_callback_t,
-    callback_data: *mut c_void,
-    rdata: *mut u64,
-) -> c_int {
-    ttree_wait_cb_impl(q, key, sleep_callback, wakeup_callback, callback_data, rdata)
-}
-
 fn ttree_wait_impl(
     q: *mut ttree_t,
     key: uint64,
@@ -834,8 +695,7 @@ fn ttree_wait_impl(
     ttree_wait_cb_impl(q, key, Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
 }
 
-#[no_mangle]
-pub extern "C" fn ttree_wait(
+pub(crate) fn ttree_wait(
     q: *mut ttree_t,
     key: uint64,
     lock: *mut spinlock_t,
@@ -858,16 +718,6 @@ fn ttree_wakeup_one_impl(
     do_wakeup(target, error_no, rdata)
 }
 
-#[no_mangle]
-pub extern "C" fn ttree_wakeup_one(
-    q: *mut ttree_t,
-    key: uint64,
-    error_no: c_int,
-    rdata: u64,
-) -> *mut thread {
-    ttree_wakeup_one_impl(q, key, error_no, rdata)
-}
-
 fn ttree_wakeup_key_impl(
     q: *mut ttree_t,
     key: uint64,
@@ -885,8 +735,7 @@ fn ttree_wakeup_key_impl(
     0
 }
 
-#[no_mangle]
-pub extern "C" fn ttree_wakeup_key(
+pub(crate) fn ttree_wakeup_key(
     q: *mut ttree_t,
     key: uint64,
     error_no: c_int,
@@ -895,39 +744,15 @@ pub extern "C" fn ttree_wakeup_key(
     ttree_wakeup_key_impl(q, key, error_no, rdata)
 }
 
-fn ttree_wakeup_all_impl(q: *mut ttree_t, error_no: c_int, rdata: u64) -> c_int {
-    let Some(qr) = tt_of(q) else { return -EINVAL };
-    if qr.counter() <= 0 { return -ENOENT; }
-    let mut count = 0;
-    let mut pos_node = rb_first_node(qr.root_ptr());
-    while !pos_node.is_null() {
-        let next_node = rb_next_node(pos_node);
-        let pos = tnode_from_tree_entry(pos_node);
-        if !tnode_in_tree(q, pos) {
-            xv6_panic(c"Thread node is not in the tree".as_ptr());
-        }
-        if ttree_do_remove(q, pos) != 0 {
-            crate::kprintln!("warning: Failed to remove node from tree during wakeup all");
-        }
-        do_wakeup(pos, error_no, rdata);
-        count += 1;
-        pos_node = next_node;
-    }
-    if count == 0 { return -ENOENT; }
-    qr.set_root_node(null_mut());
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn ttree_wakeup_all(q: *mut ttree_t, error_no: c_int, rdata: u64) -> c_int {
-    ttree_wakeup_all_impl(q, error_no, rdata)
-}
-
 // The backwards-compat `xv6_tqport_*` C-ABI alias layer that used to
-// front tq_init/ttree_init/tq_set_lock/ttree_set_lock/tnode_init/
-// tq_size/ttree_size/tnode_get_queue/tnode_get_tree/tnode_get_thread/
-// tnode_get_errno/tq_push/tq_first/tq_pop/tq_remove/tq_bulk_move/tq_wait
-// [_cb]/tq_wakeup[_all]/ttree_add/ttree_first/ttree_key_min/ttree_remove/
-// ttree_wait[_cb]/ttree_wakeup_one/ttree_wakeup_key/ttree_wakeup_all was
-// collapsed in the P3-1B2 sweep: every caller now invokes these
-// canonical names directly (crate-path, no FFI hop).
+// front these entry points was collapsed in the P3-1B2 sweep; P3-D2a
+// then dismantled the `#[no_mangle] extern "C"` export surface itself:
+// the live entry points above are plain `pub(crate)` fns, and the dead
+// exports (tq_set_lock/ttree_set_lock/tnode_init/ttree_size/
+// tnode_get_queue/tnode_get_tree/tnode_get_errno/tq_push/tq_first/
+// tq_remove/tq_pop/ttree_add/ttree_first/ttree_key_min/ttree_remove/
+// ttree_wait_cb/ttree_wakeup_one/ttree_wakeup_all -- 0-ref verified
+// crate-wide) were deleted outright, along with the `_impl` bodies only
+// they referenced. The internal `_impl` helpers that live callers still
+// share (tq_push_impl, tq_remove_impl, ttree_add_impl, ttree_remove_impl,
+// ttree_wait_cb_impl, ttree_wakeup_one_impl, ...) are unchanged.
