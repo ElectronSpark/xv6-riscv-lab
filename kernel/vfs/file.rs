@@ -28,13 +28,16 @@
 //! global open-file table (`__vfs_ftable_lock`, a `spinlock_t`) and the
 //! per-process `fdtable.lock` (`vfs_custom_fd_alloc`) are likewise
 //! single lexically-scoped critical sections and use
-//! [`crate::sync::KSpinlock`] RAII. `sock_lock` (owned by `sysnet.c`,
-//! still C) is acquired/released in one straight-line block inside
-//! [`vfs_sockalloc`] with no early return while held, so it also uses
-//! `KSpinlock` RAII even though the lock storage itself lives in
-//! another translation unit — the *pairing*, not the storage location,
-//! is what determines RAII-fitness (same reasoning `vfs/inode.rs`
-//! applied to `fs_struct.lock`).
+//! [`crate::sync::KSpinlock`] RAII. [`crate::sysnet::SOCKETS`] (owned by
+//! `sysnet.rs`) is locked in one straight-line block inside
+//! [`vfs_sockalloc`] with no early return while held — Wave P3-8d
+//! upgraded it from a `KSpinlock::from_bindings` handle onto a raw
+//! `spinlock_t` (the *pairing*, not the storage location, is what
+//! determined RAII-fitness even before this — same reasoning
+//! `vfs/inode.rs` applied to `fs_struct.lock`) to a genuine
+//! `crate::sync::SpinLock<*mut sock>::lock()` call, `Deref`ing straight
+//! to the list head instead of a separate `extern "C" { static mut
+//! sockets }` reinterpretation.
 //!
 //! The inode lock (`vfs_ilock`/`vfs_iunlock`, owned by `vfs/inode.rs`)
 //! and the two device-refcount calls (`cdev_get`/`cdev_put`,
@@ -134,13 +137,6 @@ unsafe extern "C" {
     // mm/kalloc.rs.
     safe fn kalloc() -> *mut c_void;
     safe fn kfree(pa: *mut c_void);
-
-    // sysnet.c (still C, Wave 28) — `vfs_sockalloc`'s socket table.
-    // `sockets` is a plain (non-static) C global, exactly as the C
-    // original externs it. Kept `#[no_mangle]` in `sysnet.rs` (P3-1D mesh
-    // sweep: widely-shared data anchor, see that file's own comment) --
-    // this extern stays valid.
-    static mut sockets: *mut sock;
 }
 // P3-1D mesh sweep: dev/cdev.rs, dev/blkdev.rs, dev/dev.rs, net.rs, and
 // sysnet.rs are all in scope for this wave; these become plain crate-path
@@ -153,7 +149,12 @@ use crate::dev::cdev::{cdev_get, cdev_put, cdev_read, cdev_write};
 use crate::dev::blkdev::{blkdev_get, blkdev_put};
 use crate::dev::dev::dev_ioctl;
 use crate::net::mbufq_init;
-use crate::sysnet::sock_lock;
+// Wave P3-8d: `sysnet.rs`'s `sock_lock`/`sockets` (two independently-
+// paired globals) were migrated to a single `SpinLock<*mut sock>` --
+// `SOCKETS` is locked directly below instead of a raw `spinlock_t`
+// handle (see `vfs_sockalloc`'s updated call site and this file's
+// module doc).
+use crate::sysnet::SOCKETS;
 
 // P3-1C mesh sweep: vfs/{inode,fs,fdtable,pipe}.rs are in scope for this
 // wave; converted from `extern "C"` redeclarations to plain crate-path
@@ -1203,10 +1204,15 @@ pub(crate) extern "C" fn vfs_sockalloc(
 
     // Add to the list of sockets (checking for duplicates).
     let ret: c_int = {
-        // SAFETY: `sock_lock`/`sockets` are `sysnet.c`'s live globals.
-        let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!(sock_lock) }).lock();
-        // SAFETY: `sockets` is protected by `sock_lock`, held above.
-        let mut pos = unsafe { sockets };
+        // SAFETY: `SOCKETS` (`sysnet.rs`) is a live `SpinLock<*mut
+        // crate::sysnet::sock>`; this file's local `sock` (above) is a
+        // byte-layout-identical mirror of that type (see the module
+        // doc), so casting the guard's pointer to/from this file's
+        // `sock` type is a plain reinterpretation of the same memory,
+        // not a type-confusion hazard -- same precedent as the `sock`/
+        // `crate::bindings::sock` handoff a few lines above.
+        let mut guard = SOCKETS.lock();
+        let mut pos = *guard as *mut sock;
         let mut dup = false;
         while !pos.is_null() {
             // SAFETY: `pos` is a live node on the `sockets` list.
@@ -1222,9 +1228,9 @@ pub(crate) extern "C" fn vfs_sockalloc(
         } else {
             // SAFETY: `si` is a freshly initialized, exclusively-owned node.
             unsafe {
-                (*si).next = sockets;
-                sockets = si;
+                (*si).next = *guard as *mut sock;
             }
+            *guard = si as *mut crate::sysnet::sock;
             0
         }
     };

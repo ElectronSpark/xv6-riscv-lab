@@ -496,8 +496,9 @@ mod ramdisk;
 // printf_shim.c). Same no-subdirectory/no-`pub use` precedent as above;
 // `pci_init`/`sockinit` are called by `start_kernel.rs`,
 // `__pcie_ecam_mmio_base`/`__e1000_pci_mmio_base` are extern-declared by
-// `mm/vm_pgtab.rs`, `sock_lock`/`sockets` are extern-declared by
-// `vfs/file.rs` (same symbol names/types, see `sysnet.rs`'s module
+// `mm/vm_pgtab.rs`, `SOCKETS` (Wave P3-8d: `sock_lock`/`sockets` migrated
+// to one `crate::sync::SpinLock<*mut sock>`) is locked directly by
+// `vfs/file.rs` via a plain crate-path `use` (see `sysnet.rs`'s module
 // doc), and `mbufalloc`/`mbuffree`/`net_rx` are extern-declared by
 // `dev/x1_emac.rs`.
 #[cfg(not(test))]

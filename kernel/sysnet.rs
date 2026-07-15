@@ -4,12 +4,23 @@
 //! handling. Legacy `sockalloc` was already removed in the C original --
 //! VFS uses `vfs_sockalloc` in `kernel/vfs/file.rs` (Phase 2 Wave 14)
 //! instead, which is this file's one live cross-module dependent: it
-//! `extern`s [`sock_lock`]/[`sockets`] directly (as plain C globals) and
-//! calls `mbufq_init` (`net.rs`, this wave) to initialise the `rxq` of a
-//! `struct sock` it constructs itself via `kalloc()` -- `sock_lock`/
-//! `sockets` are preserved below under the exact same symbol names/
-//! types `vfs/file.rs` already expects, so that file needs no changes.
+//! locks [`SOCKETS`] directly (a `pub(crate)` crate-path item, not a raw
+//! C-ABI extern -- see Wave P3-8d below) and calls `mbufq_init`
+//! (`net.rs`, this wave) to initialise the `rxq` of a `struct sock` it
+//! constructs itself via `kalloc()`.
 //!
+//! **Wave P3-8d**: `sock_lock`/`sockets` (originally two independently-
+//! paired C globals -- a bare `spinlock_t` plus a separate `*mut sock`)
+//! were migrated to [`SOCKETS`], a single `crate::sync::SpinLock<*mut
+//! sock>` that owns the list head it protects directly. `vfs/file.rs`'s
+//! `vfs_sockalloc` (previously a `KSpinlock::from_bindings` handle onto
+//! the raw `spinlock_t`, plus an `extern "C" { static mut sockets }`
+//! redeclaration reinterpreting the pointer as its own local `sock`
+//! mirror type) now locks this same static and casts the guard's `*mut
+//! sock` (this file's type) to/from its own mirror type at the two
+//! points it touches the list -- see that file's updated lock-map doc.
+//!
+
 //! # `sys_connect` / dead-code note
 //!
 //! The Wave 28 charter (per the plan) describes this file as owning
@@ -42,6 +53,7 @@ use core::ptr;
 
 use crate::bindings::{mbuf, spinlock_t, thread, vm, EFAULT, EINTR, ENOMEM};
 use crate::net::mbufq;
+use crate::sync::SpinLock;
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -101,23 +113,21 @@ pub struct sock {
     pub rxq: mbufq,      // a queue of packets waiting to be received
 }
 
-/// `spinlock_t sock_lock = SPINLOCK_INITIALIZED("socktbl");` --
-/// compile-time initialised (matches `kernel/uart.rs`'s established
-/// convention for `SPINLOCK_INITIALIZED` statics). Keeps the exact C
-/// symbol name/type.
-// P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) static mut sock_lock: spinlock_t =
-    spinlock_t { locked: 0, name: c"socktbl".as_ptr() as *mut core::ffi::c_char, cpu: ptr::null_mut() };
-
-/// `struct sock *sockets;` -- head of the (unsorted) list of live
-/// sockets, protected by [`sock_lock`]. Keeps the exact C symbol name/
-/// type. Kept `#[no_mangle]` -- read via `extern` by 3 out-of-scope
-/// files (`vfs/file.rs`, `vfs/vfs_syscall.rs`, `vfs/tmpfs/inode.rs`);
-/// same "widely-shared data anchor, no benefit purely for mesh-cosmetic
-/// reasons" judgment call `ipi.rs`'s `cpus` documents.
-#[no_mangle]
-pub static mut sockets: *mut sock = ptr::null_mut();
+/// Head of the (unsorted) list of live sockets. Wave P3-8d: `sock_lock`
+/// (a bare `spinlock_t`, `SPINLOCK_INITIALIZED("socktbl")`) and
+/// `sockets` (a separate `#[no_mangle] static mut *mut sock`) used to be
+/// two independently-paired globals -- manual `spin_lock`/`spin_unlock`
+/// here, and a `KSpinlock::from_bindings` handle onto the same raw
+/// `spinlock_t` from `vfs/file.rs::vfs_sockalloc` (the one live
+/// cross-file accessor -- see that file's own lock-map doc). Now the
+/// lock owns the list head directly (`crate::sync::SpinLock`, same
+/// P3-8b/8c/8d precedent as `ramdisk.rs`/`bufcache.rs`/`e1000.rs`);
+/// `vfs/file.rs` locks this same `pub(crate)` static instead of a raw
+/// `spinlock_t` handle. No longer `#[no_mangle]` -- the only remaining
+/// reader (`vfs/file.rs`) is same-crate and reaches it via a plain
+/// crate-path `use`, so the C-linkage anchor this file's own P3-1D
+/// comment used to document is no longer needed.
+pub(crate) static SOCKETS: SpinLock<*mut sock> = SpinLock::new(c"socktbl", ptr::null_mut());
 
 /// `void sockinit(void) {}` -- empty stub, ported as such (matches the
 /// plan's explicit instruction for this file).
@@ -128,7 +138,7 @@ pub(crate) extern "C" fn sockinit() {}
 // Legacy `sockalloc` removed -- VFS uses `vfs_sockalloc` in
 // `kernel/vfs/file.rs` instead.
 
-/// Closes a socket: unlinks it from the global [`sockets`] list, frees
+/// Closes a socket: unlinks it from the global [`SOCKETS`] list, frees
 /// any pending mbufs in its rxq, and frees the socket itself. See
 /// module doc: no live caller in the tree (preserved verbatim).
 ///
@@ -139,21 +149,25 @@ pub(crate) extern "C" fn sockinit() {}
 // module doc) -- demoted; `#[allow(dead_code)]` documents the gap.
 #[allow(dead_code)]
 pub(crate) unsafe extern "C" fn sockclose(si: *mut sock) {
-    // Remove from the list of sockets.
-    spin_lock(unsafe { &raw mut sock_lock });
-    // SAFETY: `sock_lock` held; `sockets`/`(*node).next` form a plain
-    // singly-linked list, walked and unlinked under the lock.
-    unsafe {
-        let mut pos: *mut *mut sock = &raw mut sockets;
-        while !(*pos).is_null() {
-            if *pos == si {
-                *pos = (*si).next;
-                break;
+    // Remove from the list of sockets. `guard` drops (RAII) at the end
+    // of this block, matching the original's `spin_unlock` placement
+    // exactly (released before the unlocked mbuf-freeing work below).
+    {
+        let mut guard = SOCKETS.lock();
+        // SAFETY: `guard` proves `SOCKETS`'s lock is held; `*guard`/
+        // `(*pos).next` form a plain singly-linked list, walked and
+        // unlinked under the lock.
+        unsafe {
+            let mut pos: *mut *mut sock = &raw mut *guard;
+            while !(*pos).is_null() {
+                if *pos == si {
+                    *pos = (*si).next;
+                    break;
+                }
+                pos = &raw mut (*(*pos)).next;
             }
-            pos = &raw mut (*(*pos)).next;
         }
     }
-    spin_unlock(unsafe { &raw mut sock_lock });
 
     // Free any pending mbufs.
     // SAFETY: caller contract; no other thread can reach `si` anymore
@@ -255,9 +269,10 @@ pub(crate) unsafe extern "C" fn sockwrite(si: *mut sock, addr: u64, n: c_int) ->
 // P3-1D mesh sweep: caller (`net.rs`) now imports this via crate-path
 // `use` instead of an `extern` redeclaration -- demoted.
 pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16, rport: u16) {
-    spin_lock(unsafe { &raw mut sock_lock });
-    // SAFETY: `sock_lock` held; `sockets` is a plain singly-linked list.
-    let mut si = unsafe { sockets };
+    let guard = SOCKETS.lock();
+    // `*guard` is a plain singly-linked list, readable through the held
+    // guard with no `unsafe` needed for the field access itself.
+    let mut si = *guard;
     while !si.is_null() {
         // SAFETY: `si` is a live node on the `sockets` list.
         if unsafe { (*si).raddr == raddr && (*si).lport == lport && (*si).rport == rport } {
@@ -270,12 +285,14 @@ pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16
                 wakeup_on_chan(&raw mut (*si).rxq as *mut c_void);
             }
             spin_unlock(unsafe { &raw mut (*si).lock });
-            spin_unlock(unsafe { &raw mut sock_lock });
-            return;
+            return; // `guard` drops here (RAII).
         }
         si = unsafe { (*si).next };
     }
-    spin_unlock(unsafe { &raw mut sock_lock });
+    // Release the lock before invoking `mbuffree` (matches the
+    // original's lock-hold window: `sock_lock`/`SOCKETS` is never held
+    // across a call into another function).
+    drop(guard);
     // SAFETY: `m` still caller-owned (no socket matched).
     unsafe { mbuffree(m) };
 }

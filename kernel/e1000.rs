@@ -33,7 +33,7 @@
 //! `x1_tx_desc`/`x1_rx_desc`) are real `bindgen` types -- the e1000's DMA
 //! engine reads/writes these 16-byte entries directly, same rationale as
 //! every other hardware-ABI struct this wave. [`layout_asserts`] pins
-//! `size_of`/`offset_of` for both at compile time. [`TX_RING`]/[`RX_RING`]
+//! `size_of`/`offset_of` for both at compile time. [`TxRing`]/[`RxRing`]
 //! keep the C's `__ALIGNED(16)` array attribute via a
 //! `#[repr(C, align(16))]` wrapper newtype (Rust has no direct
 //! `#[repr(align(N))]` on a `static` item, only on a type).
@@ -77,8 +77,9 @@ use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::bindings::{mbuf, netdev, netdev_ops, rx_desc, spinlock_t, tx_desc};
+use crate::bindings::{mbuf, netdev, netdev_ops, rx_desc, tx_desc};
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
+use crate::sync::SpinLock;
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -88,11 +89,6 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     safe fn __panic_start();
     safe fn __panic_end() -> !;
-
-    // lock/spinlock.rs -- raw calls (matches this crate's convention for
-    // straight-line critical sections with an early-return exit path).
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
 
     // string.rs.
     fn strncpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
@@ -207,9 +203,38 @@ struct RxRing([rx_desc; RX_RING_SIZE]);
 const ZERO_TX_DESC: tx_desc = tx_desc { addr: 0, length: 0, cso: 0, cmd: 0, status: 0, css: 0, special: 0 };
 const ZERO_RX_DESC: rx_desc = rx_desc { addr: 0, length: 0, csum: 0, status: 0, errors: 0, special: 0 };
 
-static mut TX_RING: TxRing = TxRing([ZERO_TX_DESC; TX_RING_SIZE]);
-static mut TX_MBUFS: [*mut mbuf; TX_RING_SIZE] = [ptr::null_mut(); TX_RING_SIZE];
+/// Mirrors `struct tx_desc tx_ring[TX_RING_SIZE] __ALIGNED(16);` plus
+/// `static struct mbuf *tx_mbufs[TX_RING_SIZE];` -- both were guarded by
+/// `e1000_lock` (a bare `spinlock_t`, manually paired `spin_lock`/
+/// `spin_unlock`) as two separate `static mut`s. Wave P3-8d: the lock
+/// now owns the data it protects directly (`crate::sync::SpinLock`, same
+/// P3-8b/8c precedent as `ramdisk.rs`'s `RAMDISK`/`bufcache.rs`'s
+/// `BCACHE`), so [`e1000_transmit`]'s early-return-while-holding exit
+/// path releases the lock for free via RAII instead of a hand-paired
+/// `spin_unlock` before the `return`.
+struct TxState {
+    ring: TxRing,
+    mbufs: [*mut mbuf; TX_RING_SIZE],
+}
 
+/// `spinlock_t e1000_lock = SPINLOCK_INITIALIZED("e1000_lock");` --
+/// compile-time initialised, valid for locking from the moment
+/// `.bss`/`.data` are live, no runtime `spin_init` call required (same
+/// convention as `kernel/uart.rs`'s `UART_TX_LOCK`/`UART_RX_LOCK`).
+static TX: SpinLock<TxState> = SpinLock::new(
+    c"e1000_lock",
+    TxState { ring: TxRing([ZERO_TX_DESC; TX_RING_SIZE]), mbufs: [ptr::null_mut(); TX_RING_SIZE] },
+);
+
+/// Mirrors `struct rx_desc rx_ring[RX_RING_SIZE] __ALIGNED(16);` plus
+/// `static struct mbuf *rx_mbufs[RX_RING_SIZE];`. Unlike the TX ring,
+/// these are **not** behind a lock in the C original either: they are
+/// only ever touched from [`e1000_recv`], itself only ever called from
+/// [`e1000_intr`] (the PLIC interrupt handler) -- a single-consumer
+/// context with no concurrent caller, so no lock was ever needed here
+/// (matches classic xv6's identical rx-path lock-freedom). Left as
+/// plain `static mut`s -- not a SpinLock<T> candidate (nothing to
+/// serialize against).
 static mut RX_RING: RxRing = RxRing([ZERO_RX_DESC; RX_RING_SIZE]);
 static mut RX_MBUFS: [*mut mbuf; RX_RING_SIZE] = [ptr::null_mut(); RX_RING_SIZE];
 
@@ -220,12 +245,6 @@ static mut RX_MBUFS: [*mut mbuf; RX_RING_SIZE] = [ptr::null_mut(); RX_RING_SIZE]
 /// `e1000_init` -- no concurrent access is possible before that call
 /// returns and `netdev_register` publishes this driver).
 static mut REGS: *mut u32 = ptr::null_mut();
-
-/// Mirrors `spinlock_t e1000_lock = SPINLOCK_INITIALIZED("e1000_lock");`
-/// -- compile-time initialised, valid for locking from the moment
-/// `.bss`/`.data` are live, no runtime `spin_init` call required (same
-/// convention as `kernel/uart.rs`'s `UART_TX_LOCK`/`UART_RX_LOCK`).
-static mut E1000_LOCK: spinlock_t = spinlock_t { locked: 0, name: c"e1000_lock".as_ptr() as *mut c_char, cpu: ptr::null_mut() };
 
 static mut E1000_NDEV: netdev = netdev {
     name: [0; NETDEV_NAME_MAX],
@@ -453,11 +472,19 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
     unsafe { e1000_dev_reset() };
 
     // [E1000 14.5] Transmit initialization.
-    // SAFETY: `TX_RING`/`TX_MBUFS` are `'static`, exclusively accessed
-    // here (single-threaded init, same as `REGS` above).
-    let (tx_ring_ptr, tx_mbufs_ptr) = unsafe { (&raw mut TX_RING.0 as *mut tx_desc, &raw mut TX_MBUFS as *mut *mut mbuf) };
-    // SAFETY: `TX_RING`/`TX_MBUFS` are `'static`, exclusively accessed
-    // here (single-threaded init).
+    // Single-threaded boot-time init (same as `REGS` above) -- taking
+    // `TX`'s lock here isn't required for exclusivity, but keeps the
+    // lock/unlock discipline uniform with every later `e1000_transmit`
+    // access (same precedent as `ramdisk.rs::ramdisk_init`'s identical
+    // `RAMDISK.lock()` call before publication).
+    let (tx_ring_ptr, tx_mbufs_ptr) = {
+        let mut tx = TX.lock();
+        (&raw mut tx.ring.0 as *mut tx_desc, &raw mut tx.mbufs as *mut *mut mbuf)
+    };
+    // SAFETY: `tx_ring_ptr`/`tx_mbufs_ptr` point into `TX`'s `'static`
+    // storage (valid for the process lifetime regardless of the guard
+    // above having since dropped); still single-threaded init, so no
+    // concurrent access is possible here.
     if unsafe {
         e1000_set_transmission_descriptor_base(
             tx_ring_ptr,
@@ -547,10 +574,11 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
 // marker) is kept: the fn-pointer-typed field it's stored into requires
 // it, per this wave's fn-pointer-value hazard class.
 pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
-    // Raw spin_lock/spin_unlock (not RAII): early-return-while-holding
-    // exit path below (matches this crate's convention, see
-    // `kernel/virtio_disk.rs`/`kernel/ramdisk.rs`'s identical rationale).
-    spin_lock(unsafe { &raw mut E1000_LOCK });
+    // `TX.lock()` (RAII): the sole early-return-while-holding exit path
+    // below now releases for free when `tx` drops, instead of a
+    // hand-paired `spin_unlock` before the `return` (Wave P3-8d; matches
+    // `kernel/ramdisk.rs`'s identical `submit_bio` upgrade).
+    let mut tx = TX.lock();
 
     // Get the current tail pointer of the transmission ring buffer.
     // SAFETY: `REGS` set by `e1000_init`, which always runs before any
@@ -562,15 +590,14 @@ pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
     }
     // SAFETY: `index <= TX_RING_SIZE` (see module doc's "Preserved-as-
     // is" note for the C's own off-by-one-tolerant bound, kept verbatim).
-    let desc = unsafe { (&raw mut TX_RING.0 as *mut tx_desc).add(index as usize) };
+    let desc = unsafe { (&raw mut tx.ring.0 as *mut tx_desc).add(index as usize) };
     // SAFETY: `desc` computed above, points at a live ring entry.
     if unsafe { (*desc).status } & E1000_TXD_STAT_DD == 0 {
-        // Descriptor not finished; report error.
-        spin_unlock(unsafe { &raw mut E1000_LOCK });
+        // Descriptor not finished; report error. `tx` drops here (RAII).
         return -1;
     }
     // SAFETY: `index` bounds as above.
-    let slot = unsafe { (&raw mut TX_MBUFS as *mut *mut mbuf).add(index as usize) };
+    let slot = unsafe { (&raw mut tx.mbufs as *mut *mut mbuf).add(index as usize) };
     // SAFETY: `slot` live.
     if !unsafe { *slot }.is_null() {
         // Free the buffer containing the already-transmitted data.
@@ -594,7 +621,7 @@ pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
         // Move the tail pointer of the transmission ring buffer forward.
         reg_write(E1000_TDT, (reg_read(E1000_TDT) + 1) % TX_RING_SIZE as u32);
     }
-    spin_unlock(unsafe { &raw mut E1000_LOCK });
+    // `tx` drops here (RAII) -- no manual `spin_unlock` needed.
     0
 }
 
