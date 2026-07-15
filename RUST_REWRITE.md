@@ -1059,6 +1059,10 @@ spend-limit throttle; all green + committed.
 
 ## Known issues (pre-existing, not caused by the rewrite)
 
+- Intermittent `rm <dir>` EBUSY on repeated same-name directory
+  reuse (alternating rounds) — proved pre-existing via A/B/A stash+rebuild
+  during P3-9d; likely a dentry-cache-held extra ref on same-name reuse.
+
 - ~~`cat /dev/tty` panics ("pid lock not held")~~ FIXED in Wave 22
   (pid_wlock around session_get_ctrl_tty; cat blocks correctly, ^C works).
 

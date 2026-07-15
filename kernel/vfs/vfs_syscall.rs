@@ -157,7 +157,7 @@ use crate::vfs::fs::{
 use crate::vfs::inode::{
     vfs_chdir, vfs_chroot, vfs_create, vfs_dir_iter, vfs_idup, vfs_ilock, vfs_ilookup,
     vfs_iput, vfs_itruncate, vfs_iunlock, vfs_link, vfs_mkdir, vfs_mknod, vfs_move, vfs_namei,
-    vfs_nameiparent, vfs_readlink, vfs_symlink, vfs_unlink,
+    vfs_nameiparent, vfs_readlink, vfs_symlink, vfs_unlink, IRef,
 };
 
 // ===========================================================================
@@ -728,25 +728,30 @@ pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
         return ret64(neg(EFAULT));
     }
 
-    let mut inode: *mut vfs_inode;
+    let mut inode: IRef;
     let mut symloop_count = 0i32;
 
     loop {
-        inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
-        if is_err(inode) {
-            return ptr_err(inode) as u64;
+        let raw_inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
+        if is_err(raw_inode) {
+            return ptr_err(raw_inode) as u64;
         }
-        if inode.is_null() {
+        if raw_inode.is_null() {
             return ret64(neg(ENOENT));
         }
+        // `IRef::from_raw`: `vfs_namei` succeeded (non-null, non-error),
+        // whose postcondition is an owned, already-held reference.
+        // Reassigning `inode` here drops the *previous* iteration's
+        // reference automatically -- replaces the manual
+        // `vfs_iput(inode); inode = ptr::null_mut();` pair below (P3-9d).
+        // SAFETY: see the comment above.
+        inode = unsafe { IRef::from_raw(raw_inode) };
 
-        if !is_lnk(unsafe { (*inode).mode }) {
+        if !is_lnk(inode.mode) {
             break;
         }
 
-        let link_len = vfs_readlink(inode, path.as_mut_ptr(), MAXPATH - 1);
-        vfs_iput(inode);
-        inode = ptr::null_mut();
+        let link_len = vfs_readlink(IRef::as_ptr(&inode), path.as_mut_ptr(), MAXPATH - 1);
         if link_len < 0 {
             return link_len as u64;
         }
@@ -759,8 +764,7 @@ pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
     }
 
     let mut kst: stat = unsafe { core::mem::zeroed() };
-    let ret = vfs_inode_stat_fallback(inode, &mut kst);
-    vfs_iput(inode);
+    let ret = vfs_inode_stat_fallback(IRef::as_ptr(&inode), &mut kst);
     if ret != 0 {
         return ret64(ret);
     }
@@ -835,25 +839,27 @@ pub(crate) extern "C" fn sys_vfs_access() -> u64 {
     if inode.is_null() {
         return ret64(neg(ENOENT));
     }
+    // `IRef::from_raw`: `vfs_namei` succeeded (non-null, non-error),
+    // whose postcondition is an owned, already-held reference -- this
+    // `IRef`'s `Drop` replaces all four manual `vfs_iput(inode)` calls
+    // below (three error-path, one success-path), eliminating the
+    // "forget on a new branch" leak shape (P3-9d).
+    // SAFETY: see the comment above.
+    let inode = unsafe { IRef::from_raw(inode) };
 
     if mode != 0 {
-        // SAFETY: non-null `inode`.
-        let perm = unsafe { (*inode).mode };
+        let perm = inode.mode;
         if (mode & 4) != 0 && (perm & (S_IRUSR | S_IRGRP | S_IROTH)) == 0 {
-            vfs_iput(inode);
             return ret64(neg(EACCES));
         }
         if (mode & 2) != 0 && (perm & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0 {
-            vfs_iput(inode);
             return ret64(neg(EACCES));
         }
         if (mode & 1) != 0 && (perm & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 {
-            vfs_iput(inode);
             return ret64(neg(EACCES));
         }
     }
 
-    vfs_iput(inode);
     0
 }
 

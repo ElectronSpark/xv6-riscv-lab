@@ -85,7 +85,9 @@
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use core::ffi::{c_char, c_int, c_void};
+use core::ops::Deref;
 use core::ptr;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
@@ -695,6 +697,142 @@ fn vfs_iput_finalize(inode: *mut vfs_inode, sb_to_free: Option<*mut vfs_superblo
     }
 }
 
+// ---------------------------------------------------------------------------
+// `IRef` -- an RAII smart pointer over `vfs_inode.ref_count` (Phase 3
+// P3-9d). Inode's refcount is a bespoke `AtomicI32` field manipulated by
+// this file's own `vfs_idup`/`vfs_idup_not_zero`/`vfs_iput` (see the
+// module doc's "Refcount map"), not a `struct kobject` -- it cannot use
+// `KArc<T>` (`kernel/kobject.rs`). `IRef` deliberately mirrors `KArc<T>`'s
+// shape (`Clone`/`Drop`/`Deref`/`from_raw`/`into_raw`/`as_ptr`) but is
+// built directly on top of the get/put pair above rather than
+// re-deriving the atomics -- it inherits their exact, already-proven
+// ordering (`Ordering::SeqCst` CAS / `Ordering::Acquire` initial load,
+// matching `smp/atomic.h`'s `atomic_oper_cond` verbatim) instead of a
+// second, independently-reasoned-about copy. `vfs_iput`'s retry/destroy
+// internals are untouched -- `IRef` only wraps the get/put pair at call
+// sites, exactly as the KArc precedent wraps `kobject_get`/`kobject_put`
+// rather than reimplementing them.
+//
+// # Invariant
+// A live `IRef` owns exactly one held reference on the pointee
+// `vfs_inode` (one increment of `ref_count` not yet matched by a
+// `vfs_iput`). `Clone` (-> `vfs_idup`) and `Drop` (-> `vfs_iput`) are the
+// only ways that invariant is created/destroyed internally;
+// [`IRef::from_raw`]/[`IRef::try_from_raw`] accept one from the caller
+// (the success postcondition of `vfs_namei`/`vfs_ilookup` +
+// `vfs_get_dentry_inode`/`vfs_idup`-family constructors) and
+// [`IRef::into_raw`] hands one back out -- the same `from_raw`/`into_raw`
+// contract `Box`/`Arc`/`KArc` use, for the C-ABI boundary where a caller
+// still juggles a raw `*mut vfs_inode` and manual `vfs_iput`.
+// ---------------------------------------------------------------------------
+
+/// See the module section doc above.
+pub(crate) struct IRef {
+    ptr: NonNull<vfs_inode>,
+}
+
+impl IRef {
+    /// Take ownership of an existing, already-held inode reference.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and point to a live `vfs_inode` whose
+    /// `ref_count` currently carries a reference the caller is
+    /// transferring to the returned `IRef` -- the caller must not also
+    /// call `vfs_iput` (or drop another `IRef` over the same reference)
+    /// on that same held count. This is exactly the success
+    /// postcondition of `vfs_namei`/`vfs_nameiparent`/`vfs_ilookup` +
+    /// `vfs_get_dentry_inode`/`vfs_idup`.
+    pub(crate) unsafe fn from_raw(ptr: *mut vfs_inode) -> Self {
+        debug_assert!(!ptr.is_null(), "IRef::from_raw: ptr is NULL");
+        // SAFETY: caller guarantees `ptr` is non-null (also debug-checked
+        // above) and owns an already-held reference (function contract).
+        IRef { ptr: unsafe { NonNull::new_unchecked(ptr) } }
+    }
+
+    /// `vfs_idup_not_zero` analog: attempt to upgrade a bare,
+    /// liveness-unproven `*mut vfs_inode` (e.g. one just read out of a
+    /// cache/hash bucket under a lock, with no existing reference of its
+    /// own) into an owned `IRef`. Returns `None` if the refcount had
+    /// already reached zero (a concurrent final `Drop`/`vfs_iput` raced
+    /// ahead of this call) or is already at `VFS_INODE_MAX_REFCOUNT`.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and point to a `vfs_inode` that is still
+    /// valid to dereference for the duration of this call -- the same
+    /// precondition a raw call to `vfs_idup_not_zero` has.
+    pub(crate) unsafe fn try_from_raw(ptr: *mut vfs_inode) -> Option<Self> {
+        debug_assert!(!ptr.is_null(), "IRef::try_from_raw: ptr is NULL");
+        if vfs_idup_not_zero(ptr) {
+            // SAFETY: `ptr` was just proven non-null-derived and live by
+            // the successful `vfs_idup_not_zero` above, which also
+            // established the held reference this `IRef` now owns.
+            Some(IRef { ptr: unsafe { NonNull::new_unchecked(ptr) } })
+        } else {
+            None
+        }
+    }
+
+    /// Give up the owned reference without decrementing the refcount,
+    /// returning the raw pointer -- the flip side of [`IRef::from_raw`],
+    /// for a C-ABI boundary that expects to receive one held reference as
+    /// a bare pointer (e.g. storing into `fs_struct.cwd`/`.rooti` via
+    /// `vfs_inode_get_ref`, or a still-C-shaped vtable slot/out-param).
+    pub(crate) fn into_raw(this: Self) -> *mut vfs_inode {
+        let ptr = this.ptr.as_ptr();
+        core::mem::forget(this);
+        ptr
+    }
+
+    /// The raw pointer this `IRef` owns a reference on, without giving up
+    /// ownership (contrast [`IRef::into_raw`]) -- for passing to the many
+    /// still-C-ABI-shaped helpers in this module that borrow a
+    /// `*mut vfs_inode` without taking or dropping a reference of their
+    /// own (`vfs_ilock`, vtable dispatch functions, `vfs_readlink`, ...).
+    pub(crate) fn as_ptr(this: &Self) -> *mut vfs_inode {
+        this.ptr.as_ptr()
+    }
+}
+
+impl Clone for IRef {
+    fn clone(&self) -> Self {
+        // Struct invariant: `self` owns a currently-held reference, so
+        // `vfs_idup`'s precondition (an already-held reference to
+        // increment from) holds; matches `KArc::clone`'s use of
+        // `kobject_get` under the same reasoning.
+        vfs_idup(self.ptr.as_ptr());
+        IRef { ptr: self.ptr }
+    }
+}
+
+impl Drop for IRef {
+    fn drop(&mut self) {
+        // Struct invariant: `self` owns exactly one held reference, which
+        // this call gives up; `vfs_iput` runs its own retry/destroy path
+        // if this was the last one (untouched by this wrapper -- see the
+        // module section doc above). Every current `IRef` call site
+        // upholds `vfs_iput`'s precondition (neither the inode lock nor
+        // the superblock write lock held here): none call `into_raw`
+        // while holding either, and none hold an `IRef` across a
+        // `vfs_ilock`/`vfs_superblock_wlock` acquisition.
+        vfs_iput(self.ptr.as_ptr());
+    }
+}
+
+impl Deref for IRef {
+    type Target = vfs_inode;
+    fn deref(&self) -> &vfs_inode {
+        // SAFETY: struct invariant -- a live `IRef` holds a reference,
+        // which keeps the pointee allocated for as long as any `IRef`
+        // over it exists (mirrors `KArc<T>::deref`'s reasoning). Shared
+        // access only: mutation of individual `vfs_inode` fields
+        // elsewhere in this crate is synchronized per-field by
+        // `vfs_ilock`/atomics, not by unique ownership of the whole
+        // struct -- the same discipline every existing `*mut vfs_inode`
+        // call site already relies on.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
 /// Mark inode as dirty.
 pub(crate) extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
@@ -1281,8 +1419,14 @@ pub(crate) extern "C" fn vfs_link(
         return ptr_err(target) as c_int;
     }
     kassert!(!target.is_null(), "vfs_link: old dentry inode is NULL");
-    if unsafe { (*target).sb } != unsafe { (*dir).sb } {
-        vfs_iput(target);
+    // `IRef::from_raw`: `vfs_get_dentry_inode` succeeded (non-null,
+    // non-error), whose postcondition is an owned, already-held
+    // reference -- `target`'s `Drop` now replaces every manual
+    // `vfs_iput(target)` below, including the two error-path calls this
+    // wave deletes (P3-9d).
+    // SAFETY: see the comment above.
+    let target = unsafe { IRef::from_raw(target) };
+    if target.sb != unsafe { (*dir).sb } {
         return neg(EXDEV); // Cross-device hard link not supported
     }
 
@@ -1291,14 +1435,13 @@ pub(crate) extern "C" fn vfs_link(
     if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
         ret = unsafe { begin_fn(sb) };
         if ret != 0 {
-            vfs_iput(target);
             return ret;
         }
     }
 
     vfs_superblock_wlock(sb);
     'out_unlock_sb: {
-        if is_dir(unsafe { (*target).mode }) {
+        if is_dir(target.mode) {
             ret = neg(EPERM); // Cannot create hard link to a directory
             break 'out_unlock_sb;
         }
@@ -1306,22 +1449,22 @@ pub(crate) extern "C" fn vfs_link(
             ret = neg(ENOTDIR);
             break 'out_unlock_sb;
         }
-        vfs_ilock_two_nondirectories(dir, target);
+        vfs_ilock_two_nondirectories(dir, IRef::as_ptr(&target));
         ret = 'out: {
             let v = vfs_inode_valid_locked(dir);
             if v != 0 {
                 break 'out v;
             }
-            let v = vfs_inode_valid_locked(target);
+            let v = vfs_inode_valid_locked(IRef::as_ptr(&target));
             if v != 0 {
                 break 'out v;
             }
             match unsafe { (*(*dir).ops).link } {
                 None => neg(ENOSYS),
-                Some(f) => unsafe { f(target, dir, name, name_len) },
+                Some(f) => unsafe { f(IRef::as_ptr(&target), dir, name, name_len) },
             }
         };
-        vfs_iunlock_two(target, dir);
+        vfs_iunlock_two(IRef::as_ptr(&target), dir);
     }
     vfs_superblock_unlock(sb);
 
@@ -1335,7 +1478,10 @@ pub(crate) extern "C" fn vfs_link(
         }
     }
 
-    vfs_iput(target);
+    // `target` (an `IRef`) drops here, calling `vfs_iput` exactly once --
+    // matches the deleted final `vfs_iput(target)`; unlike the original,
+    // every early `return` above also runs this same drop (no separate
+    // manual call to remember).
     ret
 }
 
