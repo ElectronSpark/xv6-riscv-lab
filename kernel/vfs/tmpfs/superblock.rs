@@ -33,7 +33,7 @@ use core::ptr;
 use crate::bindings::{
     hlist_entry_t, hlist_t, list_node_t, slab_cache_t, statfs, tmpfs_inode, tmpfs_sb_private,
     tmpfs_superblock, vfs_fs_type, vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops,
-    EINVAL, ENOENT, ENOMEM, PGSIZE, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
+    EINVAL, ENOMEM, PGSIZE, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
 
 use super::inode::TMPFS_INODE_OPS;
@@ -69,10 +69,15 @@ use crate::vfs::fs::{
 };
 use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iunlock};
 
-// `kassert!`/`err_ptr`'s canonical homes are `crate::kstd`/crate root
-// (P3-CS1 centralization).
+// `kassert!`'s canonical home is `crate::kstd`/crate root (P3-CS1
+// centralization). P3-CS13: the two ERR_PTR-returning superblock-ops
+// vtable methods (`tmpfs_alloc_inode`/`tmpfs_get_inode`) now build a
+// `KResult<*mut vfs_inode>` internally and encode it to the ABI-fixed
+// ERR_PTR exactly once at the `extern "C"` boundary via
+// `result_to_errptr`; only the error-return encoding changed, the
+// alloc/`slab_free` cleanup control flow is byte-identical.
 use crate::kassert;
-use crate::kstd::err_ptr;
+use crate::kstd::{result_to_errptr, Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -163,17 +168,21 @@ fn __tmpfs_alloc_inode_structure() -> *mut tmpfs_inode {
 
 /// Mirrors `tmpfs_alloc_inode()`.
 pub(crate) extern "C" fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+    result_to_errptr(tmpfs_alloc_inode_inner(sb))
+}
+
+fn tmpfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
     if sb.is_null() {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     // SAFETY: non-null `sb`, `fs_data` checked before deref.
     let private_data = unsafe { (*sb).fs_data as *mut tmpfs_sb_private };
     if private_data.is_null() {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     let ti = __tmpfs_alloc_inode_structure();
     if ti.is_null() {
-        return err_ptr(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
     let ino = __tmpfs_ino_alloc(private_data);
     // SAFETY: `ti` was just allocated above and is exclusively owned here.
@@ -182,14 +191,14 @@ pub(crate) extern "C" fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_
     }
     if ino == 0 {
         slab_free(ti as *mut c_void);
-        return err_ptr(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
     // Add the inode to the superblock's inode hash list -- done by the
     // generic `vfs_alloc_inode()` caller in `vfs/fs.rs`, not here (matches
     // the C original's own comment).
     // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`;
     // `vfs_inode` is its first field (offset 0).
-    unsafe { ptr::addr_of_mut!((*ti).vfs_inode) }
+    Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
 }
 
 /// Mirrors `tmpfs_free_inode()`.
@@ -233,11 +242,15 @@ pub(crate) extern "C" fn tmpfs_free(sb: *mut vfs_superblock) {
 
 /// Mirrors `tmpfs_get_inode()`. tmpfs does not persist inodes, so it
 /// cannot load an inode by number -- always `-ENOENT`.
-pub(crate) extern "C" fn tmpfs_get_inode(sb: *mut vfs_superblock, _ino: u64) -> *mut vfs_inode {
+pub(crate) extern "C" fn tmpfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+    result_to_errptr(tmpfs_get_inode_inner(sb, ino))
+}
+
+fn tmpfs_get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs_inode> {
     if sb.is_null() {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
-    err_ptr(neg(ENOENT))
+    Err(Errno::NoEnt)
 }
 
 /// Mirrors `tmpfs_sync_fs()`. tmpfs is an in-memory filesystem, nothing

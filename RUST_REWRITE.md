@@ -1388,6 +1388,36 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   of blocks`/assert markers anywhere. Pre-existing single-test "lost some
   free pages" artifact unchanged.
 
+### Iteration 47 — 2026-07-15 — Wave P3-CS13: tmpfs driver `KResult` (in-memory sibling of CS12)
+
+- The in-memory sibling of CS12 — same 6-function shape. All tmpfs
+  `inode_operations`/superblock vtable methods converted to private
+  `*_inner() -> KResult<*mut vfs_inode>` + one `result_to_errptr` boundary,
+  ABI byte-identical (these ops are also reused by devtmpfs for /dev nodes).
+  - `inode.rs`: `__tmpfs_create`/`__tmpfs_mkdir`/`__tmpfs_mknod`/
+    `__tmpfs_symlink` (err_ptr 6→0).
+  - `superblock.rs`: `tmpfs_alloc_inode`/`tmpfs_get_inode` (err_ptr 6→0).
+- Mapping: EINVAL/ENOMEM/ENOENT → matching variant; the shared
+  `__tmpfs_alloc_link_inode` helper returns an already-negative `c_int`
+  carried through losslessly as `Err(Errno::Raw(e))`. No new variant.
+- Cleanup preserved byte-identical: `__tmpfs_symlink`'s target-alloc-fail
+  unwind (`__tmpfs_do_unlink`→`vfs_remove_inode`→`kassert!`→
+  `__tmpfs_free_dentry`→`vfs_iunlock`→`tmpfs_free_inode`) and
+  `tmpfs_alloc_inode`'s `slab_free(ti)` on the `ino==0` path both kept in
+  place before an explicit `return Err(...)`; never `?`-propagated.
+- Verified: 0-warning `cargo clean`+`cmake` rebuild; cache clean before+
+  after; boot gate. Orchestrator re-ran independently: `devtmpfs: populated
+  9 device nodes` + `tmpfs: mounted at /tmp` at boot (boot-time
+  `__tmpfs_mknod`/`tmpfs_alloc_inode` through the converted path), `ls /dev`
+  lists console/tty/null/zero/etc. cleanly, `/tmp` mkdir+EEXIST, symlinktest
+  both subtests ok (create/symlink/readlink/unlink in tmpfs), usertests
+  createdelete OK in both /tmp (tmpfs) and / (xv6fs), stressfs completed —
+  zero panic/assert/corruption markers.
+- **Both filesystem drivers now Result-internal.** Remaining err_ptr: the
+  deliberately-kept internal-ERR_PTR retry/dispatch domains (inode.rs/
+  file.rs) + a handful of leaf boundary getters (CS14: device_get/bio_alloc/
+  pipe_alloc/get_session) + the transitional shims.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

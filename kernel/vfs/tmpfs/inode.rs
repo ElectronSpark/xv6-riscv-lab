@@ -70,10 +70,19 @@ unsafe extern "C" {
     safe fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
 }
 
-// `kassert!`/`err_ptr`/`is_err`'s canonical homes are `crate::kstd`/crate
-// root (P3-CS1 centralization). See `superblock.rs`.
+// `kassert!`/`is_err`'s canonical homes are `crate::kstd`/crate root
+// (P3-CS1 centralization). See `superblock.rs`. P3-CS13: the four
+// ERR_PTR-returning inode-ops vtable methods (`__tmpfs_create`/
+// `__tmpfs_mkdir`/`__tmpfs_mknod`/`__tmpfs_symlink`) now build a
+// `KResult<*mut vfs_inode>` internally and encode it to the ABI-fixed
+// ERR_PTR exactly once at the `extern "C"` boundary via
+// `result_to_errptr`; only the error-return encoding changed, the
+// alloc/link/cleanup control flow is byte-identical. The already-negative
+// `c_int` returned by `__tmpfs_alloc_link_inode`/`__tmpfs_make_symlink_target`
+// (which own the cross-module `vfs_alloc_inode` ERR_PTR / `ENOMEM`
+// encoding) is carried through losslessly as `Errno::Raw(..)`.
 use crate::kassert;
-use crate::kstd::{err_ptr, is_err};
+use crate::kstd::{is_err, result_to_errptr, Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -693,14 +702,18 @@ extern "C" fn __tmpfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: 
 }
 
 extern "C" fn __tmpfs_create(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
+    result_to_errptr(__tmpfs_create_inner(dir, mode, name, name_len))
+}
+
+fn __tmpfs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => err_ptr(e),
+        Err(e) => Err(Errno::Raw(e)),
         Ok((ti, _dentry)) => {
             __tmpfs_make_regfile(ti);
             // SAFETY: `ti` is a live, locked `tmpfs_inode`.
             vfs_iunlock(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) });
-            unsafe { ptr::addr_of_mut!((*ti).vfs_inode) }
+            Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
         }
     }
 }
@@ -755,9 +768,13 @@ extern "C" fn __tmpfs_link(target: *mut vfs_inode, dir: *mut vfs_inode, name: *c
 }
 
 extern "C" fn __tmpfs_mkdir(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
+    result_to_errptr(__tmpfs_mkdir_inner(dir, mode, name, name_len))
+}
+
+fn __tmpfs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => err_ptr(e),
+        Err(e) => Err(Errno::Raw(e)),
         Ok((ti, _dentry)) => {
             tmpfs_make_directory(ti);
             // SAFETY: `ti`/`dir` are live.
@@ -767,7 +784,7 @@ extern "C" fn __tmpfs_mkdir(dir: *mut vfs_inode, mode: mode_t, name: *const c_ch
                 // Increment parent's n_links for this subdir's ".." entry.
                 (*dir).n_links += 1;
                 vfs_iunlock(ptr::addr_of_mut!((*ti).vfs_inode));
-                ptr::addr_of_mut!((*ti).vfs_inode)
+                Ok(ptr::addr_of_mut!((*ti).vfs_inode))
             }
         }
     }
@@ -798,13 +815,17 @@ extern "C" fn __tmpfs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> 
 }
 
 extern "C" fn __tmpfs_mknod(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
+    result_to_errptr(__tmpfs_mknod_inner(dir, mode, dev, name, name_len))
+}
+
+fn __tmpfs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     if !s_isblk(mode) && !s_ischr(mode) {
         // TODO: Support FIFO, socket, and other special files.
-        return err_ptr(neg(EINVAL)); // Mknod can only create block/char device files
+        return Err(Errno::Inval); // Mknod can only create block/char device files
     }
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => err_ptr(e),
+        Err(e) => Err(Errno::Raw(e)),
         Ok((ti, _dentry)) => {
             if s_isblk(mode) {
                 tmpfs_make_bdev(ti, dev);
@@ -813,7 +834,7 @@ extern "C" fn __tmpfs_mknod(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name:
             }
             // SAFETY: `ti` is a live, locked `tmpfs_inode`.
             vfs_iunlock(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) });
-            unsafe { ptr::addr_of_mut!((*ti).vfs_inode) }
+            Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
         }
     }
 }
@@ -907,9 +928,20 @@ extern "C" fn __tmpfs_symlink(
     target: *const c_char,
     target_len: usize,
 ) -> *mut vfs_inode {
+    result_to_errptr(__tmpfs_symlink_inner(dir, mode, name, name_len, target, target_len))
+}
+
+fn __tmpfs_symlink_inner(
+    dir: *mut vfs_inode,
+    mode: mode_t,
+    name: *const c_char,
+    name_len: usize,
+    target: *const c_char,
+    target_len: usize,
+) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     let (new_inode, dentry) = match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => return err_ptr(e),
+        Err(e) => return Err(Errno::Raw(e)),
         Ok(v) => v,
     };
     if target_len < TMPFS_INODE_EMBEDDED_DATA_LEN {
@@ -931,12 +963,12 @@ extern "C" fn __tmpfs_symlink(
                 vfs_iunlock(ptr::addr_of_mut!((*new_inode).vfs_inode));
                 super::superblock::tmpfs_free_inode(ptr::addr_of_mut!((*new_inode).vfs_inode));
             }
-            return err_ptr(ret);
+            return Err(Errno::Raw(ret));
         }
     }
     // SAFETY: `new_inode` is live and locked.
     vfs_iunlock(unsafe { ptr::addr_of_mut!((*new_inode).vfs_inode) });
-    unsafe { ptr::addr_of_mut!((*new_inode).vfs_inode) }
+    Ok(unsafe { ptr::addr_of_mut!((*new_inode).vfs_inode) })
 }
 
 /// Destroy inode data when the last reference is dropped and `n_links ==
