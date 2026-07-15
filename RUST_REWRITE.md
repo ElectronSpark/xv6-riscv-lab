@@ -1352,6 +1352,42 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   `Errno::Raw(ptr_err(...))` cross-module passthroughs in inode.rs against
   the fs.rs producers that now return `KResult`.
 
+### Iteration 46 — 2026-07-15 — Wave P3-CS12: xv6fs on-disk driver `KResult` (corruption-sensitive)
+
+- The largest remaining genuine ERR_PTR cluster: the xv6fs concrete-driver
+  `inode_operations`/superblock vtable methods. All 6 converted to private
+  `*_inner() -> KResult<*mut vfs_inode>` + one `result_to_errptr` at the
+  `extern "C"` boundary. The **vtable ABI stays ERR_PTR** (the vfs layer
+  calls these through C-ABI fn pointers — locked until the P3-10 dyn-Trait
+  ops redesign); only the internal error-return encoding changed, disk logic
+  untouched.
+  - `inode.rs`: `__xv6fs_create`/`__xv6fs_mkdir`/`__xv6fs_symlink`/
+    `__xv6fs_mknod` (err_ptr 15→0).
+  - `superblock.rs`: `xv6fs_alloc_inode`/`xv6fs_get_inode` (err_ptr 9→0).
+- Error mapping: EINVAL/EEXIST/ENOMEM/ENOENT → the matching `Errno`
+  variant; already-negative helper `c_int` (`__xv6fs_dirlink` ret) and
+  non-enumerated `neg(EIO)`/`neg(ENOSPC)` → `Errno::Raw(...)` (lossless);
+  `vfs_alloc_inode` cross-module ERR_PTR → `Err(Errno::Raw(ptr_err))`. No new
+  variant; kstd.rs untouched. mkdir's parent-dirlink path preserves the
+  original's deliberate "discard `ret`, return EIO" behaviour.
+- **Corruption safety (the crux)**: `vfs_alloc_inode` returns the inode
+  *locked*; every post-alloc failure path unwinds before returning. All
+  cleanup — `vfs_iunlock(new_inode)`, symlink's `xv6fs_itrunc(ip)` +
+  `vfs_iunlock` (×3 sites), `xv6fs_get_inode`'s `brelse(bp)` — kept
+  byte-identical, in the exact original order/position, before an explicit
+  `return Err(...)`. Never `?`-propagated past cleanup (would drop an
+  iunlock/itrunc → on-disk inode leak/double-free). `bread`/`brelse`
+  pairing, `ilock`/`iunlock`, `xv6fs_log_write`, and scan loops byte-ident.
+- Verified: 0-warning `cargo clean`+`cmake` rebuild; cache clean before+
+  after; boot gate. **fs corruption battery on fresh `fs_img`** (orchestrator
+  re-ran independently): mkdir+EEXIST, nested mkdir, `ln`+`wc` byte-identical
+  through the hard link, ENOENT, symlinktest both subtests ok, usertests
+  createdelete/**bigdir**/linktest/unlinkread/dirtest all OK, **stressfs**
+  (first run completed full write0..32+read cycles, returned to prompt) —
+  and **zero** `panic`/`freeing free block`/`incorrect blockno`/`balloc: out
+  of blocks`/assert markers anywhere. Pre-existing single-test "lost some
+  free pages" artifact unchanged.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

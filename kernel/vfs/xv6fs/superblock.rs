@@ -105,10 +105,15 @@ use crate::vfs::fs::{
 };
 use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, vfs_mkdir, vfs_mknod};
 
-// `kassert!`/`err_ptr`/`is_err`/`is_err_or_null`'s canonical homes are
-// `crate::kstd`/crate root (P3-CS1 centralization).
+// `kassert!`/`is_err`/`is_err_or_null`'s canonical homes are
+// `crate::kstd`/crate root (P3-CS1 centralization). P3-CS12: the two
+// ERR_PTR-returning superblock-ops vtable methods (`xv6fs_alloc_inode`/
+// `xv6fs_get_inode`) now build a `KResult<*mut vfs_inode>` internally and
+// encode it to the ABI-fixed ERR_PTR exactly once at the `extern "C"`
+// boundary via `result_to_errptr`; only the error-return encoding changed,
+// the on-disk I/O / bread-brelse pairing is byte-identical.
 use crate::kassert;
-use crate::kstd::{err_ptr, is_err, is_err_or_null};
+use crate::kstd::{is_err, is_err_or_null, result_to_errptr, Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -452,8 +457,12 @@ fn __xv6fs_alloc_inode_structure() -> *mut xv6fs_inode {
 
 /// Mirrors `xv6fs_alloc_inode()`.
 pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+    result_to_errptr(xv6fs_alloc_inode_inner(sb))
+}
+
+fn xv6fs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
     if sb.is_null() {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     let xv6_sb = sb as *mut xv6fs_superblock;
     // SAFETY: `xv6_sb` is a live, exclusively-accessed superblock (caller
@@ -467,7 +476,7 @@ pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_
         while inum < (*disk_sb).ninodes as u64 {
             let bp = bread(dev, xv6fs_iblock(inum, (*disk_sb).inodestart));
             if bp.is_null() {
-                return err_ptr(neg(EIO));
+                return Err(Errno::Raw(neg(EIO)));
             }
             let dip = ((*bp).data as *mut dinode).add((inum % IPB) as usize);
             if (*dip).type_ == 0 {
@@ -479,7 +488,7 @@ pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_
 
                 let xi = __xv6fs_alloc_inode_structure();
                 if xi.is_null() {
-                    return err_ptr(neg(ENOMEM));
+                    return Err(Errno::NoMem);
                 }
                 (*xi).dev = dev;
                 (*xi).vfs_inode.ino = inum;
@@ -487,14 +496,14 @@ pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_
                 // vfs_add_inode.
                 (*xi).vfs_inode.ref_count = 1;
 
-                return ptr::addr_of_mut!((*xi).vfs_inode);
+                return Ok(ptr::addr_of_mut!((*xi).vfs_inode));
             }
             brelse(bp);
             inum += 1;
         }
     }
 
-    err_ptr(neg(ENOSPC))
+    Err(Errno::Raw(neg(ENOSPC)))
 }
 
 // ===========================================================================
@@ -503,8 +512,12 @@ pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_
 
 /// Mirrors `xv6fs_get_inode()`.
 pub(crate) extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+    result_to_errptr(xv6fs_get_inode_inner(sb, ino))
+}
+
+fn xv6fs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
     if sb.is_null() || ino == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     let xv6_sb = sb as *mut xv6fs_superblock;
     // SAFETY: `xv6_sb` is live (caller's contract).
@@ -513,24 +526,24 @@ pub(crate) extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *
         let dev = xv6fs_sb_dev(xv6_sb);
 
         if ino >= (*disk_sb).ninodes as u64 {
-            return err_ptr(neg(crate::bindings::ENOENT));
+            return Err(Errno::NoEnt);
         }
 
         let bp = bread(dev, xv6fs_iblock(ino, (*disk_sb).inodestart));
         if bp.is_null() {
-            return err_ptr(neg(EIO));
+            return Err(Errno::Raw(neg(EIO)));
         }
 
         let dip = ((*bp).data as *mut dinode).add((ino % IPB) as usize);
         if (*dip).type_ == 0 {
             brelse(bp);
-            return err_ptr(neg(crate::bindings::ENOENT));
+            return Err(Errno::NoEnt);
         }
 
         let xi = __xv6fs_alloc_inode_structure();
         if xi.is_null() {
             brelse(bp);
-            return err_ptr(neg(ENOMEM));
+            return Err(Errno::NoMem);
         }
 
         (*xi).dev = dev;
@@ -556,7 +569,7 @@ pub(crate) extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *
         }
 
         brelse(bp);
-        ptr::addr_of_mut!((*xi).vfs_inode)
+        Ok(ptr::addr_of_mut!((*xi).vfs_inode))
     }
 }
 
