@@ -184,6 +184,12 @@ use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
 use crate::vfs::vfs_syscall::vfs_mount_path;
 use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
 
+// P3-9c: `KArc<vfs_fs_type>` -- see `kernel/kobject.rs`'s `HasKobject`/
+// `KArc` doc and the `dev/dev.rs` (`device_t`) / `dev/bio.rs` (`bio`)
+// precedents. Used by `vfs_mount` below to replace its manual
+// `vfs_get_fs_type`/two-conditional-`vfs_put_fs_type` pairing.
+use crate::kobject::{HasKobject, KArc, Kobject};
+
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`) with
 /// its format arguments dropped — see the module doc's "Style notes" for
 /// why (already-established `inode.rs`/`file.rs`/`pipe.rs`/`fdtable.rs`
@@ -749,6 +755,22 @@ unsafe fn get_fs_type_locked(name: *const c_char) -> *mut vfs_fs_type {
     }
 }
 
+// `vfs_fs_type.kobj` is *not* the struct's first field (`list_entry` and
+// `superblocks` precede it -- see `kernel/inc/vfs/vfs_types.h`), unlike
+// `device_t`/`bio`'s offset-0 layout, so this is a genuine field
+// projection (`&raw mut (*this).kobj`), not a reinterpret cast.
+// SAFETY: `vfs_fs_type.kobj` is a stable, non-moving field,
+// `kobject_init`-ed by `vfs_register_fs_type` before any pointer to the
+// `vfs_fs_type` is ever handed out via `vfs_get_fs_type`, and live for as
+// long as any reference is held (`vfs_fs_type_kobj_release`/
+// `kobject_put` is the only thing that can invalidate it, and only once
+// the count reaches zero) -- exactly `HasKobject`'s contract.
+unsafe impl HasKobject for vfs_fs_type {
+    fn kobj_ptr(this: *mut Self) -> *mut Kobject {
+        unsafe { &raw mut (*this).kobj }
+    }
+}
+
 /// Mirrors `__vfs_fs_type_kobj_release()`.
 unsafe extern "C" fn vfs_fs_type_kobj_release(kobj: *mut kobject) {
     unsafe {
@@ -1280,6 +1302,16 @@ pub(crate) extern "C" fn vfs_mount(
 ) -> c_int {
     unsafe {
         let mut fs_type: *mut vfs_fs_type = ptr::null_mut();
+        // P3-9c: owns the reference `vfs_get_fs_type` acquires below (if
+        // any is ever acquired -- `None` on every early-return path
+        // before that point). Its `Drop` replaces the two unconditional
+        // `vfs_put_fs_type(fs_type)` calls the pre-P3-9c code needed at
+        // the shared epilogue (one per `ret_val != 0`/`== 0` branch) --
+        // both exit paths fall out of this same function scope, so a
+        // single implicit drop covers what used to be two manual call
+        // sites (and would silently start leaking again if a third exit
+        // path were ever added without remembering the pairing).
+        let mut fs_type_ref: Option<KArc<vfs_fs_type>> = None;
         let mut sb: *mut vfs_superblock = ptr::null_mut();
         let mut ret_val: c_int;
 
@@ -1319,12 +1351,18 @@ pub(crate) extern "C" fn vfs_mount(
         }
 
         'cleanup: {
-            fs_type = vfs_get_fs_type(type_);
-            if fs_type.is_null() {
+            let fs_type_raw = vfs_get_fs_type(type_);
+            if fs_type_raw.is_null() {
                 crate::kprintln!("vfs_mount: filesystem type '{}' not found", crate::printf::Cs(type_));
                 ret_val = neg(ENODEV);
                 break 'cleanup;
             }
+            // SAFETY: `vfs_get_fs_type`'s success postcondition (one held
+            // kobject reference) is exactly `KArc::from_raw`'s
+            // precondition.
+            let arc = KArc::<vfs_fs_type>::from_raw(fs_type_raw);
+            fs_type = KArc::as_ptr(&arc);
+            fs_type_ref = Some(arc);
             if (*fs_type).__bindgen_anon_1.registered() == 0 {
                 crate::kprintln!("vfs_mount: filesystem type '{}' not registered", crate::printf::Cs(type_));
                 ret_val = neg(ENODEV);
@@ -1398,7 +1436,9 @@ pub(crate) extern "C" fn vfs_mount(
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
                 vfs_iput(mountpoint);
             }
-            vfs_put_fs_type(fs_type);
+            // `fs_type_ref` drops here (function return), releasing the
+            // reference `vfs_get_fs_type` acquired above -- replaces the
+            // old unconditional `vfs_put_fs_type(fs_type)` on this path.
             return ret_val;
         } else if rwsem_is_write_holding(&raw mut (*sb).lock) {
             (*sb).__bindgen_anon_2.set_initialized(1);
@@ -1406,7 +1446,9 @@ pub(crate) extern "C" fn vfs_mount(
             (*sb).__bindgen_anon_2.set_attached(1);
             vfs_superblock_unlock(sb);
         }
-        vfs_put_fs_type(fs_type);
+        // `fs_type_ref` drops at the end of this scope, releasing the
+        // reference -- replaces the old unconditional
+        // `vfs_put_fs_type(fs_type)` on the success path.
         ret_val
     }
 }
@@ -2093,6 +2135,14 @@ pub(crate) extern "C" fn vfs_get_fs_type(name: *const c_char) -> *mut vfs_fs_typ
 /// Mirrors `vfs_put_fs_type()`.
 ///
 /// Locking: caller must hold the mount mutex via [`vfs_mount_lock`].
+// P3-9c: `vfs_mount` (this file's one former caller) now holds its
+// `vfs_get_fs_type` reference in a `KArc<vfs_fs_type>` instead, whose
+// `Drop` calls the raw `kobject_put` this function wraps directly --
+// leaving this header-declared (`kernel/inc/vfs/fs.h`) primitive with no
+// live in-tree caller. Kept (not deleted) as the public non-KArc
+// entry point for `vfs_get_fs_type`, same precedent as `dev/bio.rs`'s
+// `bio_dup`/`dev/cdev.rs`'s `cdev_dup`.
+#[allow(dead_code)]
 pub(crate) extern "C" fn vfs_put_fs_type(fs_type: *mut vfs_fs_type) {
     unsafe {
         if fs_type.is_null() {
