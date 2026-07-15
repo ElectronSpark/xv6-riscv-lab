@@ -1317,6 +1317,41 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   stashed all changes, rebuilt the pristine baseline, and reproduced the
   byte-identical panic at the same site.
 
+### Iteration 45 — 2026-07-15 — Wave P3-CS11 (danger zone): scheduler + thread-spawn `KResult`
+
+- The riskiest Result wave — the scheduler run-queue selection and the
+  fork/thread-creation hot path. All 4 `#[no_mangle] extern "C"` fns
+  converted to private `*_inner() -> KResult<*mut T>` + one
+  `result_to_errptr` at the boundary (ABI byte-identical; scheduler/fork
+  callers untouched):
+  - `rq.rs::get_rq_for_cpu`: 2× EINVAL → `Err(Inval)`; tail → `Ok`.
+  - `rq.rs::rq_select_task_rq`: 3× EINVAL → `Err(Inval)`; the no-match
+    `ptr::null_mut()` *success* tail preserved as `Ok(ptr::null_mut())`
+    (null is a valid "no rq selected" result, not an error).
+  - `thread.rs::thread_create`: EINVAL→`Err(Inval)`, ENOMEM→`Err(NoMem)`;
+    no cleanup between alloc and the ENOMEM path (kstack null-check fires
+    before any resource is taken).
+  - `thread.rs::kthread_create`: EAGAIN→`Err(Again)`; the two
+    cleanup-bearing error paths keep `__free_pid()` (and `thread_destroy(p)`
+    on the fs_clone path) byte-identical, in the exact original order,
+    before an explicit `return Err(...)` — never `?`-propagated past
+    cleanup. The `is_err(p)`/`is_err(fs_clone)` cross-module ERR_PTR values
+    become `Err(Errno::Raw(ptr_err(x)))` (lossless: `result_to_errptr(Err(
+    Raw(n))) == err_ptr(n)`, the original encoded pointer).
+- No new Errno variant; kstd.rs untouched. `err_ptr` 4→0 in each file.
+- Verified: 0-warning `cargo clean`+`cmake` rebuild; cache clean before+
+  after; boot gate; usertests forkfork/forktest OK; stressfs; **testsig
+  21/21**. **forkforkfork A/B regression gate**: worker stashed → pristine
+  baseline rebuild → forkforkfork panicked at the byte-identical site
+  (`0x80c40000`, "Failed to remove interrupted waiter from queue"); the
+  modified build panics at the same address/message (orchestrator re-ran
+  independently — same `0x80c40000`). Pre-existing `thread_queue.rs` panic,
+  a file untouched here — NOT a regression.
+- **Result-over-ERR_PTR migration is now essentially complete for the VFS +
+  proc fallible surfaces.** The remaining item (CS12) is typing the
+  `Errno::Raw(ptr_err(...))` cross-module passthroughs in inode.rs against
+  the fs.rs producers that now return `KResult`.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

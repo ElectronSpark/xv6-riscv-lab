@@ -25,9 +25,10 @@ use crate::bindings::{
 use crate::lock::rcu::rcu_check_callbacks;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
 use crate::proc::access::{
-    err_ptr, is_err, is_err_or_null, list_node_init_raw, CpuLocalRef, PgroupAccess,
+    is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
     SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
 };
+use crate::kstd::{result_to_errptr, Errno, KResult};
 use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
 use crate::proc::sigacts_init;
@@ -494,20 +495,19 @@ pub extern "C" fn detach_child(parent: *mut thread, child: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
+fn thread_create_inner(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> KResult<*mut thread> {
     // The guard check and shift below are plain safe arithmetic/calls;
     // the rest of the body is a `thread_raw_layout! { ... }` invocation,
     // which already supplies its own `unsafe` block — so the outer wrap
     // has been removed as redundant rather than genuinely needed.
     if kstack_order < 0 || kstack_order > PAGE_BUDDY_MAX_ORDER {
-        return err_ptr(-EINVAL);
+        return Err(Errno::Inval);
     }
     let kstack_size = 1u64 << (PAGE_SHIFT + kstack_order as u32);
     thread_raw_layout! {
         let kstack = page_alloc(kstack_order as u64, PAGE_TYPE_ANON);
         if kstack.is_null() {
-            return err_ptr(-ENOMEM);
+            return Err(Errno::NoMem);
         }
         memset((kstack as *mut u8).add((kstack_size - PAGE_SIZE) as usize) as *mut c_void,
                0, PAGE_SIZE as usize);
@@ -530,8 +530,13 @@ pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack
         ta.set_sid(-1);
 
         sched_entity_init(se, p);
-        p
+        Ok(p)
     }
+}
+
+#[no_mangle]
+pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
+    result_to_errptr(thread_create_inner(entry, arg1, arg2, kstack_order))
 }
 
 extern "C" fn kthread_entry(prev: *mut context) {
@@ -560,9 +565,8 @@ extern "C" fn kthread_entry(prev: *mut context) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
-                                         arg1: u64, arg2: u64, stack_order: c_int)-> *mut thread  {
+fn kthread_create_inner(name: *const c_char, entry: *mut c_void,
+                                         arg1: u64, arg2: u64, stack_order: c_int) -> KResult<*mut thread> {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
@@ -572,13 +576,13 @@ pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
         kassert!(!initproc.is_null(), "kthread_create: initproc is NULL");
 
         if __alloc_pid() < 0 {
-            return err_ptr(-EAGAIN);
+            return Err(Errno::Again);
         }
 
         let p = thread_create(entry, arg1, arg2, stack_order);
         if is_err_or_null(p) {
             __free_pid();
-            return if is_err(p) { p } else { err_ptr(-ENOMEM) };
+            return Err(if is_err(p) { Errno::Raw(ptr_err(p)) } else { Errno::NoMem });
         }
 
         let mut fs_clone: *mut fs_struct = ptr::null_mut();
@@ -587,7 +591,7 @@ pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
             if is_err_or_null(fs_clone) {
                 __free_pid();
                 thread_destroy(p);
-                return if is_err(fs_clone) { fs_clone as *mut thread } else { err_ptr(-ENOMEM) };
+                return Err(if is_err(fs_clone) { Errno::Raw(ptr_err(fs_clone)) } else { Errno::NoMem });
             }
         }
 
@@ -607,8 +611,14 @@ pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
         kthread_join_hierarchy_locked(p);
         pid_wunlock();
 
-        p
+        Ok(p)
     }
+}
+
+#[no_mangle]
+pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
+                                         arg1: u64, arg2: u64, stack_order: c_int)-> *mut thread  {
+    result_to_errptr(kthread_create_inner(name, entry, arg1, arg2, stack_order))
 }
 
 #[no_mangle]

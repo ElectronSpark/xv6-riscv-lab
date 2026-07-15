@@ -14,10 +14,11 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use crate::bindings::{cpu_local, rq, rq_percpu, sched_attr, sched_class, sched_entity, thread};
 use crate::machine::{cpuid, intr_get, intr_off, PreemptGuard};
 use crate::proc::access::{
-    err_ptr, is_err_or_null,
+    is_err_or_null,
     RqPercpuRef, RqRef, SchedAttrConstRef, SchedAttrRef, SchedClassRef, SchedEntityRef,
     ThreadAccess, sched_entity_llist_push_head,
 };
+use crate::kstd::{result_to_errptr, Errno, KResult};
 use crate::proc::init_fifo_rq;
 use crate::proc::init_idle_rq;
 
@@ -249,15 +250,19 @@ pub extern "C" fn rq_clear_ready(cls_id: c_int, cpu_id: c_int) {
 }
 
 // ---- get_rq_for_cpu ----
-#[no_mangle]
-pub extern "C" fn get_rq_for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
+fn get_rq_for_cpu_inner(cls_id: c_int, cpu_id: c_int) -> KResult<*mut rq> {
     if cls_id < 0 || cls_id >= PRIORITY_MAINLEVELS as c_int {
-        return err_ptr(-EINVAL);
+        return Err(Errno::Inval);
     }
     if cpu_id < 0 || cpu_id >= NCPU as c_int {
-        return err_ptr(-EINVAL);
+        return Err(Errno::Inval);
     }
-    get_rq(cls_id, cpu_id)
+    Ok(get_rq(cls_id, cpu_id))
+}
+
+#[no_mangle]
+pub extern "C" fn get_rq_for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
+    result_to_errptr(get_rq_for_cpu_inner(cls_id, cpu_id))
 }
 
 // ---- pick_next_rq ----
@@ -501,41 +506,45 @@ pub extern "C" fn rq_percpu_put_unlock(pc: *mut rq_percpu) {
 }
 
 // ---- rq_select_task_rq ----
-#[no_mangle]
-pub extern "C" fn rq_select_task_rq(se: *mut sched_entity, cpumask: cpumask_t) -> *mut rq {
-    if se.is_null() { return err_ptr(-EINVAL); }
+fn rq_select_task_rq_inner(se: *mut sched_entity, cpumask: cpumask_t) -> KResult<*mut rq> {
+    if se.is_null() { return Err(Errno::Inval); }
     let sr = se_ref(se);
     let major_prio = sr.priority() >> PRIORITY_MAINLEVEL_SHIFT;
     if major_prio < 0 || major_prio >= PRIORITY_MAINLEVELS as c_int {
-        return err_ptr(-EINVAL);
+        return Err(Errno::Inval);
     }
     let cls = sched_class_of(major_prio);
-    if cls.is_null() { return err_ptr(-EINVAL); }
+    if cls.is_null() { return Err(Errno::Inval); }
 
     let active = rqg_active_mask();
     let mut effective_mask = cpumask & active;
     if effective_mask == 0 { effective_mask = active; }
 
     // SAFETY: `cls` is checked non-null immediately above (`if cls.is_null() { return
-    // err_ptr(-EINVAL); }`).
+    // Err(Errno::Inval); }`).
     if let Some(selected) = unsafe { SchedClassRef::assume(cls) }
         .select_task_rq(sr.rq_ptr(), se, effective_mask)
     {
-        return selected;
+        return Ok(selected);
     }
 
     let cur_cpu = cpuid();
     if effective_mask & (1u64 << cur_cpu) != 0 {
         let r = get_rq_for_cpu(major_prio, cur_cpu);
-        if !is_err_or_null(r) { return r; }
+        if !is_err_or_null(r) { return Ok(r); }
     }
     for cpu in 0..NCPU as c_int {
         if effective_mask & (1u64 << cpu) != 0 {
             let r = get_rq_for_cpu(major_prio, cpu);
-            if !is_err_or_null(r) { return r; }
+            if !is_err_or_null(r) { return Ok(r); }
         }
     }
-    ptr::null_mut()
+    Ok(ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn rq_select_task_rq(se: *mut sched_entity, cpumask: cpumask_t) -> *mut rq {
+    result_to_errptr(rq_select_task_rq_inner(se, cpumask))
 }
 
 // ---- enqueue / dequeue / pick / put_prev / set_next ----
