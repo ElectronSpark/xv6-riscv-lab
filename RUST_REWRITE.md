@@ -900,6 +900,27 @@ Every wave: split verification (light worker gate + orchestrator full
 battery — testsig/stressfs/usertests/ctest) under the account
 spend-limit throttle; all green + committed.
 
+### Phase 3 interim census — 2026-07-14 (committed 1f3c92d)
+
+- C interface residue: **0 kernel .c files**; 704 #[no_mangle]; 490 unsafe
+  extern blocks; 43 bindgen allowlist_type entries (the wrapper.h-deletion
+  long tail — P3-4/5/6).
+- Unsafe: 3712 `unsafe {` blocks, 1013 unsafe fn/extern, 74 unsafe impl;
+  total occurrences 4942 (5088 @4593c1a). NOTE: total is ~flat because the
+  smart-pointer primitives RELOCATE unsafe into a few centralized impls
+  while removing scattered use-site unsafe + making whole functions safe —
+  the block count and fully-safe-fn count are the true progress signals.
+- Smart-pointer / RAII footprint: SpinLock<T> 9 files, KArc<T> 7 files,
+  Deref-guard impls 5 files. SpinLock on 6 globals; KArc on all 3
+  kobject-embedding types (inventory closed); mm-local guards data-carrying.
+- Top unsafe-block files: fdt.rs 290 + x1_sdhci 228 + x1_emac 112 (largely
+  INHERENT hardware MMIO/DMA/FDT parsing); pcache.rs 248; vfs/inode.rs 223;
+  proc/access.rs 180; vfs cluster (vfs_syscall 119 + file 114 + fs 96).
+- Next targets (highest non-hardware concentration): the vfs cluster
+  (~550 blocks — needs P3-7 ref-params + inode-refcount RAII + P3-10 dyn
+  ops) and proc/access.rs (180 — needs proc-type nativization, entangled
+  with the asm-offset danger zone).
+
 ### Iteration 38 — 2026-07-13 — Wave 28 (FINAL PORTING WAVE) → kernel C eliminated
 
 - virtio_disk.rs (virtqueue barriers 7/7 exact incl. the
