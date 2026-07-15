@@ -34,10 +34,11 @@ use crate::ipi::ipi_send_single;
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, SigactsAccess, SpinLockRef, ThreadAccess,
     ThreadGroupAccess, ThreadSignalAccess, ThreadSignalPtrRef, atomic_dec_unless_i32,
-    atomic_inc_i32, err_ptr, is_err, list_container_of as container_of,
+    atomic_inc_i32, is_err, list_container_of as container_of,
     list_node_detach_raw, list_node_init_raw, list_node_is_empty_raw, list_node_next_raw,
     list_node_push_back_raw, write_out,
 };
+use crate::kstd::{Errno, KResult};
 
 // ---------- constants ----------
 const SLAB_FLAG_STATIC: u64 = 1 << 1;
@@ -1205,31 +1206,31 @@ pub extern "C" fn sigreturn()-> c_int  {
 // __dequeue_signal_update_pending_nolock + __deliver_signal + handle_signal
 // ============================================================================
 fn dequeue_signal_update_pending_nolock(p: *mut thread, signo: c_int,
-                                               act: *mut sigaction_t)-> *mut ksiginfo_t  {
-    if p.is_null() || act.is_null() { return err_ptr(-EINVAL); }
+                                               act: *mut sigaction_t)-> KResult<*mut ksiginfo_t>  {
+    if p.is_null() || act.is_null() { return Err(Errno::Inval); }
     raw_sig_abi! {
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sa = ta.sigacts_ptr();
         if !sa.is_null() && spin_holding(&raw mut (*sa).lock) == 0 {
             xv6_panic(c"dequeue_signal: sigacts not held".as_ptr());
         }
-        if sigbad(signo) { return err_ptr(-EINVAL); }
+        if sigbad(signo) { return Err(Errno::Inval); }
         let sq = &raw mut (*p).signal.sig_pending[(signo - 1) as usize];
         let head = &raw mut (*sq).queue;
         if ((*act).sa_flags & SA_SIGINFO) == 0 {
             sigdelset(&mut (*p).signal.sig_pending_mask, signo);
-            return ptr::null_mut();
+            return Ok(ptr::null_mut());
         }
         if list_node_is_empty_raw(head) {
             sigdelset(&mut (*p).signal.sig_pending_mask, signo);
-            return ptr::null_mut();
+            return Ok(ptr::null_mut());
         }
         let info = container_of::<ksiginfo_t>((*head).next, ksi_list_entry_offset());
         list_node_detach_raw(&raw mut (*info).list_entry);
         if list_node_is_empty_raw(head) {
             sigdelset(&mut (*p).signal.sig_pending_mask, signo);
         }
-        info
+        Ok(info)
     }
 }
 
@@ -1411,11 +1412,11 @@ pub extern "C" fn handle_signal() {
             if from_shared && !tg.is_null() {
                 info = tg_dequeue_signal(tg, signo);
             } else {
-                info = dequeue_signal_update_pending_nolock(p, signo,
-                    &raw const sa_copy as *mut sigaction_t);
-                if is_err(info) {
-                    xv6_panic(c"handle_signal: dequeue failed".as_ptr());
-                }
+                info = match dequeue_signal_update_pending_nolock(p, signo,
+                    &raw const sa_copy as *mut sigaction_t) {
+                    Ok(dequeued) => dequeued,
+                    Err(_) => xv6_panic(c"handle_signal: dequeue failed".as_ptr()),
+                };
             }
             recalc_sigpending_tsk(p);
             sigacts_unlock(sa);

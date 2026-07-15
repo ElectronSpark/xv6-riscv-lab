@@ -29,10 +29,11 @@ use crate::bindings::{
 use crate::machine::{cpuid, CpuLocal};
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, ThreadAccess, ThreadGroupAccess,
-    ThreadSignalAccess, err_ptr, is_err, list_container_of as container_of,
+    ThreadSignalAccess, is_err, list_container_of as container_of,
     list_node_detach_raw, list_node_init_raw, list_node_is_detached_raw, list_node_is_empty_raw,
     list_node_next_raw, list_node_push_back_raw,
 };
+use crate::kstd::{result_to_errptr, Errno, KResult};
 use crate::proc::ksiginfo_alloc;
 use crate::proc::ksiginfo_free;
 use crate::proc::sigacts_lock;
@@ -285,16 +286,20 @@ pub extern "C" fn thread_group_live_dec(tg: *mut thread_group) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn get_thread_group(tgid: pid_t) -> *mut thread_group {
+fn get_thread_group_inner(tgid: pid_t) -> KResult<*mut thread_group> {
     let t = get_pid_thread(tgid);
-    if is_err(t) { return err_ptr(-ESRCH); }
-    if t.is_null() { return err_ptr(-ESRCH); }
+    if is_err(t) { return Err(Errno::Srch); }
+    if t.is_null() { return Err(Errno::Srch); }
     // SAFETY: `t` is checked non-null (`is_err(t)` / `t.is_null()`) immediately above.
     let ta = unsafe { ThreadAccess::assume(t) };
     let tg = ta.thread_group_ptr();
-    if tg.is_null() { return err_ptr(-ESRCH); }
-    tg
+    if tg.is_null() { return Err(Errno::Srch); }
+    Ok(tg)
+}
+
+#[no_mangle]
+pub extern "C" fn get_thread_group(tgid: pid_t) -> *mut thread_group {
+    result_to_errptr(get_thread_group_inner(tgid))
 }
 
 // ===========================================================================

@@ -238,6 +238,9 @@ pub enum Errno {
     /// P3-CS8, `vfs/inode.rs`'s `vfs_link`/`vfs_move`/
     /// `vfs_ilock_two_directories` cross-filesystem precondition checks).
     XDev,
+    /// `ESRCH`: no such process (added for P3-CS10, `proc/thread_group.rs`'s
+    /// `get_thread_group` tgid-lookup-miss paths).
+    Srch,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -293,6 +296,7 @@ impl Errno {
             Errno::AddrInUse => crate::bindings::EADDRINUSE as c_int,
             Errno::Again => crate::bindings::EAGAIN as c_int,
             Errno::XDev => crate::bindings::EXDEV as c_int,
+            Errno::Srch => crate::bindings::ESRCH as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`

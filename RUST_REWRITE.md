@@ -1285,6 +1285,38 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   scattered `err_ptr` sites, and typing inode.rs's `Errno::Raw(ptr_err(…))`
   passthroughs against these fs.rs producers now that they carry `KResult`.
 
+### Iteration 44 — 2026-07-15 — Wave P3-CS10: proc leaf `KResult` (signal dequeue + thread-group lookup)
+
+- Extends the Result migration into the proc cluster. Survey finding: most
+  proc `err_ptr` hits are the transitional **shims** themselves
+  (`access.rs::err_ptr_errno`, `proc_shims.rs::xv6_err_ptr`, clone.rs's
+  `extern` import decls) or the kstd re-export — deliberately kept. Only two
+  files hold genuinely-fallible functions that return ERR_PTR:
+- `thread_group.rs::get_thread_group` (`#[no_mangle] extern "C"`, ABI kept):
+  private `get_thread_group_inner() -> KResult<*mut thread_group>` (all three
+  `-ESRCH` paths → `Err(Errno::Srch)`) + `result_to_errptr` at the wrapper.
+  Provably identical ABI output (`err_ptr(Srch.neg()) == err_ptr(-ESRCH)`).
+- `signal.rs::dequeue_signal_update_pending_nolock` (private `fn`, signature
+  changed directly): **tri-state** contract preserved as
+  `KResult<*mut ksiginfo_t>` — the two `err_ptr(-EINVAL)` → `Err(Errno::Inval)`,
+  the two `ptr::null_mut()` *success* ("no signal pending") paths →
+  `Ok(ptr::null_mut())` (NOT an error), dequeued info → `Ok(info)`. Its sole
+  caller (signal.rs:1414) rewritten from an `is_err(info)` three-way test to
+  an `Ok`/`Err` match; the downstream null-vs-valid dispatch (skip
+  `ksiginfo_free` on null) unchanged. `raw_sig_abi!` block, `spin_holding`
+  sigacts-held assert, and every sigset/list mutation byte-identical.
+- Added `Errno::Srch` (ESRCH) to kstd.rs — no prior variant existed; matches
+  the existing variant+`raw()` style. `err_ptr` 3→0 (thread_group), 2→0
+  (signal); no other file touched.
+- Verified: 0-warning `cargo clean`+`cmake` rebuild; cache clean before+
+  after; boot gate (one `init: starting sh`); **testsig 21/21** (the signal
+  battery — tgkill/sigwait/sigsuspend/EINTR/sigpending — hammers both changed
+  functions), usertests killstatus/reparent/forkfork OK, ENOENT smoke.
+  forkforkfork's pre-existing panic (now surfacing at `thread_queue.rs:600`,
+  a file untouched here) rigorously re-confirmed NOT a regression: worker
+  stashed all changes, rebuilt the pristine baseline, and reproduced the
+  byte-identical panic at the same site.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
