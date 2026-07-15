@@ -174,7 +174,10 @@ const fn neg(e: u32) -> c_int {
 // it against another `c_int` (`neg(...)`), so the narrower return type is
 // a no-op change (see `is_eagain_ptr`, whose `as isize` comparison cast
 // is dropped accordingly).
-use crate::kstd::{err_ptr, is_err, is_err_or_null, ptr_err};
+use crate::kstd::{
+    err_ptr, errptr_to_result, is_err, is_err_or_null, ptr_err, result_to_errptr,
+    result_to_neg_errno, Errno, KResult,
+};
 
 #[inline(always)]
 fn is_eagain_ptr<T>(p: *mut T) -> bool {
@@ -972,17 +975,17 @@ fn make_iter_parent(iter: *mut vfs_dir_iter, ret_dentry: *mut vfs_dentry) -> c_i
 
 /// Lookup a dentry in a directory inode. Assumes the VFS core already
 /// handled ".".
-pub(crate) extern "C" fn vfs_ilookup(
+fn vfs_ilookup_inner(
     dir: *mut vfs_inode,
     dentry: *mut vfs_dentry,
     name: *const c_char,
     name_len: usize,
-) -> c_int {
+) -> KResult<()> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if dentry.is_null() || name.is_null() || name_len == 0 {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     // SAFETY: `name`/`name_len` describe a valid byte range (caller
     // precondition — the VFS convention for all name/name_len pairs).
@@ -997,14 +1000,14 @@ pub(crate) extern "C" fn vfs_ilookup(
         }
         let n = strndup(c".".as_ptr(), 1);
         if n.is_null() {
-            return neg(ENOMEM);
+            return Err(Errno::NoMem);
         }
         unsafe {
             (*dentry).name = n;
             (*dentry).name_len = 1;
             (*dentry).cookies = 0;
         }
-        return 0;
+        return Ok(());
     }
 
     if name_len == 2 && name_bytes[0] == b'.' && name_bytes[1] == b'.' {
@@ -1012,7 +1015,7 @@ pub(crate) extern "C" fn vfs_ilookup(
         if !target.is_null() {
             let n = strndup(c"..".as_ptr(), 2);
             if n.is_null() {
-                return neg(ENOMEM);
+                return Err(Errno::NoMem);
             }
             // SAFETY: non-null `target`/`dentry`.
             unsafe {
@@ -1023,7 +1026,7 @@ pub(crate) extern "C" fn vfs_ilookup(
                 (*dentry).name_len = 2;
                 (*dentry).cookies = 0;
             }
-            return 0;
+            return Ok(());
         }
         // fall through to driver lookup for normal ".."
     }
@@ -1049,7 +1052,18 @@ pub(crate) extern "C" fn vfs_ilookup(
 
     vfs_iunlock(dir);
     vfs_superblock_unlock(sb);
-    ret
+    if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
+}
+
+/// Lookup a dentry in a directory inode. Assumes the VFS core already
+/// handled ".".
+pub(crate) extern "C" fn vfs_ilookup(
+    dir: *mut vfs_inode,
+    dentry: *mut vfs_dentry,
+    name: *const c_char,
+    name_len: usize,
+) -> c_int {
+    result_to_neg_errno(vfs_ilookup_inner(dir, dentry, name, name_len))
 }
 
 /// Iterate over directory entries in a directory inode.
@@ -1243,17 +1257,17 @@ pub(crate) extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, b
     ret
 }
 
-pub(crate) extern "C" fn vfs_create(
+fn vfs_create_inner(
     dir: *mut vfs_inode,
     mode: mode_t,
     name: *const c_char,
     name_len: usize,
-) -> *mut vfs_inode {
+) -> KResult<*mut vfs_inode> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     loop {
@@ -1261,13 +1275,19 @@ pub(crate) extern "C" fn vfs_create(
         if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
             let r = unsafe { begin_fn(sb) };
             if r != 0 {
-                return err_ptr(r);
+                return Err(Errno::Raw(r));
             }
         }
 
         vfs_superblock_wlock(sb);
         vfs_ilock(dir);
 
+        // `ret_ptr` stays the transitional `ERR_PTR` encoding internally
+        // (rather than `KResult`) because the EAGAIN retry check below
+        // (`is_eagain_ptr`) and the driver `create` callback (a
+        // cross-module C-ABI fn that itself speaks `ERR_PTR`) both need
+        // the raw pointer form before this function's single boundary
+        // conversion at the bottom of the loop body.
         let ret_ptr: *mut vfs_inode = {
             let v = vfs_inode_valid_locked(dir);
             if v != 0 {
@@ -1306,8 +1326,17 @@ pub(crate) extern "C" fn vfs_create(
                 );
             }
         }
-        return ret_ptr;
+        return if is_err(ret_ptr) { Err(Errno::Raw(ptr_err(ret_ptr))) } else { Ok(ret_ptr) };
     }
+}
+
+pub(crate) extern "C" fn vfs_create(
+    dir: *mut vfs_inode,
+    mode: mode_t,
+    name: *const c_char,
+    name_len: usize,
+) -> *mut vfs_inode {
+    result_to_errptr(vfs_create_inner(dir, mode, name, name_len))
 }
 
 pub(crate) extern "C" fn vfs_mknod(
@@ -1988,20 +2017,20 @@ pub(crate) extern "C" fn vfs_curroot() -> *mut vfs_inode {
     rooti
 }
 
-/// Internal path lookup implementation. Returns `ERR_PTR(-EAGAIN)` on a
+/// Internal path lookup implementation. Returns `Err(Errno::Again)` on a
 /// transient race (e.g. inode freed during mount traversal); the caller
-/// ([`vfs_namei`]) retries.
-fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
+/// ([`vfs_namei_inner`]) retries.
+fn vfs_namei_once(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inode> {
     if path.is_null() || path_len == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if path_len > VFS_PATH_MAX {
-        return err_ptr(neg(ENAMETOOLONG));
+        return Err(Errno::NameTooLong);
     }
 
     let pathbuf = kmm_alloc(path_len + 1) as *mut c_char;
     if pathbuf.is_null() {
-        return err_ptr(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
 
     // Get current root for ".." at root handling.
@@ -2009,9 +2038,12 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
     if is_err_or_null(rooti) {
         kmm_free(pathbuf as *mut c_void);
         if rooti.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
-        return rooti;
+        // `vfs_curroot` is a cross-module-callable C-ABI fn (not owned by
+        // this cluster); its `ERR_PTR` encoding is preserved verbatim via
+        // `Errno::Raw`.
+        return Err(Errno::Raw(ptr_err(rooti)));
     }
 
     if unsafe { (*rooti).__bindgen_anon_1.mount() != 0 } {
@@ -2021,12 +2053,12 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
         if mnt_rooti.is_null() {
             vfs_iput(rooti);
             kmm_free(pathbuf as *mut c_void);
-            return err_ptr(neg(EINVAL)); // Mounted root inode has no mounted root
+            return Err(Errno::Inval); // Mounted root inode has no mounted root
         }
         if !atomic_inc_in_range(refcount_atomic(mnt_rooti), 0, VFS_INODE_MAX_REFCOUNT) {
             vfs_iput(rooti);
             kmm_free(pathbuf as *mut c_void);
-            return err_ptr(neg(EAGAIN)); // Mounted root is dying, retry
+            return Err(Errno::Again); // Mounted root is dying, retry
         }
         vfs_iput(rooti);
         rooti = mnt_rooti;
@@ -2045,9 +2077,10 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
         // Relative path, start from cwd.
         pos = vfs_curdir();
         if is_err(pos) {
+            let e = Errno::Raw(ptr_err(pos));
             vfs_iput(rooti);
             kmm_free(pathbuf as *mut c_void);
-            return pos;
+            return Err(e);
         }
     }
 
@@ -2061,8 +2094,11 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
 
     let mut saveptr: *mut c_char = ptr::null_mut();
     let mut token = strtok_r(pathbuf, c"/".as_ptr(), &mut saveptr);
-    let mut ret_inode: *mut vfs_inode = ptr::null_mut();
-    let mut errored = false;
+    // Mirrors the C original's `ret_inode`/`errored` pair: `result` tracks
+    // both the in-flight success pointer and any error, set immediately
+    // before each `break` exactly where the original set `ret_inode` +
+    // `errored = true`.
+    let mut result: KResult<*mut vfs_inode> = Ok(pos);
 
     while !token.is_null() {
         let token_len = strlen(token);
@@ -2072,8 +2108,7 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
         if lret != 0 {
             vfs_iput(pos);
             pos = ptr::null_mut();
-            ret_inode = err_ptr(lret);
-            errored = true;
+            result = Err(Errno::Raw(lret));
             break;
         }
 
@@ -2082,14 +2117,14 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
         if is_err(next) {
             vfs_iput(pos);
             pos = ptr::null_mut();
-            ret_inode = next;
-            errored = true;
+            result = Err(Errno::Raw(ptr_err(next)));
             break;
         }
 
         vfs_iput(pos);
         pos = next;
 
+        let mut mount_race = false;
         loop {
             let is_mount = unsafe { (*pos).__bindgen_anon_1.mount() != 0 };
             let mnt_rooti = unsafe { (*pos).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
@@ -2100,30 +2135,47 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
                 // Mount root is dying, need to retry the entire lookup.
                 vfs_iput(pos);
                 pos = ptr::null_mut();
-                ret_inode = err_ptr(neg(EAGAIN));
-                errored = true;
+                result = Err(Errno::Again);
+                mount_race = true;
                 break;
             }
             vfs_iput(pos);
             pos = mnt_rooti;
         }
-        if errored {
+        if mount_race {
             break;
         }
 
+        result = Ok(pos);
         token = strtok_r(ptr::null_mut(), c"/".as_ptr(), &mut saveptr);
-    }
-
-    if !errored {
-        ret_inode = pos;
     }
 
     vfs_iput(rooti);
     kmm_free(pathbuf as *mut c_void);
-    if pos.is_null() && !is_err(ret_inode) {
-        return err_ptr(neg(ENOENT));
+    match result {
+        Ok(p) if p.is_null() => Err(Errno::NoEnt),
+        other => other,
     }
-    ret_inode
+}
+
+/// Resolve a path to an inode, handling retry logic for transient race
+/// conditions (e.g. inode freed during mount traversal).
+fn vfs_namei_inner(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inode> {
+    let mut retries = 0;
+    loop {
+        match vfs_namei_once(path, path_len) {
+            Err(Errno::Again) => {
+                // Transient race condition, yield and retry.
+                scheduler_yield();
+                retries += 1;
+                if retries >= VFS_NAMEI_MAX_RETRIES {
+                    // Too many retries, return the error.
+                    return Err(Errno::Again);
+                }
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Resolve a path to an inode. Public wrapper handling retry logic for
@@ -2132,37 +2184,23 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
 /// Returns an inode pointer with its refcount incremented on success, or
 /// `ERR_PTR(errno)` on failure.
 pub(crate) extern "C" fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_inode {
-    let mut retries = 0;
-    loop {
-        let result = vfs_namei_once(path, path_len);
-        if !(is_err(result) && ptr_err(result) == neg(EAGAIN)) {
-            return result;
-        }
-        // Transient race condition, yield and retry.
-        scheduler_yield();
-        retries += 1;
-        if retries >= VFS_NAMEI_MAX_RETRIES {
-            break;
-        }
-    }
-    // Too many retries, return the error.
-    err_ptr(neg(EAGAIN))
+    result_to_errptr(vfs_namei_inner(path, path_len))
 }
 
 /// Resolve the parent directory of a path and copy the final name
 /// component into `name`. Returns the parent directory inode with a
-/// reference held on success, or `ERR_PTR` on failure.
-pub(crate) extern "C" fn vfs_nameiparent(
+/// reference held on success, or `Err` on failure.
+fn vfs_nameiparent_inner(
     path: *const c_char,
     path_len: usize,
     name: *mut c_char,
     name_size: usize,
-) -> *mut vfs_inode {
+) -> KResult<*mut vfs_inode> {
     if path.is_null() || path_len == 0 || name.is_null() || name_size == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if path_len > VFS_PATH_MAX {
-        return err_ptr(neg(ENAMETOOLONG));
+        return Err(Errno::NameTooLong);
     }
 
     // Find the last path component.
@@ -2173,7 +2211,7 @@ pub(crate) extern "C" fn vfs_nameiparent(
     }
     if end == 0 {
         // Path is just "/" or empty after trimming.
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     // Find the start of the last component.
@@ -2207,14 +2245,28 @@ pub(crate) extern "C" fn vfs_nameiparent(
 
     if parent_len == 0 {
         // Parent is root.
-        return if unsafe { *path } == b'/' as c_char {
+        return Ok(if unsafe { *path } == b'/' as c_char {
             vfs_curroot()
         } else {
             // Relative path with just one component, parent is cwd.
             vfs_curdir()
-        };
+        });
     }
 
-    // Resolve the parent path.
-    vfs_namei(path, parent_len)
+    // Resolve the parent path. `vfs_namei` is this same file's public
+    // C-ABI wrapper (still `ERR_PTR`-encoded, unchanged); bridge back to
+    // `KResult` at this internal call site via `errptr_to_result`.
+    errptr_to_result(vfs_namei(path, parent_len)).map_err(Errno::Raw)
+}
+
+/// Resolve the parent directory of a path and copy the final name
+/// component into `name`. Returns the parent directory inode with a
+/// reference held on success, or `ERR_PTR` on failure.
+pub(crate) extern "C" fn vfs_nameiparent(
+    path: *const c_char,
+    path_len: usize,
+    name: *mut c_char,
+    name_size: usize,
+) -> *mut vfs_inode {
+    result_to_errptr(vfs_nameiparent_inner(path, path_len, name, name_size))
 }

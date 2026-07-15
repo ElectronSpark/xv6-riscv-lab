@@ -229,6 +229,11 @@ pub enum Errno {
     /// `EADDRINUSE`: address already in use (added for P3-CS6,
     /// `vfs/file.rs`'s `vfs_sockalloc` duplicate-socket-tuple check).
     AddrInUse,
+    /// `EAGAIN`: transient race, retry (added for P3-CS7,
+    /// `vfs/inode.rs`'s `vfs_namei`/`vfs_namei_once` mount-traversal
+    /// retry loop — an inode/mount-root was caught mid-destroy; the
+    /// caller yields and retries the whole lookup).
+    Again,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -282,6 +287,7 @@ impl Errno {
             Errno::OpNotSupp => crate::bindings::EOPNOTSUPP as c_int,
             Errno::SPipe => crate::bindings::ESPIPE as c_int,
             Errno::AddrInUse => crate::bindings::EADDRINUSE as c_int,
+            Errno::Again => crate::bindings::EAGAIN as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`
