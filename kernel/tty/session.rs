@@ -50,9 +50,26 @@
 //! on every teardown path: replacing an already-set `ctrl_tty`,
 //! [`session_hangup`], and session finalization in [`session_unref`].
 //! See the [`session_set_ctrl_tty`] doc for the exact design.
+//!
+//! # `SRef` + off-by-one fix (Phase 3 P3-9e, 2026-07-14)
+//!
+//! Two, mostly-independent changes landed together in this wave:
+//!
+//! 1. [`SRef`] -- an RAII smart pointer over `session.ref_cnt`, mirroring
+//!    `kernel/kobject.rs`'s `KArc<T>` and `kernel/vfs/inode.rs`'s `IRef`.
+//!    Completes the refcount-smart-pointer trilogy (kobject / inode /
+//!    session -- the three manual-refcount families in this kernel).
+//!    See the type's own doc, just below [`session_unref`].
+//! 2. [`session_unref`]'s free-condition off-by-one (documented as a
+//!    known, preserved-1:1 bug since Wave 12) is now fixed: see that
+//!    function's doc for the exact change and for a *second, deeper*
+//!    leak this fix does **not** close (found while verifying it) --
+//!    also tracked in `RUST_REWRITE.md`'s Known issues.
 
 use core::ffi::{c_char, c_int, c_void};
+use core::ops::Deref;
 use core::ptr;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{ksiginfo, list_node_t, pgroup, pid_t, session, slab_cache_t, thread, thread_group, tty};
@@ -328,12 +345,22 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
         let pg = (*initproc).pgroup;
         session_assert!(!pg.is_null(), "session_init", "session_init: initproc has no pgroup");
 
-        let s = session_alloc((*initproc).pid);
-        session_assert!(!s.is_null(), "session_init", "session_init: session_alloc failed");
+        let s_raw = session_alloc((*initproc).pid);
+        session_assert!(!s_raw.is_null(), "session_init", "session_init: session_alloc failed");
+        // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
+        // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
+        // contract). This is the permanent, boot-created session 1 --
+        // nothing ever removes its last member, so (like the original
+        // C/pre-P3-9e code) this reference is never dropped, only handed
+        // back out via `into_raw` below (see `session_unref`'s doc for
+        // why that baseline reference staying held is a known, tracked
+        // leak, not a bug introduced by this wrapper).
+        let s = SRef::from_raw(s_raw);
 
-        session_add_pg(s, pg);
-        session_add_thread(s, initproc);
-        (*s).fg_pgrp = pg;
+        session_add_pg(SRef::as_ptr(&s), pg);
+        session_add_thread(SRef::as_ptr(&s), initproc);
+        (*SRef::as_ptr(&s)).fg_pgrp = pg;
+        let _ = SRef::into_raw(s);
     }
 }
 
@@ -406,30 +433,65 @@ pub(crate) unsafe extern "C" fn session_ref(s: *mut session) {
 /// `s`, if non-null, must be a live `session` (mirrors the C original's
 /// unconditional deref once past the null check).
 ///
-/// # A note on the finalization branch below
+/// # Off-by-one fix (Phase 3 P3-9e, 2026-07-14)
 ///
 /// The C original's `atomic_dec(&s->ref_cnt)` macro expands to
 /// `__atomic_fetch_sub(..., __ATOMIC_SEQ_CST)`, which -- per the GCC/C11
 /// atomic builtin contract -- returns the value *before* the
-/// subtraction, not after. The C code then names that pre-decrement
-/// value `new_val` and frees when `new_val == 0`, i.e. only on the call
+/// subtraction, not after. The C code then named that pre-decrement
+/// value `new_val` and freed when `new_val == 0`, i.e. only on the call
 /// that decrements ref_cnt from 0 to -1 -- one call *past* the
-/// legitimate "last owner drops its reference" transition (1 -> 0),
-/// which never fires under correctly paired `session_ref`/
-/// `session_unref` calls. This looks like a genuine pre-existing
-/// off-by-one (sessions are never actually freed via normal refcounting,
-/// only leaked) -- ported here 1:1 for fidelity, matching this project's
-/// established practice of preserving and flagging (not silently
-/// "fixing") pre-existing semantic bugs outside the current mandate
-/// (compare `timer_node_init`'s `retry_limit` bug, kept 1:1 and
-/// documented in `RUST_REWRITE.md`). Flagged as a candidate for a future,
-/// separately-reviewed fix; NOT part of this wave's mandate (which is
-/// the ctrl_tty back-pointer only). Because the branch below is
-/// consequently unreachable under normal paired usage, the ctrl_tty
-/// detach it performs is defense-in-depth (correct if the refcount bug
-/// is ever fixed later) rather than something this wave's tests can
-/// exercise live -- documented honestly per this project's convention
-/// (compare Iteration 11's `unwind_partial_map` note).
+/// legitimate "last owner drops its reference" transition (1 -> 0).
+/// Ported here 1:1 in Wave 12 (`RUST_REWRITE.md` Iteration 24) and
+/// flagged as a leaks-not-double-frees bug.
+///
+/// Fixed here: the free condition now compares the pre-decrement value
+/// against `1` (the call that actually drives `ref_cnt` to `0`),
+/// matching every other refcount in this crate (`kobject_put` frees on
+/// its *post*-decrement `count == 0`; `vfs_iput`'s CAS loop is
+/// equivalent) instead of the C's off-by-one. The `session_assert!`
+/// bound tightens from `>= 0` to `>= 1` to match: under correct pairing
+/// the pre-decrement value can never legitimately be `<= 0` any more
+/// (that would mean this call is decrementing a reference that had
+/// already reached zero -- a double-unref/use-after-free bug in the
+/// *caller*, not a normal teardown step), so a future such bug now
+/// fails loudly instead of silently falling through to a (previously
+/// unreachable) free branch.
+///
+/// No double-free risk from tightening the free condition: `fetch_sub`
+/// is a single atomic RMW, so under any concurrent race at most one
+/// caller ever observes the pre-decrement value `== 1` -- the same
+/// "exactly one hart sees the zero transition" guarantee
+/// `kobject_put`/`vfs_iput` already rely on.
+///
+/// # A second, deeper leak this fix does *not* close
+///
+/// Found while verifying the fix above: fixing the comparison makes
+/// `session_unref` free correctly whenever the pre-decrement count
+/// reaches `1` -- but a full grep of every `session_ref`/
+/// `session_unref` call site in the tree (this file is the *only*
+/// caller of either) shows [`session_alloc`]'s baseline `ref_cnt = 1`
+/// is never separately dropped anywhere except [`session_setsid`]'s
+/// `pgroup_alloc`-failure path. Every *successful* `session_setsid`/
+/// [`session_init`] leaves that baseline reference permanently
+/// un-dropped -- [`session_add_thread`]/[`session_remove_thread`] and
+/// [`session_add_pg`]/[`session_remove_pg`] only ever balance the `+1`
+/// *they themselves* took, never the allocation's own `+1`. So even
+/// with the comparison now correct, an ordinary `setsid()` followed by
+/// the leader exiting and its process group going away still leaves the
+/// session at `ref_cnt == 1` forever -- **the practical, long-running
+/// leak from ordinary interactive `setsid` use is not eliminated by
+/// this change**; only the narrow allocation-failure path is (verified:
+/// that path now frees instead of leaking -- see `session_setsid`'s own
+/// updated comment). Closing the rest would mean deciding *where* the
+/// baseline reference should be dropped (e.g. an explicit "last member
+/// left" check added to `session_remove_thread`/`session_remove_pg`, or
+/// starting `ref_cnt` at `0` instead of `1`) -- a session-lifecycle
+/// design decision, not a mechanical comparison fix, and risks a
+/// premature-free/use-after-free bug if rushed. Left undone and
+/// documented here + in `RUST_REWRITE.md`'s Known issues, matching this
+/// project's convention for preserved-but-flagged bugs (compare
+/// `timer_node_init`'s `retry_limit` bug).
 pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
     if s.is_null() {
         return;
@@ -438,19 +500,204 @@ pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
     // `session_ref`.
     unsafe {
         let old_val = AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_sub(1, Ordering::SeqCst);
-        session_assert!(old_val >= 0, "session_unref", "Session reference count went negative");
-        if old_val == 0 {
+        session_assert!(old_val >= 1, "session_unref", "Session reference count would go non-positive");
+        if old_val == 1 {
             (*s).__bindgen_anon_1.set_exited(1);
-            // Defensive teardown (see the fn doc above): make sure a
-            // still-attached controlling tty never keeps a dangling
-            // `tty->session` back-pointer into slab memory this call is
-            // about to free.
+            // Make sure a still-attached controlling tty never keeps a
+            // dangling `tty->session` back-pointer into slab memory this
+            // call is about to free (previously "defensive"/dead code
+            // under the off-by-one bug; now the live path the last
+            // dropped reference actually takes).
             __session_detach_ctrl_tty(s);
             if !ll_is_detached(&raw mut (*s).global_entry) {
                 ll_detach(&raw mut (*s).global_entry);
             }
             slab_free(s as *mut c_void);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `SRef` -- an RAII smart pointer over `session.ref_cnt` (Phase 3 P3-9e).
+// Completes the refcount-smart-pointer trilogy: `KArc<T>`
+// (`kernel/kobject.rs`) covers `kobject`, `IRef` (`kernel/vfs/inode.rs`)
+// covers `vfs_inode`, `SRef` covers `session` -- the last manual-refcount
+// family in this kernel. Session's refcount is a plain (non-kobject)
+// `AtomicI32`-backed `int` field manipulated by this file's own
+// `session_ref`/`session_unref` (just above) -- it cannot use `KArc<T>`,
+// and unlike `vfs_inode` there is no bespoke "dup, but only if still
+// live" C-ABI helper for [`SRef::try_from_raw`] to call into (the
+// `vfs_idup_not_zero` analog), so [`session_try_ref`] below is `SRef`'s
+// own small addition: a CAS retry loop directly on `ref_cnt`, using the
+// same `Ordering::SeqCst` as `session_ref`/`session_unref` (this file's
+// established single ordering for the field, not a second,
+// independently-reasoned Acquire/Relaxed split like
+// `kobject_try_get`'s). `SRef` mirrors `KArc<T>`/`IRef`'s shape
+// (`Clone`/`Drop`/`Deref`/`from_raw`/`try_from_raw`/`into_raw`/
+// `as_ptr`) but is built directly on top of the ref/unref pair rather
+// than re-deriving the atomics -- it inherits their exact,
+// already-proven ordering (including the off-by-one fix just above)
+// instead of a second, independently-reasoned-about copy.
+// `session_ref`/`session_unref`'s internals are untouched by this
+// wrapper -- `SRef` only wraps the get/put pair at call sites, exactly
+// as the `KArc`/`IRef` precedents wrap their own get/put pairs rather
+// than reimplementing them. The existing `#[no_mangle]`
+// `session_ref`/`session_unref`/`get_session` C-ABI exports are
+// unaffected.
+//
+// # Invariant
+// A live `SRef` owns exactly one held reference on the pointee
+// `session` (one increment of `ref_cnt` not yet matched by a
+// `session_unref`). `Clone` (-> `session_ref`) and `Drop` (->
+// `session_unref`) are the only ways that invariant is created/
+// destroyed internally; [`SRef::from_raw`]/[`SRef::try_from_raw`]
+// accept one from the caller (the success postcondition of
+// `session_alloc`/`session_ref`/a successful `try_from_raw` itself) and
+// [`SRef::into_raw`] hands one back out -- the same `from_raw`/
+// `into_raw` contract `Box`/`Arc`/`KArc`/`IRef` use, for call sites that
+// still store one held reference as a bare `*mut session` (e.g.
+// `thread.session`/`pgroup.session`, or `kernel/proc/thread.rs`'s
+// `KERNEL_SESSION` static).
+// ---------------------------------------------------------------------------
+
+/// `kobject_try_get`/`vfs_idup_not_zero` analog for `session`: attempt to
+/// upgrade a bare, liveness-unproven `*mut session` (e.g. one just read
+/// out of `session_list` without holding a reference of its own) by
+/// incrementing `ref_cnt` only if it has not already reached zero.
+/// Returns `false` if a concurrent final `session_unref` already zeroed
+/// (and is freeing, or has freed) `*s`.
+///
+/// Not part of `session.h`'s C ABI (no `#[no_mangle]`) -- this is an
+/// `SRef`-only addition; `session_ref`/`session_unref` above are
+/// preserved 1:1 (beyond the off-by-one fix) and untouched.
+///
+/// # Safety
+/// `s` must be non-null and point to a `session` that is still valid to
+/// dereference for the duration of this call (e.g. still under
+/// `pid_rlock`/`pid_wlock`, or otherwise known live) -- the same
+/// precondition `kobject_try_get`/`vfs_idup_not_zero` have.
+unsafe fn session_try_ref(s: *mut session) -> bool {
+    // SAFETY: see fn doc; same `AtomicI32::from_ptr` reasoning as
+    // `session_ref`/`session_unref`.
+    let rc = unsafe { AtomicI32::from_ptr(&raw mut (*s).ref_cnt) };
+    let mut old = rc.load(Ordering::SeqCst);
+    loop {
+        if old <= 0 {
+            return false;
+        }
+        // SeqCst on both success and failure: matches this field's one
+        // established ordering (see the module section doc above)
+        // rather than introducing a second, independently-reasoned
+        // Acquire/Relaxed split.
+        match rc.compare_exchange(old, old + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(cur) => old = cur,
+        }
+    }
+}
+
+/// See the module section doc above.
+pub(crate) struct SRef {
+    ptr: NonNull<session>,
+}
+
+impl SRef {
+    /// Take ownership of an existing, already-held session reference.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and point to a live `session` whose
+    /// `ref_cnt` currently carries a reference the caller is
+    /// transferring to the returned `SRef` -- the caller must not also
+    /// call `session_unref` (or drop another `SRef` over the same
+    /// reference) on that same held count. This is exactly the success
+    /// postcondition of `session_alloc`/`session_ref`.
+    pub(crate) unsafe fn from_raw(ptr: *mut session) -> Self {
+        debug_assert!(!ptr.is_null(), "SRef::from_raw: ptr is NULL");
+        // SAFETY: caller guarantees `ptr` is non-null (also debug-checked
+        // above) and owns an already-held reference (function contract).
+        SRef { ptr: unsafe { NonNull::new_unchecked(ptr) } }
+    }
+
+    /// Attempt to upgrade a bare, liveness-unproven `*mut session` into
+    /// an owned `SRef` -- see [`session_try_ref`]. Returns `None` if the
+    /// refcount had already reached zero (a concurrent final `Drop`/
+    /// `session_unref` raced ahead of this call).
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and point to a `session` that is still
+    /// valid to dereference for the duration of this call -- same
+    /// precondition [`session_try_ref`] has.
+    pub(crate) unsafe fn try_from_raw(ptr: *mut session) -> Option<Self> {
+        debug_assert!(!ptr.is_null(), "SRef::try_from_raw: ptr is NULL");
+        // SAFETY: caller guarantees `ptr` is live for the duration of
+        // this call (fn doc).
+        if unsafe { session_try_ref(ptr) } {
+            // SAFETY: `ptr` was just proven non-null-derived and live by
+            // the successful `session_try_ref` above, which also
+            // established the held reference this `SRef` now owns.
+            Some(SRef { ptr: unsafe { NonNull::new_unchecked(ptr) } })
+        } else {
+            None
+        }
+    }
+
+    /// Give up the owned reference without decrementing the refcount,
+    /// returning the raw pointer -- the flip side of [`SRef::from_raw`],
+    /// for a call site that stores one held reference as a bare pointer
+    /// (e.g. `thread.session`/`pgroup.session`, or
+    /// `kernel/proc/thread.rs`'s `KERNEL_SESSION` static).
+    pub(crate) fn into_raw(this: Self) -> *mut session {
+        let ptr = this.ptr.as_ptr();
+        core::mem::forget(this);
+        ptr
+    }
+
+    /// The raw pointer this `SRef` owns a reference on, without giving up
+    /// ownership (contrast [`SRef::into_raw`]) -- for passing to the
+    /// still-C-ABI-shaped helpers in this module that borrow a `*mut
+    /// session` without taking or dropping a reference of their own
+    /// (`session_add_pg`, `session_add_thread`, field writes like
+    /// `fg_pgrp`).
+    pub(crate) fn as_ptr(this: &Self) -> *mut session {
+        this.ptr.as_ptr()
+    }
+}
+
+impl Clone for SRef {
+    fn clone(&self) -> Self {
+        // Struct invariant: `self` owns a currently-held reference, so
+        // `session_ref`'s precondition (an already-held reference to
+        // increment from) holds; matches `KArc::clone`/`IRef::clone`'s
+        // use of `kobject_get`/`vfs_idup` under the same reasoning.
+        unsafe { session_ref(self.ptr.as_ptr()) };
+        SRef { ptr: self.ptr }
+    }
+}
+
+impl Drop for SRef {
+    fn drop(&mut self) {
+        // Struct invariant: `self` owns exactly one held reference,
+        // which this call gives up; `session_unref` runs its own
+        // finalization path (detach + free) if this was the last one.
+        // Every current `SRef` call site upholds `session_unref`'s
+        // precondition (`pid_wlock` held -- module doc's lock-ordering
+        // note): both current call sites (`session_init`,
+        // `session_setsid`) drop/into_raw while still holding it.
+        unsafe { session_unref(self.ptr.as_ptr()) };
+    }
+}
+
+impl Deref for SRef {
+    type Target = session;
+    fn deref(&self) -> &session {
+        // SAFETY: struct invariant -- a live `SRef` holds a reference,
+        // which keeps the pointee allocated for as long as any `SRef`
+        // over it exists (mirrors `KArc<T>`/`IRef::deref`'s reasoning).
+        // Shared access only: mutation of individual `session` fields
+        // elsewhere in this crate is synchronized by `pid_wlock`, not by
+        // unique ownership of the whole struct -- the same discipline
+        // every existing `*mut session` call site already relies on.
+        unsafe { self.ptr.as_ref() }
     }
 }
 
@@ -807,11 +1054,19 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
             return -EPERM;
         }
 
-        let s = session_alloc(tgid);
-        if s.is_null() {
+        let s_raw = session_alloc(tgid);
+        if s_raw.is_null() {
             pid_wunlock();
             return -ENOMEM;
         }
+        // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
+        // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
+        // contract). Owned locally until this function either transfers
+        // it out permanently (success, via `into_raw` below -- the new
+        // session's baseline reference, same as `session_init`'s) or
+        // lets it `Drop` (the `pgroup_alloc`-failure branch just below,
+        // replacing the previous manual `session_unref(s)` call there).
+        let s = SRef::from_raw(s_raw);
 
         let tg = (*p).thread_group;
         let pg = pgroup_alloc(tgid, tg);
@@ -824,14 +1079,21 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
             // dangling node in the list -- a use-after-free the next
             // time anything walks `session_list` (e.g.
             // `session_for_each_all`). `s->ref_cnt == 1` here (nothing
-            // else has referenced `s` yet), so going through
-            // `session_unref` is exactly the "sole owner drops its
-            // reference" case and correctly unlinks before freeing
-            // (mirrors this wave's "handle clearing on session
+            // else has referenced `s` yet), so dropping `s` (-> the
+            // sole owner's `session_unref`) is exactly the "sole owner
+            // drops its reference" case and correctly unlinks before
+            // freeing (mirrors this wave's "handle clearing on session
             // teardown" mandate for `session_set_ctrl_tty`, applied to
             // this other teardown path found while porting the same
-            // file).
-            session_unref(s);
+            // file). P3-9e: with the `session_unref` off-by-one fixed
+            // (see that fn's doc), this drop now actually frees `s`
+            // instead of leaking it -- explicit `drop(s)` here (not a
+            // plain scope-end `Drop`) so the free/unlink runs *before*
+            // `pid_wunlock()`, preserving the original code's lock
+            // ordering (`session_list`/`session_unref`'s finalization
+            // branch require `pid_wlock` held, same as every other
+            // mutation site -- module doc).
+            drop(s);
             pid_wunlock();
             return -ENOMEM;
         }
@@ -844,13 +1106,20 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
             session_remove_thread((*p).session, p);
         }
 
-        session_add_pg(s, pg);
+        session_add_pg(SRef::as_ptr(&s), pg);
         if !tg.is_null() {
             pgroup_add_tg(pg, tg);
         }
         pgroup_add_thread(pg, p);
-        session_add_thread(s, p);
-        (*s).fg_pgrp = pg; // becomes foreground group
+        session_add_thread(SRef::as_ptr(&s), p);
+        (*SRef::as_ptr(&s)).fg_pgrp = pg; // becomes foreground group
+
+        // Success: `s`'s baseline reference is deliberately kept alive
+        // (see `session_unref`'s doc -- this project's known,
+        // not-yet-closed leak), so hand the raw pointer back out without
+        // dropping, matching the pre-P3-9e code's behavior exactly (it
+        // never called `session_unref(s)` on this path either).
+        let _ = SRef::into_raw(s);
 
         pid_wunlock();
     }

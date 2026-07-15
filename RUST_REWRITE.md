@@ -1030,6 +1030,68 @@ spend-limit throttle; all green + committed.
   `{:<20} {:<5} {:<2}` columns = `%-20s %-5s %-2s` exactly; `free -v`
   buddy/slab G/M/K/B numbers preserved.
 
+### P3-9e — 2026-07-14 — `SRef` RAII smart pointer over session refcount + off-by-one assessed
+
+- `SRef` (`kernel/tty/session.rs`): `NonNull<session>`-backed, mirrors
+  `KArc<T>`/`IRef`'s shape (`Clone`→`session_ref`, `Drop`→`session_unref`,
+  `Deref`, `from_raw`/`try_from_raw`/`into_raw`/`as_ptr`). Unlike inode,
+  session has no bespoke "dup-if-still-live" C-ABI helper, so
+  `try_from_raw` is backed by a new private `session_try_ref` CAS loop
+  (same `Ordering::SeqCst` as the existing `session_ref`/`session_unref`,
+  not a second independently-reasoned ordering). Completes the
+  refcount-smart-pointer trilogy: `KArc<T>` (kobject), `IRef` (inode),
+  `SRef` (session) — no manual-refcount family left un-RAII'd.
+  `session_ref`/`session_unref`/`get_session`'s `#[no_mangle]` C-ABI
+  exports are unchanged.
+- Migrated 2 call sites (both in `session.rs`, the only file with any
+  `session_ref`/`session_unref` call site in the tree — grep-verified):
+  `session_init` (boot-time session 1: `from_raw` → `as_ptr` borrows for
+  `session_add_pg`/`session_add_thread`/`fg_pgrp` → `into_raw`, the
+  baseline reference deliberately kept alive, unchanged from before) and
+  `session_setsid` (same shape for the success path; its
+  `pgroup_alloc`-failure branch replaces the old manual `session_unref(s)`
+  call with an explicit `drop(s)` — kept explicit, not scope-end, so the
+  free/unlink still runs before `pid_wunlock()`, preserving the original
+  lock ordering). 1 manual `session_unref` call site eliminated;
+  `session_add_thread`/`session_remove_thread`/`session_add_pg`/
+  `session_remove_pg` (the primitives `SRef` wraps) intentionally
+  untouched, same precedent as `IRef` leaving `vfs_idup`/`vfs_iput` alone.
+- **Off-by-one bug (documented since Wave 12) FIXED**, distinct,
+  clearly-labeled change: `session_unref`'s free condition now compares
+  the pre-decrement `fetch_sub` value against `1` (was `0`), matching
+  `kobject_put`/`vfs_iput`'s post-decrement-zero convention instead of
+  the C's off-by-one; `session_assert!` bound tightened `>= 0` → `>= 1`
+  to match (a pre-decrement value `<= 0` is now a real double-unref bug,
+  not a silently-passed-through path to the previously-unreachable free
+  branch). No double-free risk: `fetch_sub` is a single atomic RMW, so at
+  most one racing caller ever observes the value `== 1`.
+- **Second, deeper leak found while verifying the fix, NOT closed**: a
+  full grep of every `session_ref`/`session_unref` call site (this file
+  is the only caller of either) shows `session_alloc`'s baseline
+  `ref_cnt = 1` is never separately dropped anywhere except
+  `session_setsid`'s `pgroup_alloc`-failure path — every *successful*
+  `setsid()`/`session_init` leaves that baseline reference permanently
+  un-dropped, since `session_add_thread`/`session_remove_thread` and
+  `session_add_pg`/`session_remove_pg` only ever balance the `+1` *they
+  themselves* took. So the comparison fix alone does **not** eliminate
+  the practical, long-running leak from ordinary interactive `setsid`
+  use — only the narrow allocation-failure path now frees correctly.
+  Live-verified via `ps -s` (walks `session_list` directly): after 3
+  `testsig` runs (each exercising `setsid` via Test 15/16), 6 sessions
+  accumulate showing `threads=0, pgroups=0` — abandoned but never
+  unlinked/freed, exactly as this analysis predicts. Closing this needs a
+  session-lifecycle design decision (where to drop the baseline
+  reference — e.g. a "last member left" check, or starting `ref_cnt` at
+  `0`), not a mechanical comparison fix, and risks a premature-free bug
+  if rushed — left undone and documented (this file's Known issues +
+  `session.rs`'s module/`session_unref` doc).
+- Verified: zero-warning build (incl. cache re-check before/after per
+  Working notes), boot gate ×2 (`init: starting sh` ×1 + `/ $` each),
+  testsig 21/21 ×3 back-to-back (Test 15 setsid/getsid green every run,
+  no panics/assertion failures), `ps -s`/`free` before+after (buddy free+
+  cached stable — no page-level leak or corruption; session-list growth
+  is the documented slab-level leak above, not a page leak).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
@@ -1058,6 +1120,22 @@ spend-limit throttle; all green + committed.
   backfill, lock/*.rs u! consolidation, rb tie-group hardening).
 
 ## Known issues (pre-existing, not caused by the rewrite)
+
+- ~~`session_unref` (`kernel/tty/session.rs`) free-condition off-by-one
+  (compared the pre-decrement `fetch_sub` value against `0` instead of
+  `1`, so sessions were never freed via normal refcounting)~~ **The
+  comparison itself FIXED in P3-9e** (2026-07-14) — see that wave's log
+  entry and `session_unref`'s doc comment for the exact change and its
+  no-double-free argument. **However, a second, deeper, still-open leak
+  was found while verifying the fix**: `session_alloc`'s baseline
+  `ref_cnt = 1` is never separately dropped by any call site except
+  `session_setsid`'s allocation-failure path, so an ordinary successful
+  `setsid()` still leaves its session's `ref_cnt` at `1` forever once its
+  last thread/pgroup member leaves — live-verified via `ps -s` (dumping
+  `session_list` directly): sessions with `threads=0, pgroups=0` persist
+  indefinitely. Closing this needs a session-lifecycle design decision
+  (where the baseline reference should be dropped), not a mechanical
+  fix; left open, tracked here and in `session.rs`'s module doc.
 
 - Intermittent `rm <dir>` EBUSY on repeated same-name directory
   reuse (alternating rounds) — proved pre-existing via A/B/A stash+rebuild
