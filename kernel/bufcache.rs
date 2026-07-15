@@ -19,8 +19,13 @@
 //! # Locking order (unchanged from the C original)
 //!
 //! 1. `bcache.lock` (spinlock) -- protects the LRU/dirty lists and the
-//!    hash table. Held only for short, non-sleeping critical sections
-//!    ([`crate::sync::KSpinlock`] RAII).
+//!    hash table. Held only for short, non-sleeping critical sections.
+//!    Wave P3-8c: lock-owns-data [`crate::sync::SpinLock`] (see
+//!    [`BCacheHash`] below) -- a held [`crate::sync::SpinLockGuard`]
+//!    `Deref`s straight to the protected fields, so most critical
+//!    sections need no `unsafe` for the field access itself, and every
+//!    early-return/loop-continue exit path releases the lock for free
+//!    via RAII (`drop(bc)`) instead of a hand-paired `spin_unlock`.
 //! 2. `buf.lock` (mutex) -- protects one buffer's contents; `bread()`
 //!    returns with it held, `brelse()` releases it. This lock crosses
 //!    function-call (often thread) boundaries by design -- the same
@@ -38,32 +43,67 @@
 //! not hold other sleeping locks that the disk interrupt/completion path
 //! could need.
 //!
+//! **Lock-ordering hazard, called out explicitly**: [`bget`] takes
+//! `bcache.lock`, walks the hash table, and -- whether it finds a cached
+//! buffer or has to recycle a free one -- must release `bcache.lock`
+//! *before* acquiring that buffer's own `buf.lock` (mutex). Holding
+//! `bcache.lock` across a (potentially sleeping) mutex acquire would
+//! both violate the spinlock's own "never sleep while held" rule and
+//! risk a lock-order inversion against any other path that acquires the
+//! two in this order. Both `bget` exit paths (`return`ed a cached hit
+//! or a freshly recycled buffer) call `drop(bc)` -- releasing the
+//! `SpinLockGuard` -- immediately before `mutex_lock`, mirroring the C
+//! original's `spin_unlock(&bcache.lock); mutex_lock(&b->lock);`
+//! ordering exactly.
+//!
 //! # Data structures
 //!
-//! `BCACHE` mirrors the C file-scope anonymous `struct { spinlock_t
+//! `BCacheHash` mirrors the C file-scope anonymous `struct { spinlock_t
 //! lock; struct buf buf[NBUF]; list_node_t free_list, dirty_list; uint
 //! dirty_count; hlist_t cached; hlist_bucket_t buckets[BIO_HASH_BUCKETS];
-//! } bcache;` field-for-field, including the `hlist_t` + immediately-
-//! adjacent `buckets` array trick: `hlist_t`'s own `buckets` member is a
-//! zero-sized `__IncompleteArrayField` (bindgen's flexible-array-member
-//! encoding), so laying a real `[list_node_t; BIO_HASH_BUCKETS]` field
-//! directly after `cached: hlist_t` in this struct reproduces the same
-//! layout `kernel/hlist.rs`'s `bucket_at()` (`buckets.as_mut_ptr()`,
-//! i.e. "the address right after the header") expects -- identical to
-//! the precedent already established by `kernel/proc/proc_shims.rs`'s
-//! `ProcTable`.
+//! } bcache;`'s LRU/dirty-list/hash-table fields -- the ones `bcache.lock`
+//! actually protects -- field-for-field, including the `hlist_t` +
+//! immediately-adjacent `buckets` array trick: `hlist_t`'s own `buckets`
+//! member is a zero-sized `__IncompleteArrayField` (bindgen's
+//! flexible-array-member encoding), so laying a real `[list_node_t;
+//! BIO_HASH_BUCKETS]` field directly after `cached: hlist_t` in this
+//! struct reproduces the same layout `kernel/hlist.rs`'s `bucket_at()`
+//! (`buckets.as_mut_ptr()`, i.e. "the address right after the header")
+//! expects -- identical to the precedent already established by
+//! `kernel/proc/proc_shims.rs`'s `ProcTable`. Wave P3-8c: `BCacheHash`
+//! now lives inside a [`crate::sync::SpinLock`] (`BCACHE`, below)
+//! instead of being a plain field-group next to a hand-rolled
+//! `spinlock_t` -- the lock genuinely *owns* exactly the data it
+//! protects, `std::sync::Mutex<T>`-style.
 //!
-//! Storage is `static mut ... MaybeUninit<BCache> = MaybeUninit::zeroed()`
-//! (same idiom as `kernel/console.rs`'s `CONSOLE_CDEV` /
-//! `kernel/tty/ptmx.rs`'s `PTMX_CDEV`). Unlike those two, the zero
-//! *value* is not just "never read before real init" here -- `bget()`'s
-//! buffer-recycling path genuinely depends on a not-yet-recycled buffer
-//! reading back `dev == 0 && blockno == 0` (the C static's implicit BSS
-//! zero-init), so `zeroed()` (not `uninit()`) is required for
-//! correctness, not merely permitted for soundness. `buf`/`list_node_t`/
-//! `hlist_t`/`mutex_t`/`spinlock_t` are all plain integers and raw
-//! pointers (no references, no niche types), so the all-zero bit pattern
-//! is a valid value for every field -- sound by construction.
+//! The `buf` array itself (`BUF_STORAGE`, below) is deliberately kept
+//! *outside* `BCacheHash`/`BCACHE`: each `buf.lock` is a sleeplock held
+//! across function-call boundaries (see locking order item 2 above), so
+//! `buf.data`/`buf.lock` etc. must stay reachable without going through
+//! a `SpinLockGuard` (whose `Deref` is only valid while the spinlock
+//! itself is held -- it cannot model a lock that outlives the critical
+//! section). `bcache.lock` still protects each buffer's
+//! `free_entry`/`dirty_entry`/`refcnt`/`dirty` fields, exactly as in the
+//! C original and unchanged by this refactor -- only reachable via raw
+//! `*mut buf` pointers and per-site `unsafe` (documented at each call
+//! site below), same as before.
+//!
+//! Storage is `static mut BUF_STORAGE: MaybeUninit<[buf; NBUF]> =
+//! MaybeUninit::zeroed()` (same idiom as `kernel/console.rs`'s
+//! `CONSOLE_CDEV` / `kernel/tty/ptmx.rs`'s `PTMX_CDEV`) for the buffers,
+//! and `BCACHE: SpinLock<BCacheHash> = SpinLock::new(name, zeroed)` for
+//! the hash/list header. Unlike those two, the zero *value* is not just
+//! "never read before real init" here -- `bget()`'s buffer-recycling
+//! path genuinely depends on a not-yet-recycled buffer reading back
+//! `dev == 0 && blockno == 0` (the C static's implicit BSS zero-init),
+//! so zeroing (not leaving uninitialised) is required for correctness,
+//! not merely permitted for soundness; likewise `BCacheHash`'s zeroed
+//! placeholder is not yet a meaningful "initialized" state (`free_list`/
+//! `dirty_list`/`cached` need real runtime `list_entry_init`/
+//! `hlist_init` calls in [`binit`], exactly as before). `buf`/
+//! `list_node_t`/`hlist_t`/`mutex_t` are all plain integers and raw
+//! pointers (no references, no niche types), so the all-zero bit
+//! pattern is a valid value for every field -- sound by construction.
 //!
 //! `NBUF` (`param.h`, `MAXOPBLOCKS * 300` = 24000) and `BIO_HASH_BUCKETS`
 //! (`dev/buf.h`, 24007) are plain `#define`s with no corresponding C
@@ -119,11 +159,11 @@ use core::sync::atomic::Ordering;
 
 use crate::bindings::{
     bio, blkdev_t, bool_, buf, completion_t, hlist_entry_t, hlist_func_t, hlist_t, list_node_t,
-    mutex_t, page_t, spinlock_t, PGSIZE,
+    mutex_t, page_t, PGSIZE,
 };
 use crate::machine;
 use crate::mm::cffi::container_of;
-use crate::sync::KSpinlock;
+use crate::sync::SpinLock;
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block, matching the
@@ -283,10 +323,12 @@ fn ln_pop_front(head: *mut list_node_t) -> *mut list_node_t {
 // Storage -- see module doc's "Data structures" section.
 // ---------------------------------------------------------------------------
 
+/// The lock-protected header: hash table + free/dirty lists. See module
+/// doc's "Data structures" section for the full layout rationale
+/// (`#[repr(C)]` field order/adjacency of `cached`/`buckets` is
+/// load-bearing) and why the `buf` array lives outside this type.
 #[repr(C)]
-struct BCache {
-    lock: spinlock_t,
-    buf: [buf; NBUF],
+struct BCacheHash {
     free_list: list_node_t,
     dirty_list: list_node_t,
     dirty_count: u32,
@@ -294,20 +336,37 @@ struct BCache {
     buckets: [list_node_t; BIO_HASH_BUCKETS],
 }
 
-static mut BCACHE: core::mem::MaybeUninit<BCache> = core::mem::MaybeUninit::zeroed();
-
-#[inline(always)]
-fn bc() -> *mut BCache {
-    // SAFETY: `BCACHE` is `'static` storage; taking its address never
-    // fails. Every field access through the returned pointer is
-    // separately justified at its call site (spinlock-protected, or
-    // one-time boot init per `binit`'s contract).
-    unsafe { BCACHE.as_mut_ptr() }
+/// Placeholder value for [`BCACHE`]'s `const fn SpinLock::new` -- not a
+/// meaningful "initialized" state; see module doc.
+const fn zeroed_bcache_hash() -> BCacheHash {
+    // SAFETY: `BCacheHash`'s fields (`list_node_t`, `hlist_t`) are plain
+    // integers/raw pointers/`Option<fn>` (null-niche), no references --
+    // the all-zero bit pattern is a valid value for the type. Real
+    // initialisation (`list_entry_init`/`hlist_init`) happens in
+    // `binit`, matching the original static's implicit BSS zero-init
+    // (module doc).
+    unsafe { core::mem::MaybeUninit::zeroed().assume_init() }
 }
 
+static BCACHE: SpinLock<BCacheHash> = SpinLock::new(c"bcache", zeroed_bcache_hash());
+
+/// The `buf` array -- kept outside [`BCACHE`] (see module doc's "Data
+/// structures" section for why). Same zero-init rationale as before:
+/// `bget`'s buffer-recycling path depends on a not-yet-recycled buffer
+/// reading back `dev == 0 && blockno == 0`.
+static mut BUF_STORAGE: core::mem::MaybeUninit<[buf; NBUF]> = core::mem::MaybeUninit::zeroed();
+
+/// Address of buffer slot `i`. Every call site indexes with `i < NBUF`
+/// (this file's own invariant, matching the original `(*bc_ptr).buf[i]`
+/// C-style indexing it replaces).
 #[inline(always)]
-fn bcache_lock() -> KSpinlock {
-    KSpinlock::from_bindings(unsafe { &raw mut (*bc()).lock })
+fn buf_at(i: usize) -> *mut buf {
+    // SAFETY: `BUF_STORAGE` is `'static` storage; taking a derived
+    // address never fails. Callers keep `i < NBUF` (documented above);
+    // dereferencing the returned pointer is separately justified at
+    // each call site (spinlock-protected, mutex-protected, or one-time
+    // boot init per `binit`'s contract).
+    unsafe { BUF_STORAGE.as_mut_ptr().cast::<buf>().add(i) }
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +503,6 @@ fn assert_blkdev_put_ok(ret: c_int) {
 fn buf_cache_prealloc() {
     let page_blocks = (PGSIZE / BSIZE) as usize;
     let pages_needed = NBUF.div_ceil(page_blocks);
-    let bc_ptr = bc();
     for i in 0..pages_needed {
         let pa = page_alloc(0, PAGE_TYPE_ANON) as *mut u8;
         if pa.is_null() {
@@ -455,11 +513,13 @@ fn buf_cache_prealloc() {
             if buf_idx >= NBUF {
                 break;
             }
-            // SAFETY: `buf_idx < NBUF`; `pa` is a freshly allocated page
-            // this buffer slot now owns permanently (buffer-cache pages
-            // are never freed, matching the C original).
+            let b = buf_at(buf_idx);
+            // SAFETY: `buf_idx < NBUF` (checked above); `pa` is a
+            // freshly allocated page this buffer slot now owns
+            // permanently (buffer-cache pages are never freed, matching
+            // the C original).
             unsafe {
-                (*bc_ptr).buf[buf_idx].data = pa.add(j * BSIZE as usize);
+                (*b).data = pa.add(j * BSIZE as usize);
             }
         }
     }
@@ -473,32 +533,48 @@ fn buf_cache_prealloc() {
 /// before any other entry point in this file.
 #[no_mangle]
 pub extern "C" fn binit() {
-    let bc_ptr = bc();
-    bcache_lock().init(c"bcache".as_ptr());
-    // SAFETY: called exactly once at boot (function contract above) --
-    // no concurrent access to `BCACHE` is possible yet.
-    unsafe {
-        machine::list_entry_init(&raw mut (*bc_ptr).free_list);
-        machine::list_entry_init(&raw mut (*bc_ptr).dirty_list);
-        (*bc_ptr).dirty_count = 0;
+    // `BCACHE` starts life already in the "locked struct with zeroed
+    // contents" state (`SpinLock::new` is a `const fn`) -- unlike the
+    // pre-P3-8c version there is no separate `spin_init` call needed
+    // before touching the guard.
+    let mut bc = BCACHE.lock();
+    // `list_entry_init`/`hlist_init` etc. below all take/dereference raw
+    // `*mut` pointers derived from the held guard (`&raw mut bc.field`)
+    // -- safe to form (address-of only), and called exactly once at
+    // boot (function contract) before any other entry point in this
+    // file can observe `BCACHE`/`BUF_STORAGE`, so no concurrent access
+    // is possible yet.
+    machine::list_entry_init(&raw mut bc.free_list);
+    machine::list_entry_init(&raw mut bc.dirty_list);
+    bc.dirty_count = 0;
 
-        let mut func = hlist_func_t {
-            hash: Some(bcache_hash_func),
-            get_node: Some(bcache_hlist_get_node),
-            get_entry: Some(bcache_hlist_get_entry),
-            cmp_node: Some(bcache_hlist_cmp),
-        };
-        hlist_init(&raw mut (*bc_ptr).cached, BIO_HASH_BUCKETS as u64, &raw mut func);
+    let mut func = hlist_func_t {
+        hash: Some(bcache_hash_func),
+        get_node: Some(bcache_hlist_get_node),
+        get_entry: Some(bcache_hlist_get_entry),
+        cmp_node: Some(bcache_hlist_cmp),
+    };
+    // SAFETY: `hlist_init` is a genuinely unsafe FFI entry point (raw
+    // hash-table-header initialisation); `&raw mut bc.cached`/`&raw mut
+    // func` are live storage reached through the held guard / a live
+    // stack local. The per-buffer loop below is likewise safe only
+    // because `binit` runs exactly once at boot, before any other entry
+    // point in this file can observe `BCACHE`/`BUF_STORAGE` -- every
+    // `&raw mut (*b).field` is a raw address-of, not an unchecked
+    // read/write, on `'static` storage `i < NBUF` keeps in-bounds.
+    unsafe {
+        hlist_init(&raw mut bc.cached, BIO_HASH_BUCKETS as u64, &raw mut func);
 
         for i in 0..NBUF {
-            let b: *mut buf = &raw mut (*bc_ptr).buf[i];
+            let b: *mut buf = buf_at(i);
             machine::list_entry_init(&raw mut (*b).free_entry);
             machine::list_entry_init(&raw mut (*b).dirty_entry);
             (*b).dirty = 0;
             mutex_init(&raw mut (*b).lock, c"buffer".as_ptr() as *mut core::ffi::c_char);
-            ln_push_back(&raw mut (*bc_ptr).free_list, &raw mut (*b).free_entry);
+            ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
         }
     }
+    drop(bc);
     buf_cache_prealloc();
 }
 
@@ -506,19 +582,18 @@ pub extern "C" fn binit() {
 /// found, recycle the least-recently-used free buffer. Returns a
 /// *locked* buffer either way (mirrors `bget`).
 fn bget(dev: u32, blockno: u32) -> *mut buf {
-    let bc_ptr = bc();
-    let guard = bcache_lock().lock();
+    let mut bc = BCACHE.lock();
 
     // Is the block already cached?
     let mut key = lookup_key(dev, blockno);
-    // SAFETY: `bc_ptr` is valid `'static` storage; `key` is a
-    // stack-local lookup key alive for this call.
-    let b = unsafe {
-        hlist_get(&raw mut (*bc_ptr).cached, (&mut key as *mut buf) as *mut c_void) as *mut buf
-    };
+    // SAFETY: `hlist_get` is a genuinely unsafe FFI hash-table lookup;
+    // `&raw mut bc.cached` is live `'static` storage reached through the
+    // held guard, `key` is a stack-local lookup key alive for this call.
+    let b = unsafe { hlist_get(&raw mut bc.cached, (&mut key as *mut buf) as *mut c_void) } as *mut buf;
     if !b.is_null() {
         // Found it. Remove from free list if it's there (refcnt was 0).
-        // SAFETY: `b` is a live, registered buffer.
+        // SAFETY: `b` is a live, registered buffer (returned by
+        // `hlist_get` while `bc` is held).
         unsafe {
             let fe = &raw mut (*b).free_entry;
             if !ln_is_detached(fe) {
@@ -526,25 +601,28 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
             }
             (*b).refcnt += 1;
         }
-        drop(guard);
-        unsafe { mutex_lock(&raw mut (*b).lock) };
+        // Release `bcache.lock` *before* acquiring the buffer's own
+        // sleeplock -- see module doc's "Lock-ordering hazard" note.
+        drop(bc);
+        // SAFETY: `b` live.
+        mutex_lock(unsafe { &raw mut (*b).lock });
         return b;
     }
 
     // Not cached. Get a free buffer from the free list (O(1), oldest
     // free buffer first for LRU behavior).
-    if ln_is_empty(unsafe { &raw mut (*bc_ptr).free_list }) {
+    if ln_is_empty(&raw mut bc.free_list) {
         xv6_panic(c"bget: no buffers".as_ptr());
     }
-    let free_node = ln_pop_front(unsafe { &raw mut (*bc_ptr).free_list });
+    let free_node = ln_pop_front(&raw mut bc.free_list);
     let b: *mut buf = container_of(free_node, offset_of!(buf, free_entry));
 
     // Remove from hash table if it was caching a different block.
-    // SAFETY: `b` is the just-recycled buffer, exclusively owned here.
+    // SAFETY: `b` is the just-recycled buffer, exclusively owned here
+    // (just popped from the free list while `bc` is held).
     let mut old_key = unsafe { lookup_key((*b).dev, (*b).blockno) };
-    let b1 = unsafe {
-        hlist_pop(&raw mut (*bc_ptr).cached, (&mut old_key as *mut buf) as *mut c_void) as *mut buf
-    };
+    // SAFETY: see the `hlist_get` call above.
+    let b1 = unsafe { hlist_pop(&raw mut bc.cached, (&mut old_key as *mut buf) as *mut c_void) } as *mut buf;
     if !b1.is_null() && b1 != b {
         // SAFETY: `b`/`b1` both live buffers.
         unsafe {
@@ -562,7 +640,8 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
             }
         }
         // The buffer b is unused, so we can put back b1 and safely use b.
-        let ret = unsafe { hlist_put(&raw mut (*bc_ptr).cached, b1 as *mut c_void, false) };
+        // SAFETY: see the `hlist_get` call above.
+        let ret = unsafe { hlist_put(&raw mut bc.cached, b1 as *mut c_void, false) };
         if !ret.is_null() {
             xv6_panic(c"bget: failed to push cached buffer into hash list".as_ptr());
         }
@@ -573,21 +652,25 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
     core::sync::atomic::fence(Ordering::SeqCst);
 
     // SAFETY: `b` is exclusively owned (just popped from the free list
-    // under `bcache.lock`, and not yet re-published into the hash
-    // table).
+    // under `bc`, and not yet re-published into the hash table).
     unsafe {
         (*b).dev = dev;
         (*b).blockno = blockno;
         (*b).valid = 0;
         (*b).refcnt = 1;
     }
-    let ret = unsafe { hlist_put(&raw mut (*bc_ptr).cached, b as *mut c_void, false) };
+    // SAFETY: see the `hlist_get` call above.
+    let ret = unsafe { hlist_put(&raw mut bc.cached, b as *mut c_void, false) };
     if !ret.is_null() {
         crate::kprintln!("dev: {}, blockno: {}", dev, blockno);
         xv6_panic(c"bget: failed to push recycled buffer into hash list".as_ptr());
     }
-    drop(guard);
-    unsafe { mutex_lock(&raw mut (*b).lock) };
+    // Release `bcache.lock` *before* acquiring the buffer's own
+    // sleeplock -- see module doc's "Lock-ordering hazard" note (same
+    // point the C original's `spin_unlock(&bcache.lock)` sat at).
+    drop(bc);
+    // SAFETY: `b` live.
+    mutex_lock(unsafe { &raw mut (*b).lock });
     b
 }
 
@@ -635,13 +718,14 @@ pub extern "C" fn bread(dev: u32, blockno: u32) -> *mut buf {
 /// Write `b`'s contents to disk. Must be locked.
 #[no_mangle]
 pub extern "C" fn bwrite(b: *mut buf) {
-    // SAFETY: `b` caller-owned; lock-holding checked immediately below,
-    // matching the C precondition.
-    unsafe {
-        if holding_mutex(&raw mut (*b).lock) == 0 {
-            xv6_panic(c"bwrite".as_ptr());
-        }
+    // `holding_mutex` is a safe FFI forward -- only the raw
+    // address-of-field needs an (immediately-scoped) `unsafe`, matching
+    // the C precondition.
+    // SAFETY: `b` caller-owned.
+    if holding_mutex(unsafe { &raw mut (*b).lock }) == 0 {
+        xv6_panic(c"bwrite".as_ptr());
     }
+    // SAFETY: `b` caller-owned and locked (just checked above).
     let dev = unsafe { (*b).dev };
     let blkdev = blkdev_get(dev_major(dev), dev_minor(dev));
     if is_err(blkdev) {
@@ -657,15 +741,17 @@ pub extern "C" fn bwrite(b: *mut buf) {
 
     // Clear dirty flag after successful write.
     {
-        let _g = bcache_lock().lock();
-        // SAFETY: `b` live; `bc()` valid `'static` storage.
+        let mut bc = BCACHE.lock();
+        // SAFETY: `b` live, `bc` held. `bc.dirty_count` -- a plain field
+        // access through the guard -- needs no `unsafe`; nested here
+        // only to match the C original's single conditional block.
         unsafe {
             if (*b).dirty != 0 {
                 (*b).dirty = 0;
                 let de = &raw mut (*b).dirty_entry;
                 if !ln_is_detached(de) {
                     machine::list_entry_detach(de);
-                    (*bc()).dirty_count -= 1;
+                    bc.dirty_count -= 1;
                 }
             }
         }
@@ -679,22 +765,23 @@ pub extern "C" fn bwrite(b: *mut buf) {
 /// faster than [`bwrite`] since it doesn't block on disk I/O.
 #[no_mangle]
 pub extern "C" fn bwrite_async(b: *mut buf) {
-    // SAFETY: see `bwrite`.
-    unsafe {
-        if holding_mutex(&raw mut (*b).lock) == 0 {
-            xv6_panic(c"bwrite_async".as_ptr());
-        }
+    // See `bwrite`: only the raw address-of-field needs `unsafe`.
+    // SAFETY: `b` caller-owned.
+    if holding_mutex(unsafe { &raw mut (*b).lock }) == 0 {
+        xv6_panic(c"bwrite_async".as_ptr());
     }
-    let _g = bcache_lock().lock();
-    // SAFETY: `b` live, `bcache.lock` held.
+    let mut bc = BCACHE.lock();
+    // SAFETY: `b` live, `bc` held. `bc.dirty_list`/`bc.dirty_count` --
+    // plain accesses through the guard -- need no `unsafe`; nested here
+    // only to match the C original's single conditional block.
     unsafe {
         if (*b).dirty == 0 {
             (*b).dirty = 1;
             // Add to dirty list (at head for FIFO writeback order via
             // `ln_pop_front` in `bsync`, matching the C's
             // `list_node_push_front`).
-            ln_push_front(&raw mut (*bc()).dirty_list, &raw mut (*b).dirty_entry);
-            (*bc()).dirty_count += 1;
+            ln_push_front(&raw mut bc.dirty_list, &raw mut (*b).dirty_entry);
+            bc.dirty_count += 1;
         }
     }
 }
@@ -703,34 +790,38 @@ pub extern "C" fn bwrite_async(b: *mut buf) {
 #[no_mangle]
 pub extern "C" fn bsync() {
     loop {
-        let guard = bcache_lock().lock();
-        // SAFETY: `bcache.lock` held.
-        let empty = unsafe { ln_is_empty(&raw mut (*bc()).dirty_list) };
-        if empty {
-            drop(guard);
+        let mut bc = BCACHE.lock();
+        if ln_is_empty(&raw mut bc.dirty_list) {
+            drop(bc);
             break;
         }
-        let node = ln_pop_front(unsafe { &raw mut (*bc()).dirty_list });
+        let node = ln_pop_front(&raw mut bc.dirty_list);
         let b: *mut buf = container_of(node, offset_of!(buf, dirty_entry));
-        // SAFETY: `b` live, `bcache.lock` held.
-        unsafe {
-            (*b).dirty = 0;
-            (*bc()).dirty_count -= 1;
+        // SAFETY: `b` live, `bc` held.
+        unsafe { (*b).dirty = 0 };
+        bc.dirty_count -= 1;
 
-            // Increment refcnt to prevent buffer from being recycled.
-            let fe = &raw mut (*b).free_entry;
-            if (*b).refcnt == 0 && !ln_is_detached(fe) {
-                machine::list_entry_detach(fe);
-            }
-            (*b).refcnt += 1;
+        // Increment refcnt to prevent buffer from being recycled.
+        // SAFETY: `b` live, `bc` held.
+        let (fe, refcnt_zero) = unsafe { (&raw mut (*b).free_entry, (*b).refcnt == 0) };
+        if refcnt_zero && !ln_is_detached(fe) {
+            machine::list_entry_detach(fe);
         }
-        drop(guard);
+        // SAFETY: `b` live, `bc` held.
+        unsafe { (*b).refcnt += 1 };
+        // Release `bcache.lock` before the (potentially sleeping) mutex
+        // acquire just below -- same ordering rule as `bget` (module
+        // doc's "Lock-ordering hazard" note).
+        drop(bc);
 
         // Lock buffer and write to disk.
-        unsafe { mutex_lock(&raw mut (*b).lock) };
+        // SAFETY: `b` live.
+        mutex_lock(unsafe { &raw mut (*b).lock });
 
+        // SAFETY: `b` locked (mutex held by this thread, just above).
         let valid = unsafe { (*b).valid } != 0;
         if valid {
+            // SAFETY: `b` locked.
             let dev = unsafe { (*b).dev };
             let blkdev = blkdev_get(dev_major(dev), dev_minor(dev));
             if !is_err(blkdev) {
@@ -744,47 +835,53 @@ pub extern "C" fn bsync() {
             }
         }
 
-        unsafe { mutex_unlock(&raw mut (*b).lock) };
+        // SAFETY: `b` live.
+        mutex_unlock(unsafe { &raw mut (*b).lock });
 
         // Release our reference.
-        let guard2 = bcache_lock().lock();
-        // SAFETY: `bcache.lock` held.
-        unsafe {
+        let mut bc = BCACHE.lock();
+        // SAFETY: `b` live, `bc` held.
+        let (refcnt_zero, fe) = unsafe {
             (*b).refcnt -= 1;
-            if (*b).refcnt == 0 {
-                ln_push_back(&raw mut (*bc()).free_list, &raw mut (*b).free_entry);
-            }
+            ((*b).refcnt == 0, &raw mut (*b).free_entry)
+        };
+        if refcnt_zero {
+            ln_push_back(&raw mut bc.free_list, fe);
         }
-        drop(guard2);
+        drop(bc);
     }
 }
 
 /// Get the count of dirty buffers (for debugging/stats).
 pub(crate) fn bdirty_count() -> u32 {
-    let _g = bcache_lock().lock();
-    // SAFETY: `bcache.lock` held.
-    unsafe { (*bc()).dirty_count }
+    BCACHE.lock().dirty_count
 }
 
 /// Release a locked buffer. Move to the free list if no longer
 /// referenced.
 #[no_mangle]
 pub extern "C" fn brelse(b: *mut buf) {
-    // SAFETY: `b` caller-owned, lock-holding checked below.
+    // SAFETY: `b` caller-owned; lock-holding checked, then released --
+    // matches the C precondition, before `bcache.lock` is taken below
+    // (`holding_mutex`/`mutex_unlock` are safe FFI forwards; only the
+    // raw address-of-field genuinely needs `unsafe`).
     unsafe {
         if holding_mutex(&raw mut (*b).lock) == 0 {
             xv6_panic(c"brelse".as_ptr());
         }
         mutex_unlock(&raw mut (*b).lock);
     }
-    let _g = bcache_lock().lock();
-    // SAFETY: `b` live, `bcache.lock` held.
+
+    let mut bc = BCACHE.lock();
+    // SAFETY: `b` live, `bc` held. `bc.free_list` -- a plain access
+    // through the guard -- needs no `unsafe`; nested here only to match
+    // the C original's single conditional block.
     unsafe {
         (*b).refcnt -= 1;
         if (*b).refcnt == 0 {
             // No one is waiting for it -- add to free list (most
             // recently used at head, oldest at tail).
-            ln_push_back(&raw mut (*bc()).free_list, &raw mut (*b).free_entry);
+            ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
         }
     }
 }
@@ -793,8 +890,8 @@ pub extern "C" fn brelse(b: *mut buf) {
 /// `refcnt == 0`).
 #[no_mangle]
 pub extern "C" fn bpin(b: *mut buf) {
-    let _g = bcache_lock().lock();
-    // SAFETY: `b` live, `bcache.lock` held.
+    let _bc = BCACHE.lock();
+    // SAFETY: `b` live, `_bc` held.
     unsafe {
         let fe = &raw mut (*b).free_entry;
         if (*b).refcnt == 0 && !ln_is_detached(fe) {
@@ -807,12 +904,14 @@ pub extern "C" fn bpin(b: *mut buf) {
 /// Undo a prior [`bpin`].
 #[no_mangle]
 pub extern "C" fn bunpin(b: *mut buf) {
-    let _g = bcache_lock().lock();
-    // SAFETY: `b` live, `bcache.lock` held.
+    let mut bc = BCACHE.lock();
+    // SAFETY: `b` live, `bc` held. `bc.free_list` -- a plain access
+    // through the guard -- needs no `unsafe`; nested here only to match
+    // the C original's single conditional block.
     unsafe {
         (*b).refcnt -= 1;
         if (*b).refcnt == 0 {
-            ln_push_back(&raw mut (*bc()).free_list, &raw mut (*b).free_entry);
+            ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
         }
     }
 }
