@@ -54,28 +54,21 @@ pub type HtHash = u64;
 const HLIST_BUCKET_CNT_MAX: u64 = 0xffff;
 
 // ---------------------------------------------------------------------------
-// Native layout — Wave P3-3C.
+// Native layout — Wave P3-3C, nativized in Wave P3-N1.
 //
-// `Hlist`/`HlistEntry`/`HlistBucket`/`HlistFunc` above stay aliased to
-// the real bindgen types for the same reason `bintree.rs`'s `RbNode`/
-// `RbRoot` do: they're the actual parameter/field type at ~10
-// out-of-scope cross-module call sites (`vfs/fs.rs`, `vfs/tmpfs/
-// {superblock,inode}.rs`, `proc/proc_shims.rs`, `proc/access.rs`,
-// `proc/thread.rs`, `bufcache.rs`, `vfs/inode.rs`) plus this file's own
-// `#[no_mangle]` C-ABI entry points -- retyping those is out of this
-// wave's scope, deferred to a future aggregate-embedding wave exactly
-// like `RbNode`/`RbRoot` above.
-//
-// `RawHlistBucket`/`RawHlistEntry`/`RawHlistFunc`/`RawHlist` are this
-// module's native, layout-identical mirrors of
-// `kernel/inc/hlist_type.h`'s `hlist_bucket_t`/`hlist_entry_t`/
-// `hlist_func_t`/`hlist_t`, gated by direct compile-time
-// `size_of`/`align_of`/`offset_of!` cross-checks against the real
-// bindgen types -- the ONE canonical native form future waves need
-// before an aggregate (e.g. `bufcache.rs`'s `bcache`, `vfs/fs.rs`'s
-// per-superblock inode cache) can embed a hash-list bucket array or
-// entry natively instead of via `bindings::hlist_bucket_t`/
-// `hlist_entry_t`.
+// `RawHlistBucket`/`RawHlistEntry`/`RawHlistFunc`/`RawHlist` ARE the
+// kernel-wide Rust definitions of `kernel/inc/hlist_type.h`'s
+// `hlist_bucket_t`/`hlist_entry_t`/`hlist_func_t`/`hlist_t` now:
+// `build.rs` blocklists the bindgen-generated versions and injects
+// `pub type hlist_* = crate::hlist::RawHlist*;` raw-line aliases, so
+// every remaining bindgen struct that embeds one (`thread.proctab_entry`,
+// `tmpfs_inode`/`tmpfs_dentry` hash entries, ...) and every
+// `crate::bindings::hlist_*` path across the crate resolves here. The
+// `Hlist`/`HlistEntry`/`HlistBucket`/`HlistFunc` aliases above keep
+// resolving through `crate::bindings`, so the ~10 cross-module call
+// sites (`vfs/fs.rs`, `vfs/tmpfs/{superblock,inode}.rs`,
+// `proc/proc_shims.rs`, `proc/access.rs`, `bufcache.rs`, ...) compile
+// unchanged. Layout is proven by the hardcoded `const _` asserts below.
 //
 // `hlist_bucket_t` is *literally* `list_node_t` (`kernel/inc/
 // hlist_type.h`: `typedef struct list_node hlist_bucket_t;` -- confirmed
@@ -88,80 +81,62 @@ const HLIST_BUCKET_CNT_MAX: u64 = 0xffff;
 // already does plain, correctly-typed field access on the bindgen alias
 // (no reinterpret-cast chain to simplify), so rewiring would only
 // relocate the casting work without an unsafe-reduction payoff.
-pub(crate) type RawHlistBucket = crate::list::ListNode;
+pub type RawHlistBucket = crate::list::ListNode;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub(crate) struct RawHlistFunc {
-    pub(crate) hash: Option<unsafe extern "C" fn(*mut c_void) -> HtHash>,
-    pub(crate) get_node: Option<unsafe extern "C" fn(*mut RawHlistEntry) -> *mut c_void>,
-    pub(crate) get_entry: Option<unsafe extern "C" fn(*mut c_void) -> *mut RawHlistEntry>,
-    pub(crate) cmp_node: Option<unsafe extern "C" fn(*mut RawHlist, *mut c_void, *mut c_void) -> i32>,
+pub struct RawHlistFunc {
+    pub hash: Option<unsafe extern "C" fn(*mut c_void) -> HtHash>,
+    pub get_node: Option<unsafe extern "C" fn(*mut RawHlistEntry) -> *mut c_void>,
+    pub get_entry: Option<unsafe extern "C" fn(*mut c_void) -> *mut RawHlistEntry>,
+    pub cmp_node: Option<unsafe extern "C" fn(*mut RawHlist, *mut c_void, *mut c_void) -> i32>,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub(crate) struct RawHlistEntry {
-    pub(crate) list_entry: RawHlistBucket,
-    pub(crate) bucket: *mut RawHlistBucket,
+pub struct RawHlistEntry {
+    pub list_entry: RawHlistBucket,
+    pub bucket: *mut RawHlistBucket,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub(crate) struct RawHlist {
-    pub(crate) bucket_cnt: u64,
-    pub(crate) elem_cnt: i64,
-    pub(crate) func: RawHlistFunc,
-    pub(crate) buckets: [RawHlistBucket; 0],
+pub struct RawHlist {
+    pub bucket_cnt: u64,
+    pub elem_cnt: i64,
+    pub func: RawHlistFunc,
+    pub buckets: [RawHlistBucket; 0],
 }
 
+// P3-N1 hardcoded layout proof — values captured from the pre-nativization
+// bindgen output (kernel_bindings.rs) for `kernel/inc/hlist_type.h`'s
+// `hlist_bucket_t` (== `struct list_node`), `struct hlist_entry`
+// (list_node_t + pointer), `struct hlist_func_struct` (4 function
+// pointers) and `struct hlist_struct` (u64 + i64 + hlist_func_t +
+// flexible bucket array). All 8-byte members, no padding, on
+// riscv64/lp64d.
 const _: () = {
-    use crate::bindings::{hlist_bucket_t, hlist_func_t};
+    assert!(core::mem::size_of::<RawHlistBucket>() == 16, "hlist_bucket_t == list_node: 2 x 8-byte pointer");
+    assert!(core::mem::align_of::<RawHlistBucket>() == 8, "hlist_bucket_t: natural pointer alignment");
 
-    // `hlist_bucket_t` == `list_node_t` identity: `crate::list::ListNode`
-    // already carries the direct-against-bindgen assert for
-    // `list_node_t` (`kernel/list.rs`); this closes the remaining gap --
-    // that `hlist_bucket_t` really is the same type, not just
-    // coincidentally same-sized.
-    assert!(core::mem::size_of::<RawHlistBucket>() == core::mem::size_of::<hlist_bucket_t>(),
-        "RawHlistBucket / hlist_bucket_t size mismatch");
-    assert!(core::mem::align_of::<RawHlistBucket>() == core::mem::align_of::<hlist_bucket_t>(),
-        "RawHlistBucket / hlist_bucket_t alignment mismatch");
+    assert!(core::mem::size_of::<RawHlistEntry>() == 24, "hlist_entry: list_node (16) + bucket pointer (8)");
+    assert!(core::mem::align_of::<RawHlistEntry>() == 8, "hlist_entry: natural pointer alignment");
+    assert!(core::mem::offset_of!(RawHlistEntry, list_entry) == 0, "hlist_entry.list_entry offset");
+    assert!(core::mem::offset_of!(RawHlistEntry, bucket) == 16, "hlist_entry.bucket offset");
 
-    assert!(core::mem::size_of::<RawHlistFunc>() == core::mem::size_of::<hlist_func_t>(),
-        "RawHlistFunc / hlist_func_t size mismatch");
-    assert!(core::mem::align_of::<RawHlistFunc>() == core::mem::align_of::<hlist_func_t>(),
-        "RawHlistFunc / hlist_func_t alignment mismatch");
-    assert!(core::mem::offset_of!(RawHlistFunc, hash) == core::mem::offset_of!(hlist_func_t, hash),
-        "RawHlistFunc.hash offset mismatch");
-    assert!(core::mem::offset_of!(RawHlistFunc, get_node) == core::mem::offset_of!(hlist_func_t, get_node),
-        "RawHlistFunc.get_node offset mismatch");
-    assert!(core::mem::offset_of!(RawHlistFunc, get_entry) == core::mem::offset_of!(hlist_func_t, get_entry),
-        "RawHlistFunc.get_entry offset mismatch");
-    assert!(core::mem::offset_of!(RawHlistFunc, cmp_node) == core::mem::offset_of!(hlist_func_t, cmp_node),
-        "RawHlistFunc.cmp_node offset mismatch");
+    assert!(core::mem::size_of::<RawHlistFunc>() == 32, "hlist_func_struct: 4 x 8-byte fn pointer");
+    assert!(core::mem::align_of::<RawHlistFunc>() == 8, "hlist_func_struct: natural pointer alignment");
+    assert!(core::mem::offset_of!(RawHlistFunc, hash) == 0, "hlist_func_struct.hash offset");
+    assert!(core::mem::offset_of!(RawHlistFunc, get_node) == 8, "hlist_func_struct.get_node offset");
+    assert!(core::mem::offset_of!(RawHlistFunc, get_entry) == 16, "hlist_func_struct.get_entry offset");
+    assert!(core::mem::offset_of!(RawHlistFunc, cmp_node) == 24, "hlist_func_struct.cmp_node offset");
 
-    assert!(core::mem::size_of::<RawHlistEntry>() == core::mem::size_of::<HlistEntry>(),
-        "RawHlistEntry / hlist_entry_t size mismatch");
-    assert!(core::mem::align_of::<RawHlistEntry>() == core::mem::align_of::<HlistEntry>(),
-        "RawHlistEntry / hlist_entry_t alignment mismatch");
-    assert!(core::mem::offset_of!(RawHlistEntry, list_entry) == core::mem::offset_of!(HlistEntry, list_entry),
-        "RawHlistEntry.list_entry offset mismatch");
-    assert!(core::mem::offset_of!(RawHlistEntry, bucket) == core::mem::offset_of!(HlistEntry, bucket),
-        "RawHlistEntry.bucket offset mismatch");
-
-    assert!(core::mem::size_of::<RawHlist>() == core::mem::size_of::<Hlist>(),
-        "RawHlist / hlist_t size mismatch");
-    assert!(core::mem::align_of::<RawHlist>() == core::mem::align_of::<Hlist>(),
-        "RawHlist / hlist_t alignment mismatch");
-    assert!(core::mem::offset_of!(RawHlist, bucket_cnt) == core::mem::offset_of!(Hlist, bucket_cnt),
-        "RawHlist.bucket_cnt offset mismatch");
-    assert!(core::mem::offset_of!(RawHlist, elem_cnt) == core::mem::offset_of!(Hlist, elem_cnt),
-        "RawHlist.elem_cnt offset mismatch");
-    assert!(core::mem::offset_of!(RawHlist, func) == core::mem::offset_of!(Hlist, func),
-        "RawHlist.func offset mismatch");
-    assert!(core::mem::offset_of!(RawHlist, buckets) == core::mem::offset_of!(Hlist, buckets),
-        "RawHlist.buckets offset mismatch");
+    assert!(core::mem::size_of::<RawHlist>() == 48, "hlist_struct: u64 + i64 + 32-byte func struct + [bucket; 0]");
+    assert!(core::mem::align_of::<RawHlist>() == 8, "hlist_struct: natural 8-byte alignment");
+    assert!(core::mem::offset_of!(RawHlist, bucket_cnt) == 0, "hlist_struct.bucket_cnt offset");
+    assert!(core::mem::offset_of!(RawHlist, elem_cnt) == 8, "hlist_struct.elem_cnt offset");
+    assert!(core::mem::offset_of!(RawHlist, func) == 16, "hlist_struct.func offset");
+    assert!(core::mem::offset_of!(RawHlist, buckets) == 48, "hlist_struct.buckets (flexible array) offset");
 };
 
 // ---------------------------------------------------------------------------

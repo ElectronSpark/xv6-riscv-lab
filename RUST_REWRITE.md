@@ -1697,6 +1697,38 @@ class the user's directive targets. Remaining C-compatible surface:
 the 22 mandated exports + bindgen type layer (nativization arc next) +
 C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
 
+### Iteration 57 — 2026-07-16 — Wave P3-N1: intrusive-node family nativized (nativization arc opener)
+
+- First nativization wave: `list_node_t` (list.rs `ListNode`), the hlist
+  family (`hlist_t`/`hlist_entry`/`hlist_func_struct`/`hlist_bucket_t` →
+  hlist.rs natives), and the rb-tree family (`rb_node`/`rb_root`/
+  `rb_root_opts` → bintree.rs natives) are now hand-written `#[repr(C)]`
+  Rust types. bindgen no longer generates them.
+- **The blocklist+redirect technique proven** (template for all later
+  families): build.rs `blocklist_type` + `raw_line` re-export so
+  still-bindgen structs embed the native types; PLUS the non-obvious
+  part — a `ParseCallbacks::blocklisted_type_implements_trait` impl,
+  because bindgen otherwise assumes blocklisted types derive nothing and
+  silently degrades embedding structs (e.g. `page_struct`'s anonymous
+  union decays to `__BindgenUnionField` if `list_node` isn't known
+  `Copy`).
+- **Compile-time layout proofs**: const asserts on size/align + every
+  field offset (`offset_of!`) for all three families, values cited from
+  the pre-change bindgen output (list_node 16/8; rb_node 24/8;
+  hlist_struct field offsets incl. the flexible-array `buckets` at 48).
+  A mismatch fails the build — the 0-warning build IS the byte-identity
+  proof.
+- 5 files (+217/−165): list.rs, hlist.rs, bintree.rs, build.rs,
+  proc_shims.rs (hlist ops-struct init touch-up).
+- Incident: the wave's worker was killed mid-verification and left the
+  cmake cache poisoned (`/usr/bin/riscv64-unknown-elf-gcc`); orchestrator
+  reconfigured with TOOLPREFIX+LAB=fs and re-ran everything.
+- Verified (orchestrator, on the corrected cache): 0-warning clean
+  rebuild; boot gate; **testsig 21/21**; **mmaptest all passed**;
+  symlinktest both ok; forkfork OK; createdelete OK; stressfs; no
+  panics. (Worker had independently reached mmaptest 16/16 before
+  being stopped.)
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

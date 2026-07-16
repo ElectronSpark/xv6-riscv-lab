@@ -8,12 +8,17 @@ use core::marker::PhantomData;
 use crate::bindings::list_node_t;
 
 // ---------------------------------------------------------------------------
-// Native layout — Wave P3-3C.
+// Native layout — Wave P3-3C, nativized in Wave P3-N1.
 //
-// `crate::bindings::list_node_t` is bindgen-generated from
-// `kernel/inc/list_type.h`'s `struct list_node` (two raw `prev`/`next`
-// pointers, naturally 8-byte aligned -- no `__attribute__((aligned))` on
-// this one, unlike `spinlock_t`). It is the single most widely embedded
+// `ListNode` IS the kernel-wide definition of `kernel/inc/list_type.h`'s
+// `struct list_node` on the Rust side now: `build.rs` blocklists the
+// bindgen-generated `list_node`/`list_node_t` and injects
+// `pub type list_node_t = crate::list::ListNode;` raw-line aliases, so
+// every remaining bindgen struct that embeds a list node (and every
+// `crate::bindings::list_node_t` path across the crate) resolves here.
+// The type is two raw `prev`/`next` pointers, naturally 8-byte aligned
+// -- no `__attribute__((aligned))` on this one, unlike `spinlock_t`.
+// It is the single most widely embedded
 // intrusive-structure type in the kernel (~390 referents across ~30
 // files: `hlist_entry_t`/`hlist_bucket_t`, `work_struct`, `tq_t`,
 // `vma`/`pcache_node`/`sched_entity`/... all embed it), which is exactly
@@ -57,15 +62,16 @@ impl ListNode {
     }
 }
 
+// P3-N1 hardcoded layout proof — values captured from the pre-nativization
+// bindgen output (kernel_bindings.rs: `pub struct list_node { pub prev:
+// *mut list_node, pub next: *mut list_node }`) for `kernel/inc/
+// list_type.h`'s `struct list_node`: two 8-byte pointers, no padding,
+// natural 8-byte alignment on riscv64/lp64d.
 const _: () = {
-    assert!(core::mem::size_of::<ListNode>() == core::mem::size_of::<list_node_t>(),
-        "ListNode / list_node_t size mismatch");
-    assert!(core::mem::align_of::<ListNode>() == core::mem::align_of::<list_node_t>(),
-        "ListNode / list_node_t alignment mismatch");
-    assert!(core::mem::offset_of!(ListNode, prev) == core::mem::offset_of!(list_node_t, prev),
-        "ListNode.prev / list_node_t.prev offset mismatch");
-    assert!(core::mem::offset_of!(ListNode, next) == core::mem::offset_of!(list_node_t, next),
-        "ListNode.next / list_node_t.next offset mismatch");
+    assert!(core::mem::size_of::<ListNode>() == 16, "list_node: 2 x 8-byte pointer");
+    assert!(core::mem::align_of::<ListNode>() == 8, "list_node: natural pointer alignment");
+    assert!(core::mem::offset_of!(ListNode, prev) == 0, "list_node.prev offset");
+    assert!(core::mem::offset_of!(ListNode, next) == 8, "list_node.next offset");
 };
 
 pub struct ListIterator<'a, T> {

@@ -11,6 +11,55 @@
 use std::env;
 use std::path::PathBuf;
 
+/// P3-N1 nativization support: bindgen cannot inspect blocklisted types,
+/// so by default it assumes they implement none of the derivable traits.
+/// That silently changes codegen for *other* structs that embed them —
+/// e.g. `page_struct`'s anonymous union degrades from a real `union` to
+/// `__BindgenUnionField` wrappers when its `list_node` member is no
+/// longer known to be `Copy`. Answer the trait queries for our
+/// hand-written native replacements (all are `#[derive(Copy, Clone)]`,
+/// none derive `Debug`/`Default`/`Hash`/`PartialEq` — matching
+/// `derive_debug(false)`/`derive_default(false)` above).
+#[derive(Debug)]
+struct NativeTypeCallbacks;
+
+impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
+    fn blocklisted_type_implements_trait(
+        &self,
+        name: &str,
+        derive_trait: bindgen::callbacks::DeriveTrait,
+    ) -> Option<bindgen::callbacks::ImplementsTrait> {
+        use bindgen::callbacks::{DeriveTrait, ImplementsTrait};
+        const NATIVE_TYPES: &[&str] = &[
+            // kernel/list.rs
+            "list_node",
+            "list_node_t",
+            // kernel/hlist.rs
+            "hlist_bucket_t",
+            "hlist_entry",
+            "hlist_entry_t",
+            "hlist_func_struct",
+            "hlist_func_t",
+            "hlist_struct",
+            "hlist_t",
+            // kernel/bintree.rs
+            "rb_node",
+            "rb_root",
+            "rb_root_opts",
+        ];
+        if !NATIVE_TYPES.contains(&name) {
+            return None;
+        }
+        match derive_trait {
+            DeriveTrait::Copy => Some(ImplementsTrait::Yes),
+            DeriveTrait::Debug
+            | DeriveTrait::Default
+            | DeriveTrait::Hash
+            | DeriveTrait::PartialEqOrPartialOrd => Some(ImplementsTrait::No),
+        }
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
@@ -208,6 +257,47 @@ fn main() {
         .allowlist_function("signal_pending")
         .allowlist_function("sched_timer_set|sched_timer_done|scheduler_sleep|sleep_ms")
         .blocklist_function("__assert.*");
+
+    // ------------------------------------------------------------------
+    // P3-N1 nativization: the intrusive-node type families below are
+    // hand-written `#[repr(C)]` Rust types now (their owning modules
+    // carry compile-time layout asserts against the C layout). Blocklist
+    // the bindgen-generated definitions and redirect every remaining
+    // bindgen reference (embedding structs, extern fn signatures) to the
+    // native definitions via `raw_line` aliases. The C headers stay
+    // unchanged for the remaining C consumers.
+    //
+    // Known side effect (bindgen limitation, verified harmless): a C
+    // union whose member is *directly* one of these blocklisted types
+    // (`tnode`'s list/tree union, `sched_entity`'s rb_entry/list_entry
+    // union) is emitted in the `__BindgenUnionField` + `bindgen_union_field`
+    // blob representation instead of a native Rust `union`. The blob is
+    // sized/aligned from clang's real C layout, so the byte layout of the
+    // embedding structs is unchanged; no Rust code accesses those union
+    // fields (unions whose members merely *contain* these types, e.g.
+    // `page_struct`'s, stay native thanks to `NativeTypeCallbacks`).
+    builder = builder
+        .parse_callbacks(Box::new(NativeTypeCallbacks))
+        // kernel/inc/list_type.h `struct list_node` -> kernel/list.rs
+        .blocklist_type("list_node|list_node_t")
+        .raw_line("pub type list_node = crate::list::ListNode;")
+        .raw_line("pub type list_node_t = crate::list::ListNode;")
+        // kernel/inc/hlist_type.h hash-list family -> kernel/hlist.rs
+        // (`hlist_bucket_t` is literally `struct list_node` in C, so it
+        // redirects to the same native list node type).
+        .blocklist_type("hlist_bucket_t|hlist_entry|hlist_entry_t|hlist_func_struct|hlist_func_t|hlist_struct|hlist_t")
+        .raw_line("pub type hlist_bucket_t = crate::list::ListNode;")
+        .raw_line("pub type hlist_entry = crate::hlist::RawHlistEntry;")
+        .raw_line("pub type hlist_entry_t = crate::hlist::RawHlistEntry;")
+        .raw_line("pub type hlist_func_struct = crate::hlist::RawHlistFunc;")
+        .raw_line("pub type hlist_func_t = crate::hlist::RawHlistFunc;")
+        .raw_line("pub type hlist_struct = crate::hlist::RawHlist;")
+        .raw_line("pub type hlist_t = crate::hlist::RawHlist;")
+        // kernel/inc/bintree_type.h red-black tree family -> kernel/bintree.rs
+        .blocklist_type("rb_node|rb_root|rb_root_opts")
+        .raw_line("pub type rb_node = crate::bintree::RawRbNode;")
+        .raw_line("pub type rb_root = crate::bintree::RawRbRoot;")
+        .raw_line("pub type rb_root_opts = crate::bintree::RawRbRootOpts;");
 
     let bindings = builder
         .generate()

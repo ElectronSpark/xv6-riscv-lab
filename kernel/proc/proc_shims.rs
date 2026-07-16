@@ -1298,7 +1298,6 @@ pub(crate) fn xv6_exit_reap_zombie(
 
 use crate::bindings::{
     hlist_bucket_t, hlist_entry_t, hlist_func_struct, hlist_func_t, hlist_t, ht_hash_t, rwlock,
-    __IncompleteArrayField,
 };
 use core::sync::atomic::{AtomicI64, AtomicPtr};
 
@@ -1443,7 +1442,11 @@ static PROC_TABLE: ProcTableCell = ProcTableCell(UnsafeCell::new(ProcTable {
             get_entry: None,
             cmp_node: None,
         },
-        buckets: __IncompleteArrayField::new(),
+        // P3-N1: `hlist_t` is native `crate::hlist::RawHlist` now; its
+        // flexible-array tail is a zero-length `[ListNode; 0]` instead of
+        // bindgen's `__IncompleteArrayField` (both are zero-sized, same
+        // layout).
+        buckets: [],
     },
     buckets: [NULL_LIST_NODE; NR_THREAD_HASH_BUCKETS],
     registered_cnt: 0,
