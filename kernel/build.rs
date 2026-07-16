@@ -279,6 +279,23 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "thread_signal",
             "struct thread_signal",
             "thread_signal_t",
+            // kernel/irq/trap.rs + kernel/proc/sched.rs + kernel/ipi.rs
+            // (P3-5, the asm-offset-locked trio). All four derived
+            // Copy/Clone in the pre-nativization bindgen output (plain
+            // scalar/pointer fields throughout). Nothing still-bindgen
+            // embeds any of them by value (verified: the only by-value
+            // embedder of `trapframe` was `utrapframe`, native in the
+            // same wave; `sched_entity.context` is native since P3-N7;
+            // every remaining use is a pointer). Tag-prefixed forms
+            // included (no typedefs exist for any of the four).
+            "trapframe",
+            "struct trapframe",
+            "utrapframe",
+            "struct utrapframe",
+            "context",
+            "struct context",
+            "cpu_local",
+            "struct cpu_local",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -1232,6 +1249,53 @@ fn main() {
         // `thread_group`/`thread_signal` (native, own entries).
         .blocklist_type("thread|thread__bindgen_ty_[1234]")
         .raw_line("pub use crate::proc::thread::Thread as thread;");
+
+    // ------------------------------------------------------------------
+    // P3-5 nativization: the asm-offset-locked trio — `struct trapframe`
+    // + `struct utrapframe` (kernel/inc/trapframe.h), `struct context`
+    // (same header), `struct cpu_local` (kernel/inc/smp/percpu_types.h).
+    // Same blocklist + `pub use` re-export technique as P3-N2..N9 above.
+    //
+    // DANGER-ZONE NOTE: these are the only nativized types with
+    // *assembly* consumers — kernelvec.S/trampoline.S address trapframe/
+    // utrapframe/cpu_local fields through asm-offsets.h macros, and
+    // swtch.S hardcodes the context offsets as literal displacements.
+    // As of this wave asm-offsets.h is a static checked-in file
+    // (kernel/inc/asm-offsets.h, byte-value-identical to the last
+    // gcc-generated output); the natives' hardcoded per-field const
+    // asserts (each citing its .S consumer) are the drift enforcement —
+    // they fail this target build on any layout change. scripts/
+    // gen_asm_offsets.py and its cmake hook are gone.
+    //
+    // Layout evidence: golden gcc-generated asm-offsets.h values +
+    // toolchain-gcc `_Static_assert` probe (rv64gc/lp64d, scratchpad
+    // p3_5_static_assert_probe.c) + the pre-nativization bindgen output —
+    // three-way agreement on every size/align/offset.
+    //
+    // The C headers themselves stay in wrapper.h's include graph (other
+    // still-bindgen headers `#include` them); only these type EMISSIONS
+    // move. No typedefs exist for any of the four (bare tag names only);
+    // the regexes are anchored, so `context` does not match
+    // `context_switch_finish` (a fn) and `trapframe` does not match
+    // `utrapframe` (own entry).
+    builder = builder
+        // kernel/inc/trapframe.h `struct trapframe` / `struct utrapframe`
+        // -> kernel/irq/trap.rs (the trap entry/exit surface that owns
+        // the .S contract).
+        .blocklist_type("trapframe|utrapframe")
+        .raw_line("pub use crate::irq::trap::Trapframe as trapframe;")
+        .raw_line("pub use crate::irq::trap::Utrapframe as utrapframe;")
+        // kernel/inc/trapframe.h `struct context` -> kernel/proc/sched.rs
+        // (home of `__swtch_context`'s extern and every context-switch
+        // call site).
+        .blocklist_type("context")
+        .raw_line("pub use crate::proc::sched::Context as context;")
+        // kernel/inc/smp/percpu_types.h `struct cpu_local` ->
+        // kernel/ipi.rs (owner of the `cpus[]` backing array; the
+        // accessor wrapper stays `machine::CpuLocal` — see ipi.rs's
+        // name-split note).
+        .blocklist_type("cpu_local")
+        .raw_line("pub use crate::ipi::CpuLocal as cpu_local;");
 
     let bindings = builder
         .generate()

@@ -2200,6 +2200,77 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   (same message chain, same site — sepc even resolves to the same
   symbol at the same address). 5 files, ~+330/−15.
 
+### Iteration 66 — 2026-07-16 — Wave P3-5: the asm-offset-locked trio nativized + the offsets generator retired (THE danger-zone wave)
+
+- **Phase A — the trio goes native.** The last types whose layouts feed
+  assembly code: `struct trapframe` + `struct utrapframe`
+  (kernel/inc/trapframe.h) → native `Trapframe`/`Utrapframe` in
+  kernel/irq/trap.rs (184/8 and 344/8; ALL 23 + 21 field offsets
+  hardcoded-asserted, each assert message citing the exact
+  `TRAPFRAME_*`/`UTRAPFRAME_*` macro kernelvec.S/trampoline.S loads
+  through); `struct context` (same header) → native `Context` in
+  kernel/proc/sched.rs (128/64, `__ALIGNED_CACHELINE` tail-pads 112→128;
+  all 14 offsets asserted, each citing swtch.S's literal
+  `sd ra, 0(a0)` .. `ld s11, 104(a1)` displacements — swtch.S consumes
+  no macro at all); `struct cpu_local` (kernel/inc/smp/percpu_types.h)
+  → native `CpuLocal` in kernel/ipi.rs (64/64, all 10 offsets asserted;
+  `CPU_LOCAL_FLAGS`@48 + `CPU_LOCAL_INTR_SP`@24 are live kernelvec.S
+  `(tp)` loads, and the size assert guards the per-hart tp stride).
+  bindgen emission for the four → 0 (remaining bindgen structs 38→34);
+  build.rs facades `pub use` re-export all four under their C names, so
+  every consumer (`bindings::{trapframe,utrapframe,context,cpu_local}`
+  across 13 files) compiles unchanged. Derive-fidelity gate: bindings
+  diff REMOVED == exactly the four structs, ADDED == exactly the four
+  facade lines, CHANGED 0; `NativeTypeCallbacks` answers Copy=Yes for
+  all four (only by-value embedders: `utrapframe.trapframe`, same wave;
+  `sched_entity.context`, native since P3-N7). Name split documented:
+  `machine::CpuLocal` (accessor wrapper) vs `ipi::CpuLocal` (the data
+  record) — ipi.rs, the only file with both in scope, qualifies the
+  accessor; C field `proc` stays `proc_` (bindgen's reserved-word
+  rename, all Rust consumers already use it). Layout evidence three-way:
+  golden gcc-generated asm-offsets.h + riscv64-unknown-elf-gcc
+  `_Static_assert` probe (rv64gc/lp64d, scratchpad
+  p3_5_static_assert_probe.c, PROBE_PASS) + pre-nativization bindgen
+  output — all agree on every size/align/offset.
+- **Phase B — gen_asm_offsets.py retired; asm-offsets.h is a static
+  checked-in file.** Mechanism decision (per the brief's framework): a
+  build-time Rust `offset_of!` generator would have to EXECUTE
+  target-layout code (host `offset_of!` builds are host-layout and were
+  ruled out on principle); instead asm-offsets.h becomes a static
+  checked-in header (kernel/inc/asm-offsets.h) whose values are
+  ENFORCED by the native types' per-field const asserts, compiled in
+  the riscv64gc target build itself — drift can never be silent (the
+  build that would consume a stale value fails first). Scripted diff of
+  golden (last generated) vs static file: **all 114 `#define` lines
+  byte-identical** (`DEFINES_BYTE_IDENTICAL`); only delta is the
+  replaced top comment block (documents the new enforcement chain).
+  scripts/gen_asm_offsets.py + kernel/inc/CMakeLists.txt deleted;
+  `add_subdirectory(inc)`, the 5 `generate_asm_offsets` dependency
+  edges, the 2 `${CMAKE_BINARY_DIR}/kernel/inc` include dirs, and the
+  bindgen include-path entry all removed (the static header is found
+  via the pre-existing global `-I kernel/inc`); stale generated copy
+  removed from the build tree. THREAD_*/CONTEXT_* defines kept as
+  pinned reference values (no .S consumer — N9 finding). The C headers
+  themselves are untouched (wrapper.h still includes them until P3-6).
+  **Binary proof: after reconfigure + forced recompile of
+  kernelvec.S/trampoline.S/swtch.S against the static header, xv6.bin
+  is md5-IDENTICAL to the Phase-A binary (78967694b1ec…).**
+- Verified (worker, cache-checked before/after both phases +
+  post-reconfigure `Lab: fs`, BUILD_TYPE empty + toolchain gcc), full
+  battery run separately after EACH phase: 0-warning builds; 4 boots
+  per phase, each exactly one `init: starting sh`; **testsig 21/21**
+  ×2; **mmaptest 16/16** ×2; usertests preempt/forkfork OK ×2
+  (single-test "lost some free pages" trailers = documented
+  pre-existing artifact); stressfs write+read to completion ×2;
+  `cat /nonexistent` → ENOENT ×2; **forkforkfork A/B** vs pre-change
+  baseline captured on HEAD: IDENTICAL signature after both phases
+  ("Failed to remove interrupted waiter from queue" → both cores
+  IPI_REASON_CRASH → recursive load-page-fault storm scause=0xd,
+  stval=0xfffffffffffffff1, **same sepc 0x8022af58** as baseline and as
+  N9's record). Boot-log discipline: early-boot line SET identical pre
+  vs post for both phases (only SMP interleaving order varies).
+  10 files, ~+560/−660 (the generator was 574 lines of Python).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

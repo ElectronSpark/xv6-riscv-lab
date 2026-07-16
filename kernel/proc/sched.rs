@@ -165,6 +165,90 @@ unsafe extern "C" {
     fn __swtch_context(cur: *mut context, target: *mut context) -> *mut context;
 }
 
+// ===========================================================================
+// Native layout — Wave P3-5 (the asm-offset-locked trio, part 2/3).
+//
+// This IS the kernel-wide Rust definition of `struct context`
+// (`kernel/inc/trapframe.h`) now: `build.rs` blocklists the bindgen form
+// and injects `pub use crate::proc::sched::Context as context;`, so
+// every `crate::bindings::context` path (including this file's own
+// `__swtch_context` extern above) resolves here.
+//
+// DANGER ZONE — ASM CONTRACT: kernel/proc/swtch.S's `__swtch_context`
+// HARDCODES these offsets as literal displacements (`sd ra, 0(a0)` ..
+// `sd s11, 104(a0)` and the matching `ld`s from a1) — it consumes no
+// asm-offsets.h macro at all. The const asserts below cite those literal
+// instructions; any field move fails the target build before an image
+// can be linked. (asm-offsets.h also carries CONTEXT_* defines — no .S
+// consumer, kept for reference and pinned by the same asserts.)
+//
+// Layout evidence (three-way agreement): the golden gcc-generated
+// asm-offsets.h CONTEXT_* values + the riscv64-unknown-elf-gcc
+// `_Static_assert` probe (rv64gc/lp64d, scratchpad
+// p3_5_static_assert_probe.c) + the pre-nativization bindgen output
+// (`#[repr(C)] #[repr(align(64))]`, derives Copy/Clone). C attribute
+// `__ALIGNED_CACHELINE` == align(64); 14 u64 fields = 112 bytes,
+// tail-padded to 128.
+//
+// Derive fidelity: bindgen derived Copy/Clone; the native keeps them,
+// and build.rs's `NativeTypeCallbacks` answers Copy=Yes (the only
+// by-value embedder, `sched_entity.context`, is native since P3-N7 and
+// carries its own derives).
+// ===========================================================================
+
+/// Native `struct context` (`kernel/inc/trapframe.h`) — callee-saved
+/// registers for kernel context switches, saved/restored by
+/// `kernel/proc/swtch.S::__swtch_context`.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Context {
+    pub ra: u64,
+    pub sp: u64,
+    // callee-saved
+    pub s0: u64,
+    pub s1: u64,
+    pub s2: u64,
+    pub s3: u64,
+    pub s4: u64,
+    pub s5: u64,
+    pub s6: u64,
+    pub s7: u64,
+    pub s8: u64,
+    pub s9: u64,
+    pub s10: u64,
+    pub s11: u64,
+}
+
+// P3-5 hardcoded layout proof — each offset equals the literal
+// displacement swtch.S uses (cited per assert), == the golden
+// asm-offsets.h CONTEXT_* values, independently confirmed by the
+// toolchain-gcc `_Static_assert` probe and the pre-nativization bindgen
+// output. This is the drift tripwire for swtch.S's hardcoded contract.
+const _: () = {
+    assert!(core::mem::size_of::<Context>() == 128, "CONTEXT_SIZE (112 tail-padded to align 64)");
+    assert!(core::mem::align_of::<Context>() == 64, "context alignment (__ALIGNED_CACHELINE)");
+    assert!(core::mem::offset_of!(Context, ra) == 0, "swtch.S `sd ra, 0(a0)` / `ld ra, 0(a1)`");
+    assert!(core::mem::offset_of!(Context, sp) == 8, "swtch.S `sd sp, 8(a0)` / `ld sp, 8(a1)`");
+    assert!(core::mem::offset_of!(Context, s0) == 16, "swtch.S `sd s0, 16(a0)` / `ld s0, 16(a1)`");
+    assert!(core::mem::offset_of!(Context, s1) == 24, "swtch.S `sd s1, 24(a0)` / `ld s1, 24(a1)`");
+    assert!(core::mem::offset_of!(Context, s2) == 32, "swtch.S `sd s2, 32(a0)` / `ld s2, 32(a1)`");
+    assert!(core::mem::offset_of!(Context, s3) == 40, "swtch.S `sd s3, 40(a0)` / `ld s3, 40(a1)`");
+    assert!(core::mem::offset_of!(Context, s4) == 48, "swtch.S `sd s4, 48(a0)` / `ld s4, 48(a1)`");
+    assert!(core::mem::offset_of!(Context, s5) == 56, "swtch.S `sd s5, 56(a0)` / `ld s5, 56(a1)`");
+    assert!(core::mem::offset_of!(Context, s6) == 64, "swtch.S `sd s6, 64(a0)` / `ld s6, 64(a1)`");
+    assert!(core::mem::offset_of!(Context, s7) == 72, "swtch.S `sd s7, 72(a0)` / `ld s7, 72(a1)`");
+    assert!(core::mem::offset_of!(Context, s8) == 80, "swtch.S `sd s8, 80(a0)` / `ld s8, 80(a1)`");
+    assert!(core::mem::offset_of!(Context, s9) == 88, "swtch.S `sd s9, 88(a0)` / `ld s9, 88(a1)`");
+    assert!(
+        core::mem::offset_of!(Context, s10) == 96,
+        "swtch.S `sd s10, 96(a0)` / `ld s10, 96(a1)`"
+    );
+    assert!(
+        core::mem::offset_of!(Context, s11) == 104,
+        "swtch.S `sd s11, 104(a0)` / `ld s11, 104(a1)`"
+    );
+};
+
 // P3-D3c: `bintree.rs`'s iterators are genuinely `unsafe fn`s now that
 // their `#[no_mangle]` exports are gone; this file's original extern
 // declarations were plain (non-`safe`) `fn`s, so every call site already

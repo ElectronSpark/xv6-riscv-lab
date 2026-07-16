@@ -39,8 +39,9 @@ add_library(proc OBJECT
 # These .S files use the C preprocessor; force C language for them.
 set_source_files_properties(${PROC_S_SRCS} PROPERTIES LANGUAGE C)
 
-# Ensure asm-offsets.h is generated before building assembly files
-add_dependencies(proc generate_asm_offsets)
-
-# Add build directory to include path for generated headers
-target_include_directories(proc PRIVATE ${CMAKE_BINARY_DIR}/kernel/inc)
+# P3-5: asm-offsets.h is a static checked-in header now
+# (kernel/inc/asm-offsets.h, found via the global -I${KERNEL_DIR}/inc);
+# the generate_asm_offsets custom target and the
+# ${CMAKE_BINARY_DIR}/kernel/inc include dir it wrote into are gone.
+# (swtch.S never consumed it anyway — it hardcodes the context offsets,
+# pinned by kernel/proc/sched.rs's const asserts.)

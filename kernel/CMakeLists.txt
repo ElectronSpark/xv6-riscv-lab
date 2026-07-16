@@ -251,8 +251,11 @@ find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
 # Pass the kernel C include search paths to bindgen (consumed by build.rs).
 # Keep this in sync with the include flags in the top-level CMakeLists.txt.
+# P3-5: ${CMAKE_BINARY_DIR}/kernel/inc dropped — the only header ever
+# generated there (asm-offsets.h) is a static checked-in file now, and
+# wrapper.h never included it anyway.
 set(RUST_BINDGEN_INCLUDES
-    "${CMAKE_SOURCE_DIR};${KERNEL_DIR}/inc;${CMAKE_BINARY_DIR}/kernel/inc")
+    "${CMAKE_SOURCE_DIR};${KERNEL_DIR}/inc")
 
 # ==============================================================================
 # In-kernel test-suite launch gates (RWLOCK_TEST / SEMAPHORE_TEST /
@@ -384,8 +387,12 @@ endif()
 
 set(KERNEL_S_FILES ${KERNEL_DIR}/entry.S)
 
-# Generate asm-offsets.h before building anything else
-add_subdirectory(${KERNEL_DIR}/inc)
+# P3-5: asm-offsets.h is a static checked-in header now
+# (kernel/inc/asm-offsets.h, values enforced by the native Rust types'
+# const asserts — see that header's comment). The kernel/inc
+# subdirectory (whose CMakeLists.txt only ran scripts/gen_asm_offsets.py,
+# both deleted) is no longer added, and no target depends on the former
+# generate_asm_offsets custom target.
 
 # Pull in subdirectory object libraries.
 # NOTE: kernel/lock has no C sources anymore (fully ported to Rust; see
@@ -586,7 +593,7 @@ set(RUST_FORCE_UNDEFINED
 # Plain kernel (without embedded symbols)
 # ==============================================================================
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
-add_dependencies(${KERNEL_BINARY} generate_asm_offsets xv6_rust)
+add_dependencies(${KERNEL_BINARY} xv6_rust)
 target_sources(${KERNEL_BINARY} PRIVATE ${KERNEL_OBJ_LIBS})
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_LD}
     ${RUST_FORCE_UNDEFINED}
@@ -635,12 +642,11 @@ add_custom_command(
 )
 
 add_library(ksymbols_placeholder OBJECT EXCLUDE_FROM_ALL ${KSYM_PLACEHOLDER_ASM})
-add_dependencies(ksymbols_placeholder generate_asm_offsets)
 set_source_files_properties(${KSYM_PLACEHOLDER_ASM} PROPERTIES GENERATED TRUE)
 
 # Kernel with placeholder
 add_executable(kernel_with_symbols_elf EXCLUDE_FROM_ALL ${KERNEL_OBJS})
-add_dependencies(kernel_with_symbols_elf generate_asm_offsets ksymbols_placeholder xv6_rust)
+add_dependencies(kernel_with_symbols_elf ksymbols_placeholder xv6_rust)
 target_sources(kernel_with_symbols_elf PRIVATE ${KERNEL_OBJ_LIBS} $<TARGET_OBJECTS:ksymbols_placeholder>)
 target_link_options(kernel_with_symbols_elf PRIVATE -z max-page-size=4096 -T ${KERNEL_LD}
     ${RUST_FORCE_UNDEFINED}

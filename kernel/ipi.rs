@@ -94,7 +94,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bindings::cpu_local;
 use crate::machine;
-use crate::machine::{CpuLocal, CPU_FLAG_CRASHED, SIE_SSIE};
+// P3-5: `machine::CpuLocal` (the borrow-scoped accessor wrapper) is now
+// referenced by qualified path — this file defines the native `struct
+// cpu_local` under the same CamelCase name `CpuLocal` below (the N-wave
+// naming convention), so the bare import would collide.
+use crate::machine::{CPU_FLAG_CRASHED, SIE_SSIE};
 // P3-1C mesh sweep: printf.rs is in scope for this wave; both are thin
 // spinlock wrappers, unconditionally safe to call, so they become plain
 // crate-path imports instead of `extern "C"` redeclarations.
@@ -251,6 +255,95 @@ fn ctz8(x: u8) -> i32 {
 // NCPU (8) * sizeof(cpu_local) (64, `#[repr(align(64))]` per the bindgen
 // struct) = 512 bytes, comfortably under one page.
 // ===========================================================================
+
+// ===========================================================================
+// Native layout — Wave P3-5 (the asm-offset-locked trio, part 3/3).
+//
+// This IS the kernel-wide Rust definition of `struct cpu_local`
+// (`kernel/inc/smp/percpu_types.h`) now: `build.rs` blocklists the
+// bindgen form and injects `pub use crate::ipi::CpuLocal as cpu_local;`,
+// so every `crate::bindings::cpu_local` path across the crate (including
+// this file's own import and `machine.rs`'s accessor wrapper) resolves
+// here. NOTE the deliberate name split: `crate::machine::CpuLocal` is
+// the borrow-scoped per-hart ACCESSOR wrapper; `crate::ipi::CpuLocal`
+// (this type) is the per-CPU DATA record it points at — this file, the
+// only place both are in scope, qualifies the accessor as
+// `machine::CpuLocal`.
+//
+// DANGER ZONE — ASM CONTRACT: kernel/irq/kernelvec.S addresses this
+// struct through `tp` using the `CPU_LOCAL_FLAGS`/`CPU_LOCAL_INTR_SP`
+// macros of asm-offsets.h (interrupt-stack switch on trap entry); the
+// per-hart `tp` spacing itself is `sizeof(struct cpu_local)` (`mycpu_
+// init` below, and `machine::cpuid()`'s divide). The const asserts below
+// cite the consumers; any drift fails the target build before an image
+// can be linked.
+//
+// FIELD-NAME NOTE: the C field `proc` is spelled `proc_` here — bindgen
+// renamed it (`proc` is on bindgen's reserved list) and every Rust
+// consumer already reads `.proc_`; the asm-offsets.h define stays
+// `CPU_LOCAL_PROC` (no .S consumer).
+//
+// Layout evidence (three-way agreement): the golden gcc-generated
+// asm-offsets.h CPU_LOCAL_* values + the riscv64-unknown-elf-gcc
+// `_Static_assert` probe (rv64gc/lp64d, scratchpad
+// p3_5_static_assert_probe.c) + the pre-nativization bindgen output
+// (`#[repr(C)] #[repr(align(64))]`, derives Copy/Clone). C attribute
+// `__ALIGNED_CACHELINE` == align(64); fields end at 64, no tail pad.
+//
+// Derive fidelity: bindgen derived Copy/Clone; the native keeps them
+// (the `ZERO_CPU_LOCAL` array-repeat seed below depends on Copy), and
+// build.rs's `NativeTypeCallbacks` answers Copy=Yes (nothing
+// still-bindgen embeds it by value — the only by-value context is the
+// `CpuLocalArray` wrapper below, hand-written in this file).
+// ===========================================================================
+
+/// Native `struct cpu_local` (`kernel/inc/smp/percpu_types.h`) — the
+/// per-CPU state record each hart's `tp` points at.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct CpuLocal {
+    pub proc_: *mut crate::bindings::thread,
+    pub idle_thread: *mut crate::bindings::thread,
+    pub intr_stacks: *mut *mut c_void,
+    pub intr_sp: u64,
+    pub intr_depth: c_int,
+    pub noff: c_int,
+    pub spin_depth: c_int,
+    pub intena: c_int,
+    pub flags: u64,
+    pub rcu_timestamp: u64,
+}
+
+// P3-5 hardcoded layout proof — every value equals the golden
+// gcc-generated asm-offsets.h CPU_LOCAL_* define named in the message,
+// independently confirmed by the toolchain-gcc `_Static_assert` probe
+// and the pre-nativization bindgen output. `CPU_LOCAL_FLAGS` and
+// `CPU_LOCAL_INTR_SP` are live kernelvec.S loads; the size assert
+// guards the per-hart `tp` stride (kernelvec.S's `(tp)` addressing +
+// `machine::cpuid()`); the rest are pinned for the static asm-offsets.h.
+const _: () = {
+    assert!(
+        core::mem::size_of::<CpuLocal>() == 64,
+        "CPU_LOCAL_SIZE (per-hart tp stride: kernelvec.S `(tp)` addressing, machine::cpuid())"
+    );
+    assert!(core::mem::align_of::<CpuLocal>() == 64, "cpu_local alignment (__ALIGNED_CACHELINE)");
+    assert!(core::mem::offset_of!(CpuLocal, proc_) == 0, "CPU_LOCAL_PROC (C field `proc`)");
+    assert!(core::mem::offset_of!(CpuLocal, idle_thread) == 8, "CPU_LOCAL_IDLE_THREAD");
+    assert!(core::mem::offset_of!(CpuLocal, intr_stacks) == 16, "CPU_LOCAL_INTR_STACKS");
+    assert!(
+        core::mem::offset_of!(CpuLocal, intr_sp) == 24,
+        "CPU_LOCAL_INTR_SP (kernelvec.S `ld a0, CPU_LOCAL_INTR_SP(tp)`)"
+    );
+    assert!(core::mem::offset_of!(CpuLocal, intr_depth) == 32, "CPU_LOCAL_INTR_DEPTH");
+    assert!(core::mem::offset_of!(CpuLocal, noff) == 36, "CPU_LOCAL_NOFF");
+    assert!(core::mem::offset_of!(CpuLocal, spin_depth) == 40, "CPU_LOCAL_SPIN_DEPTH");
+    assert!(core::mem::offset_of!(CpuLocal, intena) == 44, "CPU_LOCAL_INTENA");
+    assert!(
+        core::mem::offset_of!(CpuLocal, flags) == 48,
+        "CPU_LOCAL_FLAGS (kernelvec.S `ld a0, CPU_LOCAL_FLAGS(tp)`)"
+    );
+    assert!(core::mem::offset_of!(CpuLocal, rcu_timestamp) == 56, "CPU_LOCAL_RCU_TIMESTAMP");
+};
 
 /// Alignment-carrying wrapper -- `#[repr(align(N))]` cannot be attached
 /// directly to a `static`'s array type, same reason `start.rs` wraps
@@ -504,7 +597,7 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
 
         match reason {
             IPI_REASON_CRASH => {
-                CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
+                machine::CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
                 panic_msg_lock();
                 crate::kprintln!("[Core: {}] Received IPI_REASON_CRASH, crashing...", hartid);
                 // SAFETY: same as the removed `printf` call above; the
@@ -529,7 +622,7 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
                 // (see the `extern` block above and the module doc's
                 // interrupt-context audit).
                 unsafe { rq_flush_wake_list(hartid) };
-                CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
+                machine::CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
             }
             IPI_REASON_TLB_FLUSH => {
                 // xv6 uses separate kernel/user page tables, so the TLB
