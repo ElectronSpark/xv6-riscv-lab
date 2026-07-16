@@ -2140,6 +2140,66 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   interactivity throughout the battery is itself the tty gate).
   10 files, +836/−24.
 
+### Iteration 65 — 2026-07-16 — Wave P3-N9: the thread family nativized (the process-struct hub)
+
+- Ninth nativization wave, the most consumed type in the kernel:
+  `struct thread` (kernel/inc/proc/thread_types.h) → native `Thread` in
+  kernel/proc/thread.rs (1152/64, EVERY field offset hardcoded-asserted:
+  lock@0, state@64, flags@72, sched_entity@80, ksp@88, chan@96,
+  sched_entry@104, wq@120, trapframe@128, vm@136, clone_flags@144,
+  kentry@152, arg@160, name@176, kstack_order@192, kstack@200,
+  trapframe_vbase@208, fs@216, fdtable@224, rcu_read_lock_nesting@232,
+  sigacts@256, parent@264, vfork_parent@272, thread_group@280,
+  pgroup@288, session@296, sid/pgid/tgid/pid@304–316, tg_entry@320,
+  pg_entry@336, sid_entry@352, siblings@368, children@384,
+  children_count@400, xstate@404, wq_entry@408, proctab_entry@448,
+  dmp_list_entry@472, signal@488, rcu_head@1072); `thread_signal_t`
+  (kernel/inc/signal_types.h) → native `ThreadSignal` in
+  kernel/proc/signal.rs with the N4 family (584/8, all 9 offsets
+  asserted; `sig_pending` re-points transparently to the native
+  `SigPending`, `sig_stack` stays the bindgen uabi `stack_t` by value —
+  mixed-tier). The four `thread__bindgen_ty_*` shells (zero-sized
+  align(64) `__STRUCT_CACHELINE_PADDING` markers, NOT unions) vanish —
+  the native carries explicit private `_pad*` arrays reproducing
+  bindgen's `__bindgen_padding_0/1` byte-for-byte (N7 precedent).
+  bindgen emission for the family → 0; remaining bindgen structs
+  44→**40**; derive-fidelity gate REMOVED == exactly {thread,
+  thread__bindgen_ty_1..4, thread_signal}, ADDED/CHANGED 0.
+- **ASM-OFFSET FINDING**: `thread` IS in gen_asm_offsets.py's struct set
+  (`THREAD_*` defines generated into build/kernel/inc/asm-offsets.h,
+  THREAD_SIZE 1152) but **no .S file consumes any `THREAD_*` macro**
+  (kernelvec.S/trampoline.S use only `TRAPFRAME_*`/`UTRAPFRAME_*`/
+  `CPU_LOCAL_*`; swtch.S hardcodes context offsets 0–104). The generator
+  keeps reading the untouched C header; thread.rs's asserts pin the
+  native to those exact gcc values.
+- uabi determination: `siginfo`/`sigval`/`stack` are defined in
+  kernel/inc/uabi/signal.h — userspace-ABI class, SKIPPED (stay
+  bindgen, P3-4), per the brief's conditional and N8's termios
+  precedent.
+- Layout evidence: temporary in-tree `offset_of!` gate on the live
+  bindgen forms + riscv64-unknown-elf-gcc `_Static_assert` probe
+  (rv64gc/lp64d, scratchpad p3n9_static_assert_probe.c) + the
+  gcc-generated asm-offsets.h `THREAD_*` values — all three agree on
+  every size/align/offset (no pipe-style divergence). Zero consumer
+  re-pointing needed: no Rust code ever touched the `__bindgen_anon_*`
+  ZSTs, and all field names are preserved (`offset_of!(thread, ...)`
+  container-of sites in proc_shims/session/thread_group compile
+  against the native unchanged). `proc::thread` module `pub(crate)`
+  for the facade path (N2/N3/N4 precedent).
+- Verified (worker, cache-clean before+after, BUILD_TYPE empty +
+  toolchain gcc): 0-warning clean rebuild; 3 boots each with exactly
+  one `init: starting sh`; **testsig 21/21**; **mmaptest 16/16**;
+  usertests preempt/forkfork/forktest/killstatus/reparent/exitwait all
+  OK (single-test "lost some free pages" trailers = documented
+  pre-existing artifact); stressfs ran to completion (write+read
+  phases); `cat /nonexistent` → ENOENT. **forkforkfork A/B**: baseline
+  captured on HEAD pre-change — panic "Failed to remove interrupted
+  waiter from queue" → both cores IPI_REASON_CRASH → recursive
+  load-page-fault storm (scause=0xd, stval=0xfffffffffffffff1) inside
+  `backtrace::print_backtrace`; post-change run IDENTICAL
+  (same message chain, same site — sepc even resolves to the same
+  symbol at the same address). 5 files, ~+330/−15.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

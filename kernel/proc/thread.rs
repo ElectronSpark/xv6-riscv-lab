@@ -18,9 +18,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::bindings::{
-    context, fs_struct, list_node_t, hlist_entry_t, page_t, pgroup,
-    rq, sched_attr, sched_entity, session, sigacts as sigacts_t, spinlock_t, thread,
-    thread_group, thread_state, utrapframe, vfs_fdtable, vfs_inode, vfs_inode_ref,
+    context, fs_struct, list_node_t, hlist_entry_t, page_t, pgroup, pid_t,
+    rcu_head_t, rq, sched_attr, sched_entity, session, sigacts as sigacts_t, spinlock_t, thread,
+    thread_group, thread_signal_t, thread_state, utrapframe, vfs_fdtable, vfs_inode,
+    vfs_inode_ref, vm_t, workqueue,
 };
 use crate::lock::rcu::rcu_check_callbacks;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
@@ -85,6 +86,188 @@ fn proctab_proc_add(p: *mut thread) {
 fn __proctab_set_initproc(p: *mut thread) {
     crate::proc::pid::__proctab_set_initproc(p as *mut c_void as *mut crate::proc::pid::Thread);
 }
+
+// ===========================================================================
+// Native layout — Wave P3-N9 (the thread family hub).
+//
+// This IS the kernel-wide Rust definition of `struct thread`
+// (`kernel/inc/proc/thread_types.h`) now: `build.rs` blocklists the
+// bindgen-generated form (plus its four `thread__bindgen_ty_*` shells)
+// and injects `pub use crate::proc::thread::Thread as thread;`, so every
+// `crate::bindings::thread` path across the crate resolves here.
+//
+// The C struct separates its hot-field groups with four
+// `__STRUCT_CACHELINE_PADDING` markers (`struct {}
+// __attribute__((aligned(64)))`, kernel/inc/compiler.h) — bindgen
+// emitted those as the four zero-sized align(64) `thread__bindgen_ty_*`
+// shells plus two explicit `__bindgen_padding_*` arrays where the
+// preceding field group didn't already end on a cacheline. The native
+// reproduces the byte layout with explicit private `_pad*` arrays (N7
+// `RqPercpu`/`SchedEntity` precedent); the shells themselves vanish
+// (nothing ever read them — grep-verified, they are zero-sized).
+//
+// Mixed-tier fields (P3-5 asm-offset set, stay bindgen until then):
+// `trapframe: *mut utrapframe` is a POINTER (transparent);
+// `sched_entity` likewise. Nothing here embeds context/trapframe/
+// cpu_local by value. `signal: thread_signal_t` re-points to the native
+// `ThreadSignal` (same wave, kernel/proc/signal.rs).
+//
+// ASM-OFFSET FINDING (P3-N9): `thread` IS in the gen_asm_offsets.py set
+// (kernel/inc/CMakeLists.txt generates THREAD_* defines into
+// build/kernel/inc/asm-offsets.h, THREAD_SIZE 1152) — but NO .S file
+// consumes any THREAD_* macro (grep over kernel/**/*.S: kernelvec.S/
+// trampoline.S use only TRAPFRAME_*/UTRAPFRAME_*/CPU_LOCAL_*; swtch.S
+// uses hardcoded context offsets). The generator reads the C header
+// (which remains authoritative and untouched), so the generated defines
+// stay correct regardless; the hardcoded asserts below additionally
+// pin the native to those exact gcc values field-by-field.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + riscv64-unknown-elf-gcc `_Static_assert` probe
+// (rv64gc/lp64d — scratchpad p3n9_static_assert_probe.c) + the
+// gcc-generated asm-offsets.h THREAD_* values; all three agree on every
+// size/align/offset (no pipe-style divergence, N5 precedent checked).
+//
+// Derive fidelity: bindgen derived Copy/Clone (as it does for every
+// non-degraded struct); the native keeps them, and build.rs's
+// `NativeTypeCallbacks` answers Copy=Yes for `thread` (nothing
+// still-bindgen embeds it by value — the only by-value context is the
+// kernel-stack head arranged by `kstack_arrange` below).
+// ===========================================================================
+
+/// Native `struct thread` (`kernel/inc/proc/thread_types.h`) — the
+/// per-thread control block, laid out at the top of its kernel stack.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Thread {
+    // ===== Cache line 0: lock (isolated against false sharing) =====
+    pub lock: spinlock_t,
+    // C `__STRUCT_CACHELINE_PADDING` #1 (bindgen `__bindgen_anon_1`,
+    // zero-sized align(64) shell): next field starts at 64.
+    _pad0: [u8; 40],
+    // ===== Cache line 1: scheduler hot path =====
+    pub state: thread_state,
+    pub flags: u64,
+    pub sched_entity: *mut sched_entity,
+    pub ksp: u64,
+    pub chan: *mut c_void,
+    pub sched_entry: list_node_t,
+    pub wq: *mut workqueue,
+    // C `__STRUCT_CACHELINE_PADDING` #2 (bindgen `__bindgen_anon_2`):
+    // the group above already ends exactly at 128 — zero bytes.
+    // ===== Cache line 2: trap/syscall hot path + cold init =====
+    pub trapframe: *mut utrapframe,
+    pub vm: *mut vm_t,
+    pub clone_flags: u64,
+    pub kentry: u64,
+    pub arg: [u64; 2],
+    pub name: [c_char; 16],
+    pub kstack_order: c_int,
+    pub kstack: u64,
+    pub trapframe_vbase: u64,
+    pub fs: *mut fs_struct,
+    pub fdtable: *mut vfs_fdtable,
+    pub rcu_read_lock_nesting: c_int,
+    // C `__STRUCT_CACHELINE_PADDING` #3 (bindgen `__bindgen_padding_0:
+    // [u64; 2]` + the zero-sized `__bindgen_anon_3`): 236 -> 256.
+    _pad1: [u64; 2],
+    // ===== Cache line 3+: family tree (fork/exit/wait) =====
+    pub sigacts: *mut sigacts_t,
+    pub parent: *mut Thread,
+    pub vfork_parent: *mut Thread,
+    pub thread_group: *mut thread_group,
+    pub pgroup: *mut pgroup,
+    pub session: *mut session,
+    pub sid: pid_t,
+    pub pgid: pid_t,
+    pub tgid: pid_t,
+    pub pid: pid_t,
+    pub tg_entry: list_node_t,
+    pub pg_entry: list_node_t,
+    pub sid_entry: list_node_t,
+    pub siblings: list_node_t,
+    pub children: list_node_t,
+    pub children_count: c_int,
+    pub xstate: c_int,
+    pub wq_entry: list_node_t,
+    // C `__STRUCT_CACHELINE_PADDING` #4 (bindgen `__bindgen_padding_1:
+    // [u64; 3]` + the zero-sized `__bindgen_anon_4`): 424 -> 448.
+    _pad2: [u64; 3],
+    // ===== Cold: registration / debug =====
+    pub proctab_entry: hlist_entry_t,
+    pub dmp_list_entry: list_node_t,
+    // ===== Signal (large, pushed to end) =====
+    pub signal: thread_signal_t,
+    // ===== RCU deferred freeing (must be last) =====
+    pub rcu_head: rcu_head_t,
+    // struct align(64) tail-pads 1112 -> 1152, exactly as bindgen/gcc.
+}
+
+// P3-N9 hardcoded layout proof — every field of the hub, values captured
+// from the pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate, independently confirmed by the gcc `_Static_assert`
+// probe (scratchpad p3n9_static_assert_probe.c) AND equal to the
+// gcc-generated build/kernel/inc/asm-offsets.h THREAD_* defines
+// (THREAD_LOCK..THREAD_RCU_HEAD, THREAD_SIZE — no .S consumer exists,
+// see the block note above).
+const _: () = {
+    assert!(core::mem::size_of::<Thread>() == 1152, "thread size (THREAD_SIZE)");
+    assert!(core::mem::align_of::<Thread>() == 64, "thread alignment");
+    assert!(core::mem::offset_of!(Thread, lock) == 0, "thread.lock offset");
+    assert!(core::mem::offset_of!(Thread, state) == 64, "thread.state offset");
+    assert!(core::mem::offset_of!(Thread, flags) == 72, "thread.flags offset");
+    assert!(core::mem::offset_of!(Thread, sched_entity) == 80, "thread.sched_entity offset");
+    assert!(core::mem::offset_of!(Thread, ksp) == 88, "thread.ksp offset");
+    assert!(core::mem::offset_of!(Thread, chan) == 96, "thread.chan offset");
+    assert!(core::mem::offset_of!(Thread, sched_entry) == 104, "thread.sched_entry offset");
+    assert!(core::mem::offset_of!(Thread, wq) == 120, "thread.wq offset");
+    assert!(core::mem::offset_of!(Thread, trapframe) == 128, "thread.trapframe offset");
+    assert!(core::mem::offset_of!(Thread, vm) == 136, "thread.vm offset");
+    assert!(core::mem::offset_of!(Thread, clone_flags) == 144, "thread.clone_flags offset");
+    assert!(core::mem::offset_of!(Thread, kentry) == 152, "thread.kentry offset");
+    assert!(core::mem::offset_of!(Thread, arg) == 160, "thread.arg offset");
+    assert!(core::mem::offset_of!(Thread, name) == 176, "thread.name offset");
+    assert!(core::mem::offset_of!(Thread, kstack_order) == 192, "thread.kstack_order offset");
+    assert!(core::mem::offset_of!(Thread, kstack) == 200, "thread.kstack offset");
+    assert!(
+        core::mem::offset_of!(Thread, trapframe_vbase) == 208,
+        "thread.trapframe_vbase offset"
+    );
+    assert!(core::mem::offset_of!(Thread, fs) == 216, "thread.fs offset");
+    assert!(core::mem::offset_of!(Thread, fdtable) == 224, "thread.fdtable offset");
+    assert!(
+        core::mem::offset_of!(Thread, rcu_read_lock_nesting) == 232,
+        "thread.rcu_read_lock_nesting offset"
+    );
+    assert!(core::mem::offset_of!(Thread, sigacts) == 256, "thread.sigacts offset");
+    assert!(core::mem::offset_of!(Thread, parent) == 264, "thread.parent offset");
+    assert!(core::mem::offset_of!(Thread, vfork_parent) == 272, "thread.vfork_parent offset");
+    assert!(core::mem::offset_of!(Thread, thread_group) == 280, "thread.thread_group offset");
+    assert!(core::mem::offset_of!(Thread, pgroup) == 288, "thread.pgroup offset");
+    assert!(core::mem::offset_of!(Thread, session) == 296, "thread.session offset");
+    assert!(core::mem::offset_of!(Thread, sid) == 304, "thread.sid offset");
+    assert!(core::mem::offset_of!(Thread, pgid) == 308, "thread.pgid offset");
+    assert!(core::mem::offset_of!(Thread, tgid) == 312, "thread.tgid offset");
+    assert!(core::mem::offset_of!(Thread, pid) == 316, "thread.pid offset");
+    assert!(core::mem::offset_of!(Thread, tg_entry) == 320, "thread.tg_entry offset");
+    assert!(core::mem::offset_of!(Thread, pg_entry) == 336, "thread.pg_entry offset");
+    assert!(core::mem::offset_of!(Thread, sid_entry) == 352, "thread.sid_entry offset");
+    assert!(core::mem::offset_of!(Thread, siblings) == 368, "thread.siblings offset");
+    assert!(core::mem::offset_of!(Thread, children) == 384, "thread.children offset");
+    assert!(
+        core::mem::offset_of!(Thread, children_count) == 400,
+        "thread.children_count offset"
+    );
+    assert!(core::mem::offset_of!(Thread, xstate) == 404, "thread.xstate offset");
+    assert!(core::mem::offset_of!(Thread, wq_entry) == 408, "thread.wq_entry offset");
+    assert!(core::mem::offset_of!(Thread, proctab_entry) == 448, "thread.proctab_entry offset");
+    assert!(
+        core::mem::offset_of!(Thread, dmp_list_entry) == 472,
+        "thread.dmp_list_entry offset"
+    );
+    assert!(core::mem::offset_of!(Thread, signal) == 488, "thread.signal offset");
+    assert!(core::mem::offset_of!(Thread, rcu_head) == 1072, "thread.rcu_head offset");
+};
 
 // ---------------- constants ----------------------------------------------
 const PAGE_SHIFT: u32 = 12;
@@ -866,4 +1049,3 @@ fn install_user_root_finish(p: *mut thread, root_inode: *mut c_void) {
 // tcb_unlock/proc_assert_holding/thread_init/attach_child/detach_child/
 // thread_create/kthread_create/idle_thread_init/thread_destroy/userinit/
 // install_user_root was collapsed in the P3-1B2 sweep: every caller now
-// invokes these canonical names directly (crate-path, no FFI hop).

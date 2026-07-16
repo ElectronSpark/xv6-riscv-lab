@@ -44,7 +44,10 @@ mod rq_test;
 // redirect can path here.
 pub(crate) mod thread_group;
 pub(crate) mod thread_queue;
-mod thread;
+// pub(crate) (P3-N9): `build.rs` injects `pub use crate::proc::thread::
+// Thread as thread;` facade re-export into `crate::bindings`, which
+// needs the module nameable from the crate root (N2/N3/N4 precedent).
+pub(crate) mod thread;
 // pub(crate) (P3-N7): `build.rs` injects `pub use crate::proc::sched::
 // SchedClass as sched_class;` (+ sched_attr) and `pub use crate::proc::
 // rq::Rq as rq;` (+ rq_percpu/sched_entity/load_weight) facade

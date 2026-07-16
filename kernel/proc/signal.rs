@@ -154,6 +154,29 @@ pub struct TgSharedPending {
     pub sig_pending: [SigPending; 32],
 }
 
+/// `struct thread_signal` / `thread_signal_t` (`kernel/inc/
+/// signal_types.h`) — per-thread signal state, embedded by value by the
+/// native `Thread` (P3-N9). `crate::bindings::{thread_signal,
+/// thread_signal_t}` resolve here via the build.rs facade. The
+/// `sig_pending` array embeds the native `SigPending` (N4, transparent
+/// re-point); `sig_stack` stays typed as the bindgen `stack_t`
+/// (`crate::bindings::stack`, kernel/inc/uabi/signal.h) — the uabi
+/// class stays bindgen-emitted until P3-4, the sanctioned mixed-tier
+/// pattern (N2/N5 precedent, cf. `KsigInfo::info`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ThreadSignal {
+    pub sig_mask: sigset_t,
+    pub sig_saved_mask: sigset_t,
+    pub sig_pending_mask: sigset_t,
+    pub sig_pending: [SigPending; 32],
+    pub sig_ucontext: u64,
+    pub sig_stack: crate::bindings::stack,
+    pub esignal: u64,
+    pub stop_signal: c_int,
+    pub term_signal: c_int,
+}
+
 // P3-N4 hardcoded layout proof — values captured from the
 // pre-nativization bindgen output (kernel_bindings.rs: `pub struct
 // sigaction { __bindgen_anon_1: sigaction__bindgen_ty_1, sa_mask:
@@ -208,6 +231,45 @@ const _: () = {
     assert!(
         core::mem::offset_of!(TgSharedPending, sig_pending) == 8,
         "tg_shared_pending.sig_pending offset"
+    );
+    // P3-N9 — values captured from the pre-nativization bindgen output
+    // via the temporary in-tree `offset_of!` gate and independently
+    // confirmed by the riscv64-unknown-elf-gcc `_Static_assert` probe
+    // (rv64gc/lp64d — scratchpad p3n9_static_assert_probe.c); both agree
+    // on every value (no pipe-style divergence, N5 precedent checked).
+    assert!(core::mem::size_of::<ThreadSignal>() == 584, "thread_signal size");
+    assert!(core::mem::align_of::<ThreadSignal>() == 8, "thread_signal alignment");
+    assert!(core::mem::offset_of!(ThreadSignal, sig_mask) == 0, "thread_signal.sig_mask offset");
+    assert!(
+        core::mem::offset_of!(ThreadSignal, sig_saved_mask) == 8,
+        "thread_signal.sig_saved_mask offset"
+    );
+    assert!(
+        core::mem::offset_of!(ThreadSignal, sig_pending_mask) == 16,
+        "thread_signal.sig_pending_mask offset"
+    );
+    assert!(
+        core::mem::offset_of!(ThreadSignal, sig_pending) == 24,
+        "thread_signal.sig_pending offset"
+    );
+    assert!(
+        core::mem::offset_of!(ThreadSignal, sig_ucontext) == 536,
+        "thread_signal.sig_ucontext offset"
+    );
+    assert!(
+        core::mem::offset_of!(ThreadSignal, sig_stack) == 544,
+        "thread_signal.sig_stack offset"
+    );
+    assert!(core::mem::size_of::<crate::bindings::stack>() == 24, "stack_t size");
+    assert!(core::mem::align_of::<crate::bindings::stack>() == 8, "stack_t alignment");
+    assert!(core::mem::offset_of!(ThreadSignal, esignal) == 568, "thread_signal.esignal offset");
+    assert!(
+        core::mem::offset_of!(ThreadSignal, stop_signal) == 576,
+        "thread_signal.stop_signal offset"
+    );
+    assert!(
+        core::mem::offset_of!(ThreadSignal, term_signal) == 580,
+        "thread_signal.term_signal offset"
     );
 };
 use crate::machine::{cpuid, CpuLocal};

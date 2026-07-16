@@ -192,10 +192,10 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "page_t",
             // kernel/lock/rcu.rs (P3-N7, rcu sub-family). Derived
             // Copy/Clone in the pre-nativization bindgen output; the
-            // still-bindgen `thread` embeds `rcu_head_t` BY VALUE
-            // (`rcu_head`, its last field) and derives Copy/Clone
-            // itself — the accurate Yes here is what keeps *its* derive
-            // line unchanged. Listed in bare, `_t`, and tag-prefixed
+            // `thread` hub (still-bindgen until P3-N9, native since)
+            // embeds `rcu_head_t` BY VALUE (`rcu_head`, its last field)
+            // and derives Copy/Clone itself — the accurate Yes here is
+            // what keeps *its* derive line unchanged. Listed in bare, `_t`, and tag-prefixed
             // forms (the P3-N6 FINDING: bindgen queries non-typedef'd
             // field spellings as `"struct X"`).
             "rcu_head",
@@ -262,6 +262,23 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "struct xv6fs_logheader",
             "xv6fs_log",
             "struct xv6fs_log",
+            // kernel/proc/thread.rs + kernel/proc/signal.rs (P3-N9, the
+            // thread family hub). Both derived Copy/Clone in the
+            // pre-nativization bindgen output (`thread`'s embedded
+            // `spinlock_t`/`list_node_t`/`hlist_entry_t`/`rcu_head_t`/
+            // `sigpending_t` are typedef-spelled natives that already
+            // answered Yes via their own entries; `thread_signal`'s
+            // `sig_stack` embeds the still-bindgen uabi `stack_t`, which
+            // bindgen derives Copy for natively). Nothing in the
+            // remaining bindgen output embeds either by value (verified:
+            // the only by-value embedder of `thread_signal` was `thread`
+            // itself, native in the same wave; all remaining `thread`
+            // uses are pointers). Tag-prefixed + typedef forms included.
+            "thread",
+            "struct thread",
+            "thread_signal",
+            "struct thread_signal",
+            "thread_signal_t",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -809,10 +826,12 @@ fn main() {
         // and re-exported under both names; no `sigaction_t`/
         // `ksiginfo_t`/`tg_shared_pending` typedefs ever appeared in the
         // bindgen output (consumers alias in their `use` items). NOTE:
-        // `siginfo`/`sigval`/`stack`/`thread_signal` deliberately stay
-        // bindgen-emitted (out of this wave's scope); the native
-        // `KsigInfo` embeds `siginfo_t` *by value* via its
-        // `crate::bindings` path — the sanctioned mixed-tier pattern.
+        // `siginfo`/`sigval`/`stack` deliberately stay bindgen-emitted
+        // (uabi class, kernel/inc/uabi/signal.h — P3-4 scrutiny; the
+        // P3-N9 determination); the native `KsigInfo` embeds `siginfo_t`
+        // *by value* via its `crate::bindings` path — the sanctioned
+        // mixed-tier pattern. `thread_signal` stayed bindgen through
+        // N4..N8 and nativized with its embedder in P3-N9 below.
         .blocklist_type("sigaction|sigaction__bindgen_ty_1|sigacts|sigacts_t|sigpending|sigpending_t|ksiginfo|tg_shared_pending")
         .raw_line("pub use crate::proc::signal::SigAction as sigaction;")
         .raw_line("pub use crate::proc::signal::SigActs as sigacts;")
@@ -1167,6 +1186,52 @@ fn main() {
             "    }\n",
             "}"
         ));
+
+    // ------------------------------------------------------------------
+    // P3-N9 nativization: the thread family — `struct thread`, the most
+    // consumed type in the kernel, plus its embedded `thread_signal_t`.
+    // Same blocklist + `pub use` re-export technique as P3-N2..N8 above.
+    // Layout evidence: temporary in-tree `offset_of!` gate on the live
+    // bindgen forms + cross-compiler `_Static_assert` probe (toolchain
+    // gcc, rv64gc/lp64d — scratchpad p3n9_static_assert_probe.c) + the
+    // gcc-generated build/kernel/inc/asm-offsets.h THREAD_* defines;
+    // all three agree on every size/align/offset (no pipe-style
+    // divergence, P3-N5 precedent checked).
+    //
+    // ASM-OFFSET NOTE: `thread` is in kernel/inc/CMakeLists.txt's
+    // gen_asm_offsets.py set, but no .S file consumes any THREAD_*
+    // macro (grep-verified: kernelvec.S/trampoline.S use only
+    // TRAPFRAME_*/UTRAPFRAME_*/CPU_LOCAL_*; swtch.S hardcodes context
+    // offsets). The generator keeps reading the untouched C header, and
+    // thread.rs's per-field hardcoded asserts pin the native to those
+    // same values.
+    //
+    // uabi determination: `siginfo`/`sigval`/`stack` (stack_t) are
+    // defined in kernel/inc/uabi/signal.h — userspace-ABI layout
+    // contracts (P3-4 scrutiny class), they stay bindgen-emitted; the
+    // native `ThreadSignal` embeds `stack_t` by value via its
+    // `crate::bindings` path (mixed-tier, cf. `KsigInfo::info`).
+    //
+    // `context`/`trapframe`/`utrapframe`/`cpu_local` are untouched
+    // (P3-5 asm-offset set); `thread` holds only POINTERS to them.
+    builder = builder
+        // kernel/inc/signal_types.h `struct thread_signal` /
+        // `thread_signal_t` -> kernel/proc/signal.rs (with the N4
+        // signal family).
+        .blocklist_type("thread_signal|thread_signal_t")
+        .raw_line("pub use crate::proc::signal::ThreadSignal as thread_signal;")
+        .raw_line("pub use crate::proc::signal::ThreadSignal as thread_signal_t;")
+        // kernel/inc/proc/thread_types.h `struct thread` (no typedef) ->
+        // kernel/proc/thread.rs. The four `thread__bindgen_ty_*` shells
+        // are the zero-sized align(64) `__STRUCT_CACHELINE_PADDING`
+        // markers bindgen would otherwise still emit as orphans (the
+        // native carries explicit `_pad*` arrays instead — nothing ever
+        // named the shells outside `thread` itself, grep-verified). The
+        // regexes are anchored, so `thread` matches neither
+        // `thread_state` (stays bindgen: constified enum) nor
+        // `thread_group`/`thread_signal` (native, own entries).
+        .blocklist_type("thread|thread__bindgen_ty_[1234]")
+        .raw_line("pub use crate::proc::thread::Thread as thread;");
 
     let bindings = builder
         .generate()
