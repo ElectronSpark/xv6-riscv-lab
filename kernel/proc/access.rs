@@ -446,10 +446,10 @@ impl<'a> PgroupAccess<'a> {
     #[inline] pub fn exited(&self) -> c_int { shim_call!(self, pg_exited) }
     #[inline] pub fn is_kernel(&self) -> c_int { shim_call!(self, pg_is_kernel) }
     /// Sets the `pgroup->is_kernel` bitfield (was the C `pgroup_mark_kernel`
-    /// bridge helper). Direct bitfield write via bindgen's
-    /// `__bindgen_anon_1` accessor — no FFI hop needed since every caller
-    /// is already Rust.
-    #[inline] pub fn mark_kernel(&self) { bit_set!(self, __bindgen_anon_1, set_is_kernel, 1) }
+    /// bridge helper). Direct bitfield write via the native
+    /// `PgroupFlagBits` accessor (P3-N3) — no FFI hop needed since every
+    /// caller is already Rust.
+    #[inline] pub fn mark_kernel(&self) { bit_set!(self, flags, set_is_kernel, 1) }
     #[inline] pub fn session_ptr(&self) -> *mut session { shim_call!(self, pg_session) }
     #[inline] pub fn set_pgid(&self, v: c_int) { shim_call!(self, pg_set_pgid, v) }
     #[inline] pub fn set_leader(&self, tg: *mut thread_group) { shim_call!(self, pg_set_leader, tg) }
@@ -572,8 +572,11 @@ impl<'a> ThreadGroupAccess<'a> {
     #[inline] pub fn set_group_exit_code(&self, code: c_int) { raw_set!(self, group_exit_code, code) }
     #[inline] pub fn set_group_stop_count(&self, v: c_int) { raw_set!(self, group_stop_count, v) }
     #[inline] pub fn set_group_stop_signo(&self, v: c_int) { raw_set!(self, group_stop_signo, v) }
-    #[inline] pub fn is_kernel(&self) -> c_int { bit_get!(self, __bindgen_anon_1, is_kernel) as c_int }
-    #[inline] pub fn set_is_kernel(&self, v: u64) { bit_set!(self, __bindgen_anon_1, set_is_kernel, v) }
+    // P3-N3: `thread_group` is native (`crate::proc::thread_group::
+    // ThreadGroup`); the anonymous C bitfield struct is its named
+    // `flags` field (`ThreadGroupFlagBits`).
+    #[inline] pub fn is_kernel(&self) -> c_int { bit_get!(self, flags, is_kernel) as c_int }
+    #[inline] pub fn set_is_kernel(&self, v: u64) { bit_set!(self, flags, set_is_kernel, v) }
 }
 
 #[derive(Clone, Copy)]
@@ -623,8 +626,9 @@ impl<'a> SessionAccess<'a> {
     #[inline] pub fn fg_pgrp_ptr(&self) -> *mut pgroup { shim_call!(self, session_fg_pgrp) }
     /// Sets the `session->is_kernel` bitfield (was the C
     /// `session_mark_kernel` bridge helper). Same pattern as
-    /// [`PgroupAccess::mark_kernel`] / `ThreadGroupAccess::set_is_kernel`.
-    #[inline] pub fn mark_kernel(&self) { bit_set!(self, __bindgen_anon_1, set_is_kernel, 1) }
+    /// [`PgroupAccess::mark_kernel`] / `ThreadGroupAccess::set_is_kernel`
+    /// — the native `SessionFlagBits` accessor since P3-N3.
+    #[inline] pub fn mark_kernel(&self) { bit_set!(self, flags, set_is_kernel, 1) }
 }
 
 // =========================================================================
@@ -2195,17 +2199,20 @@ impl<'a> WorkqueueRef<'a> {
     #[inline] pub fn cb_worker_dtor(&self) -> Option<unsafe extern "C" fn(*mut workqueue, *mut thread)> {
         raw_get!(self, callbacks.worker_dtor)
     }
+    // P3-N3: `workqueue` is native (`crate::proc::workqueue::Workqueue`);
+    // the anonymous C bitfield struct is its named `flags` field
+    // (`WorkqueueFlagBits`) rather than bindgen's `__bindgen_anon_1`.
     #[inline] pub fn is_active(&self) -> bool {
-        bit_get!(self, __bindgen_anon_1, active) != 0
+        bit_get!(self, flags, active) != 0
     }
     #[inline] pub fn set_active(&self, v: u64) {
-        bit_set!(self, __bindgen_anon_1, set_active, v)
+        bit_set!(self, flags, set_active, v)
     }
     #[inline] pub fn dtor_called(&self) -> bool {
-        bit_get!(self, __bindgen_anon_1, dtor_called) != 0
+        bit_get!(self, flags, dtor_called) != 0
     }
     #[inline] pub fn set_dtor_called(&self, v: u64) {
-        bit_set!(self, __bindgen_anon_1, set_dtor_called, v)
+        bit_set!(self, flags, set_dtor_called, v)
     }
 }
 

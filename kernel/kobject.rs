@@ -1,8 +1,13 @@
 //! Kernel object reference counting — Rust port of `kernel/kobject.c`.
 //!
-//! `struct kobject` is the real bindgen-generated `crate::bindings::kobject`
-//! type (added to `wrapper.h` for this port, see `kernel/inc/kobject.h`)
-//! — no opaque stand-in. The global registry list/lock/count are private
+//! `struct kobject` / `struct kobject_ops` are hand-written native
+//! `#[repr(C)]` types below (nativized in Wave P3-N3): `build.rs`
+//! blocklists the bindgen-generated forms and injects
+//! `pub use crate::kobject::Kobject as kobject;` (etc.) raw-line
+//! re-exports, so every remaining bindgen struct that embeds a kobject
+//! by value (`device.kobj`, `bio.kobj`, `inode.kobj`) and every
+//! `crate::bindings::kobject` path across the crate resolves here.
+//! The global registry list/lock/count are private
 //! Rust statics, initialised at runtime by `kobject_global_init`, exactly
 //! mirroring the C `LIST_ENTRY_INITIALIZED`/`SPINLOCK_INITIALIZED`
 //! compile-time initializers (which cannot be replicated as a Rust
@@ -29,10 +34,56 @@ use core::ptr;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
-use crate::bindings::{kobject, list_node_t, spinlock_t};
+use crate::bindings::{list_node_t, spinlock_t};
+use crate::list::ListNode;
 use crate::sync::KSpinlock;
 
-pub type Kobject = kobject;
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N3.
+//
+// `Kobject`/`KobjectOps` ARE the kernel-wide Rust definitions of
+// `kernel/inc/kobject.h`'s `struct kobject`/`struct kobject_ops` now
+// (blocklist+redirect technique per P3-N1/P3-N2, see `build.rs`).
+// `list_entry` is the crate's canonical native `crate::list::ListNode`
+// (== `list_node_t` via the P3-N1 redirect); `release` reproduces
+// bindgen's `Option<unsafe extern "C" fn(*mut kobject)>` lowering of the
+// C function pointer exactly (`*mut Kobject` == `*mut kobject` via this
+// wave's redirect).
+// ---------------------------------------------------------------------------
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KobjectOps {
+    pub release: Option<unsafe extern "C" fn(obj: *mut Kobject)>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Kobject {
+    pub list_entry: ListNode,
+    pub refcount: core::ffi::c_int,
+    pub name: *const c_char,
+    pub ops: KobjectOps,
+}
+
+// P3-N3 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// kobject { list_entry: list_node_t, refcount: c_int, name: *const
+// c_char, ops: kobject_ops }` / `pub struct kobject_ops { release:
+// Option<unsafe extern "C" fn(*mut kobject)> }`) and independently
+// confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
+// (rv64gc/lp64d) against `kernel/inc/kobject.h`: kobject 40/8,
+// offsets 0/16/24/32; kobject_ops 8/8, release at 0.
+const _: () = {
+    assert!(core::mem::size_of::<KobjectOps>() == 8, "kobject_ops size");
+    assert!(core::mem::align_of::<KobjectOps>() == 8, "kobject_ops alignment");
+    assert!(core::mem::offset_of!(KobjectOps, release) == 0, "kobject_ops.release offset");
+    assert!(core::mem::size_of::<Kobject>() == 40, "kobject size");
+    assert!(core::mem::align_of::<Kobject>() == 8, "kobject alignment");
+    assert!(core::mem::offset_of!(Kobject, list_entry) == 0, "kobject.list_entry offset");
+    assert!(core::mem::offset_of!(Kobject, refcount) == 16, "kobject.refcount offset");
+    assert!(core::mem::offset_of!(Kobject, name) == 24, "kobject.name offset");
+    assert!(core::mem::offset_of!(Kobject, ops) == 32, "kobject.ops offset");
+};
 
 use crate::proc::proc_shims::xv6_panic;
 pub(crate) use crate::kmm_free;

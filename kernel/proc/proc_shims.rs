@@ -406,11 +406,14 @@ pub(crate) fn t_set_sid(p: *mut thread, v: c_int) { field_set!(p, sid, v) }
 pub(crate) fn pg_pgid(pg: *mut pgroup) -> c_int { field_get!(pg, pgid) }
 pub(crate) fn pg_t_cnt(pg: *mut pgroup) -> c_int { field_get!(pg, t_cnt) }
 pub(crate) fn pg_p_cnt(pg: *mut pgroup) -> c_int { field_get!(pg, p_cnt) }
+// P3-N3: `pgroup` is native (`crate::proc::pgroup::Pgroup`); the
+// anonymous C bitfield struct is its named `flags` field
+// (`PgroupFlagBits`) rather than bindgen's `__bindgen_anon_1`.
 pub(crate) fn pg_exited(pg: *mut pgroup) -> c_int {
-    bit_get!(pg, __bindgen_anon_1, exited) as c_int
+    bit_get!(pg, flags, exited) as c_int
 }
 pub(crate) fn pg_is_kernel(pg: *mut pgroup) -> c_int {
-    bit_get!(pg, __bindgen_anon_1, is_kernel) as c_int
+    bit_get!(pg, flags, is_kernel) as c_int
 }
 pub(crate) fn pg_session(pg: *mut pgroup) -> *mut session { field_get!(pg, session) }
 
@@ -422,7 +425,7 @@ pub(crate) fn pg_set_session(pg: *mut pgroup, s: *mut session) {
     field_set!(pg, session, s)
 }
 pub(crate) fn pg_set_exited(pg: *mut pgroup, v: c_int) {
-    bit_set!(pg, __bindgen_anon_1, set_exited, if v != 0 { 1 } else { 0 })
+    bit_set!(pg, flags, set_exited, if v != 0 { 1 } else { 0 })
 }
 pub(crate) fn pg_set_t_cnt(pg: *mut pgroup, v: c_int) { field_set!(pg, t_cnt, v) }
 pub(crate) fn pg_set_p_cnt(pg: *mut pgroup, v: c_int) { field_set!(pg, p_cnt, v) }
@@ -2329,7 +2332,7 @@ pub(crate) fn xv6_dump_session(s: *mut Session) {
         let pg_off = core::mem::offset_of!(Pgroup, list_entry);
         list_foreach_safe::<Pgroup>(&raw mut (*s).pgrps, pg_off, |pg| {
             let fg = if (*s).fg_pgrp == pg { " [fg]" } else { "" };
-            let exited = if (*pg).__bindgen_anon_1.exited() != 0 { ", exited" } else { "" };
+            let exited = if (*pg).flags.exited() != 0 { ", exited" } else { "" };
             crate::kprintln!(
                 "  PGroup {}{}  (threads={}, tgroups={}{})",
                 (*pg).pgid, fg, (*pg).t_cnt, (*pg).p_cnt, exited,

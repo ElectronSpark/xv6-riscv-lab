@@ -70,6 +70,26 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "semaphore",
             "sem_t",
             "completion_t",
+            // kernel/kobject.rs (P3-N3). Both derive Copy/Clone exactly
+            // as the pre-nativization bindgen output did; `kobject` is
+            // still embedded by value by remaining bindgen structs
+            // (`device.kobj`, `bio.kobj`, `inode.kobj`), so an accurate
+            // Yes here is what keeps their own derive lines unchanged.
+            "kobject",
+            "kobject_ops",
+            // kernel/proc/workqueue.rs (P3-N3). `work_struct` is still
+            // embedded by value by the remaining bindgen `blkdev`
+            // (`flush_work`); all three derived Copy/Clone in the
+            // pre-nativization bindgen output.
+            "work_struct",
+            "workqueue",
+            "workqueue_callbacks",
+            // kernel/proc/pgroup.rs (P3-N3)
+            "pgroup",
+            // kernel/proc/thread_group.rs (P3-N3)
+            "thread_group",
+            // kernel/tty/session.rs (P3-N3)
+            "session",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -403,6 +423,52 @@ fn main() {
         .raw_line("pub use crate::lock::rwsem::RawRwsem as rwsem_t;")
         .raw_line("pub use crate::lock::semaphore::RawSemaphore as semaphore;")
         .raw_line("pub use crate::lock::completion::RawCompletion as completion_t;");
+
+    // ------------------------------------------------------------------
+    // P3-N3 nativization: the kobject + workqueue + process-object type
+    // families. Same blocklist + `pub use` re-export technique as P3-N2
+    // above (the facade `pub use` lifts natives out of the private
+    // `proc`/`tty` modules to public effective visibility; `kobject` is
+    // a `pub mod`, but the uniform spelling is kept for symmetry).
+    builder = builder
+        // kernel/inc/kobject.h `struct kobject`/`struct kobject_ops` ->
+        // kernel/kobject.rs. No typedef aliases exist for either.
+        .blocklist_type("kobject|kobject_ops")
+        .raw_line("pub use crate::kobject::Kobject as kobject;")
+        .raw_line("pub use crate::kobject::KobjectOps as kobject_ops;")
+        // kernel/inc/proc/workqueue_types.h workqueue family ->
+        // kernel/proc/workqueue.rs. No typedef aliases exist for the
+        // three structs; the `workqueue_lifecycle_cb_t`/
+        // `workqueue_thread_lifecycle_cb_t` fn-pointer typedefs stay
+        // bindgen-emitted (their `*mut workqueue` parameter resolves to
+        // the native via the re-export). `workqueue__bindgen_ty_1` is
+        // the anonymous-bitfield-struct shell bindgen would otherwise
+        // still emit as an orphan; the native `WorkqueueFlagBits`
+        // replaces it (nothing outside `workqueue` ever named it).
+        .blocklist_type("work_struct|workqueue|workqueue_callbacks|workqueue__bindgen_ty_1")
+        .raw_line("pub use crate::proc::workqueue::WorkStruct as work_struct;")
+        .raw_line("pub use crate::proc::workqueue::Workqueue as workqueue;")
+        .raw_line("pub use crate::proc::workqueue::WorkqueueCallbacks as workqueue_callbacks;")
+        // kernel/inc/proc/pgroup_types.h `struct pgroup` (no typedef) ->
+        // kernel/proc/pgroup.rs. `pgroup__bindgen_ty_1` is the
+        // anonymous-bitfield-struct shell (native: `PgroupFlagBits`).
+        .blocklist_type("pgroup|pgroup__bindgen_ty_1")
+        .raw_line("pub use crate::proc::pgroup::Pgroup as pgroup;")
+        // kernel/inc/proc/thread_group_types.h `struct thread_group`
+        // (no typedef) -> kernel/proc/thread_group.rs. NOTE:
+        // `tg_shared_pending` deliberately stays bindgen-emitted (it is
+        // signal-family, out of this wave's scope); the native
+        // `ThreadGroup` embeds it by value via its `crate::bindings`
+        // path. `thread_group__bindgen_ty_1` is the
+        // anonymous-bitfield-struct shell (native: `ThreadGroupFlagBits`).
+        .blocklist_type("thread_group|thread_group__bindgen_ty_1")
+        .raw_line("pub use crate::proc::thread_group::ThreadGroup as thread_group;")
+        // kernel/inc/tty/session_types.h `struct session` (no typedef)
+        // -> kernel/tty/session.rs (already a `pub mod`).
+        // `session__bindgen_ty_1` is the anonymous-bitfield-struct shell
+        // (native: `SessionFlagBits`).
+        .blocklist_type("session|session__bindgen_ty_1")
+        .raw_line("pub use crate::tty::session::Session as session;");
 
     let bindings = builder
         .generate()

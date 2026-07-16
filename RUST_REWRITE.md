@@ -1762,6 +1762,59 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   the worker's pre-change-baseline A/B). (Worker: 6/6 boots, stressfs,
   createdelete, ENOENT, C probe.) 11 files, +380/−200.
 
+### Iteration 59 — 2026-07-16 — Wave P3-N3: kobject + workqueue + process-object families nativized (8 structs + 4 anon bitfields)
+
+- Third nativization wave via the 41f268e/8768b10 technique:
+  `kobject`/`kobject_ops` (kobject.rs), `work_struct`/`workqueue`/
+  `workqueue_callbacks` (proc/workqueue.rs — `WorkStruct` promoted from
+  its P3-3D relative-assert form to THE definition), `pgroup`
+  (proc/pgroup.rs), `thread_group` (proc/thread_group.rs), `session`
+  (tty/session.rs). bindgen emits ZERO struct defs for all eight; every
+  `crate::bindings::X` path resolves through `pub use` raw-line
+  redirects (`mod workqueue`/`mod pgroup`/`mod thread_group` promoted to
+  `pub(crate)` for facade pathing, as thread_queue was in N2).
+- **Anonymous C bitfield structs nativized as named fields**: the four
+  `struct { uint64 x : 1; ... }` members (workqueue
+  active/dtor_called; pgroup exited/is_kernel; thread_group is_kernel;
+  session exited/is_kernel) each became a hand-written 8/8
+  `*FlagBits { bits: u8, _pad: [u8; 7] }` holder (little-endian bit 0 =
+  first C bitfield, identical to bindgen's `get(0,1)`/`get(1,1)` unit
+  accessors, reproduced 1:1 as inline methods) under a real field name
+  `flags` — every `__bindgen_anon_1` consumer re-pointed (access.rs
+  bit_get!/bit_set! for WorkqueueRef/PgroupAccess/ThreadGroupAccess/
+  SessionAccess, proc_shims pg_* accessors, session.rs/thread_group.rs
+  direct sites); the orphan `*__bindgen_ty_1` shells are blocklisted.
+- **Mixed-tier embed exercised**: native `ThreadGroup` embeds the
+  still-bindgen `tg_shared_pending` *by value* via its
+  `crate::bindings` path (signal family out of scope; alias re-points
+  transparently when it nativizes). `_Atomic int` members stay plain
+  `c_int` exactly as bindgen lowered them (access.rs AtomicI32 views
+  untouched). `workqueue` carries bindgen's `#[repr(align(64))]`
+  (spinlock_t-typedef cacheline alignment) — size 256, `lock` at 0.
+- Layout evidence: cross-compiler `_Static_assert` probe
+  (riscv64-unknown-elf-gcc, rv64gc/lp64d, -I kernel/inc) proved every
+  size/align/offset — kobject 40/8, kobject_ops 8/8, work_struct 48/8,
+  workqueue_callbacks 48/8, workqueue 256/64, pgroup 96/8,
+  tg_shared_pending 520/8, thread_group 616/8, session 96/8 (anon
+  bitfield windows pinned by both neighbours) — all hardcoded into
+  const asserts in the owning modules. NATIVE_TYPES callback extended
+  (all eight Copy=Yes, matching pre-change derives; `kobject` and
+  `work_struct` are still embedded by value by bindgen `device`/`bio`/
+  `inode`/`blkdev`, so the accurate Yes keeps their derive lines
+  byte-identical).
+- Verified (worker): 0-warning clean rebuild (rust target dir wiped);
+  cache clean before+after; bindgen emission grep = 0 structs, 8
+  redirect `pub use` lines, orphan shells gone; 7 boots each with
+  exactly one `init: starting sh`; **testsig 21/21**; `ls /dev` full
+  10-node listing (one early-boot run raced async device population at
+  6s — re-verified at 6s and 8s with complete listings; HEAD A/B showed
+  the same node set); usertests killstatus/reparent/forkfork/
+  createdelete all OK (single-test "lost some free pages" = documented
+  pre-existing artifact); stressfs completed; `cat /nonexistent` →
+  ENOENT; **forkforkfork identical pre-existing panic** ("Failed to
+  remove interrupted waiter from queue", matches RUST_REWRITE.md's
+  documented signature).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

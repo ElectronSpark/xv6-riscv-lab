@@ -74,6 +74,98 @@ use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{ksiginfo, list_node_t, pgroup, pid_t, session, slab_cache_t, thread, thread_group, tty};
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N3.
+//
+// `Session` IS the kernel-wide Rust definition of
+// `kernel/inc/tty/session_types.h`'s `struct session` now: `build.rs`
+// blocklists the bindgen-generated form and injects
+// `pub use crate::tty::session::Session as session;`, so every
+// `crate::bindings::session` path across the crate (thread.session,
+// pgroup.session, tty.session, ...) resolves here. `fg_pgrp`/`ctrl_tty`
+// pointer fields keep their bindgen pointee paths (`pgroup` redirects
+// to the native in `proc/pgroup.rs` — this same wave; `tty` is still
+// bindgen); a pointer's own layout never depends on its pointee.
+// ---------------------------------------------------------------------------
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 exited : 1; uint64 is_kernel : 1; }` inside
+/// `struct session` (bindgen's `session__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `exited` at bit 0 and
+/// `is_kernel` at bit 1 of the (8-byte) unit's byte 0 — identical to
+/// bindgen's `get(0,1)`/`get(1,1)` accessors reproduced below.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct SessionFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl SessionFlagBits {
+    #[inline]
+    pub(crate) fn exited(&self) -> u64 {
+        (self.bits & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_exited(&mut self, val: u64) {
+        self.bits = (self.bits & !0b01) | ((val as u8) & 0b01);
+    }
+    #[inline]
+    pub(crate) fn is_kernel(&self) -> u64 {
+        ((self.bits >> 1) & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_is_kernel(&mut self, val: u64) {
+        self.bits = (self.bits & !0b10) | (((val as u8) << 1) & 0b10);
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<SessionFlagBits>() == 8, "session anon bitfield size");
+    assert!(core::mem::align_of::<SessionFlagBits>() == 8, "session anon bitfield alignment");
+};
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Session {
+    pub(crate) global_entry: crate::list::ListNode,
+    pub(crate) sid: pid_t,
+    pub(crate) ref_cnt: core::ffi::c_int,
+    pub(crate) flags: SessionFlagBits,
+    pub(crate) t_cnt: core::ffi::c_int,
+    pub(crate) threads: crate::list::ListNode,
+    pub(crate) pg_cnt: core::ffi::c_int,
+    pub(crate) pgrps: crate::list::ListNode,
+    pub(crate) fg_pgrp: *mut pgroup,
+    pub(crate) ctrl_tty: *mut tty,
+}
+
+// P3-N3 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// session { global_entry: list_node_t, sid: pid_t, ref_cnt: c_int,
+// __bindgen_anon_1: session__bindgen_ty_1, t_cnt: c_int, threads:
+// list_node_t, pg_cnt: c_int, pgrps: list_node_t, fg_pgrp: *mut
+// pgroup, ctrl_tty: *mut tty }`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe (rv64gc/lp64d)
+// against `kernel/inc/tty/session_types.h`: size 96, align 8, offsets
+// 0/16/20/[24]/32/40/56/64/80/88 (the anonymous bitfield struct
+// occupies [24,32), pinned in the probe by both neighbours).
+const _: () = {
+    assert!(core::mem::size_of::<Session>() == 96, "session size");
+    assert!(core::mem::align_of::<Session>() == 8, "session alignment");
+    assert!(core::mem::offset_of!(Session, global_entry) == 0, "session.global_entry offset");
+    assert!(core::mem::offset_of!(Session, sid) == 16, "session.sid offset");
+    assert!(core::mem::offset_of!(Session, ref_cnt) == 20, "session.ref_cnt offset");
+    assert!(core::mem::offset_of!(Session, flags) == 24, "session anon bitfield offset");
+    assert!(core::mem::offset_of!(Session, t_cnt) == 32, "session.t_cnt offset");
+    assert!(core::mem::offset_of!(Session, threads) == 40, "session.threads offset");
+    assert!(core::mem::offset_of!(Session, pg_cnt) == 56, "session.pg_cnt offset");
+    assert!(core::mem::offset_of!(Session, pgrps) == 64, "session.pgrps offset");
+    assert!(core::mem::offset_of!(Session, fg_pgrp) == 80, "session.fg_pgrp offset");
+    assert!(core::mem::offset_of!(Session, ctrl_tty) == 88, "session.ctrl_tty offset");
+};
+
 // P3-1C mesh sweep: tty/tty.rs is in scope for this wave; converted from
 // `extern "C"` redeclarations to plain crate-path items (identical
 // signatures -- both real `unsafe extern "C" fn`s, every call site
@@ -497,7 +589,7 @@ pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
         let old_val = AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_sub(1, Ordering::SeqCst);
         session_assert!(old_val >= 1, "session_unref", "Session reference count would go non-positive");
         if old_val == 1 {
-            (*s).__bindgen_anon_1.set_exited(1);
+            (*s).flags.set_exited(1);
             // Make sure a still-attached controlling tty never keeps a
             // dangling `tty->session` back-pointer into slab memory this
             // call is about to free (previously "defensive"/dead code
@@ -713,7 +805,7 @@ pub(crate) unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thre
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*s).__bindgen_anon_1.exited() != 0 {
+        if (*s).flags.exited() != 0 {
             return -ESRCH;
         }
         if !(*t).session.is_null() {
@@ -768,7 +860,7 @@ pub(crate) unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup)
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*s).__bindgen_anon_1.exited() != 0 {
+        if (*s).flags.exited() != 0 {
             return -ESRCH;
         }
         if !(*pg).session.is_null() {
@@ -879,7 +971,7 @@ pub(crate) unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*s).__bindgen_anon_1.exited() != 0 {
+        if (*s).flags.exited() != 0 {
             return;
         }
         if (*s).ctrl_tty == new_tty {
@@ -917,14 +1009,14 @@ pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*s).__bindgen_anon_1.exited() != 0 {
+        if (*s).flags.exited() != 0 {
             return;
         }
         let pg = get_pgroup(pgid);
         if is_err(pg) {
             return;
         }
-        if (*pg).__bindgen_anon_1.exited() != 0 {
+        if (*pg).flags.exited() != 0 {
             return; // cannot set an exited pgroup as foreground
         }
         if (*pg).session != s {
@@ -1011,15 +1103,15 @@ pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*s).__bindgen_anon_1.exited() != 0 {
+        if (*s).flags.exited() != 0 {
             return;
         }
         pid_assert_wholding();
 
-        (*s).__bindgen_anon_1.set_exited(1);
+        (*s).flags.set_exited(1);
 
         let fg = (*s).fg_pgrp;
-        if !fg.is_null() && (*fg).__bindgen_anon_1.exited() == 0 {
+        if !fg.is_null() && (*fg).flags.exited() == 0 {
             let head = &raw mut (*fg).threads;
             let off = core::mem::offset_of!(thread, pg_entry);
             crate::list_for_each!(head, off, t, {

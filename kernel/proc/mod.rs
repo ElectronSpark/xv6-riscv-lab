@@ -20,11 +20,16 @@ mod sched_idle;
 mod sched_fifo;
 mod sysproc;
 mod sys_signal;
-mod pgroup;
+// P3-N3: `pub(crate)` so `crate::bindings`' raw-line
+// `pub use crate::proc::pgroup::Pgroup as pgroup;` redirect can path here.
+pub(crate) mod pgroup;
 mod pid;
 mod clone;
 mod exit;
-mod workqueue;
+// P3-N3: `pub(crate)` so `crate::bindings`' raw-line
+// `pub use crate::proc::workqueue::Workqueue as workqueue;` (etc.)
+// redirects can path here — same pattern as `thread_queue` (P3-N2).
+pub(crate) mod workqueue;
 // In-kernel runtime test suite for the real `workqueue` module (Phase 4,
 // docs/rustify/test_port_plan.md), re-homing the retired
 // `test/src/ut_workqueue_main.c` mock-only cmocka suite. Exposes a single
@@ -34,7 +39,10 @@ mod workqueue;
 // enabled.
 mod workqueue_test;
 mod rq_test;
-mod thread_group;
+// P3-N3: `pub(crate)` so `crate::bindings`' raw-line
+// `pub use crate::proc::thread_group::ThreadGroup as thread_group;`
+// redirect can path here.
+pub(crate) mod thread_group;
 pub(crate) mod thread_queue;
 mod thread;
 mod sched;

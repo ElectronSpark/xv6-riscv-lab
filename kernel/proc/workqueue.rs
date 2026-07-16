@@ -24,21 +24,20 @@ use crate::proc::access::{
 };
 
 // ---------------------------------------------------------------------------
-// Native layout — Wave P3-3D.
+// Native layout — Wave P3-3D, nativized in Wave P3-N3.
 //
-// `work_struct` (`kernel/inc/proc/workqueue_types.h`) embeds only a
-// `list_node_t` by value plus two C-ABI function pointers, a `u64` and a
-// `u32` -- exactly the "aggregate that embeds only now-native leaves"
-// case P3-3C unblocked (`docs/rustify/phase3_plan.md` P3-3D): `entry`
-// below is the crate's one canonical `crate::list::ListNode`
-// (established in P3-3C), proven layout-identical to `list_node_t`
-// there.
-//
-// Unlike `workqueue` (which embeds a `spinlock_t`/`tq_t` and picks up
-// `#[repr(align(64))]` from that), `work_struct` has no embedded lock,
-// so its bindgen layout stays naturally aligned -- confirmed directly
-// below rather than assumed (this is exactly the surprise the P3-3B/C
-// waves flagged as worth checking per aggregate).
+// `WorkStruct`/`Workqueue`/`WorkqueueCallbacks` ARE the kernel-wide Rust
+// definitions of `kernel/inc/proc/workqueue_types.h`'s `struct
+// work_struct`/`struct workqueue`/`struct workqueue_callbacks` now:
+// `build.rs` blocklists the bindgen-generated forms and injects
+// `pub use crate::proc::workqueue::WorkStruct as work_struct;` (etc.)
+// raw-line re-exports, so the remaining bindgen struct that embeds a
+// work_struct by value (`blkdev.flush_work`) and every
+// `crate::bindings::{work_struct,workqueue,workqueue_callbacks}` path
+// across the crate resolves here. The `workqueue_lifecycle_cb_t`/
+// `workqueue_thread_lifecycle_cb_t` fn-pointer typedefs stay
+// bindgen-emitted (plain `Option<unsafe extern "C" fn(..)>` aliases whose
+// `*mut workqueue` parameter now resolves to the native `Workqueue`).
 //
 // `func`/`fault` deliberately keep the bindgen `*mut work_struct`
 // callback signature (not `*mut WorkStruct`): they are genuine C-ABI
@@ -48,7 +47,7 @@ use crate::proc::access::{
 // untouched.
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub(crate) struct WorkStruct {
+pub struct WorkStruct {
     pub(crate) entry: ListNode,
     pub(crate) func: Option<unsafe extern "C" fn(*mut work_struct)>,
     pub(crate) fault: Option<unsafe extern "C" fn(*mut work_struct)>,
@@ -56,25 +55,143 @@ pub(crate) struct WorkStruct {
     pub(crate) flags: u32,
 }
 
+// P3-N3 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// work_struct { entry: list_node_t, func: Option<..>, fault:
+// Option<..>, data: uint64, flags: uint32 }`) and independently
+// confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
+// (rv64gc/lp64d) against `kernel/inc/proc/workqueue_types.h`:
+// size 48, align 8, offsets 0/16/24/32/40. Unlike `workqueue` (which
+// gets align(64) from its embedded spinlock_t), work_struct has no
+// embedded lock and stays naturally (8-byte) aligned.
 const _: () = {
-    assert!(core::mem::size_of::<WorkStruct>() == core::mem::size_of::<work_struct>(),
-        "WorkStruct / work_struct size mismatch");
-    assert!(core::mem::align_of::<WorkStruct>() == core::mem::align_of::<work_struct>(),
-        "WorkStruct / work_struct alignment mismatch");
-    assert!(core::mem::align_of::<work_struct>() == 8,
-        "work_struct unexpectedly gained a non-natural alignment -- unlike `workqueue` \
-         (which gets align(64) from its embedded spinlock_t/tq_t), work_struct has no \
-         embedded lock and must stay naturally (8-byte) aligned");
-    assert!(core::mem::offset_of!(WorkStruct, entry) == core::mem::offset_of!(work_struct, entry),
-        "WorkStruct.entry / work_struct.entry offset mismatch");
-    assert!(core::mem::offset_of!(WorkStruct, func) == core::mem::offset_of!(work_struct, func),
-        "WorkStruct.func / work_struct.func offset mismatch");
-    assert!(core::mem::offset_of!(WorkStruct, fault) == core::mem::offset_of!(work_struct, fault),
-        "WorkStruct.fault / work_struct.fault offset mismatch");
-    assert!(core::mem::offset_of!(WorkStruct, data) == core::mem::offset_of!(work_struct, data),
-        "WorkStruct.data / work_struct.data offset mismatch");
-    assert!(core::mem::offset_of!(WorkStruct, flags) == core::mem::offset_of!(work_struct, flags),
-        "WorkStruct.flags / work_struct.flags offset mismatch");
+    assert!(core::mem::size_of::<WorkStruct>() == 48, "work_struct size");
+    assert!(core::mem::align_of::<WorkStruct>() == 8, "work_struct natural alignment");
+    assert!(core::mem::offset_of!(WorkStruct, entry) == 0, "work_struct.entry offset");
+    assert!(core::mem::offset_of!(WorkStruct, func) == 16, "work_struct.func offset");
+    assert!(core::mem::offset_of!(WorkStruct, fault) == 24, "work_struct.fault offset");
+    assert!(core::mem::offset_of!(WorkStruct, data) == 32, "work_struct.data offset");
+    assert!(core::mem::offset_of!(WorkStruct, flags) == 40, "work_struct.flags offset");
+};
+
+/// Native mirror of `struct workqueue_callbacks`
+/// (`kernel/inc/proc/workqueue_types.h`). Field types are the
+/// still-bindgen `workqueue_lifecycle_cb_t`/
+/// `workqueue_thread_lifecycle_cb_t` typedefs — exactly what the
+/// pre-nativization bindgen struct carried.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct WorkqueueCallbacks {
+    pub(crate) workqueue_ctor: crate::bindings::workqueue_lifecycle_cb_t,
+    pub(crate) workqueue_dtor: crate::bindings::workqueue_lifecycle_cb_t,
+    pub(crate) manager_ctor: crate::bindings::workqueue_thread_lifecycle_cb_t,
+    pub(crate) manager_dtor: crate::bindings::workqueue_thread_lifecycle_cb_t,
+    pub(crate) worker_ctor: crate::bindings::workqueue_thread_lifecycle_cb_t,
+    pub(crate) worker_dtor: crate::bindings::workqueue_thread_lifecycle_cb_t,
+}
+
+// P3-N3 hardcoded layout proof — bindgen: six consecutive
+// `Option<unsafe extern "C" fn(..)>` (8 bytes each); cross-compiler
+// probe: size 48, align 8, offsets 0/8/16/24/32/40.
+const _: () = {
+    assert!(core::mem::size_of::<WorkqueueCallbacks>() == 48, "workqueue_callbacks size");
+    assert!(core::mem::align_of::<WorkqueueCallbacks>() == 8, "workqueue_callbacks alignment");
+    assert!(core::mem::offset_of!(WorkqueueCallbacks, workqueue_ctor) == 0);
+    assert!(core::mem::offset_of!(WorkqueueCallbacks, workqueue_dtor) == 8);
+    assert!(core::mem::offset_of!(WorkqueueCallbacks, manager_ctor) == 16);
+    assert!(core::mem::offset_of!(WorkqueueCallbacks, manager_dtor) == 24);
+    assert!(core::mem::offset_of!(WorkqueueCallbacks, worker_ctor) == 32);
+    assert!(core::mem::offset_of!(WorkqueueCallbacks, worker_dtor) == 40);
+};
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 active : 1; uint64 dtor_called : 1; }` inside
+/// `struct workqueue` (bindgen's `workqueue__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `active` at bit 0 and
+/// `dtor_called` at bit 1 of the (8-byte) unit's byte 0 — identical to
+/// bindgen's `get(0,1)`/`get(1,1)` accessors reproduced below.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct WorkqueueFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl WorkqueueFlagBits {
+    #[inline]
+    pub(crate) fn active(&self) -> u64 {
+        (self.bits & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_active(&mut self, val: u64) {
+        self.bits = (self.bits & !0b01) | ((val as u8) & 0b01);
+    }
+    #[inline]
+    pub(crate) fn dtor_called(&self) -> u64 {
+        ((self.bits >> 1) & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_dtor_called(&mut self, val: u64) {
+        self.bits = (self.bits & !0b10) | (((val as u8) << 1) & 0b10);
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<WorkqueueFlagBits>() == 8, "workqueue anon bitfield size");
+    assert!(core::mem::align_of::<WorkqueueFlagBits>() == 8, "workqueue anon bitfield alignment");
+};
+
+/// Native mirror of `struct workqueue`
+/// (`kernel/inc/proc/workqueue_types.h`). The C struct picks up
+/// alignment 64 from its embedded `spinlock_t lock` (whose *typedef*
+/// carries `__ALIGNED_CACHELINE` — see the P3-N2 note in
+/// `kernel/lock/spinlock.rs`); bindgen expressed that as
+/// `#[repr(align(64))]` on `workqueue` itself, reproduced here.
+#[repr(C)]
+#[repr(align(64))]
+#[derive(Copy, Clone)]
+pub struct Workqueue {
+    pub(crate) lock: spinlock_t,
+    pub(crate) idle_queue: tq_t,
+    pub(crate) worker_list: ListNode,
+    pub(crate) manager: *mut thread,
+    pub(crate) pending_works: c_int,
+    pub(crate) work_list: ListNode,
+    pub(crate) name: [c_char; 32],
+    pub(crate) flags: WorkqueueFlagBits,
+    pub(crate) nr_workers: c_int,
+    pub(crate) min_active: c_int,
+    pub(crate) max_active: c_int,
+    pub(crate) callbacks: WorkqueueCallbacks,
+}
+
+// P3-N3 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (`pub struct workqueue { lock:
+// spinlock_t, idle_queue: tq_t, worker_list: list_node_t, manager:
+// *mut thread, pending_works: c_int, work_list: list_node_t, name:
+// [c_char; 32], __bindgen_anon_1: workqueue__bindgen_ty_1, nr_workers:
+// c_int, min_active: c_int, max_active: c_int, callbacks:
+// workqueue_callbacks }`, `#[repr(C)] #[repr(align(64))]`) and
+// independently confirmed by the cross-compiler `_Static_assert`
+// probe: size 256, align 64, offsets
+// 0/24/72/88/96/104/120/[152]/160/164/168/176 (the anonymous bitfield
+// struct occupies [152,160), pinned in the probe by both neighbours).
+const _: () = {
+    assert!(core::mem::size_of::<Workqueue>() == 256, "workqueue size");
+    assert!(core::mem::align_of::<Workqueue>() == 64, "workqueue alignment");
+    assert!(core::mem::offset_of!(Workqueue, lock) == 0, "workqueue.lock offset");
+    assert!(core::mem::offset_of!(Workqueue, idle_queue) == 24, "workqueue.idle_queue offset");
+    assert!(core::mem::offset_of!(Workqueue, worker_list) == 72, "workqueue.worker_list offset");
+    assert!(core::mem::offset_of!(Workqueue, manager) == 88, "workqueue.manager offset");
+    assert!(core::mem::offset_of!(Workqueue, pending_works) == 96, "workqueue.pending_works offset");
+    assert!(core::mem::offset_of!(Workqueue, work_list) == 104, "workqueue.work_list offset");
+    assert!(core::mem::offset_of!(Workqueue, name) == 120, "workqueue.name offset");
+    assert!(core::mem::offset_of!(Workqueue, flags) == 152, "workqueue anon bitfield offset");
+    assert!(core::mem::offset_of!(Workqueue, nr_workers) == 160, "workqueue.nr_workers offset");
+    assert!(core::mem::offset_of!(Workqueue, min_active) == 164, "workqueue.min_active offset");
+    assert!(core::mem::offset_of!(Workqueue, max_active) == 168, "workqueue.max_active offset");
+    assert!(core::mem::offset_of!(Workqueue, callbacks) == 176, "workqueue.callbacks offset");
 };
 
 // -------- mirrored constants ----------------------------------------------

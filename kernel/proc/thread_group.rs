@@ -74,6 +74,110 @@ use crate::proc::sigacts_unlock;
 use crate::proc::{scheduler_wakeup_interruptible, scheduler_wakeup_stopped};
 use crate::ipi::ipi_send_single;
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N3.
+//
+// `ThreadGroup` IS the kernel-wide Rust definition of
+// `kernel/inc/proc/thread_group_types.h`'s `struct thread_group` now:
+// `build.rs` blocklists the bindgen-generated form and injects
+// `pub use crate::proc::thread_group::ThreadGroup as thread_group;`, so
+// every `crate::bindings::thread_group` path across the crate resolves
+// here. `shared_pending` embeds the still-bindgen
+// `crate::bindings::tg_shared_pending` *by value* — the sanctioned
+// mixed-tier pattern (P3-N2): when the signal family later nativizes,
+// the alias re-points transparently. The C `_Atomic int` members
+// (`live_threads`/`refcount`/`group_exit`) stay plain `c_int` fields,
+// exactly as bindgen lowered them; all atomic access goes through
+// `access.rs`'s `AtomicI32` pointer views, unchanged.
+// ---------------------------------------------------------------------------
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 is_kernel : 1; }` inside `struct thread_group`
+/// (bindgen's `thread_group__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `is_kernel` at bit 0 of the
+/// (8-byte) unit's byte 0 — identical to bindgen's `get(0,1)` accessor
+/// reproduced below.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct ThreadGroupFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl ThreadGroupFlagBits {
+    #[inline]
+    pub(crate) fn is_kernel(&self) -> u64 {
+        (self.bits & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_is_kernel(&mut self, val: u64) {
+        self.bits = (self.bits & !0b01) | ((val as u8) & 0b01);
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<ThreadGroupFlagBits>() == 8, "thread_group anon bitfield size");
+    assert!(core::mem::align_of::<ThreadGroupFlagBits>() == 8, "thread_group anon bitfield alignment");
+};
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ThreadGroup {
+    pub(crate) list_entry: crate::list::ListNode,
+    pub(crate) pgroup: *mut crate::bindings::pgroup,
+    pub(crate) tgid: pid_t,
+    pub(crate) group_leader: *mut thread,
+    pub(crate) thread_list: crate::list::ListNode,
+    pub(crate) live_threads: c_int,
+    pub(crate) refcount: c_int,
+    pub(crate) shared_pending: crate::bindings::tg_shared_pending,
+    pub(crate) group_exit: c_int,
+    pub(crate) group_exit_code: c_int,
+    pub(crate) group_exit_task: *mut thread,
+    pub(crate) group_stop_count: c_int,
+    pub(crate) group_stop_signo: c_int,
+    pub(crate) flags: ThreadGroupFlagBits,
+}
+
+// P3-N3 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// thread_group { list_entry: list_node_t, pgroup: *mut pgroup, tgid:
+// pid_t, group_leader: *mut thread, thread_list: list_node_t,
+// live_threads: c_int, refcount: c_int, shared_pending:
+// tg_shared_pending, group_exit: c_int, group_exit_code: c_int,
+// group_exit_task: *mut thread, group_stop_count: c_int,
+// group_stop_signo: c_int, __bindgen_anon_1:
+// thread_group__bindgen_ty_1 }`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe (rv64gc/lp64d)
+// against `kernel/inc/proc/thread_group_types.h`: size 616, align 8,
+// offsets 0/16/24/32/40/56/60/64/584/588/592/600/604/[608]
+// (tg_shared_pending itself proven 520/8 by the same probe; the
+// anonymous bitfield struct occupies [608,616), pinned in the probe by
+// its predecessor plus the struct size).
+const _: () = {
+    assert!(core::mem::size_of::<crate::bindings::tg_shared_pending>() == 520,
+        "tg_shared_pending size");
+    assert!(core::mem::align_of::<crate::bindings::tg_shared_pending>() == 8,
+        "tg_shared_pending alignment");
+    assert!(core::mem::size_of::<ThreadGroup>() == 616, "thread_group size");
+    assert!(core::mem::align_of::<ThreadGroup>() == 8, "thread_group alignment");
+    assert!(core::mem::offset_of!(ThreadGroup, list_entry) == 0, "thread_group.list_entry offset");
+    assert!(core::mem::offset_of!(ThreadGroup, pgroup) == 16, "thread_group.pgroup offset");
+    assert!(core::mem::offset_of!(ThreadGroup, tgid) == 24, "thread_group.tgid offset");
+    assert!(core::mem::offset_of!(ThreadGroup, group_leader) == 32, "thread_group.group_leader offset");
+    assert!(core::mem::offset_of!(ThreadGroup, thread_list) == 40, "thread_group.thread_list offset");
+    assert!(core::mem::offset_of!(ThreadGroup, live_threads) == 56, "thread_group.live_threads offset");
+    assert!(core::mem::offset_of!(ThreadGroup, refcount) == 60, "thread_group.refcount offset");
+    assert!(core::mem::offset_of!(ThreadGroup, shared_pending) == 64, "thread_group.shared_pending offset");
+    assert!(core::mem::offset_of!(ThreadGroup, group_exit) == 584, "thread_group.group_exit offset");
+    assert!(core::mem::offset_of!(ThreadGroup, group_exit_code) == 588, "thread_group.group_exit_code offset");
+    assert!(core::mem::offset_of!(ThreadGroup, group_exit_task) == 592, "thread_group.group_exit_task offset");
+    assert!(core::mem::offset_of!(ThreadGroup, group_stop_count) == 600, "thread_group.group_stop_count offset");
+    assert!(core::mem::offset_of!(ThreadGroup, group_stop_signo) == 604, "thread_group.group_stop_signo offset");
+    assert!(core::mem::offset_of!(ThreadGroup, flags) == 608, "thread_group anon bitfield offset");
+};
+
 // ---------------- constants ----------------------------------------------
 const SLAB_FLAG_STATIC: u64 = 1 << 1;
 const TG_MAX_SIGINFO_PER_SIGNAL: c_int = 8;
@@ -611,7 +715,7 @@ pub(crate) fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_
     // just before each early return.
     u! {
         if sigbad((*info).signo) { return -EINVAL; }
-        if (*tg).__bindgen_anon_1.is_kernel() != 0 { return -EPERM; }
+        if (*tg).flags.is_kernel() != 0 { return -EPERM; }
         let signo = (*info).signo;
 
         let tga = ThreadGroupAccess::assume(tg);
