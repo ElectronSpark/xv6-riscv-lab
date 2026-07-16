@@ -137,7 +137,7 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     }
 
     // SAFETY: `pc` is live.
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() } == 0 {
+    if unsafe { (*pc).flags.bits.active() } == 0 {
         return neg(EIO) as isize;
     }
 
@@ -246,7 +246,7 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
         return neg(EINVAL) as isize;
     }
 
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() } == 0 {
+    if unsafe { (*pc).flags.bits.active() } == 0 {
         return neg(EIO) as isize;
     }
 
@@ -433,7 +433,7 @@ extern "C" fn __xv6fs_file_fsync(file: *mut vfs_file, _start: loff_t, _len: loff
         return 0;
     }
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() } == 0 {
+    if unsafe { (*pc).flags.bits.active() } == 0 {
         return 0;
     }
     // TODO: implement range-based flush (matches the C original's own TODO).
@@ -447,7 +447,7 @@ extern "C" fn __xv6fs_file_fflush(file: *mut vfs_file) -> c_int {
         return 0;
     }
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() } == 0 {
+    if unsafe { (*pc).flags.bits.active() } == 0 {
         return 0;
     }
     pcache_flush(pc)
@@ -501,7 +501,7 @@ extern "C" fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64
         bytes_to_read = unsafe { (*inode).size } as u64 - file_off;
     }
 
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() } == 0 {
+    if unsafe { (*pc).flags.bits.active() } == 0 {
         vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();

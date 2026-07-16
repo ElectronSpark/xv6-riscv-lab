@@ -16,9 +16,12 @@ mod kalloc;
 // P3-D3c: `pub(crate)` so `dev/fdt.rs`/`start_kernel.rs` can import
 // `early_alloc*` by crate path (their `extern "C"` redeclarations are gone).
 pub(crate) mod early_allocator;
-mod pcache;
+// P3-N6: `pub` so `build.rs`'s bindings-facade `pub use crate::mm::
+// {pcache,vm}::...` re-exports can name them (same promotion the vfs
+// modules got in P3-N5).
+pub mod pcache;
 mod vm_pgtab;
-mod vm;
+pub mod vm;
 pub mod mm_safe;
 
 // In-kernel runtime test suite, ported from the retired

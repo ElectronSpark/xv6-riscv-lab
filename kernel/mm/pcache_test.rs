@@ -379,8 +379,8 @@ fn create_cached_page(cache: *mut Pcache, blkno: u64) -> *mut Page {
     // page in the global array; `node` is its just-validated pcache node.
     unsafe {
         pg_lock(page);
-        (*node).__bindgen_anon_1.set_uptodate(1);
-        (*node).__bindgen_anon_1.set_dirty(0);
+        (*node).flags.set_uptodate(1);
+        (*node).flags.set_dirty(0);
         pg_unlock(page);
     }
     page
@@ -395,7 +395,7 @@ fn set_io_in_progress(page: *mut Page, node: *mut PcacheNode, v: bool) {
     // reference.
     unsafe {
         pg_lock(page);
-        (*node).__bindgen_anon_1.set_io_in_progress(v as u64);
+        (*node).flags.set_io_in_progress(v as u64);
         pg_unlock(page);
     }
 }
@@ -403,11 +403,11 @@ fn set_io_in_progress(page: *mut Page, node: *mut PcacheNode, v: bool) {
 fn node_dirty(node: *mut PcacheNode) -> bool {
     // SAFETY: `node` is a live pcache node for the duration of the caller's
     // reference on its page.
-    unsafe { (*node).__bindgen_anon_1.dirty() != 0 }
+    unsafe { (*node).flags.dirty() != 0 }
 }
 fn node_uptodate(node: *mut PcacheNode) -> bool {
     // SAFETY: see `node_dirty`.
-    unsafe { (*node).__bindgen_anon_1.uptodate() != 0 }
+    unsafe { (*node).flags.uptodate() != 0 }
 }
 
 /// Allocates a real, plain (non-pcache) page directly from the buddy
@@ -735,7 +735,7 @@ fn t15_get_page_not_up_to_date() {
         // SAFETY: `node` valid while this test holds a ref on `page`.
         unsafe {
             pg_lock(page);
-            (*node).__bindgen_anon_1.set_uptodate(0);
+            (*node).flags.set_uptodate(0);
             pg_unlock(page);
         }
         // `pcache_put_page` on a clean-but-not-up-to-date, otherwise
@@ -804,8 +804,8 @@ fn t18_read_page_populates_clean_page() {
         // SAFETY: see `t15`.
         unsafe {
             pg_lock(page);
-            (*node).__bindgen_anon_1.set_uptodate(0);
-            (*node).__bindgen_anon_1.set_dirty(0);
+            (*node).flags.set_uptodate(0);
+            (*node).flags.set_dirty(0);
             pg_unlock(page);
         }
         let rc = pcache_read_page(cache, page);
@@ -826,7 +826,7 @@ fn t19_read_page_propagates_failure() {
         let node = xv6_page_pcache_get_node(page);
         unsafe {
             pg_lock(page);
-            (*node).__bindgen_anon_1.set_uptodate(0);
+            (*node).flags.set_uptodate(0);
             pg_unlock(page);
         }
         READ_PAGE_ERR.store(EIO as i32, Ordering::SeqCst);
@@ -1153,7 +1153,7 @@ fn c3_conc_io_wait_and_complete() {
         let node = xv6_page_pcache_get_node(page);
         unsafe {
             pg_lock(page);
-            (*node).__bindgen_anon_1.set_uptodate(0);
+            (*node).flags.set_uptodate(0);
             pg_unlock(page);
         }
         CONC_DONE[0].store(0, Ordering::SeqCst);

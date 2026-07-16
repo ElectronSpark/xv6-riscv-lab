@@ -970,7 +970,7 @@ pub(crate) extern "C" fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
         // pcache_flush here because: 1. fflush was called in vfs_fput before
         // releasing the file reference. 2. The data is being truncated below
         // anyway.
-        if (*inode).i_data.__bindgen_anon_1.__bindgen_anon_1.active() != 0 {
+        if (*inode).i_data.flags.bits.active() != 0 {
             pcache_teardown(ptr::addr_of_mut!((*inode).i_data));
         }
 
@@ -1004,7 +1004,7 @@ pub(crate) extern "C" fn xv6fs_free_inode(inode: *mut vfs_inode) {
     // releasing the file reference, so pages should already be clean.
     // SAFETY: `inode` is live.
     unsafe {
-        if (*inode).i_data.__bindgen_anon_1.__bindgen_anon_1.active() != 0 {
+        if (*inode).i_data.flags.bits.active() != 0 {
             pcache_teardown(ptr::addr_of_mut!((*inode).i_data));
         }
     }
@@ -1032,7 +1032,7 @@ pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
             (*file).ops = ptr::addr_of!(super::file::XV6FS_FILE_OPS) as *mut _;
             // Lazily initialise the per-inode page cache on first open.
             // VFS calls open with the inode locked, so this is race-free.
-            if (*inode).i_data.__bindgen_anon_1.__bindgen_anon_1.active() == 0 {
+            if (*inode).i_data.flags.bits.active() == 0 {
                 super::superblock::xv6fs_inode_pcache_init(inode);
             }
         }

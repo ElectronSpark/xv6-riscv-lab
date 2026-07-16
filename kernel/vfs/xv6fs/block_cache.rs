@@ -42,6 +42,46 @@ use crate::bindings::{
     buf, free_extent, rb_node, rb_root, slab_cache_t, spinlock_t, xv6fs_block_cache, xv6fs_superblock, EINVAL, ENOSPC,
 };
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N6 (mm type family, allocator-POD slice).
+//
+// This IS the kernel-wide Rust definition of `kernel/vfs/xv6fs/
+// block_cache.h`'s `struct free_extent` now: `build.rs` blocklists the
+// bindgen-generated form and injects a `pub use crate::vfs::xv6fs::
+// block_cache::FreeExtent as free_extent;` facade re-export (no `_t`
+// typedef exists), so this file's `free_extent` import above resolves
+// right back here. Field names/types reproduce bindgen's exactly; the
+// pre-nativization bindgen output derived NEITHER Copy nor Clone
+// (intrusive `rb_node` embedder class, N1 precedent), so the native
+// faithfully has no derives (accurate NONCOPY answer in build.rs's
+// NativeTypeCallbacks — the still-bindgen `xv6fs_block_cache` only
+// holds these behind pointers/the tree, never by value).
+//
+// Layout evidence (P3-N6): temporary in-tree `offset_of!` gate on the
+// live bindgen form + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n6_static_assert_probe.c); the two
+// agree on every value.
+// ---------------------------------------------------------------------------
+
+/// `struct free_extent` (`kernel/vfs/xv6fs/block_cache.h`) — one
+/// contiguous range of free disk blocks, keyed by `start` in the
+/// per-mount rb-tree.
+#[repr(C)]
+pub struct FreeExtent {
+    pub rb_node: rb_node,
+    pub start: crate::bindings::uint32,
+    pub length: crate::bindings::uint32,
+}
+
+// P3-N6 hardcoded layout proof — gate + probe agree (see above).
+const _: () = {
+    assert!(core::mem::size_of::<FreeExtent>() == 32, "free_extent size");
+    assert!(core::mem::align_of::<FreeExtent>() == 8, "free_extent align");
+    assert!(core::mem::offset_of!(FreeExtent, rb_node) == 0, "free_extent.rb_node");
+    assert!(core::mem::offset_of!(FreeExtent, start) == 24, "free_extent.start");
+    assert!(core::mem::offset_of!(FreeExtent, length) == 28, "free_extent.length");
+};
+
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================

@@ -37,6 +37,101 @@ use crate::bindings::{
     VMA_FLAG_PROT_MASK, VMA_FLAG_USER,
 };
 
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N6 (mm type family, vm slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/mm/
+// vm_types.h`'s `struct vm` (`vm_t`) / `struct vma` (`vma_t`) now:
+// `build.rs` blocklists the bindgen-generated forms and injects `pub use
+// crate::mm::vm::... as ...;` facade re-exports for both the struct tag
+// and `_t` typedef names, so this file's `vm`/`vma` imports above resolve
+// right back here. Field names/types reproduce bindgen's exactly (`_pad0`
+// reproduces bindgen's `__bindgen_padding_0: [u64; 4]` verbatim — the C
+// `__ALIGNED_CACHELINE` rides the `spinlock_t` typedef, the native
+// `RawSpinlock` is align 8 in Rust, so the explicit pad carries the
+// 64-byte lock placement, exactly as bindgen emitted it; `rw_lock`'s
+// 64-alignment comes from the native `rwsem_t`'s own `align(64)`).
+// Neither struct derived Copy nor Clone in the pre-nativization bindgen
+// output (embedded native-lock/intrusive-node members answered No — see
+// build.rs's P3-N6 FINDING note), so the natives faithfully have no
+// derives; nothing in the remaining bindgen output embeds either by
+// value (verified — `thread.vm` is a pointer).
+//
+// Layout evidence (P3-N6): temporary in-tree `offset_of!` gate on the
+// live bindgen forms + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n6_static_assert_probe.c); the two
+// agree on every size/align/offset.
+// ---------------------------------------------------------------------------
+
+/// `struct vma` / `vma_t` (`kernel/inc/mm/vm_types.h`) — one virtual
+/// memory area (rb-tree node + list linkage + range/flags/file backing).
+#[repr(C)]
+pub struct Vma {
+    pub rb_entry: rb_node,
+    pub list_entry: list_node_t,
+    pub free_list_entry: list_node_t,
+    pub vm: *mut Vm,
+    pub start: crate::bindings::uint64,
+    pub end: crate::bindings::uint64,
+    pub flags: crate::bindings::uint64,
+    pub file: *mut vfs_file,
+    pub pgoff: crate::bindings::uint64,
+}
+
+/// `struct vm` / `vm_t` (`kernel/inc/mm/vm_types.h`) — one address
+/// space (VMA tree + pagetable + CPU mask).
+#[repr(C, align(64))]
+pub struct Vm {
+    pub rw_lock: rwsem_t,
+    pub vm_tree: rb_root,
+    pub trapframe_pte: *mut crate::bindings::pte_t,
+    pub stack: *mut Vma,
+    pub stack_size: usize,
+    pub heap: *mut Vma,
+    pub heap_size: usize,
+    pub vm_list: list_node_t,
+    pub vm_free_list: list_node_t,
+    pub cpumask: crate::bindings::cpumask_t,
+    pub(crate) _pad0: [u64; 4],
+    pub spinlock: spinlock_t,
+    pub pagetable: crate::bindings::pagetable_t,
+    pub refcount: c_int,
+}
+
+// P3-N6 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by the temporary
+// `offset_of!` gate) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain gcc agrees on every value).
+const _: () = {
+    assert!(core::mem::size_of::<Vma>() == 104, "vma size");
+    assert!(core::mem::align_of::<Vma>() == 8, "vma align");
+    assert!(core::mem::offset_of!(Vma, rb_entry) == 0, "vma.rb_entry");
+    assert!(core::mem::offset_of!(Vma, list_entry) == 24, "vma.list_entry");
+    assert!(core::mem::offset_of!(Vma, free_list_entry) == 40, "vma.free_list_entry");
+    assert!(core::mem::offset_of!(Vma, vm) == 56, "vma.vm");
+    assert!(core::mem::offset_of!(Vma, start) == 64, "vma.start");
+    assert!(core::mem::offset_of!(Vma, end) == 72, "vma.end");
+    assert!(core::mem::offset_of!(Vma, flags) == 80, "vma.flags");
+    assert!(core::mem::offset_of!(Vma, file) == 88, "vma.file");
+    assert!(core::mem::offset_of!(Vma, pgoff) == 96, "vma.pgoff");
+
+    assert!(core::mem::size_of::<Vm>() == 384, "vm size");
+    assert!(core::mem::align_of::<Vm>() == 64, "vm align");
+    assert!(core::mem::offset_of!(Vm, rw_lock) == 0, "vm.rw_lock");
+    assert!(core::mem::offset_of!(Vm, vm_tree) == 192, "vm.vm_tree");
+    assert!(core::mem::offset_of!(Vm, trapframe_pte) == 208, "vm.trapframe_pte");
+    assert!(core::mem::offset_of!(Vm, stack) == 216, "vm.stack");
+    assert!(core::mem::offset_of!(Vm, stack_size) == 224, "vm.stack_size");
+    assert!(core::mem::offset_of!(Vm, heap) == 232, "vm.heap");
+    assert!(core::mem::offset_of!(Vm, heap_size) == 240, "vm.heap_size");
+    assert!(core::mem::offset_of!(Vm, vm_list) == 248, "vm.vm_list");
+    assert!(core::mem::offset_of!(Vm, vm_free_list) == 264, "vm.vm_free_list");
+    assert!(core::mem::offset_of!(Vm, cpumask) == 280, "vm.cpumask");
+    assert!(core::mem::offset_of!(Vm, spinlock) == 320, "vm.spinlock");
+    assert!(core::mem::offset_of!(Vm, pagetable) == 344, "vm.pagetable");
+    assert!(core::mem::offset_of!(Vm, refcount) == 352, "vm.refcount");
+};
+
 // Constants not picked up by bindgen (defined in headers as #defines that
 // reference other macros).
 const PAGE_TYPE_ANON: u64 = 0;

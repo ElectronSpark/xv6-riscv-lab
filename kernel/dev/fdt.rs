@@ -123,6 +123,44 @@ use crate::bindings::{
 use crate::hlist::{Hlist, HlistEntry, HlistFunc, HtHash};
 use crate::machine;
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N6 (mm type family, allocator-POD slice).
+//
+// This IS the kernel-wide Rust definition of `kernel/inc/dev/fdt.h`'s
+// `struct mem_region` now: `build.rs` blocklists the bindgen-generated
+// form and injects a `pub use crate::dev::fdt::MemRegion as mem_region;`
+// facade re-export (no `_t` typedef exists), so this file's `mem_region`
+// import above resolves right back here. Field names/types and the
+// `#[repr(C, packed)]` (the header's `__PACKED`) reproduce bindgen's
+// exactly; derived Copy/Clone exactly as the pre-nativization bindgen
+// output did — the still-bindgen `platform_info` embeds
+// `[mem_region; 8]` BY VALUE and derives Copy/Clone itself, so the
+// accurate Copy=Yes in build.rs's NativeTypeCallbacks is what keeps
+// *its* derive line unchanged.
+//
+// Layout evidence (P3-N6): temporary in-tree `offset_of!` gate on the
+// live bindgen form + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n6_static_assert_probe.c); the two
+// agree on every value (16/1, base@0, size@8).
+// ---------------------------------------------------------------------------
+
+/// `struct mem_region` (`kernel/inc/dev/fdt.h`) — one physical memory
+/// range parsed from the device tree (`__PACKED`: byte-aligned).
+#[repr(C, packed)]
+#[derive(Copy, Clone)]
+pub struct MemRegion {
+    pub base: crate::bindings::uint64,
+    pub size: crate::bindings::uint64,
+}
+
+// P3-N6 hardcoded layout proof — gate + probe agree (see above).
+const _: () = {
+    assert!(size_of::<MemRegion>() == 16, "mem_region size");
+    assert!(align_of::<MemRegion>() == 1, "mem_region align (__PACKED)");
+    assert!(offset_of!(MemRegion, base) == 0, "mem_region.base");
+    assert!(offset_of!(MemRegion, size) == 8, "mem_region.size");
+};
+
 // ===========================================================================
 // Externs -- printf/allocator/string primitives (declared locally per this
 // crate's established convention: every file redeclares the C-ABI symbols

@@ -162,7 +162,7 @@ pub(crate) extern "C" fn tmpfs_inode_pcache_teardown(inode: *mut vfs_inode) {
     // SAFETY: `inode` is live (caller's contract).
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     // SAFETY: `pc` is live embedded storage.
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() != 0 } {
+    if unsafe { (*pc).flags.bits.active() != 0 } {
         pcache_teardown(pc);
     }
 }
@@ -220,7 +220,7 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     }
 
     // pcache-based read.
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() == 0 } {
+    if unsafe { (*pc).flags.bits.active() == 0 } {
         vfs_iunlock(inode);
         return neg(EIO) as isize;
     }
@@ -339,7 +339,7 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
     }
 
     // pcache-based write.
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() == 0 } {
+    if unsafe { (*pc).flags.bits.active() == 0 } {
         vfs_iunlock(inode);
         return neg(EIO) as isize;
     }
@@ -519,7 +519,7 @@ extern "C" fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64
     }
 
     // ---- pcache path ----
-    if unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() == 0 } {
+    if unsafe { (*pc).flags.bits.active() == 0 } {
         vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();

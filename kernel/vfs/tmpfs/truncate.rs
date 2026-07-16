@@ -57,18 +57,19 @@ fn tmpfs_iblock(pos: loff_t) -> loff_t {
     pos >> PAGE_SHIFT
 }
 
-/// `pcache.active` bit (`pcache__bindgen_ty_1.__bindgen_anon_1.active`,
-/// a real Rust union since all its variants are Copy). Matches
+/// `pcache.active` bit (the native `PcacheFlags` union's
+/// `PcacheFlagBits::active()` accessor since P3-N6 — bit-identical to
+/// the bindgen `__bindgen_anon_1` path it replaced). Matches
 /// `mm/pcache.rs`'s own `PcacheHandle::active()` access path exactly
 /// (that helper is crate-private to `mm`, so this file reaches the
-/// bindgen field directly rather than duplicating a public wrapper for
+/// field directly rather than duplicating a public wrapper for
 /// one boolean read).
 ///
 /// # Safety
 /// `pc` must point to a live `pcache`.
 #[inline(always)]
 unsafe fn pcache_active(pc: *mut pcache) -> bool {
-    unsafe { (*pc).__bindgen_anon_1.__bindgen_anon_1.active() != 0 }
+    unsafe { (*pc).flags.bits.active() != 0 }
 }
 
 /// Shrink a tmpfs file to `new_size` by discarding pcache pages beyond

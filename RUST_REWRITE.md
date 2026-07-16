@@ -1953,6 +1953,95 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   fault, stval=0xfffffffffffffff1 — same signature as the recorded
   baseline, sepc shifted only by relink).
 
+### Iteration 62 — 2026-07-16 — Wave P3-N6: mm type family nativized (11 structs + 2 anon bitfields + 3 anon unions, incl. the 5-arm page union)
+
+- **USER DIRECTIVE (remove C-compatible interfaces), sixth nativization
+  wave** (N4/N5 template). The mm descriptor graph is hand-written
+  native Rust now, sub-family by sub-family (tree green + boot gate
+  after each): **slab** (`slab_cache_struct`/`slab_cache_t` 1280/64,
+  `slab_struct`/`slab_t` 80/8, `percpu_slab_cache_t` 128/64) →
+  `mm/slab.rs` (`SlabCacheStruct`/`SlabStruct`/`PercpuSlabCache`; the
+  module's private atomic-view `SlabCache`/`Slab`/`PercpuCache` mirrors
+  stay, byte-identical and cross-asserted — C `_Atomic` degrades to
+  plain ints in bindgen and the natives reproduce that); **allocator
+  PODs** — `free_extent` 32/8 → `vfs/xv6fs/block_cache.rs`
+  (`FreeExtent`; brief guessed mm/kalloc but the header truth is
+  block_cache.h) and `mem_region` 16/1 packed → `dev/fdt.rs`
+  (`MemRegion`; header truth dev/fdt.h — a parse POD, not a DMA
+  descriptor); **vm** (`vma`/`vma_t` 104/8, `vm`/`vm_t` 384/64) →
+  `mm/vm.rs` (`Vma`/`Vm`); **pcache trio** (`pcache` 576/64,
+  `pcache_node` 160/8, `pcache_ops` 40/8) → `mm/pcache.rs` (`Pcache`/
+  `PcacheNode`/`PcacheOps` + real Rust union `PcacheFlags`{flags,bits} +
+  `PcacheFlagBits`(active=0,flush_requested=1) with
+  `PcacheNodeFlagBits`(dirty=0,uptodate=1,io_in_progress=2) — the
+  direct-alias `pub type Pcache = pcache` layer became the definition
+  itself); **page** (`page_struct`/`page_t` 128/64, the gnarly closer)
+  → `mm/page.rs` (`PageStruct`; the single-member anonymous flags union
+  FLATTENED to a direct `flags: u64` @32 — N5 superblock precedent; the
+  5-arm per-type union became real Rust union `PageTypeData` (field
+  `type_data`) with named arms `PageAnon`(EMPTY 0/1)/`PageBuddy`24/
+  `PageSlab`16/`PagePcache`16/`PageTail`8 — N2 tnode precedent; the
+  private byte-accessor `Page` mirror stays, cross-asserted). bindgen
+  emission: **21 struct/union defs removed, zero left** (incl. all 9
+  `__bindgen_ty` shells); ~130 hardcoded const asserts added.
+- **NO bindgen-vs-header divergence anywhere in this family** (pipe
+  precedent explicitly checked): the temporary in-tree `offset_of!`
+  gate on the live bindgen forms (mm/p3n6_gate.rs, built green then
+  removed) and the cross-compiler `_Static_assert` probe (toolchain
+  gcc, rv64gc/lp64d — scratchpad p3n6_static_assert_probe.c, exit 0)
+  agree on every size/align/offset. The explicit `_pad0/_pad1` fields
+  reproduce bindgen's `__bindgen_padding_*` verbatim; the 64-byte lock
+  placements come out identical because `completion_t`/`rwlock`/
+  `rwsem_t` natives kept `align(64)`.
+- **TOOLING FINDING (build.rs NativeTypeCallbacks)**: bindgen asks
+  `blocklisted_type_implements_trait` about typedef'd types by bare
+  name (`slab_cache_t`) but about non-typedef'd records as `"struct
+  X"`. Symptom: `platform_info` (still bindgen, embeds
+  `[mem_region; 8]` by value) silently lost Copy/Clone. Fix: explicit
+  `"struct X"` entries for the new tag-only types. A blanket
+  prefix-strip was tried and REJECTED: it resurrected Copy/Clone on
+  nine remaining bindgen types (`pcache(+node)`/`vm`/`vma`/
+  `xv6fs_block_cache`/`sched_entity(+ty_1)`/`timer_node`/`timer_root`)
+  that had silently lost derives to this same quirk back when `struct
+  spinlock` etc. nativized in P3-N2 — the established no-derive
+  emission is the boot-verified truth, and remaining types' derive
+  lines must not change as a wave side effect. **Flag for orchestrator:
+  those nine (now seven remaining) are candidates for a deliberate
+  derive-restoration decision in their own waves.** Derive fidelity
+  gate: full regex diff of every remaining type's attr block pre/post —
+  REMOVED 21 / ADDED 0 / CHANGED 0.
+- Copy fidelity: slab trio + `pcache_ops` + `page_struct`(+5 arms) +
+  `mem_region` Copy=Yes (exactly as bindgen emitted; `mem_region`'s Yes
+  is what keeps `platform_info`'s derive line); `pcache`/`pcache_node`/
+  `vm`/`vma`/`free_extent` NONCOPY (bindgen emitted no derives — the
+  native `VfsInode` embeds `pcache` by value (`i_data` @320) with no
+  derives, unchanged). Facades cover every alias: struct tag + `_t`
+  names both re-exported.
+- ~30 consumer sites re-pointed: pcache flag sites → `.flags.flags`/
+  `.flags.bits.active()` etc. (mm/pcache.rs 12, mm/pcache_test.rs 10,
+  vfs/tmpfs/file.rs 4 + truncate.rs 1, vfs/xv6fs/file.rs 5 + inode.rs 3
+  — via `i_data.flags.bits`); page union sites → `.flags` /
+  `.type_data.{buddy,slab,pcache,tail}` (mm/slab.rs 8, mm/pcache.rs 5);
+  page.rs's P3-3B mirror cross-assert block re-pointed to the native.
+  `mm/{pcache,vm}` promoted to `pub mod` (N5's vfs precedent) for the
+  facade paths.
+- Verified (worker): 0-warning FULL CLEAN rebuild (`cargo clean` +
+  rebuild: 0 warnings 0 errors); cmake cache checked clean
+  (BUILD_TYPE empty, toolchain gcc) before+after every build step; 8
+  boots total, each with exactly ONE `init: starting sh`; **mmaptest
+  16/16 all passed**; **testsig 21/21 ALL PASSED**; usertests
+  createdelete OK; **stressfs ×2 completed** (both `stressfs starting`
+  plus full write/read phases, prompt back); **cowtest → ALL COW TESTS
+  PASSED** (standalone `_cowtest` binary; `usertests cowtest` matches
+  no test name in this tree — verified identical no-op + identical
+  `lost some free pages 193011/193015` artifact on a pre-wave HEAD
+  worktree build, byte-identical numbers, PRE-EXISTING; ditto
+  createdelete's `193006/193017` trailer); `cat /nonexistent` → ENOENT;
+  forkforkfork → identical pre-existing kerneltrap storm on pre-wave
+  AND post-wave builds (same `In thread ... at 0x0000000080c34000` +
+  `kerneltrap: exception preempted interrupt` signature); zero panics
+  in every other run. NOT committed (orchestrator gate).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

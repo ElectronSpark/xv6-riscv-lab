@@ -45,7 +45,7 @@ use core::ptr::{self, addr_of, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::bindings::{
-    completion_t, list_node_t, page_t, pcache, pcache_node, rb_node, rb_root, rb_root_opts,
+    completion_t, list_node_t, page_t, rb_node, rb_root, rb_root_opts,
     rwlock, sleep_callback_t, slab_cache_t, spinlock_t, thread, thread_state_THREAD_UNINTERRUPTIBLE,
     tq_t, wakeup_callback_t, work_struct, workqueue, EAGAIN, EBUSY, EINPROGRESS, EINTR, EINVAL,
     EIO, SLAB_FLAG_EMBEDDED,
@@ -54,12 +54,241 @@ use crate::machine;
 use crate::mm::mm_safe::{SlabBox, SlabCacheRef};
 
 // ---------------------------------------------------------------------------
-// Canonical types — direct aliases of the bindgen structs. Every pointer
-// in this file is `*mut Pcache` / `*mut PcacheNode` / `*mut Page` etc.,
-// with the real C layout, not an opaque zero-sized stand-in.
+// Canonical types. `Pcache`/`PcacheNode`/`PcacheOps` are the hand-written
+// natives below (P3-N6); the remaining aliases stay direct re-namings of
+// the bindgen/facade structs. Every pointer in this file is `*mut Pcache`
+// / `*mut PcacheNode` / `*mut Page` etc., with the real C layout, not an
+// opaque zero-sized stand-in.
 // ---------------------------------------------------------------------------
-pub type Pcache = pcache;
-pub type PcacheNode = pcache_node;
+
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N6 (mm type family, pcache slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/mm/
+// pcache_types.h`'s `struct pcache` / `struct pcache_node` / `struct
+// pcache_ops` now: `build.rs` blocklists the bindgen-generated forms and
+// injects `pub use crate::mm::pcache::... as ...;` facade re-exports (no
+// `_t` typedefs exist). Field names/types reproduce bindgen's exactly:
+// `_pad0`/`_pad1` reproduce `pcache`'s `__bindgen_padding_0/1` verbatim
+// (the C `__ALIGNED_CACHELINE` rides the `spinlock_t` typedef; the
+// native `RawSpinlock` is align 8 in Rust, so the explicit pads +
+// `completion_t`/`rwlock`'s own native `align(64)` carry the 64-byte
+// placements exactly as bindgen emitted them). The anonymous C
+// flags union became the named real Rust union [`PcacheFlags`] (field
+// `flags`, bit holder [`PcacheFlagBits`]); `pcache_node`'s anonymous C
+// bitfield struct became the named 8/8 `{bits,_pad}` holder
+// [`PcacheNodeFlagBits`] (field `flags`) — both with safe masking
+// accessors bit-identical to bindgen's little-endian unit (N5's
+// `VfsInodeFlagBits` precedent); consumers re-pointed from
+// `__bindgen_anon_1`. The ops-table fn-pointer fields reproduce
+// bindgen's `Option<unsafe extern "C" fn>` forms exactly
+// (trait-ification is P3-10's job). Copy fidelity: `pcache_ops` derived
+// Copy/Clone in the pre-nativization bindgen output; `pcache` and
+// `pcache_node` derived NEITHER, so the natives deliberately have no
+// derives — the native `VfsInode` embeds `pcache` BY VALUE (`i_data`)
+// and has no derives either (accurate NONCOPY answer in build.rs).
+//
+// Layout evidence (P3-N6): temporary in-tree `offset_of!` gate on the
+// live bindgen forms + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n6_static_assert_probe.c); the two
+// agree on every size/align/offset.
+// ---------------------------------------------------------------------------
+
+/// Native replacement for the anonymous C bitfield struct inside
+/// `struct pcache`'s flags union (bindgen's
+/// `pcache__bindgen_ty_1__bindgen_ty_1`, 8/8): the pcache state bits.
+/// Bit order (LE unit byte 0): active=0, flush_requested=1 — identical
+/// to bindgen's `get(N,1)`/`set(N,1)` accessors.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct PcacheFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+macro_rules! pcache_flag_bit {
+    ($holder:ident { $($get:ident, $set:ident, $bit:expr;)+ }) => {
+        impl $holder {
+            $(
+                #[inline]
+                pub(crate) fn $get(&self) -> u64 {
+                    ((self.bits >> $bit) & 0b1) as u64
+                }
+                #[inline]
+                pub(crate) fn $set(&mut self, val: u64) {
+                    self.bits = (self.bits & !(1u8 << $bit)) | (((val as u8) & 0b1) << $bit);
+                }
+            )+
+        }
+    };
+}
+
+pcache_flag_bit!(PcacheFlagBits {
+    active, set_active, 0;
+    flush_requested, set_flush_requested, 1;
+});
+
+/// Native replacement for the anonymous C union inside `struct pcache`
+/// (bindgen's `pcache__bindgen_ty_1`, 8/8): the whole flags word
+/// (`flags`, the C member name) overlaid with the state bit holder
+/// (`bits`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union PcacheFlags {
+    pub flags: crate::bindings::uint64,
+    pub bits: PcacheFlagBits,
+}
+
+/// Native replacement for the anonymous C bitfield struct inside
+/// `struct pcache_node` (bindgen's `pcache_node__bindgen_ty_1`, 8/8):
+/// the per-node page state bits. Bit order (LE unit byte 0): dirty=0,
+/// uptodate=1, io_in_progress=2.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct PcacheNodeFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+pcache_flag_bit!(PcacheNodeFlagBits {
+    dirty, set_dirty, 0;
+    uptodate, set_uptodate, 1;
+    io_in_progress, set_io_in_progress, 2;
+});
+
+/// `struct pcache_ops` (`kernel/inc/mm/pcache_types.h`) — the
+/// filesystem-facing page IO vtable.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PcacheOps {
+    pub read_page: Option<
+        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
+    >,
+    pub write_page: Option<
+        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
+    >,
+    pub write_begin: Option<
+        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
+    >,
+    pub write_end: Option<
+        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
+    >,
+    pub mark_dirty: Option<unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t)>,
+}
+
+/// `struct pcache` (`kernel/inc/mm/pcache_types.h`) — one page cache.
+/// The anonymous flags union became the named `flags` field
+/// ([`PcacheFlags`]); consumers re-pointed from bindgen's
+/// `__bindgen_anon_1`.
+#[repr(C, align(64))]
+pub struct Pcache {
+    pub spinlock: spinlock_t,
+    pub list_entry: list_node_t,
+    pub lru: list_node_t,
+    pub dirty_list: list_node_t,
+    pub dirty_rate: crate::bindings::uint8,
+    pub lru_count: crate::bindings::int64,
+    pub dirty_count: crate::bindings::int64,
+    pub page_count: crate::bindings::int64,
+    pub max_pages: crate::bindings::uint64,
+    pub blk_count: crate::bindings::uint64,
+    pub last_request: crate::bindings::uint64,
+    pub last_flushed: crate::bindings::uint64,
+    pub(crate) _pad0: [u64; 2],
+    pub flush_completion: completion_t,
+    pub private_data: *mut c_void,
+    pub flags: PcacheFlags,
+    pub(crate) _pad1: [u64; 6],
+    pub tree_lock: rwlock,
+    pub page_map: rb_root,
+    pub gfp_flags: crate::bindings::uint64,
+    pub ops: *mut PcacheOps,
+    pub flush_work: work_struct,
+    pub flush_error: c_int,
+    pub wait_refcount: crate::bindings::uint32,
+}
+
+/// `struct pcache_node` (`kernel/inc/mm/pcache_types.h`) — one cached
+/// page's tree/LRU linkage + state. The anonymous bitfield struct
+/// became the named `flags` field ([`PcacheNodeFlagBits`]); consumers
+/// re-pointed from bindgen's `__bindgen_anon_1`.
+#[repr(C)]
+pub struct PcacheNode {
+    pub tree_entry: rb_node,
+    pub lru_entry: list_node_t,
+    pub pcache: *mut Pcache,
+    pub page: *mut page_t,
+    pub data: *mut c_void,
+    pub page_count: crate::bindings::int64,
+    pub last_request: crate::bindings::uint64,
+    pub last_flushed: crate::bindings::uint64,
+    pub flags: PcacheNodeFlagBits,
+    pub blkno: crate::bindings::uint64,
+    pub size: usize,
+    pub io_waiters: tq_t,
+}
+
+// P3-N6 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by the temporary
+// `offset_of!` gate) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain gcc agrees on every value).
+const _: () = {
+    assert!(core::mem::size_of::<PcacheFlags>() == 8, "pcache flags union size");
+    assert!(core::mem::align_of::<PcacheFlags>() == 8, "pcache flags union align");
+    assert!(core::mem::size_of::<PcacheFlagBits>() == 8, "pcache flag bits size");
+    assert!(core::mem::align_of::<PcacheFlagBits>() == 8, "pcache flag bits align");
+    assert!(core::mem::size_of::<PcacheNodeFlagBits>() == 8, "pcache_node flag bits size");
+    assert!(core::mem::align_of::<PcacheNodeFlagBits>() == 8, "pcache_node flag bits align");
+
+    assert!(core::mem::size_of::<Pcache>() == 576, "pcache size");
+    assert!(core::mem::align_of::<Pcache>() == 64, "pcache align");
+    assert!(core::mem::offset_of!(Pcache, spinlock) == 0, "pcache.spinlock");
+    assert!(core::mem::offset_of!(Pcache, list_entry) == 24, "pcache.list_entry");
+    assert!(core::mem::offset_of!(Pcache, lru) == 40, "pcache.lru");
+    assert!(core::mem::offset_of!(Pcache, dirty_list) == 56, "pcache.dirty_list");
+    assert!(core::mem::offset_of!(Pcache, dirty_rate) == 72, "pcache.dirty_rate");
+    assert!(core::mem::offset_of!(Pcache, lru_count) == 80, "pcache.lru_count");
+    assert!(core::mem::offset_of!(Pcache, dirty_count) == 88, "pcache.dirty_count");
+    assert!(core::mem::offset_of!(Pcache, page_count) == 96, "pcache.page_count");
+    assert!(core::mem::offset_of!(Pcache, max_pages) == 104, "pcache.max_pages");
+    assert!(core::mem::offset_of!(Pcache, blk_count) == 112, "pcache.blk_count");
+    assert!(core::mem::offset_of!(Pcache, last_request) == 120, "pcache.last_request");
+    assert!(core::mem::offset_of!(Pcache, last_flushed) == 128, "pcache.last_flushed");
+    assert!(core::mem::offset_of!(Pcache, flush_completion) == 192, "pcache.flush_completion");
+    assert!(core::mem::offset_of!(Pcache, private_data) == 320, "pcache.private_data");
+    assert!(core::mem::offset_of!(Pcache, flags) == 328, "pcache.flags");
+    assert!(core::mem::offset_of!(Pcache, tree_lock) == 384, "pcache.tree_lock");
+    assert!(core::mem::offset_of!(Pcache, page_map) == 448, "pcache.page_map");
+    assert!(core::mem::offset_of!(Pcache, gfp_flags) == 464, "pcache.gfp_flags");
+    assert!(core::mem::offset_of!(Pcache, ops) == 472, "pcache.ops");
+    assert!(core::mem::offset_of!(Pcache, flush_work) == 480, "pcache.flush_work");
+    assert!(core::mem::offset_of!(Pcache, flush_error) == 528, "pcache.flush_error");
+    assert!(core::mem::offset_of!(Pcache, wait_refcount) == 532, "pcache.wait_refcount");
+
+    assert!(core::mem::size_of::<PcacheNode>() == 160, "pcache_node size");
+    assert!(core::mem::align_of::<PcacheNode>() == 8, "pcache_node align");
+    assert!(core::mem::offset_of!(PcacheNode, tree_entry) == 0, "pcache_node.tree_entry");
+    assert!(core::mem::offset_of!(PcacheNode, lru_entry) == 24, "pcache_node.lru_entry");
+    assert!(core::mem::offset_of!(PcacheNode, pcache) == 40, "pcache_node.pcache");
+    assert!(core::mem::offset_of!(PcacheNode, page) == 48, "pcache_node.page");
+    assert!(core::mem::offset_of!(PcacheNode, data) == 56, "pcache_node.data");
+    assert!(core::mem::offset_of!(PcacheNode, page_count) == 64, "pcache_node.page_count");
+    assert!(core::mem::offset_of!(PcacheNode, last_request) == 72, "pcache_node.last_request");
+    assert!(core::mem::offset_of!(PcacheNode, last_flushed) == 80, "pcache_node.last_flushed");
+    assert!(core::mem::offset_of!(PcacheNode, flags) == 88, "pcache_node.flags");
+    assert!(core::mem::offset_of!(PcacheNode, blkno) == 96, "pcache_node.blkno");
+    assert!(core::mem::offset_of!(PcacheNode, size) == 104, "pcache_node.size");
+    assert!(core::mem::offset_of!(PcacheNode, io_waiters) == 112, "pcache_node.io_waiters");
+
+    assert!(core::mem::size_of::<PcacheOps>() == 40, "pcache_ops size");
+    assert!(core::mem::align_of::<PcacheOps>() == 8, "pcache_ops align");
+    assert!(core::mem::offset_of!(PcacheOps, read_page) == 0, "pcache_ops.read_page");
+    assert!(core::mem::offset_of!(PcacheOps, write_page) == 8, "pcache_ops.write_page");
+    assert!(core::mem::offset_of!(PcacheOps, write_begin) == 16, "pcache_ops.write_begin");
+    assert!(core::mem::offset_of!(PcacheOps, write_end) == 24, "pcache_ops.write_end");
+    assert!(core::mem::offset_of!(PcacheOps, mark_dirty) == 32, "pcache_ops.mark_dirty");
+};
+
 pub type Page = page_t;
 pub type WorkStruct = work_struct;
 pub type Thread = thread;
@@ -724,32 +953,26 @@ impl PcacheHandle {
     }
     #[inline]
     fn set_flags(self, v: u64) {
-        unsafe { (*self.raw()).__bindgen_anon_1.flags = v };
+        unsafe { (*self.raw()).flags.flags = v };
     }
     #[inline]
     fn active(self) -> bool {
-        unsafe { (*self.raw()).__bindgen_anon_1.__bindgen_anon_1.active() != 0 }
+        unsafe { (*self.raw()).flags.bits.active() != 0 }
     }
     #[inline]
     fn set_active(self, v: bool) {
         unsafe {
-            (*self.raw())
-                .__bindgen_anon_1
-                .__bindgen_anon_1
-                .set_active(v as u64);
+            (*self.raw()).flags.bits.set_active(v as u64);
         }
     }
     #[inline]
     fn flush_requested(self) -> bool {
-        unsafe { (*self.raw()).__bindgen_anon_1.__bindgen_anon_1.flush_requested() != 0 }
+        unsafe { (*self.raw()).flags.bits.flush_requested() != 0 }
     }
     #[inline]
     fn set_flush_requested(self, v: bool) {
         unsafe {
-            (*self.raw())
-                .__bindgen_anon_1
-                .__bindgen_anon_1
-                .set_flush_requested(v as u64);
+            (*self.raw()).flags.bits.set_flush_requested(v as u64);
         }
     }
     #[inline]
@@ -936,7 +1159,7 @@ impl PcacheHandle {
             let le = &(*p).list_entry;
             (*p).page_count == 0
                 && (*p).dirty_count == 0
-                && (*p).__bindgen_anon_1.flags == 0
+                && (*p).flags.flags == 0
                 && rb_empty
                 && lru.next.is_null()
                 && lru.prev.is_null()
@@ -1040,27 +1263,27 @@ impl NodeHandle {
     }
     #[inline]
     fn dirty(self) -> bool {
-        unsafe { (*self.raw()).__bindgen_anon_1.dirty() != 0 }
+        unsafe { (*self.raw()).flags.dirty() != 0 }
     }
     #[inline]
     fn set_dirty(self, v: bool) {
-        unsafe { (*self.raw()).__bindgen_anon_1.set_dirty(v as u64) };
+        unsafe { (*self.raw()).flags.set_dirty(v as u64) };
     }
     #[inline]
     fn uptodate(self) -> bool {
-        unsafe { (*self.raw()).__bindgen_anon_1.uptodate() != 0 }
+        unsafe { (*self.raw()).flags.uptodate() != 0 }
     }
     #[inline]
     fn set_uptodate(self, v: bool) {
-        unsafe { (*self.raw()).__bindgen_anon_1.set_uptodate(v as u64) };
+        unsafe { (*self.raw()).flags.set_uptodate(v as u64) };
     }
     #[inline]
     fn io_in_progress(self) -> bool {
-        unsafe { (*self.raw()).__bindgen_anon_1.io_in_progress() != 0 }
+        unsafe { (*self.raw()).flags.io_in_progress() != 0 }
     }
     #[inline]
     fn set_io_in_progress(self, v: bool) {
-        unsafe { (*self.raw()).__bindgen_anon_1.set_io_in_progress(v as u64) };
+        unsafe { (*self.raw()).flags.set_io_in_progress(v as u64) };
     }
     #[inline]
     fn lru_detached(self) -> bool {
@@ -1281,10 +1504,10 @@ fn xv6_pcache_node_detach_lru(n: *mut PcacheNode) {
 // `page_t`'s type-tagged union — see `kernel/inc/mm/page_type.h`).
 // ---------------------------------------------------------------------------
 fn xv6_page_pcache_get_pcache(page: *mut Page) -> *mut Pcache {
-    unsafe { (*page).__bindgen_anon_2.pcache.pcache }
+    unsafe { (*page).type_data.pcache.pcache }
 }
 fn xv6_page_pcache_set_pcache(page: *mut Page, p: *mut Pcache) {
-    unsafe { (*page).__bindgen_anon_2.pcache.pcache = p };
+    unsafe { (*page).type_data.pcache.pcache = p };
 }
 /// C-ABI export: `vm.rs`'s `xv6_vm_call_vma_fault` calls this through its
 /// own `extern "C"` declaration. Pre-existing regression from the WP2
@@ -1294,16 +1517,16 @@ fn xv6_page_pcache_set_pcache(page: *mut Page, p: *mut Pcache) {
 /// links. `vm.rs`/`pcache.rs` are otherwise out of scope for the WP3
 /// mm/page/slab/vm_pgtab refactor this file is part of.
 pub(crate) fn xv6_page_pcache_get_node(page: *mut Page) -> *mut PcacheNode {
-    unsafe { (*page).__bindgen_anon_2.pcache.pcache_node }
+    unsafe { (*page).type_data.pcache.pcache_node }
 }
 fn xv6_page_pcache_set_node(page: *mut Page, n: *mut PcacheNode) {
-    unsafe { (*page).__bindgen_anon_2.pcache.pcache_node = n };
+    unsafe { (*page).type_data.pcache.pcache_node = n };
 }
 fn xv6_page_is_pcache_type(page: *mut Page) -> c_int {
     if page.is_null() {
         return 0;
     }
-    let flags = unsafe { (*page).__bindgen_anon_1.flags };
+    let flags = unsafe { (*page).flags };
     if (flags & PAGE_FLAG_TYPE_MASK) == PAGE_TYPE_PCACHE as u64 { 1 } else { 0 }
 }
 

@@ -244,6 +244,141 @@ const _: () = {
     assert!(core::mem::offset_of!(Slab, page) == core::mem::offset_of!(slab_t, page));
 };
 
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N6 (mm type family, slab slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/mm/
+// slab_type.h`'s `struct slab_cache_struct` (`slab_cache_t`), `struct
+// slab_struct` (`slab_t`) and the anonymous-struct typedef
+// `percpu_slab_cache_t` now: `build.rs` blocklists the bindgen-generated
+// forms and injects `pub use crate::mm::slab::... as ...;` facade
+// re-exports for both the struct tag and `_t` typedef names. Field
+// names/types reproduce bindgen's exactly (`_pad0`/`_pad1` reproduce
+// bindgen's `__bindgen_padding_0/1` verbatim — the C
+// `__ALIGNED_CACHELINE` rides the `spinlock_t` typedef, the native
+// `RawSpinlock` is align 8 in Rust, so the explicit pads carry the
+// 64-byte lock placements, exactly as bindgen emitted them); the C
+// `_Atomic` qualifiers on the counter fields degrade to plain integers
+// in bindgen's output and are reproduced as such (this module's private
+// `SlabCache`/`Slab`/`PercpuCache` mirrors above remain the
+// atomic-access views, cast per pointer as before — byte-identical
+// layout, asserted below). All three derived Copy/Clone in the
+// pre-nativization bindgen output; the natives do too.
+//
+// Layout evidence (P3-N6): temporary in-tree `offset_of!` gate on the
+// live bindgen forms (kernel/mm/p3n6_gate.rs, removed with this wave)
+// + cross-compiler `_Static_assert` probe (toolchain gcc, rv64gc/
+// lp64d — scratchpad p3n6_static_assert_probe.c). gcc's C-header
+// layout and bindgen's runtime layout AGREE on every size/align/offset
+// of this family (no pipe-style divergence, P3-N5 precedent checked).
+// ---------------------------------------------------------------------------
+
+/// `percpu_slab_cache_t` (`kernel/inc/mm/slab_type.h`) — one CPU's
+/// partial/full slab lists. `_pad0` reproduces bindgen's
+/// `__bindgen_padding_0: [u64; 3]` (places `lock` at its C-correct
+/// 64-aligned offset).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct PercpuSlabCache {
+    pub partial_list: crate::bindings::list_node_t,
+    pub full_list: crate::bindings::list_node_t,
+    pub partial_count: crate::bindings::uint32,
+    pub full_count: crate::bindings::uint32,
+    pub(crate) _pad0: [u64; 3],
+    pub lock: crate::bindings::spinlock_t,
+}
+
+/// `struct slab_cache_struct` / `slab_cache_t` (`kernel/inc/mm/
+/// slab_type.h`) — one slab cache. `_pad0`/`_pad1` reproduce bindgen's
+/// `__bindgen_padding_0/1` (place `percpu_caches`/`global_free_lock`
+/// at their C-correct 64-aligned offsets). `percpu_caches` is `[_; 8]`
+/// exactly as bindgen emitted for `NCPU == 8` (asserted above).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct SlabCacheStruct {
+    pub name: *const c_char,
+    pub flags: crate::bindings::uint64,
+    pub obj_size: usize,
+    pub offset: usize,
+    pub slab_order: crate::bindings::uint32,
+    pub slab_obj_num: crate::bindings::uint32,
+    pub bitmap_size: crate::bindings::uint32,
+    pub limits: crate::bindings::uint32,
+    pub(crate) _pad0: [u64; 2],
+    pub percpu_caches: [PercpuSlabCache; 8],
+    pub global_free_list: crate::bindings::list_node_t,
+    pub(crate) _pad1: [u64; 6],
+    pub global_free_lock: crate::bindings::spinlock_t,
+    pub global_free_count: crate::bindings::int64,
+    pub slab_total: crate::bindings::int64,
+    pub obj_active: crate::bindings::uint64,
+    pub obj_total: crate::bindings::uint64,
+    pub cache_list_entry: crate::bindings::list_node_t,
+}
+
+/// `struct slab_struct` / `slab_t` (`kernel/inc/mm/slab_type.h`) — one
+/// slab descriptor. `state` keeps bindgen's `slab_state_t` c_uint alias;
+/// `page` keeps the `*mut page_t` facade path (page family nativized in
+/// this same wave).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlabStruct {
+    pub list_entry: crate::bindings::list_node_t,
+    pub cache: *mut SlabCacheStruct,
+    pub page: *mut crate::bindings::page_t,
+    pub slab_order: crate::bindings::uint16,
+    pub in_use: crate::bindings::uint64,
+    pub next: *mut c_void,
+    pub state: crate::bindings::slab_state_t,
+    pub bitmap: *mut crate::bindings::uint64,
+    pub cpu_id: c_int,
+}
+
+// P3-N6 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by the temporary
+// `offset_of!` gate) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain gcc agrees on every value).
+const _: () = {
+    assert!(core::mem::size_of::<PercpuSlabCache>() == 128, "percpu_slab_cache_t size");
+    assert!(core::mem::align_of::<PercpuSlabCache>() == 64, "percpu_slab_cache_t align");
+    assert!(core::mem::offset_of!(PercpuSlabCache, partial_list) == 0, "percpu.partial_list");
+    assert!(core::mem::offset_of!(PercpuSlabCache, full_list) == 16, "percpu.full_list");
+    assert!(core::mem::offset_of!(PercpuSlabCache, partial_count) == 32, "percpu.partial_count");
+    assert!(core::mem::offset_of!(PercpuSlabCache, full_count) == 36, "percpu.full_count");
+    assert!(core::mem::offset_of!(PercpuSlabCache, lock) == 64, "percpu.lock");
+
+    assert!(core::mem::size_of::<SlabCacheStruct>() == 1280, "slab_cache_t size");
+    assert!(core::mem::align_of::<SlabCacheStruct>() == 64, "slab_cache_t align");
+    assert!(core::mem::offset_of!(SlabCacheStruct, name) == 0, "cache.name");
+    assert!(core::mem::offset_of!(SlabCacheStruct, flags) == 8, "cache.flags");
+    assert!(core::mem::offset_of!(SlabCacheStruct, obj_size) == 16, "cache.obj_size");
+    assert!(core::mem::offset_of!(SlabCacheStruct, offset) == 24, "cache.offset");
+    assert!(core::mem::offset_of!(SlabCacheStruct, slab_order) == 32, "cache.slab_order");
+    assert!(core::mem::offset_of!(SlabCacheStruct, slab_obj_num) == 36, "cache.slab_obj_num");
+    assert!(core::mem::offset_of!(SlabCacheStruct, bitmap_size) == 40, "cache.bitmap_size");
+    assert!(core::mem::offset_of!(SlabCacheStruct, limits) == 44, "cache.limits");
+    assert!(core::mem::offset_of!(SlabCacheStruct, percpu_caches) == 64, "cache.percpu_caches");
+    assert!(core::mem::offset_of!(SlabCacheStruct, global_free_list) == 1088, "cache.global_free_list");
+    assert!(core::mem::offset_of!(SlabCacheStruct, global_free_lock) == 1152, "cache.global_free_lock");
+    assert!(core::mem::offset_of!(SlabCacheStruct, global_free_count) == 1176, "cache.global_free_count");
+    assert!(core::mem::offset_of!(SlabCacheStruct, slab_total) == 1184, "cache.slab_total");
+    assert!(core::mem::offset_of!(SlabCacheStruct, obj_active) == 1192, "cache.obj_active");
+    assert!(core::mem::offset_of!(SlabCacheStruct, obj_total) == 1200, "cache.obj_total");
+    assert!(core::mem::offset_of!(SlabCacheStruct, cache_list_entry) == 1208, "cache.cache_list_entry");
+
+    assert!(core::mem::size_of::<SlabStruct>() == 80, "slab_t size");
+    assert!(core::mem::align_of::<SlabStruct>() == 8, "slab_t align");
+    assert!(core::mem::offset_of!(SlabStruct, list_entry) == 0, "slab.list_entry");
+    assert!(core::mem::offset_of!(SlabStruct, cache) == 16, "slab.cache");
+    assert!(core::mem::offset_of!(SlabStruct, page) == 24, "slab.page");
+    assert!(core::mem::offset_of!(SlabStruct, slab_order) == 32, "slab.slab_order");
+    assert!(core::mem::offset_of!(SlabStruct, in_use) == 40, "slab.in_use");
+    assert!(core::mem::offset_of!(SlabStruct, next) == 48, "slab.next");
+    assert!(core::mem::offset_of!(SlabStruct, state) == 56, "slab.state");
+    assert!(core::mem::offset_of!(SlabStruct, bitmap) == 64, "slab.bitmap");
+    assert!(core::mem::offset_of!(SlabStruct, cpu_id) == 72, "slab.cpu_id");
+};
+
 // ===========================================================================
 // FFI surface (declared in slab_shims.c, defs.h, mm/page.h).
 //
@@ -463,9 +598,10 @@ fn log_from_free(obj: *mut c_void, slab: &mut Slab, cache: &mut SlabCache, cpu_i
 // ===========================================================================
 // Page-union access for slab pages -- previously `xv6_slab_page_attach` /
 // `xv6_slab_page_set_order` / `xv6_slab_find_obj_slab` in the deleted
-// `slab_shims.rs`. These still operate on the bindgen `page_struct` (rather
-// than `page::Page`) because that is the type the C-derived union layout
-// (`__bindgen_anon_2.{slab,tail}`) is expressed in; `page.rs` and `slab.rs`
+// `slab_shims.rs`. These still operate on the kernel-wide `page_struct`
+// (the native `page::PageStruct` facade since P3-N6, rather than the
+// private `page::Page` mirror) because that is the type the union layout
+// (`type_data.{slab,tail}`) is expressed in; `page.rs` and `slab.rs`
 // otherwise stay decoupled from each other's internal representations.
 // ===========================================================================
 use crate::bindings::page_struct;
@@ -474,7 +610,7 @@ use crate::bindings::page_struct;
 fn page_flags_raw(page: *mut page_struct) -> u64 {
     // SAFETY: `page` is a valid page-array entry (guaranteed by every
     // caller: freshly allocated or resolved via `__pa_to_page`).
-    unsafe { (*page).__bindgen_anon_1.flags }
+    unsafe { (*page).flags }
 }
 #[inline]
 fn page_is_type(page: *mut page_struct, ty: u64) -> bool {
@@ -489,14 +625,14 @@ fn page_attach(head: *mut c_void, slab: &mut Slab, order: u32) {
     // exclusively-owned pages (from `page_alloc`); every page in the group
     // is valid to write through this whole function.
     unsafe {
-        let slab_var = &raw mut (*head).__bindgen_anon_2.slab;
+        let slab_var = &raw mut (*head).type_data.slab;
         (*slab_var).slab = slab as *mut Slab as *mut crate::bindings::slab_t;
         (*slab_var).order = order;
         let page_count = 1u64 << order;
         for i in 1..page_count {
             let p = head.add(i as usize);
-            (*p).__bindgen_anon_1.flags = PAGE_TYPE_TAIL;
-            let tail_var = &raw mut (*p).__bindgen_anon_2.tail;
+            (*p).flags = PAGE_TYPE_TAIL;
+            let tail_var = &raw mut (*p).type_data.tail;
             (*tail_var).head_page = head;
         }
     }
@@ -506,7 +642,7 @@ fn page_set_order(head: *mut c_void, order: u32) {
     let head = head as *mut page_struct;
     // SAFETY: `head` is a live PAGE_TYPE_SLAB head page.
     unsafe {
-        let slab_var = &raw mut (*head).__bindgen_anon_2.slab;
+        let slab_var = &raw mut (*head).type_data.slab;
         (*slab_var).order = order;
     }
 }
@@ -530,7 +666,7 @@ fn find_obj_slab(ptr: *mut c_void) -> Option<&'static mut Slab> {
         // SAFETY: `page` is a valid PAGE_TYPE_TAIL page; `tail.head_page`
         // was set by `page_attach` above and always points at a live
         // PAGE_TYPE_SLAB head page.
-        let h = unsafe { (*page).__bindgen_anon_2.tail.head_page } as *mut page_struct;
+        let h = unsafe { (*page).type_data.tail.head_page } as *mut page_struct;
         if h.is_null() || !page_is_type(h, PAGE_TYPE_SLAB) {
             return None;
         }
@@ -539,7 +675,7 @@ fn find_obj_slab(ptr: *mut c_void) -> Option<&'static mut Slab> {
         return None;
     };
     // SAFETY: `header` is a live PAGE_TYPE_SLAB head page.
-    let slab_ptr = unsafe { (*header).__bindgen_anon_2.slab.slab } as *mut Slab;
+    let slab_ptr = unsafe { (*header).type_data.slab.slab } as *mut Slab;
     // SAFETY: turning a freshly-resolved raw pointer into a `&mut` is sound
     // because the slab descriptor is uniquely owned by the allocator's
     // free path while this reference is held.

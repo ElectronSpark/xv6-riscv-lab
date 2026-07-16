@@ -129,6 +129,145 @@ impl PcpuCache {
 }
 
 // ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N6 (mm type family, page slice).
+//
+// [`PageStruct`] IS the kernel-wide Rust definition of `kernel/inc/mm/
+// page_type.h`'s `struct page_struct` (`page_t`) now: `build.rs`
+// blocklists the bindgen-generated form (plus its six anonymous-union
+// shells) and injects `pub use crate::mm::page::PageStruct as
+// page_struct;` / `as page_t;` facade re-exports. Field names/types
+// reproduce bindgen's exactly, with two N5-precedent renames:
+//
+//   * the single-member anonymous C flags union (bindgen's
+//     `__bindgen_anon_1: page_struct__bindgen_ty_1`) is FLATTENED to a
+//     direct `flags: uint64` field at the identical offset (32) —
+//     N5's `vfs_superblock` inode-hash precedent;
+//   * the anonymous per-type C payload union (bindgen's
+//     `__bindgen_anon_2: page_struct__bindgen_ty_2` + five arm shells)
+//     became the named real Rust union [`PageTypeData`] (field
+//     `type_data`, arm structs [`PageAnon`]/[`PageBuddy`]/[`PageSlab`]/
+//     [`PagePcache`]/[`PageTail`] with the C arm member names) — N2's
+//     `tnode` / N5's `VfsFilePos` precedent. Consumers re-pointed
+//     (`mm/slab.rs`, `mm/pcache.rs`).
+//
+// `PageStruct` derives Copy/Clone exactly as the pre-nativization
+// bindgen output did (all five arms did too). `PageAnon` reproduces
+// bindgen's EMPTY 0/1 placeholder arm — `build.rs`'s empty-struct
+// `align(64)` postprocess pass deliberately skipped it pre-wave
+// (`no_align_empty`) and the native stays unattributed for the same
+// reason: forcing align would shift the union.
+//
+// The private `Page` mirror below (earlier shim-collapse work; byte
+// accessors, no derives) remains this module's internal working view —
+// same layout, cross-asserted against the native at the bottom of this
+// block. Layout evidence (P3-N6): temporary in-tree `offset_of!` gate
+// on the live bindgen forms + cross-compiler `_Static_assert` probe
+// (toolchain gcc, rv64gc/lp64d — scratchpad
+// p3n6_static_assert_probe.c); the two agree on every value.
+// ---------------------------------------------------------------------------
+
+/// Empty `anon` arm of [`PageTypeData`] (bindgen's
+/// `page_struct__bindgen_ty_2__bindgen_ty_1`, 0/1): anonymous pages
+/// carry no per-type payload.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PageAnon {}
+
+/// `buddy` arm of [`PageTypeData`] (24/8): free-page linkage while the
+/// page sits in the buddy allocator.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PageBuddy {
+    pub lru_entry: crate::bindings::list_node_t,
+    pub order: crate::bindings::uint32,
+    pub state: crate::bindings::uint32,
+}
+
+/// `slab` arm of [`PageTypeData`] (16/8): owning slab descriptor +
+/// compound order.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PageSlab {
+    pub slab: *mut crate::bindings::slab_t,
+    pub order: crate::bindings::uint32,
+}
+
+/// `pcache` arm of [`PageTypeData`] (16/8): owning pcache + node.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PagePcache {
+    pub pcache: *mut crate::bindings::pcache,
+    pub pcache_node: *mut crate::bindings::pcache_node,
+}
+
+/// `tail` arm of [`PageTypeData`] (8/8): back-pointer to the compound
+/// head page.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PageTail {
+    pub head_page: *mut PageStruct,
+}
+
+/// Native replacement for the anonymous per-type C union inside
+/// `struct page_struct` (bindgen's `page_struct__bindgen_ty_2`, 24/8).
+/// Select the arm according to `PAGE_FLAG_GET_TYPE(flags)`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union PageTypeData {
+    pub anon: PageAnon,
+    pub buddy: PageBuddy,
+    pub slab: PageSlab,
+    pub pcache: PagePcache,
+    pub tail: PageTail,
+}
+
+/// `struct page_struct` / `page_t` (`kernel/inc/mm/page_type.h`) — one
+/// physical page descriptor. The single-member anonymous flags union is
+/// flattened to the direct `flags` field; the per-type payload union
+/// became the named `type_data` field (consumers re-pointed from
+/// bindgen's `__bindgen_anon_1`/`__bindgen_anon_2`).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct PageStruct {
+    pub lock: crate::bindings::spinlock_t,
+    pub physical_address: crate::bindings::uint64,
+    pub flags: crate::bindings::uint64,
+    pub ref_count: c_int,
+    pub type_data: PageTypeData,
+}
+
+// P3-N6 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by the temporary
+// `offset_of!` gate) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain gcc agrees on every value).
+const _: () = {
+    assert!(core::mem::size_of::<PageStruct>() == 128, "page_struct size");
+    assert!(core::mem::align_of::<PageStruct>() == 64, "page_struct align");
+    assert!(core::mem::offset_of!(PageStruct, lock) == 0, "page.lock");
+    assert!(core::mem::offset_of!(PageStruct, physical_address) == 24, "page.physical_address");
+    assert!(core::mem::offset_of!(PageStruct, flags) == 32, "page.flags (flattened union)");
+    assert!(core::mem::offset_of!(PageStruct, ref_count) == 40, "page.ref_count");
+    assert!(core::mem::offset_of!(PageStruct, type_data) == 48, "page.type_data");
+
+    assert!(core::mem::size_of::<PageTypeData>() == 24, "page type union size");
+    assert!(core::mem::align_of::<PageTypeData>() == 8, "page type union align");
+    assert!(core::mem::size_of::<PageAnon>() == 0, "page.anon arm size (empty)");
+    assert!(core::mem::align_of::<PageAnon>() == 1, "page.anon arm align");
+    assert!(core::mem::size_of::<PageBuddy>() == 24, "page.buddy arm size");
+    assert!(core::mem::offset_of!(PageBuddy, lru_entry) == 0, "buddy.lru_entry");
+    assert!(core::mem::offset_of!(PageBuddy, order) == 16, "buddy.order");
+    assert!(core::mem::offset_of!(PageBuddy, state) == 20, "buddy.state");
+    assert!(core::mem::size_of::<PageSlab>() == 16, "page.slab arm size");
+    assert!(core::mem::offset_of!(PageSlab, slab) == 0, "slab.slab");
+    assert!(core::mem::offset_of!(PageSlab, order) == 8, "slab.order");
+    assert!(core::mem::size_of::<PagePcache>() == 16, "page.pcache arm size");
+    assert!(core::mem::offset_of!(PagePcache, pcache) == 0, "pcache.pcache");
+    assert!(core::mem::offset_of!(PagePcache, pcache_node) == 8, "pcache.pcache_node");
+    assert!(core::mem::size_of::<PageTail>() == 8, "page.tail arm size");
+    assert!(core::mem::offset_of!(PageTail, head_page) == 0, "tail.head_page");
+};
+
+// ---------------------------------------------------------------------------
 // Layout pins (compile-time). Formerly `_Static_assert`s in the deleted
 // `page_shims.c` / `page_shims.rs`; `Page`/`BuddyPool` are hand-rolled
 // mirrors of the C `page_t`/`buddy_pool_t`, so these guards are what
@@ -146,13 +285,13 @@ const _: () = {
     assert!(PAGE_BUDDY_MAX_ORDER == 10, "PAGE_BUDDY_MAX_ORDER must be 10");
 };
 
-// Wave P3-3B: field-level layout gate against the real bindgen
-// `page_struct` (`kernel/inc/mm/page_type.h`'s `struct page_struct`,
-// aliased `page_t`). `Page` (above) already existed as a hand-rolled
-// `#[repr(C)]` mirror from the earlier mm shim-collapse work, but --
-// unlike `slab.rs`'s `SlabCache`/`Slab` mirrors -- it was only pinned by
-// hardcoded size/align literals, never cross-checked directly against
-// the bindgen type itself. This closes that gap.
+// Wave P3-3B (re-pointed by P3-N6): field-level layout gate for the
+// private `Page` mirror against the kernel-wide `page_struct`
+// definition. Originally this cross-checked the mirror against the real
+// bindgen emission; since P3-N6 `crate::bindings::page_struct` IS the
+// native [`PageStruct`] above (facade re-export), so the same asserts
+// now pin mirror <-> native (the native itself is pinned to the old
+// bindgen numbers by the hardcoded block above).
 //
 // Note: unlike the *standalone* `spinlock_t` (bindgen's bare `struct
 // spinlock` record, align 8 -- see `kernel/lock/spinlock.rs`'s
@@ -184,8 +323,8 @@ const _: () = {
         "Page.physical_address / page_struct.physical_address offset mismatch"
     );
     assert!(
-        core::mem::offset_of!(Page, flags) == core::mem::offset_of!(page_struct, __bindgen_anon_1),
-        "Page.flags / page_struct.__bindgen_anon_1 (flags union) offset mismatch"
+        core::mem::offset_of!(Page, flags) == core::mem::offset_of!(page_struct, flags),
+        "Page.flags / page_struct.flags (flattened flags union) offset mismatch"
     );
     assert!(
         core::mem::offset_of!(Page, ref_count) == core::mem::offset_of!(page_struct, ref_count),
@@ -193,18 +332,16 @@ const _: () = {
     );
     assert!(
         core::mem::offset_of!(Page, union_bytes)
-            == core::mem::offset_of!(page_struct, __bindgen_anon_2),
-        "Page.union_bytes / page_struct.__bindgen_anon_2 (buddy/slab/tail/pcache union) offset mismatch"
+            == core::mem::offset_of!(page_struct, type_data),
+        "Page.union_bytes / page_struct.type_data (buddy/slab/tail/pcache union) offset mismatch"
     );
     // The buddy/slab/tail/pcache union arms accessed via `union_bytes`
     // slicing (see the `impl Page` accessor methods below) against the
-    // real bindgen union member structs.
-    use crate::bindings::{
-        page_struct__bindgen_ty_2__bindgen_ty_2 as BuddyArm,
-        page_struct__bindgen_ty_2__bindgen_ty_3 as SlabArm,
-        page_struct__bindgen_ty_2__bindgen_ty_4 as PcacheArm,
-        page_struct__bindgen_ty_2__bindgen_ty_5 as TailArm,
-    };
+    // native union arm structs (P3-N6; formerly the bindgen shells).
+    use PageBuddy as BuddyArm;
+    use PagePcache as PcacheArm;
+    use PageSlab as SlabArm;
+    use PageTail as TailArm;
     assert!(core::mem::offset_of!(BuddyArm, lru_entry) == 0, "buddy.lru_entry offset");
     assert!(core::mem::offset_of!(BuddyArm, order) == 16, "buddy.order offset");
     assert!(core::mem::offset_of!(BuddyArm, state) == 20, "buddy.state offset");

@@ -154,6 +154,42 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // Derived Copy/Clone in the pre-nativization bindgen
             // output (`vfs_inode` itself did not — see NONCOPY below).
             "vfs_inode_ops",
+            // kernel/mm/slab.rs (P3-N6, slab sub-family). All three
+            // derived Copy/Clone in the pre-nativization bindgen
+            // output; `slab_cache_t` is still embedded BY VALUE by the
+            // remaining bindgen `xv6fs_block_cache` (`extent_cache`),
+            // so an accurate Yes here is what keeps *its* (absent)
+            // derive line unchanged.
+            "percpu_slab_cache_t",
+            "slab_cache_struct",
+            "slab_cache_t",
+            "slab_struct",
+            "slab_t",
+            // kernel/dev/fdt.rs (P3-N6, allocator-POD slice). Derived
+            // Copy/Clone in the pre-nativization bindgen output; the
+            // still-bindgen `platform_info` embeds `[mem_region; 8]` BY
+            // VALUE and derives Copy/Clone itself — the accurate Yes
+            // here is what keeps *its* derive line unchanged. Listed in
+            // BOTH bare and tag-prefixed forms: `mem_region` has no
+            // typedef, and bindgen asks about non-typedef'd records as
+            // `"struct X"` (see the P3-N6 FINDING note below the lists).
+            "mem_region",
+            "struct mem_region",
+            // kernel/mm/pcache.rs (P3-N6, pcache sub-family). The ops
+            // table derived Copy/Clone in the pre-nativization bindgen
+            // output (`pcache`/`pcache_node` derived neither — see
+            // NONCOPY below). Tag-prefixed form included (no typedef).
+            "pcache_ops",
+            "struct pcache_ops",
+            // kernel/mm/page.rs (P3-N6, page sub-family — the wave's
+            // gnarly closer). Derived Copy/Clone in the pre-nativization
+            // bindgen output (as did all five anonymous-union arm
+            // shells). Nothing in the remaining bindgen output embeds
+            // `page_t` by value (verified — all uses are pointers).
+            // Tag-prefixed form included alongside the typedef name.
+            "page_struct",
+            "struct page_struct",
+            "page_t",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -198,7 +234,57 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // field) and derived neither themselves — the accurate No
             // here is what keeps their derive lines unchanged.
             "vfs_inode",
+            // kernel/vfs/xv6fs/block_cache.rs (P3-N6): `free_extent`
+            // derived neither Copy nor Clone in the pre-nativization
+            // bindgen output (intrusive `rb_node` embedder class, N1
+            // precedent); the native faithfully has no derives. Nothing
+            // in the remaining bindgen output embeds it by value
+            // (verified — `xv6fs_block_cache` reaches extents only
+            // through the rb-tree/pointers). Tag-prefixed form included
+            // (no typedef — see the P3-N6 FINDING note below).
+            "free_extent",
+            "struct free_extent",
+            // kernel/mm/vm.rs (P3-N6): neither `vm` nor `vma` derived
+            // Copy/Clone in the pre-nativization bindgen output (their
+            // embedded `struct spinlock`/rb_node members answered No via
+            // this callback's tag-prefix quirk — see the FINDING note
+            // below); the natives faithfully have no derives. Nothing in
+            // the remaining bindgen output embeds them by value
+            // (verified — `thread.vm` is a pointer). Tag-prefixed forms
+            // included alongside the `_t` typedef names.
+            "vm",
+            "vm_t",
+            "struct vm",
+            "vma",
+            "vma_t",
+            "struct vma",
+            // kernel/mm/pcache.rs (P3-N6): neither `pcache` nor
+            // `pcache_node` derived Copy/Clone in the pre-nativization
+            // bindgen output; the natives faithfully have no derives.
+            // The NATIVE `VfsInode` embeds `pcache` BY VALUE (`i_data`)
+            // and has no derives either; nothing in the REMAINING
+            // bindgen output embeds either by value (verified).
+            // Tag-prefixed forms included (no typedefs).
+            "pcache",
+            "struct pcache",
+            "pcache_node",
+            "struct pcache_node",
         ];
+        // P3-N6 FINDING — bindgen asks this callback about typedef'd
+        // types by their bare typedef name (`slab_cache_t`) but about
+        // non-typedef'd records with the tag prefix (`struct
+        // mem_region`). Observed empirically when `platform_info`
+        // silently lost its Copy/Clone derive: `"struct mem_region"`
+        // matched nothing in the lists above. The fix is the explicit
+        // `"struct X"` entries above rather than stripping the prefix
+        // here: a blanket strip was tried and RESURRECTED Copy/Clone on
+        // nine remaining bindgen types (`pcache`/`pcache_node`/`vm`/
+        // `vma`/`xv6fs_block_cache`/`sched_entity`(+ty_1)/`timer_node`/
+        // `timer_root`) that had silently lost their derives to this
+        // same quirk when `struct spinlock`/`struct rwlock`/... were
+        // nativized in P3-N2 — the established (and boot-verified)
+        // emission is the no-derive form, and a nativization wave must
+        // not change remaining types' derive lines as a side effect.
         let is_copy = if NATIVE_TYPES.contains(&name) {
             true
         } else if NONCOPY_NATIVE_TYPES.contains(&name) {
@@ -716,6 +802,61 @@ fn main() {
         .raw_line("pub use crate::vfs::inode::VfsInode as vfs_inode;")
         .raw_line("pub use crate::vfs::inode::VfsInodeOps as vfs_inode_ops;");
 
+    // ------------------------------------------------------------------
+    // P3-N6 nativization: the mm type family. Same blocklist + `pub use`
+    // re-export technique as P3-N2..N5 above. Layout evidence for the
+    // whole family: temporary in-tree `offset_of!` gate on the live
+    // bindgen forms + cross-compiler `_Static_assert` probe (toolchain
+    // gcc, rv64gc/lp64d — scratchpad p3n6_static_assert_probe.c); the
+    // two AGREE on every size/align/offset (no pipe-style divergence,
+    // P3-N5 precedent checked).
+    builder = builder
+        // kernel/inc/mm/slab_type.h slab family -> kernel/mm/slab.rs
+        // (that module's private `SlabCache`/`Slab`/`PercpuCache`
+        // atomic-view mirrors stay, byte-identical and cross-asserted).
+        .blocklist_type("percpu_slab_cache_t|slab_cache_struct|slab_cache_t|slab_struct|slab_t")
+        .raw_line("pub use crate::mm::slab::PercpuSlabCache as percpu_slab_cache_t;")
+        .raw_line("pub use crate::mm::slab::SlabCacheStruct as slab_cache_struct;")
+        .raw_line("pub use crate::mm::slab::SlabCacheStruct as slab_cache_t;")
+        .raw_line("pub use crate::mm::slab::SlabStruct as slab_struct;")
+        .raw_line("pub use crate::mm::slab::SlabStruct as slab_t;")
+        // kernel/vfs/xv6fs/block_cache.h `struct free_extent` ->
+        // kernel/vfs/xv6fs/block_cache.rs (the extent cache's owning
+        // module). `xv6fs_block_cache` itself stays bindgen (P3-N7+).
+        .blocklist_type("free_extent")
+        .raw_line("pub use crate::vfs::xv6fs::block_cache::FreeExtent as free_extent;")
+        // kernel/inc/dev/fdt.h `struct mem_region` -> kernel/dev/fdt.rs.
+        // A plain packed POD (not a DMA/hardware descriptor — P3-4's
+        // scrutiny class is untouched); `platform_info` stays bindgen
+        // and embeds the native by value via the facade.
+        .blocklist_type("mem_region")
+        .raw_line("pub use crate::dev::fdt::MemRegion as mem_region;")
+        // kernel/inc/mm/vm_types.h vm family -> kernel/mm/vm.rs.
+        .blocklist_type("vm|vm_t|vma|vma_t")
+        .raw_line("pub use crate::mm::vm::Vm as vm;")
+        .raw_line("pub use crate::mm::vm::Vm as vm_t;")
+        .raw_line("pub use crate::mm::vm::Vma as vma;")
+        .raw_line("pub use crate::mm::vm::Vma as vma_t;")
+        // kernel/inc/mm/pcache_types.h pcache family -> kernel/mm/
+        // pcache.rs. `pcache__bindgen_ty_1`/`..__bindgen_ty_1__bindgen_
+        // ty_1`/`pcache_node__bindgen_ty_1` are the anonymous flags
+        // union/bitfield shells bindgen would otherwise still emit as
+        // orphans (natives: `PcacheFlags`/`PcacheFlagBits`/
+        // `PcacheNodeFlagBits`).
+        .blocklist_type("pcache|pcache_ops|pcache_node|pcache__bindgen_ty_1|pcache__bindgen_ty_1__bindgen_ty_1|pcache_node__bindgen_ty_1")
+        .raw_line("pub use crate::mm::pcache::Pcache as pcache;")
+        .raw_line("pub use crate::mm::pcache::PcacheOps as pcache_ops;")
+        .raw_line("pub use crate::mm::pcache::PcacheNode as pcache_node;")
+        // kernel/inc/mm/page_type.h page family -> kernel/mm/page.rs
+        // (that module's private `Page` byte-accessor mirror stays,
+        // byte-identical and cross-asserted). The six `__bindgen_ty`
+        // shells are the anonymous flags-union (flattened to a direct
+        // `flags` field in the native) and the five-arm per-type union
+        // (native real Rust union `PageTypeData` + named arm structs).
+        .blocklist_type("page_struct|page_t|page_struct__bindgen_ty_1|page_struct__bindgen_ty_2|page_struct__bindgen_ty_2__bindgen_ty_1|page_struct__bindgen_ty_2__bindgen_ty_2|page_struct__bindgen_ty_2__bindgen_ty_3|page_struct__bindgen_ty_2__bindgen_ty_4|page_struct__bindgen_ty_2__bindgen_ty_5")
+        .raw_line("pub use crate::mm::page::PageStruct as page_struct;")
+        .raw_line("pub use crate::mm::page::PageStruct as page_t;");
+
     let bindings = builder
         .generate()
         .expect("bindgen failed to generate kernel bindings");
@@ -744,6 +885,12 @@ fn main() {
         // variant of `page_struct`'s data union is just a placeholder
         // marker; forcing align 64 silently shifts the union's offset
         // and corrupts every embedding struct.)
+        // (P3-N6: `page_struct__bindgen_ty_2__bindgen_ty_1` is no longer
+        // emitted — the whole page family is blocklisted-native now, the
+        // empty `anon` arm included (`kernel/mm/page.rs`'s `PageAnon`,
+        // deliberately unattributed for the same shifting reason). The
+        // entry stays as the documented pattern for any future empty
+        // placeholder arm.)
         let no_align_empty: &[&str] = &["page_struct__bindgen_ty_2__bindgen_ty_1"];
 
         for line in contents.split_inclusive('\n') {
