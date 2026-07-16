@@ -231,6 +231,18 @@ static int vm_file_fault_trace_enabled(void)
     return cached;
 }
 
+static int vm_file_fault_trace_chrome_only(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("vm_file_fault_trace_chrome", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
 static uint64 vm_file_fault_trace_threshold_ms(void)
 {
     static uint64 threshold;
@@ -1337,6 +1349,29 @@ static void vm_count_orphan_leaf(uint64 va, uint64 size, pte_t pte, void *arg)
 
 static void vm_report_pte_accounting(vm_t *vm)
 {
+    static int audit_enabled = -1;
+    char value[8];
+
+    /*
+     * This is a consistency audit, not part of address-space teardown.  A
+     * Chromium zygote can have tens of thousands of present leaves, and
+     * __vm_destroy() used to run this full page-table walk both before and
+     * after every exec-time teardown.  Besides walking every leaf, the audit
+     * performs a maple-tree VMA lookup for each one, so mature renderer/GPU
+     * children paid an ever-growing diagnostic tax on every exec.
+     *
+     * Keep the corruption detector available for focused forensic boots,
+     * but do not put two complete address-space scans in the production hot
+     * path.  The actual teardown and freewalk checks remain unchanged.
+     */
+    if (audit_enabled == -1) {
+        audit_enabled =
+            cmdline_get_param("vm_destroy_pte_audit", value,
+                              sizeof(value)) == 0 && value[0] != '0';
+    }
+    if (!audit_enabled)
+        return;
+
     if (vm == NULL || vm->pagetable == NULL)
         return;
 
@@ -1387,20 +1422,6 @@ static void *vm_tree_next_slot(vm_t *vm, uint64 *cursor,
     }
 
     return NULL;
-}
-
-static int vm_tree_contains_vma(vm_t *vm, vma_t *needle)
-{
-    if (vm == NULL || needle == NULL)
-        return 0;
-
-    uint64 cursor = vm->vm_bottom;
-    void *entry;
-    while ((entry = vm_tree_next_slot(vm, &cursor, NULL, NULL)) != NULL) {
-        if (entry == needle)
-            return 1;
-    }
-    return 0;
 }
 
 static void vm_clear_vma_slot_range(vm_t *vm, vma_t *vma,
@@ -1517,6 +1538,7 @@ void vm_put(vm_t *vm)
 static void __vm_destroy(vm_t *vm)
 {
     struct thread_group *teardown_owner;
+    list_node_t free_vmas;
 
     if (vm == NULL)
         return;
@@ -1539,6 +1561,7 @@ static void __vm_destroy(vm_t *vm)
     smp_store_release(&vm->cpumask, 0);
 
     vm_report_pte_accounting(vm);
+    list_entry_init(&free_vmas);
 
     while (1) {
         uint64 cursor = vm->vm_bottom;
@@ -1563,10 +1586,30 @@ static void __vm_destroy(vm_t *vm)
         vm_clear_vma_slot_range(vm, vma, slot_start, slot_end);
 
         mtree_store_range(&vm->vm_mt, slot_start, slot_last, NULL);
-        if (!vm_tree_contains_vma(vm, vma)) {
+        if (!vma->teardown_queued) {
+            /*
+             * A failed partial maple update can leave one VMA pointer in
+             * multiple disjoint slots.  The old code preserved that safety
+             * by scanning the entire remaining tree after every slot, which
+             * made ordinary Chromium teardown O(number_of_vmas^2).
+             *
+             * Close and unlink each VMA once, then reuse its now-empty rmap
+             * list node to defer the slab free until every maple slot has
+             * been cleared.  Duplicate slots remain backed by a live VMA
+             * object and still have their exact page-table range cleared.
+             */
             __vma_set_free(vma);
-            __vma_free(vma);
+            anon_vma_unlink(vma);
+            vma->teardown_queued = 1;
+            list_node_push(&free_vmas, vma, anon_vma_chain);
         }
+    }
+
+    vma_t *vma;
+    while ((vma = list_node_pop_back(&free_vmas, vma_t,
+                                     anon_vma_chain)) != NULL) {
+        vma->teardown_queued = 0;
+        __vma_free(vma);
     }
 
     vm_report_pte_accounting(vm);
@@ -3460,7 +3503,9 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
     uint64 map_length_snapshot = 0;
     uint64 vma_flags_snapshot = 0;
     int ret = -EAGAIN;
-    int trace = vm_file_fault_trace_enabled();
+    int trace = vm_file_fault_trace_enabled() &&
+        (!vm_file_fault_trace_chrome_only() ||
+         chrome_lifecycle_trace_match(current));
     uint64 trace_start_ms = trace ? sched_timer_now_ms() : 0;
     uint64 trace_t = trace_start_ms;
     uint64 trace_lookup_ms = 0;

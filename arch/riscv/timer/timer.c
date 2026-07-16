@@ -109,6 +109,7 @@ void timer_node_init(struct timer_node *node, uint64 expires,
     node->expires = expires;
     node->callback = callback;
     node->data = data;
+    node->retry_limit = retry_limit > 0 ? retry_limit : TIMER_DEFAULT_RETRY_LIMIT;
 }
 
 // Add a timer_node to a timer_root;
@@ -122,6 +123,10 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
         return -EINVAL;
     }
     if (node->callback == NULL) {
+        return -EINVAL;
+    }
+    if (node->timer != NULL || !rb_node_is_empty(&node->rb) ||
+        !LIST_ENTRY_IS_DETACHED(&node->list_entry)) {
         return -EINVAL;
     }
     spin_lock(&timer->lock);
@@ -208,8 +213,14 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         return;
     }
 
-    struct timer_node *node, *next;
-    list_foreach_node_safe(&timer->list_head, node, next, list_entry) {
+    for (;;) {
+        struct timer_node *node = LIST_FIRST_NODE(
+            &timer->list_head, struct timer_node, list_entry);
+        void (*callback)(struct timer_node *);
+
+        if (node == NULL) {
+            break;
+        }
         if (node->expires > ticks) {
             break;
         }
@@ -219,6 +230,7 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             __timer_remove_unlocked(node->timer, node);
             continue;
         }
+        callback = node->callback;
         node->retry++;
         if (node->retry >= node->retry_limit) {
             // Because many callback functions is to wake up a thread,
@@ -227,8 +239,12 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             // retry limit is reached or the timer node is removed by the
             // thread.
             __timer_remove_unlocked(node->timer, node);
+            spin_unlock(&timer->lock);
+            callback(node);
+            spin_lock(&timer->lock);
+            continue;
         }
-        node->callback(node);
+        callback(node);
     }
 
     spin_unlock(&timer->lock);

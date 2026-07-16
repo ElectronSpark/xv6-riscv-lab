@@ -24,6 +24,7 @@ typedef struct vma {
     uint64 file_data_end;  // ELF file-data limit marker, see below
     struct anon_vma *anon_vma;   // rmap: this VMA's own anon_vma
     list_node_t anon_vma_chain;  // rmap: list of anon_vma_chain nodes
+    int teardown_queued;         // internal: queued for deferred VM teardown
 } vma_t;
 
 /*

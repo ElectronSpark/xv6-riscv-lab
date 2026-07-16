@@ -47,6 +47,13 @@ static cpumask_t cpu_active_mask = 0; /**< Bitmask of active CPUs */
 /** @brief Pending IPI bitmask per hart (indexed by hart ID) */
 uint64 ipi_pending[NCPU] = {0};
 
+int ipi_poll_tlb(void)
+{
+    /* RISC-V remote fences are completed by SBI; there is no local mailbox
+     * acknowledgement cycle for the generic spin path to advance. */
+    return 0;
+}
+
 /** @brief IRQ number for supervisor software interrupt */
 #define IRQ_S_SOFT 1
 

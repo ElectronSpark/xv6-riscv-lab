@@ -2081,6 +2081,9 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
         return ret;
     owner = kvmalloc(sizeof(*owner));
     if (owner == NULL) {
+        printf("DRM: open failed stage=owner-alloc node=%s tgid=%d ret=%d\n",
+               drm_core_node_name(gpu_drm_node_from_cdev(cdev)),
+               current ? current->tgid : -1, -ENOMEM);
         (void)gpu_release(cdev);
         return -ENOMEM;
     }
@@ -2093,6 +2096,10 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
                        owner->id, owner->tgid);
     ret = fb_gpu_render_owner_register(owner);
     if (ret != 0) {
+        printf("DRM: open failed stage=owner-register node=%s tgid=%d "
+               "owner=%lu ret=%d capacity=%d\n",
+               drm_core_node_name(owner->drm.node_type), owner->tgid,
+               owner->id, ret, FB_GPU_MAX_RENDER_OWNERS);
         kvfree(owner);
         (void)gpu_release(cdev);
         return ret;

@@ -428,10 +428,15 @@ retry:
     // Linux ttwu pattern - check on_rq FIRST (under lock):
     if (smp_load_acquire(&se->on_rq)) {
         // Task logically on rq (on_rq=1 while running).
-        // Just set RUNNING - put_prev_task will add back to list.
+        // No migration occurs here. Set RUNNING and kick the CPU that still
+        // owns the entity; target_cpu is only a placement suggestion.
         smp_store_release(&t->state, PSTATE_RUNNING);
         spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
+        if (origin_cpuid == cpuid())
+            SET_NEEDS_RESCHED();
+        else
+            ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
         return;
     }
     
@@ -762,7 +767,7 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │  6. Re-check cpu_id: if changed, unlock, release/re-acquire pi_lock,        │
 │     re-check state, goto retry                                               │
 │  7. state = WAKENING                                                         │
-│  8. if on_rq=1: state = RUNNING, release pi_lock, rq_unlock_two, return     │
+│  8. if on_rq=1: state = RUNNING, unlock, reschedule origin_cpu, return      │
 │  9. if on_cpu=1: add to wake_list, release pi_lock, rq_unlock_two,          │
 │     send IPI, return                                                         │
 │ 10. else: rq_enqueue_task(), release pi_lock, rq_unlock_two                 │

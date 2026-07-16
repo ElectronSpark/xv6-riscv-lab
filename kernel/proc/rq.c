@@ -4,6 +4,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "proc/thread.h"
+#include "proc/sched.h"
 #include "proc_private.h"
 #include "defs.h"
 #include "printf.h"
@@ -407,14 +408,18 @@ void sched_entity_init(struct sched_entity *se, struct thread *p) {
     se->on_cpu = 0;
     se->cpu_id = -1;
     se->affinity_mask = cpu_possible_mask(); // all CPUs
-    se->start_time = 0;
+    /* Immutable boot-relative birth time for /proc/<pid>/stat field 22. */
+    se->start_time = r_time();
     se->exec_start = 0;
     se->exec_end = 0;
     se->sum_exec_runtime = 0;
+    se->runnable_start = 0;
+    se->sum_runnable_wait = 0;
+    se->run_slices = 0;
     se->vruntime = 0;
     se->deadline = 0;
     se->min_vruntime = 0;
-    se->slice = EEVDF_DEFAULT_SLICE_TICKS;
+    se->slice = eevdf_default_slice_ticks();
     se->load.weight = SCHED_FIXEDPOINT_ONE;
     se->load.inv_weight = SCHED_FIXEDPOINT_ONE;
     se->eevdf_on_rq = 0;
@@ -792,6 +797,11 @@ void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
     smp_store_release(&se->cpu_id, rq_cpu);
     smp_store_release(&se->on_rq, 1);
     se->sched_class = rq->sched_class;
+    /* A newly runnable entity begins one queue-delay interval.  Migration may
+     * dequeue and enqueue an already-runnable entity; retain its original
+     * timestamp so migration time is not silently discarded. */
+    if (se->runnable_start == 0)
+        se->runnable_start = r_time();
     rq->task_count++;
     rq_set_ready(rq->class_id, rq_cpu);
 }
@@ -868,6 +878,9 @@ void rq_put_prev_task(struct sched_entity *se) {
             se->sum_exec_runtime += delta;
             se->exec_start = now;
         }
+        /* THREAD_RUNNING means context_switch_finish() will reinsert this
+         * preempted/yielding entity.  Its next selection closes this interval. */
+        se->runnable_start = now;
     }
 }
 
@@ -881,6 +894,13 @@ void rq_set_next_task(struct sched_entity *se) {
     assert(
         se->sched_class == se->rq->sched_class,
         "rq_set_next_task: se->sched_class does not match rq's sched_class\n");
+    uint64 now = r_time();
+    uint64 runnable_start = se->runnable_start;
+    if (runnable_start != 0 && now >= runnable_start) {
+        se->sum_runnable_wait += now - runnable_start;
+        se->run_slices++;
+        se->runnable_start = 0;
+    }
     smp_store_release(&__rqpc(rq_cpu)->current_se, se);
     if (se->sched_class->set_next_task) {
         se->sched_class->set_next_task(se->rq, se);
@@ -890,7 +910,7 @@ void rq_set_next_task(struct sched_entity *se) {
      * the on-CPU delta for sum_exec_runtime.  For classes that already
      * set exec_start (e.g. EEVDF), this harmlessly overwrites with an
      * approximately equal value. */
-    se->exec_start = r_time();
+    se->exec_start = now;
 
     // Note: We do NOT decrement task_count here. The task is still logically
     // "on rq" (counted in task_count) while running. Matching Linux behavior,

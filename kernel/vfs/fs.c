@@ -942,10 +942,11 @@ fail_unlock:
 /*
  * __vfs_evict_unused_inodes - Evict all unreferenced inodes from a superblock.
  *
- * This removes inodes that have refcount <= 1 from the inode cache.
- * For backend filesystems, cached inodes have refcount == 1 (base state).
- * For backendless filesystems, cached inodes have refcount == 0.
- * Inodes with refcount > 1 are actively in use and cannot be evicted.
+ * This removes inodes that have refcount == 0 from the inode cache.  The
+ * current VFS reference model has no hidden cache reference: both backend and
+ * backendless filesystems leave an idle cached inode at zero.  Any positive
+ * refcount belongs to a caller, file, directory-child parent hold, mount, or
+ * watcher and must keep the inode alive.
  *
  * Locking:
  *   - Caller must hold the superblock write lock.
@@ -961,24 +962,10 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
         sb, "Superblock lock must be write held to evict inodes");
 
     hlist_foreach_node_safe(&sb->inodes, inode, tmp, hash_entry) {
-        // Skip inodes that are actively in use (refcount > 1)
-        // refcount == 1 means "cached but not actively used" for backend fs
-        // refcount == 0 means "cached but not actively used" for backendless fs
-        if (inode->ref_count > 1) {
-            continue;
-        }
-
-        // Backendless filesystems (e.g. tmpfs) keep idle inodes cached at
-        // ref_count == 0; a ref_count of exactly 1 therefore means the inode
-        // is still actively referenced -- most importantly by a file whose
-        // close() deferred its vfs_fput() (close -> call_rcu -> workqueue ->
-        // vfs_fput), which has not yet released the reference. Evicting and
-        // freeing it here would let that pending fput later iput a freed inode
-        // and put a freed/reused superblock (superblock refcount underflow).
-        // Leave it cached so unmount reports the superblock busy; the caller
-        // drains the deferred fput and retries. (tmpfs_unmount_begin already
-        // applies this ref_count > 0 policy; keep the generic evictor in step.)
-        if (sb->backendless && inode->ref_count >= 1) {
+        // A positive count is always an active reference.  In particular,
+        // ref_count == 1 can be a file whose close has queued a deferred fput;
+        // freeing it here would make that worker iput freed memory.
+        if (inode->ref_count != 0) {
             continue;
         }
 
@@ -1000,12 +987,10 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
         // Lock the inode to safely remove it
         vfs_ilock(inode);
 
-        // Double-check after locking (authoritative). Same backendless
-        // ref_count >= 1 guard as above: never free a still-referenced
-        // backendless inode out from under a pending deferred fput.
-        if (inode->ref_count > 1 || inode->destroying || !inode->valid ||
-            inode->mount ||
-            (sb->backendless && inode->ref_count >= 1)) {
+        // Double-check after locking (authoritative): never free a referenced
+        // inode out from under a pending deferred fput or any other owner.
+        if (inode->ref_count != 0 || inode->destroying || !inode->valid ||
+            inode->mount) {
             vfs_iunlock(inode);
             continue;
         }
@@ -1015,10 +1000,6 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
             inode->ops->sync_inode(inode);
         }
 
-        // Remove from cache - decrement refcount to 0 if needed
-        if (inode->ref_count == 1) {
-            atomic_dec(&inode->ref_count);
-        }
         // Remove from LRU if present (device-backed inodes at ref=0)
         if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
             list_node_detach(inode, lru_entry);
@@ -2388,10 +2369,9 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
     // kept alive in cache (see vfs_iput). We must allow bumping refcount from
     // 0 in this case, otherwise the inode becomes inaccessible.
     //
-    // For backend filesystems, a zombie inode (ref=0, valid=1, not destroying)
-    // can exist in the cache when vfs_iput did a dirty sync and hasn't yet
-    // re-acquired locks to evict it.  If we hold the sb write lock, we can
-    // safely revive it (the evicting thread needs sb wlock to proceed).
+    // For backend filesystems, an idle LRU inode can remain cached at ref=0
+    // with positive link count. If we hold the sb write lock, we can safely
+    // revive it (the evicting thread needs the same write lock to proceed).
     bool lru_removed = false;
     bool inode_locked = false;
     if (!vfs_idup_not_zero(inode)) {

@@ -160,14 +160,14 @@ void tmpfs_unmount_begin(struct vfs_superblock *sb) {
         }
 
         // Only evict inodes with no references
-        if (inode->ref_count > 0) {
+        if (inode->ref_count > 0 || inode->destroying) {
             continue;
         }
 
         vfs_ilock(inode);
 
         // Double-check ref_count under lock
-        if (inode->ref_count > 0) {
+        if (inode->ref_count > 0 || inode->destroying) {
             vfs_iunlock(inode);
             continue;
         }

@@ -1358,6 +1358,36 @@ static int chrome_ppoll_trace_limit(void)
     return limit;
 }
 
+static int chrome_ppoll_trace_main_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_ppoll_trace_main_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_ppoll_trace_nfds_filter(void)
+{
+    static int initialized;
+    static int nfds;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_ppoll_trace_nfds", value,
+                              sizeof(value)) == 0)
+            nfds = chrome_trace_parse_uint(value, 0, NOFILE);
+        initialized = 1;
+    }
+    return nfds;
+}
+
 static int chrome_syscall_enter_ipc_only_enabled(void)
 {
     static int initialized;
@@ -1632,6 +1662,69 @@ static int chrome_thread_dump_interval_ms(void)
     return interval_ms;
 }
 
+static int chrome_thread_user_stack_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_thread_user_stack", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void chrome_thread_dump_user_stack(struct thread *t, uint64 rsp)
+{
+    enum { CHROME_USER_STACK_WORDS = 128 };
+    uint64 words[CHROME_USER_STACK_WORDS];
+    int matches = 0;
+
+    if (t == NULL || t->vm == NULL || rsp == 0)
+        return;
+    if (vm_copyin(t->vm, words, rsp, sizeof(words)) < 0) {
+        printf("chrome-thread-user-stack: pid=%d tgid=%d rsp=0x%lx "
+               "copy=fault\n", t->pid, t->tgid, rsp);
+        return;
+    }
+
+    vm_rlock(t->vm);
+    for (int i = 0; i < CHROME_USER_STACK_WORDS; i++) {
+        uint64 pc = words[i];
+        vma_t *vma = vm_find_area(t->vm, pc);
+
+        if (vma == NULL || !(vma->flags & PROT_EXEC))
+            continue;
+        printf("chrome-thread-user-stack: pid=%d tgid=%d sp_off=%d "
+               "pc=0x%lx map=[0x%lx-0x%lx) file_off=0x%lx path=%s\n",
+               t->pid, t->tgid, i * (int)sizeof(uint64), pc, vma->start,
+               vma->end, vma->pgoff + (pc - vma->start),
+               chrome_thread_vma_path(vma));
+        if (++matches >= 48)
+            break;
+    }
+    vm_runlock(t->vm);
+
+    if (matches == 0)
+        printf("chrome-thread-user-stack: pid=%d tgid=%d rsp=0x%lx "
+               "exec_matches=0\n", t->pid, t->tgid, rsp);
+}
+
+static int chrome_thread_dump_relevant_name(const char *name)
+{
+    return strcmp(name, "chrome") == 0 ||
+           strncmp(name, "Chrome_ChildIOT", 15) == 0 ||
+           strncmp(name, "Chrome_IOThread", 15) == 0 ||
+           strncmp(name, "dav1d-worker", 12) == 0 ||
+           strncmp(name, "Compositor", 10) == 0 ||
+           strncmp(name, "Media", 5) == 0 ||
+           strncmp(name, "VideoFrameCompo", 15) == 0 ||
+           strncmp(name, "AudioOutputDevi", 15) == 0;
+}
+
 static void chrome_thread_dump_cb(struct thread *t, void *arg)
 {
     struct chrome_thread_dump_ctx *ctx = arg;
@@ -1639,39 +1732,43 @@ static void chrome_thread_dump_cb(struct thread *t, void *arg)
     if (t == NULL || ctx == NULL || !chrome_syscall_trace_process(t))
         return;
 
+    char name[sizeof(t->name)];
+    safestrcpy(name, t->name, sizeof(name));
+    if (!chrome_thread_dump_relevant_name(name))
+        return;
+
     enum thread_state state = __thread_state_get(t);
     int cpu = t->sched_entity ? t->sched_entity->cpu_id : -1;
     int on_cpu = t->sched_entity ?
         smp_load_acquire(&t->sched_entity->on_cpu) : 0;
     void *chan = t->chan;
-    char name[sizeof(t->name)];
     const char *exec_path = "";
-    uint64 rip = 0, rsp = 0, rax = 0, rdi = 0, rsi = 0, rdx = 0;
+    uint64 rip = 0, rsp = 0, rbp = 0, rax = 0, rdi = 0, rsi = 0, rdx = 0;
 
     if (t->trapframe != NULL) {
         rip = t->trapframe->trapframe.rip;
         rsp = t->trapframe->trapframe.rsp;
+        rbp = t->trapframe->trapframe.rbp;
         rax = t->trapframe->trapframe.rax;
         rdi = t->trapframe->trapframe.rdi;
         rsi = t->trapframe->trapframe.rsi;
         rdx = t->trapframe->trapframe.rdx;
     }
 
-    safestrcpy(name, t->name, sizeof(name));
     if (t->thread_group != NULL && t->thread_group->exec_path[0] != '\0')
         exec_path = t->thread_group->exec_path;
     ctx->count++;
     printf("chrome-thread-dump: sample=%d pid=%d tgid=%d name=%s "
            "state=%s cpu=%d on_cpu=%d chan=%p rip=0x%lx rsp=0x%lx "
-           "rax=0x%lx rdi=0x%lx rsi=0x%lx rdx=0x%lx exec=%s\n",
+           "rbp=0x%lx rax=0x%lx rdi=0x%lx rsi=0x%lx rdx=0x%lx exec=%s\n",
            ctx->sample, t->pid, t->tgid, name, thread_state_short(state),
-           cpu, on_cpu, chan, rip, rsp, rax, rdi, rsi, rdx, exec_path);
-    if (ctx->sample == 1 &&
-        (strncmp(name, "QDBusConnection", 15) == 0 ||
-         strncmp(name, "kwin_wayland", 12) == 0)) {
-        vfs_fdtable_debug_dump(t, "thread-dump", 16);
+           cpu, on_cpu, chan, rip, rsp, rbp, rax, rdi, rsi, rdx, exec_path);
+    if (ctx->sample == 1) {
         chrome_thread_dump_vmas(t, rip, rsp);
     }
+    if (ctx->sample == 2 && t->pid == t->tgid && !on_cpu &&
+        chrome_thread_user_stack_enabled())
+        chrome_thread_dump_user_stack(t, rsp);
 }
 
 static void chrome_thread_dump_worker(uint64 arg1, uint64 arg2)
@@ -1715,6 +1812,7 @@ static int chrome_syscall_trace_process(struct thread *p)
     static int initialized;
     static int network_service_only;
     static int audio_service_only;
+    static int gpu_process_only;
     static int child_processes;
     static int crashpad_processes;
     static char process_name[32];
@@ -1728,6 +1826,10 @@ static int chrome_syscall_trace_process(struct thread *p)
             value[0] != '0' && value[0] != 'n' && value[0] != 'N';
         audio_service_only =
             cmdline_get_param("chrome_syscall_trace_audio_service", value,
+                              sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        gpu_process_only =
+            cmdline_get_param("chrome_syscall_trace_gpu_process", value,
                               sizeof(value)) == 0 &&
             value[0] != '0' && value[0] != 'n' && value[0] != 'N';
         child_processes =
@@ -1764,11 +1866,14 @@ static int chrome_syscall_trace_process(struct thread *p)
     int is_crashpad = strncmp(p->name, "chrome_crashpad", 15) == 0;
     if (is_crashpad)
         return crashpad_processes;
-    if (network_service_only || audio_service_only || child_processes)
+    if (network_service_only || audio_service_only || gpu_process_only ||
+        child_processes)
         return (network_service_only &&
                 chrome_lifecycle_network_service_match(p)) ||
                (audio_service_only &&
                 chrome_lifecycle_audio_service_match(p)) ||
+               (gpu_process_only &&
+                chrome_lifecycle_gpu_process_match(p)) ||
                (child_processes &&
                 chrome_lifecycle_child_process_match(p));
     return chrome_lifecycle_thread_match(p);
@@ -2929,6 +3034,13 @@ void syscall(void) {
                       orig_num == SYS_ppoll_x86 &&
                       chrome_lifecycle_kernel_trace_process_match(p, 0, 1) &&
                       chrome_ppoll_trace_count < chrome_ppoll_trace_limit();
+    if (ppoll_trace && chrome_ppoll_trace_main_only_enabled() &&
+        p->pid != p->tgid)
+        ppoll_trace = 0;
+    int ppoll_nfds_filter = chrome_ppoll_trace_nfds_filter();
+    if (ppoll_trace && ppoll_nfds_filter > 0 &&
+        a1 != (uint64)ppoll_nfds_filter)
+        ppoll_trace = 0;
     int ppoll_trace_seq = 0;
     maybe_start_chrome_thread_dump(p);
     /*
@@ -2963,6 +3075,24 @@ void syscall(void) {
                "sigmask=0x%lx sigsetsize=%lu\n",
                ppoll_trace_seq, p->pid, p->tgid, roles, p->name,
                a0, a1, a2, a3, a4);
+        if (a2 != 0) {
+            struct {
+                int64 tv_sec;
+                int64 tv_nsec;
+            } ts;
+            if (vm_copyin(p->vm, &ts, a2, sizeof(ts)) == 0) {
+                printf("chrome-ppoll-trace: phase=timeout seq=%d "
+                       "tv_sec=%lld tv_nsec=%lld\n",
+                       ppoll_trace_seq, (long long)ts.tv_sec,
+                       (long long)ts.tv_nsec);
+            } else {
+                printf("chrome-ppoll-trace: phase=timeout seq=%d "
+                       "copy=<fault>\n", ppoll_trace_seq);
+            }
+        } else {
+            printf("chrome-ppoll-trace: phase=timeout seq=%d infinite=1\n",
+                   ppoll_trace_seq);
+        }
         chrome_syscall_trace_pollfds(a0, a1);
     }
     if (num >= 0 && num < (int)NELEM(syscalls) && syscalls[num]) {

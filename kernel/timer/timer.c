@@ -151,16 +151,15 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     }
     bool inserted = false;
     struct timer_node *pos, *tmp;
-    list_foreach_node_safe(&timer->list_head, pos, tmp, list_entry) {
-        if (__timer_node_before(node, pos)) {
-            list_entry_insert(LIST_PREV_ENTRY(&pos->list_entry),
-                              &node->list_entry);
+    list_foreach_node_inv_safe(&timer->list_head, pos, tmp, list_entry) {
+        if (__timer_node_before(pos, node)) {
+            list_node_insert(pos, node, list_entry);
             inserted = true;
             break;
         }
     }
     if (!inserted)
-        list_node_push(&timer->list_head, node, list_entry);
+        list_node_push_back(&timer->list_head, node, list_entry);
     node->timer = timer;
     __timer_update_next_tick(timer);
     spin_unlock(&timer->lock);
@@ -219,8 +218,14 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         return;
     }
 
-    struct timer_node *node, *next;
-    list_foreach_node_safe(&timer->list_head, node, next, list_entry) {
+    for (;;) {
+        struct timer_node *node = LIST_FIRST_NODE(
+            &timer->list_head, struct timer_node, list_entry);
+        void (*callback)(struct timer_node *);
+
+        if (node == NULL) {
+            break;
+        }
         if (node->expires > ticks) {
             break;
         }
@@ -230,6 +235,7 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             __timer_remove_unlocked(node->timer, node);
             continue;
         }
+        callback = node->callback;
         node->retry++;
         if (node->retry >= node->retry_limit) {
             // Because many callback functions is to wake up a thread,
@@ -238,8 +244,12 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             // retry limit is reached or the timer node is removed by the
             // thread.
             __timer_remove_unlocked(node->timer, node);
+            spin_unlock(&timer->lock);
+            callback(node);
+            spin_lock(&timer->lock);
+            continue;
         }
-        node->callback(node);
+        callback(node);
     }
 
     spin_unlock(&timer->lock);

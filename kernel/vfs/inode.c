@@ -167,6 +167,7 @@ void vfs_iput(struct vfs_inode *inode) {
     bool should_free_sb = false;
     struct vfs_inode *parent = NULL;
     struct vfs_superblock *sb = inode->sb;
+    void *iput_caller = __builtin_return_address(0);
     int ret = 0;
 
 retry:
@@ -276,18 +277,28 @@ retry:
     // First check if it is dirty and sync if needed
     // If sync failed, just delete it.
     if (inode->dirty && inode->valid && !failed_clean && sb->attached) {
+        /*
+         * Claim eviction before dropping either lock.  The LRU/unmount
+         * evictors also accept ref_count == 0, so without this claim one of
+         * them can remove and free this inode while vfs_sync_inode() is using
+         * it.  Apart from the use-after-free, the resumed path then observes
+         * inode->sb == NULL and reports the misleading ret=-EINVAL
+         * "already removed" warning.
+         *
+         * vfs_sync_inode() validates inode->valid, not ->destroying, so the
+         * claim excludes cache lookup/reclaim without preventing the owner
+         * below from writing the inode.
+         */
+        inode->destroying = 1;
         vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
         failed_clean = vfs_sync_inode(inode) != 0;
 
         // Re-acquire locks after sync.  During the gap another thread may
-        // have grabbed a reference (e.g. via vfs_get_inode_cached or
-        // vfs_add_inode).  If so, the inode is live again and we must not
-        // evict it.
-        // Cannot goto retry because the retry path would re-consume a
-        // refcount that now belongs to someone else (the conditional
-        // subtraction won't fire at ref==1, so the assert(ref==1) path
-        // would steal it).
+        // The destroying claim blocks new cache references.  Retain a
+        // defensive refcount check for a reference that was already in flight
+        // before the claim; if one exists, relinquish eviction without
+        // consuming that reference.
         // Use trylock loop to respect lock ordering (sb wlock → inode lock).
         for (;;) {
             vfs_superblock_wlock(sb);
@@ -298,9 +309,7 @@ retry:
         }
 
         if (smp_load_acquire(&inode->ref_count) > 0) {
-            // Someone else acquired the inode during sync gap.  The inode
-            // is live again — we must not evict it.  Just release our
-            // locks and return.  We did NOT hold a ref, so no decrement.
+            inode->destroying = 0;
             vfs_iunlock(inode);
             vfs_superblock_unlock(sb);
             return;
@@ -415,7 +424,7 @@ skip_destroy:
         sb->inode_lru_count--;
     }
 
-    ret = vfs_remove_inode(inode->sb, inode);
+    ret = vfs_remove_inode(sb, inode);
     if (ret != 0) {
         // Inode was already removed from the hash table by a concurrent
         // eviction or destroy path.  This can happen when a deferred workqueue
@@ -425,7 +434,12 @@ skip_destroy:
         // Another path may already be freeing (or have freed) this inode,
         // so we must NOT free it again here.
         printf("vfs_iput: warning: inode %lu already removed from cache "
-               "(ret=%d)\n", inode->ino, ret);
+               "ret=%d caller=%p inode=%p sb=%p inode_sb=%p attached=%d "
+               "valid=%u destroying=%u dirty=%u refs=%d links=%u\n",
+               inode->ino, ret, iput_caller, inode, sb, inode->sb,
+               HLIST_ENTRY_ATTACHED(&inode->hash_entry), inode->valid,
+               inode->destroying, inode->dirty, inode->ref_count,
+               inode->n_links);
 
         // Unlock in standard order and return without freeing to avoid
         // double-free on races.

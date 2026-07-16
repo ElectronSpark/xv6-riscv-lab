@@ -577,13 +577,19 @@ retry:
         // Task is on rq - just change state to RUNNING.
         // The task is already in the run queue and will be scheduled.
         // This is true regardless of on_cpu (Linux: ttwu_runnable path).
+        // No migration happened in this branch: rq_select_task_rq() may have
+        // suggested a different CPU, but the entity is still owned by
+        // origin_cpuid.  Kick that owner, not target_cpu.  Kicking the unused
+        // placement target can otherwise leave the origin halted with a
+        // runnable entity; this became visible when EEVDF stopped mistaking a
+        // busy CPU with an empty internal rb-tree for an idle CPU.
         smp_store_release(&p->state, THREAD_RUNNING);
         spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
-        if (target_cpu == cpuid())
+        if (origin_cpuid == cpuid())
             SET_NEEDS_RESCHED();
         else
-            ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+            ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
         return;
     }
 

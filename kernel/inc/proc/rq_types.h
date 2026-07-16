@@ -146,6 +146,9 @@ struct sched_entity {
     uint64 exec_start;       // Last time the thread started executing
     uint64 exec_end;         // Last time the thread stopped executing
     uint64 sum_exec_runtime; // Cumulative CPU time in raw ticks
+    uint64 runnable_start;   // Last time the thread became runnable
+    uint64 sum_runnable_wait;// Cumulative runnable-to-running time
+    uint64 run_slices;       // Number of measured runnable selections
 
     // EEVDF scheduler fields
     int64 vruntime;       // Virtual runtime (fixed-point, SCHED_FIXEDPOINT_SHIFT)
@@ -193,8 +196,11 @@ struct fifo_rq {
     uint8 ready_mask; // Bitmask of non-empty subqueues
 };
 
-// EEVDF run queue - uses a red-black tree keyed by virtual deadline
-#define EEVDF_DEFAULT_SLICE_TICKS 10000000ULL // ~10ms at 1GHz timebase
+// EEVDF run queue - uses a red-black tree keyed by virtual deadline.
+// Linux 6.8 starts from a 750-us base slice and scales it logarithmically by
+// the online CPU count.  Store that policy in real time; callers convert it
+// through the architecture's measured timebase.
+#define EEVDF_BASE_SLICE_US 750ULL
 
 struct eevdf_rq {
     struct rq rq;

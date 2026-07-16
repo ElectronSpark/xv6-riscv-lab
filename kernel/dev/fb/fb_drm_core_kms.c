@@ -1793,8 +1793,9 @@ static int gpu_kms_present_clock_60hz_enabled(void)
  * grid_ts), reusing that path's tested timer / reservation / never-drop
  * machinery verbatim. MUST be called under fb_state.lock (guards the grid
  * statics). Timestamps are wall-clock-anchored so the grid self-heals if the
- * worker runs late: a missed edge is skipped forward (a dropped frame, correct
- * vsync behaviour) rather than delivered late-and-chained.
+ * worker runs late. A missed edge advances to the latest edge that has already
+ * elapsed (sequence gaps still expose dropped frames), but does not wait for
+ * another future edge and turn one miss into two.
  */
 static void gpu_kms_present_clock_next_locked(uint64 *base_seq_out,
                                               uint64 *base_ts_out)
@@ -1814,14 +1815,17 @@ static void gpu_kms_present_clock_next_locked(uint64 *base_seq_out,
     target_seq = grid_seq + 1;
     target_ts = anchor_ns + target_seq * period_ns;
 
-    /* If the worker fell behind (long blit / host stall), the naive next edge is
-     * already in the past. Snap forward to the first grid edge strictly after
-     * now so the clock stays phase-locked and never accrues a backlog — kwin
-     * sees a dropped frame, not a late one. */
+    /* If the worker fell behind (long blit / host stall), the naive next edge
+     * is already in the past. Snap to the most recent elapsed grid edge, not
+     * the next future one. The paced-delivery helper then uses its minimum
+     * one-tick path instead of sleeping for almost a second vblank. Skipped
+     * sequence numbers still tell kwin that frames were missed, while the
+     * elapsed-edge timestamp lets its next repaint catch up to the original
+     * wall-clock phase. */
     if (now_ns >= target_ts) {
         uint64 elapsed = (now_ns > anchor_ns) ?
                          (now_ns - anchor_ns) / period_ns : 0;
-        target_seq = elapsed + 1;
+        target_seq = elapsed;
         target_ts = anchor_ns + target_seq * period_ns;
         fb_state.stats.present_clock60_snap_total++;
     }

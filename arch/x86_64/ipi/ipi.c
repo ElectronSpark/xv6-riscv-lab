@@ -38,16 +38,103 @@ static volatile uint64 *ipi_pending;
 volatile uint64 *tlb_flush_va;
 volatile uint64 *tlb_flush_sync_req;
 volatile uint64 *tlb_flush_sync_ack;
-volatile uint64 tlb_flush_sync_epoch;
+volatile uint64 *tlb_flush_page_sync_req;
+volatile uint64 *tlb_flush_page_sync_ack;
 
-static inline void tlb_flush_sync_acknowledge(int cpu)
+static inline uint64 tlb_flush_sync_snapshot(volatile uint64 *req, int cpu)
 {
-    if (tlb_flush_sync_req == NULL || tlb_flush_sync_ack == NULL)
+    if (req == NULL)
+        return 0;
+    return __atomic_load_n(&req[cpu], __ATOMIC_ACQUIRE);
+}
+
+static inline void tlb_flush_sync_acknowledge(volatile uint64 *ack,
+                                               int cpu, uint64 seq)
+{
+    if (ack == NULL || seq == 0)
         return;
-    uint64 seq = __atomic_load_n(&tlb_flush_sync_req[cpu],
-                                 __ATOMIC_ACQUIRE);
-    if (seq != 0)
-        __atomic_store_n(&tlb_flush_sync_ack[cpu], seq, __ATOMIC_RELEASE);
+
+    /* ipi_poll_tlb() can be interrupted by the hardware IPI path.  Never
+     * let an older polling completion overwrite a newer acknowledgement. */
+    uint64 old = __atomic_load_n(&ack[cpu], __ATOMIC_ACQUIRE);
+    while (old < seq &&
+           !__atomic_compare_exchange_n(&ack[cpu], &old, seq, 0,
+                                        __ATOMIC_RELEASE,
+                                        __ATOMIC_ACQUIRE))
+        ;
+}
+
+static inline void x86_tlb_flush_all_contexts(void)
+{
+    /* Include global entries and every PCID, matching the IPI full-flush
+     * contract. */
+    asm volatile(
+        "movq %%cr4, %%rax\n\t"
+        "btrq $7, %%rax\n\t"
+        "movq %%rax, %%cr4\n\t"
+        "btsq $7, %%rax\n\t"
+        "movq %%rax, %%cr4"
+        ::: "rax", "memory");
+}
+
+static inline void x86_tlb_flush_page_mailbox(int cpu)
+{
+    uint64 va = __atomic_exchange_n(&tlb_flush_va[cpu], 0,
+                                    __ATOMIC_ACQ_REL);
+    if (va == 0 || va == TLB_FLUSH_ALL || vm_asid_max() > 0)
+        sfence_vma_global();
+    else
+        sfence_vma_page(va);
+}
+
+int ipi_poll_tlb(void)
+{
+    if (ipi_pending == NULL)
+        return 0;
+
+    const uint64 tlb_mask = (1ULL << IPI_REASON_TLB_FLUSH) |
+                            (1ULL << IPI_REASON_TLB_FLUSH_PAGE);
+    int cpu = cpuid();
+    uint64 observed = __atomic_load_n(&ipi_pending[cpu], __ATOMIC_ACQUIRE);
+    uint64 claimed;
+
+    for (;;) {
+        claimed = observed & tlb_mask;
+        if (claimed == 0)
+            return 0;
+        uint64 desired = observed & ~claimed;
+        if (__atomic_compare_exchange_n(&ipi_pending[cpu], &observed,
+                                        desired, 0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            break;
+    }
+
+    /* Capture the exact tickets covered by this flush BEFORE flushing.
+     * Reading the request afterwards can acknowledge a concurrent request
+     * whose PTE update happened after the flush (free-before-shootdown). */
+    uint64 full_seq = 0;
+    uint64 page_seq = 0;
+    if (claimed & (1ULL << IPI_REASON_TLB_FLUSH))
+        full_seq = tlb_flush_sync_snapshot(tlb_flush_sync_req, cpu);
+    if (claimed & (1ULL << IPI_REASON_TLB_FLUSH_PAGE))
+        page_seq = tlb_flush_sync_snapshot(tlb_flush_page_sync_req, cpu);
+
+    if (claimed & (1ULL << IPI_REASON_TLB_FLUSH)) {
+        x86_tlb_flush_all_contexts();
+        /* A coalesced page request is covered by the full flush, but its
+         * mailbox must still be retired before acknowledging the epoch. */
+        if (claimed & (1ULL << IPI_REASON_TLB_FLUSH_PAGE))
+            (void)__atomic_exchange_n(&tlb_flush_va[cpu], 0,
+                                      __ATOMIC_ACQ_REL);
+    } else {
+        x86_tlb_flush_page_mailbox(cpu);
+    }
+    if (full_seq != 0)
+        tlb_flush_sync_acknowledge(tlb_flush_sync_ack, cpu, full_seq);
+    if (page_seq != 0)
+        tlb_flush_sync_acknowledge(tlb_flush_page_sync_ack, cpu,
+                                   page_seq);
+    return 1;
 }
 
 /* ── Internal: wait for LAPIC ICR idle ── */
@@ -115,14 +202,12 @@ void x86_ipi_handler(void) {
              * current PCID's non-global entries.  Toggle CR4.PGE to
              * flush everything (all PCIDs + global entries).
              */
-            asm volatile(
-                "movq %%cr4, %%rax\n\t"
-                "btrq $7, %%rax\n\t"     /* clear PGE */
-                "movq %%rax, %%cr4\n\t"
-                "btsq $7, %%rax\n\t"     /* set PGE   */
-                "movq %%rax, %%cr4"
-                ::: "rax", "memory");
-            tlb_flush_sync_acknowledge(cpu);
+            {
+                uint64 seq = tlb_flush_sync_snapshot(tlb_flush_sync_req,
+                                                     cpu);
+                x86_tlb_flush_all_contexts();
+                tlb_flush_sync_acknowledge(tlb_flush_sync_ack, cpu, seq);
+            }
             break;
 
         case IPI_REASON_TLB_FLUSH_PAGE: {
@@ -137,13 +222,13 @@ void x86_ipi_handler(void) {
              * context).  User PCID entries for the same VA would
              * survive, so always use a global flush.
              */
-            uint64 va = __atomic_exchange_n(&tlb_flush_va[cpu], 0,
-                                            __ATOMIC_ACQ_REL);
-            if (va == 0 || va == TLB_FLUSH_ALL || vm_asid_max() > 0)
-                sfence_vma_global();
-            else
-                sfence_vma_page(va);
-            tlb_flush_sync_acknowledge(cpu);
+            {
+                uint64 seq = tlb_flush_sync_snapshot(
+                    tlb_flush_page_sync_req, cpu);
+                x86_tlb_flush_page_mailbox(cpu);
+                tlb_flush_sync_acknowledge(tlb_flush_page_sync_ack, cpu,
+                                           seq);
+            }
             break;
         }
 
@@ -167,8 +252,14 @@ void ipi_init(void) {
         (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_sync_req) * ncpu);
     tlb_flush_sync_ack =
         (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_sync_ack) * ncpu);
+    tlb_flush_page_sync_req =
+        (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_page_sync_req) * ncpu);
+    tlb_flush_page_sync_ack =
+        (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_page_sync_ack) * ncpu);
     if (ipi_pending == NULL || tlb_flush_va == NULL ||
-        tlb_flush_sync_req == NULL || tlb_flush_sync_ack == NULL)
+        tlb_flush_sync_req == NULL || tlb_flush_sync_ack == NULL ||
+        tlb_flush_page_sync_req == NULL ||
+        tlb_flush_page_sync_ack == NULL)
         panic("ipi_init: per-CPU mailbox allocation failed");
 
     memset((void *)ipi_pending, 0, sizeof(*ipi_pending) * ncpu);
@@ -177,6 +268,10 @@ void ipi_init(void) {
            sizeof(*tlb_flush_sync_req) * ncpu);
     memset((void *)tlb_flush_sync_ack, 0,
            sizeof(*tlb_flush_sync_ack) * ncpu);
+    memset((void *)tlb_flush_page_sync_req, 0,
+           sizeof(*tlb_flush_page_sync_req) * ncpu);
+    memset((void *)tlb_flush_page_sync_ack, 0,
+           sizeof(*tlb_flush_page_sync_ack) * ncpu);
     for (int i = 0; i < ncpu; i++)
         __atomic_store_n(&ipi_pending[i], 0, __ATOMIC_RELEASE);
     printf("ipi_init: IPI subsystem initialized (vector 0x%x)\n",

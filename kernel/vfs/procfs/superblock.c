@@ -714,11 +714,11 @@ void procfs_unmount_begin(struct vfs_superblock *sb) {
     hlist_foreach_node_safe(&sb->inodes, inode, tmp_inode, hash_entry) {
         if (inode == rooti)
             continue;
-        if (inode->ref_count > 0)
+        if (inode->ref_count > 0 || inode->destroying)
             continue;
 
         vfs_ilock(inode);
-        if (inode->ref_count > 0) {
+        if (inode->ref_count > 0 || inode->destroying) {
             vfs_iunlock(inode);
             continue;
         }
@@ -764,6 +764,15 @@ void procfs_evict_pid(int tgid) {
         if (pi->pid != tgid)
             continue;
 
+        /*
+         * vfs_iput() sets destroying under this same superblock lock before
+         * dropping it for destroy_inode.  A zero refcount during that gap is
+         * owned cleanup, not an idle cache entry.  Let that owner finish;
+         * removing/freeing here would race its later vfs_remove_inode().
+         */
+        if (inode->destroying)
+            continue;
+
         if (inode->ref_count > 0) {
             /* Still open: mark dead so VFS frees on last release */
             vfs_ilock(inode);
@@ -773,7 +782,7 @@ void procfs_evict_pid(int tgid) {
         }
 
         vfs_ilock(inode);
-        if (inode->ref_count > 0) {
+        if (inode->ref_count > 0 || inode->destroying) {
             inode->n_links = 0;
             vfs_iunlock(inode);
             continue;

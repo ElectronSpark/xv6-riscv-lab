@@ -15,6 +15,15 @@ struct thread *__get_pid_thread(int pid);
 int __alloc_pid(void);
 void __free_pid(void);
 
+/*
+ * Sleep until a child changes into a waitable state.  The caller must hold
+ * pid_rlock(); the helper drops it atomically with queueing and returns with
+ * it held again.  Child-state publishers call pid_child_event_notify() while
+ * holding pid_wlock().
+ */
+int pid_wait_child_event(void);
+void pid_child_event_notify(void);
+
 /**
  * @brief Get a thread by PID using RCU (lock-free)
  * @param pid The PID to look up

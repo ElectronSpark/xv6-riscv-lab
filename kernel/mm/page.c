@@ -712,16 +712,17 @@ STATIC_INLINE void __page_as_buddy_group_init(page_t *buddy_head, uint64 order,
 // count value of the buddy pool by one.
 // Will not do validity check here
 STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
+    uint64 count = __atomic_load_n(&pool->count, __ATOMIC_RELAXED);
+
     if (LIST_IS_EMPTY(&pool->lru_head)) {
-        if (pool->count != 0) {
+        if (count != 0) {
             panic("__buddy_push_page");
         }
-    } else if (pool->count == 0) {
+    } else if (count == 0) {
         panic("__buddy_push_page");
     }
     list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
-    pool->count++;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_fetch_add(&pool->count, 1, __ATOMIC_RELEASE);
 }
 
 // Pop a buddy page from a pool and return the page descriptor of the buddy
@@ -730,13 +731,14 @@ STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
 STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
     page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
     if (ret == NULL) {
-        if (pool->count > 0) {
+        if (__atomic_load_n(&pool->count, __ATOMIC_RELAXED) > 0) {
             panic("__buddy_pop_page");
         }
         return NULL;
     }
-    pool->count--;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint64 old_count =
+        __atomic_fetch_sub(&pool->count, 1, __ATOMIC_RELEASE);
+    assert(old_count > 0, "__buddy_pop_page: count underflow");
     return ret;
 }
 
@@ -747,7 +749,9 @@ STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
         panic("__buddy_detach_page");
     }
-    pool->count--;
+    uint64 old_count =
+        __atomic_fetch_sub(&pool->count, 1, __ATOMIC_RELEASE);
+    assert(old_count > 0, "__buddy_detach_page: count underflow");
     list_node_detach(page, buddy.lru_entry);
 }
 
@@ -2233,15 +2237,22 @@ void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
     if (ret_arr == NULL || size < PAGE_BUDDY_MAX_ORDER + 1) {
         return;
     }
-    // Lock all orders to get a consistent snapshot
-    __buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    /*
+     * This is deliberately an approximate, lockless snapshot.  Allocation
+     * calls mm_watermark_ok() after obtaining a page, and its caller may
+     * still hold that page's lock.  Taking buddy-pool locks here reverses the
+     * allocator's pool-lock -> page-lock order and can deadlock concurrent
+     * buddy coalescing.  Watermarks and /proc statistics do not require a
+     * transactionally consistent view across orders; atomic per-order counts
+     * are sufficient and keep the allocation path outside the lock graph.
+     */
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER && i < size; i++) {
-        ret_arr[i] = __buddy_pools[i].count;
-        if (empty_arr != NULL) {
-            empty_arr[i] = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
-        }
+        uint64 count =
+            __atomic_load_n(&__buddy_pools[i].count, __ATOMIC_ACQUIRE);
+        ret_arr[i] = count;
+        if (empty_arr != NULL)
+            empty_arr[i] = count == 0;
     }
-    __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
 // Helper function to print size in human-readable format

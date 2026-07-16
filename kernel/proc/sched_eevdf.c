@@ -67,6 +67,7 @@
 #include "errno.h"
 #include "bintree.h"
 #include "smp/ipi.h"
+#include "timer/timer.h"
 
 /* ──────────────────────────────────────────────────────────────
  *  Weight table — maps the 40 EEVDF priorities to Linux-compatible
@@ -116,6 +117,27 @@ static const uint32 __eevdf_inv_weight_table[EEVDF_NUM_PRIOS] = {
     /* nice  10 */  39045157,  49367440,  61356676,  76695844,  95443717,
     /* nice  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
 };
+
+/*
+ * Match Linux 6.8's default EEVDF request size: 750 us multiplied by
+ * 1 + ilog2(min(ncpus, 8)).  This is 2.25 ms for the six-vCPU Linux/xv6
+ * parity configuration.  Convert only after the architecture publishes its
+ * measured timebase; never assume that r_time() runs at 1 GHz.
+ */
+uint64 eevdf_default_slice_ticks(void) {
+    unsigned int cpus = (unsigned int)cpu_possible_count();
+    unsigned int factor = 1;
+
+    if (cpus > 8)
+        cpus = 8;
+    while (cpus > 1) {
+        cpus >>= 1;
+        factor++;
+    }
+
+    uint64 ticks = US_TO_RAWTICKS(EEVDF_BASE_SLICE_US * factor);
+    return ticks != 0 ? ticks : 1;
+}
 
 /* ──────────────────────────────────────────────────────────────
  *  Helper: weighted virtual-time computation (fixed-point)
@@ -494,7 +516,7 @@ static void __eevdf_task_fork(struct rq *rq, struct sched_entity *se) {
      * the rq's current min_vruntime so it doesn't starve old tasks. */
     __set_load_weight(se);
     se->vruntime = erq->min_vruntime;
-    se->slice = EEVDF_DEFAULT_SLICE_TICKS;
+    se->slice = eevdf_default_slice_ticks();
     se->deadline = se->vruntime +
                    __calc_delta_vruntime(se->slice, &se->load);
 
@@ -562,16 +584,23 @@ static void __eevdf_yield_task(struct rq *rq) {
  *      than static weight sums alone.
  * ────────────────────────────────────────────────────────────── */
 
-/* Balance intervals in raw timer ticks (tuned for ~1GHz timebase). */
-#define EEVDF_BALANCE_INTERVAL_NORMAL  (100000000ULL)  /* ~100ms */
-#define EEVDF_BALANCE_INTERVAL_FAST     (10000000ULL)  /*  ~10ms */
-#define EEVDF_IDLE_COOLDOWN              (1000000ULL)  /*   ~1ms */
+/*
+ * r_time() is expressed in the architecture's measured timebase, not a
+ * fixed 1 GHz clock.  Convert every policy duration through that timebase so
+ * x86 TSC frequency and the RISC-V timer frequency implement the same EEVDF
+ * behavior.  The previous raw literals also made task request size depend on
+ * clock frequency; eevdf_default_slice_ticks() supplies the separate
+ * Linux-derived, CPU-scaled request size.
+ */
+#define EEVDF_BALANCE_INTERVAL_NORMAL  MS_TO_RAWTICKS(100)
+#define EEVDF_BALANCE_INTERVAL_FAST    MS_TO_RAWTICKS(10)
+#define EEVDF_IDLE_COOLDOWN            MS_TO_RAWTICKS(1)
 
-/* EWMA half-life period in raw ticks (~50ms). */
-#define EEVDF_LOAD_AVG_PERIOD           (50000000ULL)
+/* EWMA half-life period (~50ms). */
+#define EEVDF_LOAD_AVG_PERIOD           MS_TO_RAWTICKS(50)
 
-/* PELT half-life period in raw ticks (~32ms, same as Linux). */
-#define EEVDF_PELT_PERIOD               (32000000ULL)
+/* PELT half-life period (~32ms, same as Linux). */
+#define EEVDF_PELT_PERIOD               MS_TO_RAWTICKS(32)
 
 /* Imbalance thresholds. */
 #define EEVDF_IMBALANCE_MIN            (NICE_0_WEIGHT)       /* 1024 */
@@ -1082,13 +1111,21 @@ static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
  *
  * Strategy (in priority order):
  *  1. If an allowed CPU is idle, pick it immediately (spread tasks).
- *  2. Prefer current CPU if its load is at or below average (locality bias).
- *  3. Otherwise pick the CPU with the lowest weighted load_sum.
+ *  2. Prefer the task's previous CPU when it is no busier than average.
+ *  3. Otherwise pick the CPU with the lowest effective load.
  *
- * Reads of remote load_sum are racy (no remote locks held) but acceptable
- * for a placement heuristic — the periodic load balancer corrects any
- * poor decisions post-hoc.
+ * Remote reads are racy (no remote locks held) but acceptable for a placement
+ * heuristic — the periodic load balancer corrects poor decisions post-hoc.
+ * Effective load is max(PELT load, instantaneous runnable weight): PELT alone
+ * lags a newly-created Chromium worker burst, while load_sum still includes
+ * the currently executing entity that EEVDF removes from its rb-tree.
  */
+static inline uint64 __eevdf_effective_load(struct eevdf_rq *erq) {
+    uint64 load = smp_load_acquire(&erq->cpu_load);
+    uint64 runnable = smp_load_acquire(&erq->load_sum);
+    return runnable > load ? runnable : load;
+}
+
 static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
                                          struct sched_entity *se,
                                          cpumask_t cpumask) {
@@ -1102,23 +1139,36 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
     }
 
     int cur_cpu = cpuid();
+    int previous_cpu = smp_load_acquire(&se->cpu_id);
+    int preferred_cpu = previous_cpu >= 0 ? previous_cpu : cur_cpu;
+    if (preferred_cpu >= cpu_possible_count() ||
+        !(cpumask & (1ULL << preferred_cpu))) {
+        preferred_cpu = cur_cpu;
+    }
     struct rq *best_rq = NULL;
     uint64 best_load = (uint64)-1;
     uint64 total_load = 0;
     int active_cpus = 0;
 
-    /* First pass: find idle CPUs and compute total load for averaging.
-     * Uses PELT-based cpu_load for utilization-aware placement. */
+    /* First pass: find genuinely idle CPUs and compute total load for
+     * averaging.  nr_running counts entities in the EEVDF rb-tree, but the
+     * currently executing entity is deliberately removed from that tree by
+     * __eevdf_set_next_task().  Consequently nr_running == 0 alone does not
+     * mean that the CPU is idle; treating it that way repeatedly placed burst
+     * thread creation (notably Chromium decoder workers) on an already busy
+     * CPU.  Pair the tree state with the generic current-task check. */
     for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (!(cpumask & (1ULL << cpu))) continue;
         struct eevdf_rq *erq = &__eevdf_rqs[major][cpu];
-        uint64 load = smp_load_acquire(&erq->cpu_load);
+        uint64 load = __eevdf_effective_load(erq);
         total_load += load;
         active_cpus++;
 
-        /* Idle CPU — pick immediately. Prefer current CPU among idles. */
-        if (erq->nr_running == 0) {
-            if (cpu == cur_cpu) return &erq->rq;
+        /* Keep a waking task on its previous idle CPU.  A new task has no
+         * previous CPU, so preferred_cpu is the current CPU in that case. */
+        if (smp_load_acquire(&erq->nr_running) == 0 &&
+            rq_cpu_is_idle(cpu)) {
+            if (cpu == preferred_cpu) return &erq->rq;
             if (best_rq == NULL) {
                 best_rq = &erq->rq;
                 best_load = 0;
@@ -1134,23 +1184,25 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
     /* Compute average load for locality bias. */
     uint64 avg_load = active_cpus > 0 ? total_load / active_cpus : 0;
 
-    /* Locality bias: prefer current CPU if its load <= average. */
-    if (cpumask & (1ULL << cur_cpu)) {
-        struct eevdf_rq *erq = &__eevdf_rqs[major][cur_cpu];
-        uint64 cur_load = smp_load_acquire(&erq->cpu_load);
-        if (cur_load <= avg_load) {
+    /* Wake-affine locality: retain the task's cache footprint when its
+     * previous CPU is not overloaded.  This avoids migrating every short
+     * futex/socket sleep to whichever CPU happened to issue the wakeup. */
+    if (cpumask & (1ULL << preferred_cpu)) {
+        struct eevdf_rq *erq = &__eevdf_rqs[major][preferred_cpu];
+        uint64 preferred_load = __eevdf_effective_load(erq);
+        if (preferred_load <= avg_load) {
             return &erq->rq;
         }
         best_rq = &erq->rq;
-        best_load = cur_load;
+        best_load = preferred_load;
     }
 
-    /* Second pass: pick least-loaded CPU by PELT cpu_load. */
+    /* Second pass: pick the least-loaded allowed CPU. */
     for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
-        if (cpu == cur_cpu) continue;
+        if (cpu == preferred_cpu) continue;
         if (!(cpumask & (1ULL << cpu))) continue;
         struct eevdf_rq *erq = &__eevdf_rqs[major][cpu];
-        uint64 load = smp_load_acquire(&erq->cpu_load);
+        uint64 load = __eevdf_effective_load(erq);
         if (load < best_load) {
             best_rq = &erq->rq;
             best_load = load;

@@ -31,6 +31,7 @@ void scheduler_wakeup_stopped(struct thread *p);
  * CPU onto @cpu's rq when the regular balance modes are unreachable.
  * Returns 1 if local work exists or was pulled, 0 to allow halting. */
 int eevdf_idle_pull(int cpu);
+uint64 eevdf_default_slice_ticks(void);
 void sleep_on_chan(void *chan, spinlock_t *lk);
 int sleep_on_chan_interruptible(void *chan, spinlock_t *lk);
 void wakeup_on_chan(void *chan);

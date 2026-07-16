@@ -41,6 +41,36 @@ static struct {
     struct rwlock pid_lock;
 } proc_table;
 
+/*
+ * wait()/waitpid()/waitid() used to rely on setting INTERRUPTIBLE before a
+ * scan followed by a bare scheduler_yield().  A child could complete its
+ * final thread-group exit after the scan without the scheduler wake becoming
+ * durable, leaving a parent asleep while the exact target was already a
+ * reapable zombie.  Keep a real wait queue for child-state transitions.
+ *
+ * pid_lock protects the condition; child_wait_lock serializes queue list
+ * mutation because several waiters may concurrently hold pid_rlock().  The
+ * lock order is pid_lock -> child_wait_lock.
+ */
+static tq_t child_wait_queue;
+static spinlock_t child_wait_lock;
+
+static int child_wait_sleep_cb(void *data)
+{
+    (void)data;
+    spin_unlock(&child_wait_lock);
+    pid_runlock();
+    return 1;
+}
+
+static void child_wait_wake_cb(void *data, int status)
+{
+    (void)data;
+    (void)status;
+    pid_rlock();
+    spin_lock(&child_wait_lock);
+}
+
 /* Hash table callback functions for proc table */
 
 static ht_hash_t __proctab_hash(void *node) {
@@ -73,10 +103,31 @@ void __proctab_init(void) {
     };
     hlist_init(&proc_table.procs, NR_THREAD_HASH_BUCKETS, &funcs);
     rwlock_init(&proc_table.pid_lock, "pid_lock");
+    spin_init(&child_wait_lock, "child_wait");
+    tq_init(&child_wait_queue, "child_wait", &child_wait_lock);
     list_entry_init(&proc_table.procs_list);
     proc_table.initproc = NULL;
     proc_table.nextpid = 1;
     proc_table.next_pid_seq = 1;
+}
+
+int pid_wait_child_event(void)
+{
+    spin_lock(&child_wait_lock);
+    int ret = tq_wait_in_state_cb(&child_wait_queue,
+                                  child_wait_sleep_cb,
+                                  child_wait_wake_cb, NULL, NULL,
+                                  THREAD_INTERRUPTIBLE);
+    spin_unlock(&child_wait_lock);
+    return ret;
+}
+
+void pid_child_event_notify(void)
+{
+    pid_assert_wholding();
+    spin_lock(&child_wait_lock);
+    (void)tq_wakeup_all(&child_wait_queue, 0, 0);
+    spin_unlock(&child_wait_lock);
 }
 
 /* Lock and unlock proc table

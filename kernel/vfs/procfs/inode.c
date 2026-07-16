@@ -25,6 +25,9 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
+#include "vfs/pipe.h"
+#include "vfs/unix_socket.h"
+#include "kqueue_types.h"
 #include "../vfs_private.h"
 #include "list.h"
 #include "hlist.h"
@@ -48,6 +51,7 @@
 #include "dev/fdt.h"
 #include "smp/percpu.h"
 #include "klog.h"
+#include "cmdline.h"
 #include <mm/kmemleak.h>
 
 /* snprintf is provided by lwip_port/sys_arch.c – forward-declare it here */
@@ -1077,10 +1081,24 @@ static char *procfs_gen_status(int tgid) {
     int              ngroups  = 0;
     /* Cumulative CPU time (raw timer ticks at TIMEBASE_FREQUENCY Hz) */
     uint64 cputime_raw = 0;
+    uint64 runnable_wait_raw = 0;
+    uint64 run_slices = 0;
     uint32 util_avg = 0;
     uint64 load_contrib = 0;
     if (p->sched_entity) {
         cputime_raw = p->sched_entity->sum_exec_runtime;
+        runnable_wait_raw = __atomic_load_n(
+            &p->sched_entity->sum_runnable_wait, __ATOMIC_RELAXED);
+        run_slices = __atomic_load_n(&p->sched_entity->run_slices,
+                                     __ATOMIC_RELAXED);
+        uint64 runnable_start = __atomic_load_n(
+            &p->sched_entity->runnable_start, __ATOMIC_RELAXED);
+        if (runnable_start != 0 &&
+            !__atomic_load_n(&p->sched_entity->on_cpu, __ATOMIC_ACQUIRE)) {
+            uint64 now = r_time();
+            if (now >= runnable_start)
+                runnable_wait_raw += now - runnable_start;
+        }
         util_avg = p->sched_entity->util_avg;
         load_contrib = p->sched_entity->load_avg_contrib;
     }
@@ -1217,6 +1235,8 @@ static char *procfs_gen_status(int tgid) {
                  "voluntary_ctxt_switches:\t0\n"
                  "nonvoluntary_ctxt_switches:\t0\n"
                  "CpuTime:\t%lu\n"
+                 "RunWaitTicks:\t%lu\n"
+                 "RunSlices:\t%lu\n"
                  "UtilAvg:\t%u\n"
                  "LoadContrib:\t%lu\n",
                  real_tgid, pid, pgid, sid, kthread,
@@ -1229,6 +1249,8 @@ static char *procfs_gen_status(int tgid) {
                  0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
                  cpu_mask, cpu_list,
                  (unsigned long)cputime_raw,
+                 (unsigned long)runnable_wait_raw,
+                 (unsigned long)run_slices,
                  (unsigned)util_avg,
                  (unsigned long)load_contrib);
     }
@@ -1808,9 +1830,190 @@ static char *procfs_gen_setgroups(void)
     return buf;
 }
 
+static int procfs_unix_fdinfo_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("proc_unix_fdinfo", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static size_t procfs_unix_queue_count(int head, int tail, int max)
+{
+    return tail >= head ? (size_t)(tail - head)
+                        : (size_t)(max - head + tail);
+}
+
+static int procfs_append_unix_fdinfo(char *buf, size_t size,
+                                     struct vfs_file *file)
+{
+    if (!procfs_unix_fdinfo_enabled() || !unix_sock_is_unix(file) ||
+        file->private_data == NULL)
+        return 0;
+
+    struct unix_sock *sk = file->private_data;
+    struct unix_sock *peer = NULL;
+    struct vfs_file *peer_file = NULL;
+    uint64 ino;
+    int type, state, shutdown, cred_pid, peer_pid;
+    size_t tx_bytes, tx_capacity, tx_scm, tx_packets;
+    uint64 peer_ino = 0;
+    int peer_state = -1, peer_shutdown = 0;
+    int peer_knotes = 0, peer_queued = 0, peer_edge_active = 0;
+    int peer_file_present = 0, peer_file_visible = 0, peer_file_refs = 0;
+    uint64 peer_first_ident = 0;
+    size_t rx_bytes = 0, rx_capacity = 0, rx_scm = 0, rx_packets = 0;
+
+    spin_lock(&sk->lock);
+    ino = sk->proc_ino;
+    type = sk->type;
+    state = sk->state;
+    shutdown = sk->shutdown_flags;
+    cred_pid = sk->cred_pid;
+    peer_pid = sk->peer_pid;
+    tx_bytes = (size_t)(sk->tx.nwrite - sk->tx.nread);
+    tx_capacity = sk->tx.capacity;
+    tx_scm = procfs_unix_queue_count(sk->scm_head, sk->scm_tail,
+                                     UNIX_SCM_QUEUE_MAX);
+    tx_packets = procfs_unix_queue_count(sk->packet_head, sk->packet_tail,
+                                         UNIX_PACKET_QUEUE_MAX);
+    peer = sk->peer;
+    unix_sock_get_ref(peer);
+    spin_unlock(&sk->lock);
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        peer_ino = peer->proc_ino;
+        peer_state = peer->state;
+        peer_shutdown = peer->shutdown_flags;
+        rx_bytes = (size_t)(peer->tx.nwrite - peer->tx.nread);
+        rx_capacity = peer->tx.capacity;
+        rx_scm = procfs_unix_queue_count(peer->scm_head, peer->scm_tail,
+                                         UNIX_SCM_QUEUE_MAX);
+        rx_packets = procfs_unix_queue_count(peer->packet_head,
+                                             peer->packet_tail,
+                                             UNIX_PACKET_QUEUE_MAX);
+        if (peer->file != NULL) {
+            peer_file_present = 1;
+            peer_file_visible = peer->file->visible_fd_refs;
+            peer_file_refs = peer->file->ref_count;
+            peer_file = vfs_fdup(peer->file);
+        }
+        spin_unlock(&peer->lock);
+        unix_sock_put_ref(peer);
+    }
+
+    if (peer_file != NULL) {
+        struct knote *kn = NULL;
+        struct knote *tmp = NULL;
+
+        spin_lock(&peer_file->knote_lock);
+        list_foreach_node_safe(&peer_file->knote_list, kn, tmp,
+                               source_entry) {
+            if (peer_knotes == 0)
+                peer_first_ident = kn->ident;
+            peer_knotes++;
+            if (kn->status & KN_QUEUED)
+                peer_queued++;
+            if (kn->status & KN_EDGE_ACTIVE)
+                peer_edge_active++;
+        }
+        spin_unlock(&peer_file->knote_lock);
+        vfs_fput(peer_file);
+    }
+
+    int used = snprintf(buf, size,
+                    "xv6_unix_ino:\t%llu\n"
+                    "xv6_unix_type:\t%d\n"
+                    "xv6_unix_state:\t%d\n"
+                    "xv6_unix_shutdown:\t%d\n"
+                    "xv6_unix_pid:\t%d peer_pid=%d\n"
+                    "xv6_unix_tx:\t%llu/%llu scm=%llu packets=%llu\n"
+                    "xv6_unix_peer:\t%llu state=%d shutdown=%d\n"
+                    "xv6_unix_rx:\t%llu/%llu scm=%llu packets=%llu\n",
+                    (unsigned long long)ino, type, state, shutdown,
+                    cred_pid, peer_pid,
+                    (unsigned long long)tx_bytes,
+                    (unsigned long long)tx_capacity,
+                    (unsigned long long)tx_scm,
+                    (unsigned long long)tx_packets,
+                    (unsigned long long)peer_ino, peer_state, peer_shutdown,
+                    (unsigned long long)rx_bytes,
+                    (unsigned long long)rx_capacity,
+                    (unsigned long long)rx_scm,
+                    (unsigned long long)rx_packets);
+    if (used < 0 || (size_t)used >= size)
+        return used;
+    int appended =
+        snprintf(buf + used, size - (size_t)used,
+                 "xv6_unix_peer_knotes:\t%d queued=%d edge=%d first_ident=%llu\n",
+                 peer_knotes, peer_queued, peer_edge_active,
+                 (unsigned long long)peer_first_ident);
+    if (appended < 0 || (size_t)appended >= size - (size_t)used)
+        return used + appended;
+    used += appended;
+    return used +
+        snprintf(buf + used, size - (size_t)used,
+                 "xv6_unix_peer_file:\tpresent=%d visible=%d refs=%d\n",
+                 peer_file_present, peer_file_visible, peer_file_refs);
+}
+
+static int procfs_append_ipc_fdinfo(char *buf, size_t size,
+                                    struct vfs_file *file)
+{
+    char target[96] = "";
+    uint64 event_count = 0;
+    uint64 event_id = 0;
+    int used;
+
+    if (!procfs_unix_fdinfo_enabled() || file == NULL)
+        return 0;
+
+    if (file->ops != NULL && file->ops->readlink != NULL) {
+        ssize_t len = file->ops->readlink(file, target, sizeof(target));
+        if (len < 0)
+            target[0] = '\0';
+        else
+            target[sizeof(target) - 1] = '\0';
+    }
+
+    used = snprintf(buf, size, "xv6_kind:\t%d target=%s\n",
+                    (int)file->f_kind, target);
+    if (used < 0 || (size_t)used >= size)
+        return used;
+
+    if (eventfd_file_info(file, &event_count, &event_id, NULL) == 0)
+        return used + snprintf(buf + used, size - (size_t)used,
+                               "xv6_eventfd:\tid=%llu count=%llu\n",
+                               (unsigned long long)event_id,
+                               (unsigned long long)event_count);
+
+    if (file->f_kind == VFS_FILE_KIND_PIPE && file->pipe != NULL) {
+        struct pipe *pi = file->pipe;
+        uint nread = smp_load_acquire(&pi->nread);
+        uint nwrite = smp_load_acquire(&pi->nwrite);
+        uint64 flags = smp_load_acquire(&pi->flags);
+
+        return used + snprintf(buf + used, size - (size_t)used,
+                               "xv6_pipe:\tid=%llu bytes=%u/%u flags=%llu\n",
+                               (unsigned long long)pi->id, nwrite - nread,
+                               (uint)PIPESIZE, (unsigned long long)flags);
+    }
+
+    return used;
+}
+
 static char *procfs_gen_fdinfo(int pid, int fd)
 {
-    char *buf = kvmalloc(256);
+    const size_t buf_size = 768;
+    char *buf = kvmalloc(buf_size);
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
 
@@ -1839,6 +2042,11 @@ static char *procfs_gen_fdinfo(int pid, int fd)
     int flags = f->f_flags | fdflags;
     struct vfs_file *stat_file =
         (f->ops != NULL && f->ops->stat != NULL) ? vfs_fdup(f) : NULL;
+    struct vfs_file *unix_file =
+        (procfs_unix_fdinfo_enabled() && unix_sock_is_unix(f))
+            ? vfs_fdup(f) : NULL;
+    struct vfs_file *ipc_file =
+        procfs_unix_fdinfo_enabled() ? vfs_fdup(f) : NULL;
     struct vfs_inode *fi = f->inode.inode;
     loff_t pos = (fi != NULL && S_ISREG(fi->mode)) ? f->f_pos : 0;
     uint64 ino = fi != NULL ? fi->ino : 0;
@@ -1861,8 +2069,22 @@ static char *procfs_gen_fdinfo(int pid, int fd)
         value >>= 3;
     }
 
-    snprintf(buf, 256, "pos:\t%lld\nflags:\t%s\nmnt_id:\t0\nino:\t%llu\n",
-             (long long)pos, flagbuf, (unsigned long long)ino);
+    int used = snprintf(buf, buf_size,
+                        "pos:\t%lld\nflags:\t%s\nmnt_id:\t0\nino:\t%llu\n",
+                        (long long)pos, flagbuf, (unsigned long long)ino);
+    if (unix_file != NULL) {
+        if (used > 0 && (size_t)used < buf_size)
+            procfs_append_unix_fdinfo(buf + used, buf_size - (size_t)used,
+                                      unix_file);
+        vfs_fput(unix_file);
+    }
+    if (ipc_file != NULL) {
+        used = strlen(buf);
+        if (used > 0 && (size_t)used < buf_size)
+            procfs_append_ipc_fdinfo(buf + used, buf_size - (size_t)used,
+                                     ipc_file);
+        vfs_fput(ipc_file);
+    }
     return buf;
 }
 
@@ -1978,10 +2200,17 @@ static char *procfs_gen_pid_stat(int tgid)
     int sid = p->sid;
     vm_t *vm = procfs_pin_thread_vm(p);
     uint64 cputime_raw = 0;
+    uint64 starttime_raw = 0;
+    int processor = 0;
     int priority = LINUX_NICE_BIAS;
     int nice = 0;
-    if (p->sched_entity)
+    if (p->sched_entity) {
         cputime_raw = p->sched_entity->sum_exec_runtime;
+        starttime_raw = p->sched_entity->start_time;
+        int cpu = smp_load_acquire(&p->sched_entity->cpu_id);
+        if (cpu >= 0 && cpu < cpu_possible_count())
+            processor = cpu;
+    }
     if (p->sched_entity) {
         int sched_priority = p->sched_entity->priority;
         if (IS_EEVDF_PRIORITY(sched_priority))
@@ -1996,15 +2225,26 @@ static char *procfs_gen_pid_stat(int tgid)
         vm_put(vm);
     uint64 hz = __timebase_frequency ? __timebase_frequency : 10000000UL;
     unsigned long cputime_ticks = (unsigned long)((cputime_raw * HZ) / hz);
+    unsigned long starttime_ticks =
+        (unsigned long)((starttime_raw * HZ) / hz);
+    /* PID ownership tuples treat zero as "timestamp unavailable". */
+    if (starttime_ticks == 0)
+        starttime_ticks = 1;
 
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
     snprintf(buf, PROCFS_BUF_SIZE,
-             "%d (%s) %c %d %d %d 0 -1 4194304 0 0 0 0 %lu 0 0 0 %d %d 1 0 0 %lu %lu 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+             "%d (%s) %c %d %d %d 0 -1 4194304 0 0 0 0 %lu 0 0 0 "
+             "%d %d 1 0 %lu %lu %lu "
+             /* fields 25-38, then Linux field 39: last processor */
+             "0 0 0 0 0 0 0 0 0 0 0 0 0 0 %d "
+             /* fields 40-52 */
+             "0 0 0 0 0 0 0 0 0 0 0 0 0\n",
              tgid, name, state, ppid, pgid, sid, cputime_ticks,
-             priority, nice, (unsigned long)(acct.size_pages * PGSIZE),
-             (unsigned long)acct.resident_pages);
+             priority, nice, starttime_ticks,
+             (unsigned long)(acct.size_pages * PGSIZE),
+             (unsigned long)acct.resident_pages, processor);
     return buf;
 }
 

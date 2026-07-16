@@ -1667,6 +1667,91 @@ ssize_t unix_sock_read_preserve_scm(struct vfs_file *file, char *buf,
     return unix_file_read_common(file, buf, count, user, false);
 }
 
+static int unix_chrome_epipe_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_unix_epipe_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int unix_chrome_epipe_trace_process(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "chrome", 6) == 0 ||
+        strncmp(current->name, "chromium", 8) == 0 ||
+        strncmp(current->name, "AudioOutputDevi", 15) == 0)
+        return 1;
+    return current->thread_group != NULL &&
+        (strstr(current->thread_group->exec_path, "/chrome") != NULL ||
+         strstr(current->thread_group->exec_path, "/chromium") != NULL);
+}
+
+static void unix_chrome_epipe_trace(struct unix_sock *sk, const char *reason,
+                                    size_t requested, ssize_t completed)
+{
+    struct unix_sock *peer = NULL;
+    uint64 ino = 0, peer_ino = 0;
+    int state = -1, shutdown = 0, refs = 0, visible = -1;
+    int peer_state = -1, peer_shutdown = 0, peer_refs = 0;
+    int peer_visible = -1;
+    size_t queued = 0, capacity = 0, peer_queued = 0, peer_capacity = 0;
+
+    if (!unix_chrome_epipe_trace_enabled() ||
+        !unix_chrome_epipe_trace_process() || sk == NULL)
+        return;
+
+    spin_lock(&sk->lock);
+    ino = sk->proc_ino;
+    state = sk->state;
+    shutdown = sk->shutdown_flags;
+    refs = sk->refcount;
+    visible = sk->file != NULL ? sk->file->visible_fd_refs : -1;
+    queued = RING_READABLE(&sk->tx);
+    capacity = sk->tx.capacity;
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    spin_unlock(&sk->lock);
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        peer_ino = peer->proc_ino;
+        peer_state = peer->state;
+        peer_shutdown = peer->shutdown_flags;
+        peer_refs = peer->refcount;
+        peer_visible = peer->file != NULL ? peer->file->visible_fd_refs : -1;
+        peer_queued = RING_READABLE(&peer->tx);
+        peer_capacity = peer->tx.capacity;
+        spin_unlock(&peer->lock);
+    }
+
+    printf("chrome-unix-epipe: t=%lu pid=%d tgid=%d name=%s reason=%s "
+           "requested=%lu completed=%ld ino=%llu state=%d shutdown=0x%x "
+           "refs=%d visible=%d queued=%lu capacity=%lu peer=%s "
+           "peer_ino=%llu peer_state=%d peer_shutdown=0x%x peer_refs=%d "
+           "peer_visible=%d peer_queued=%lu peer_capacity=%lu\n",
+           sched_timer_now_ms(), current->pid, current->tgid, current->name,
+           reason, (unsigned long)requested, (long)completed,
+           (unsigned long long)ino, state, shutdown, refs, visible,
+           (unsigned long)queued, (unsigned long)capacity,
+           peer != NULL ? "present" : "null",
+           (unsigned long long)peer_ino, peer_state, peer_shutdown, peer_refs,
+           peer_visible, (unsigned long)peer_queued,
+           (unsigned long)peer_capacity);
+
+    if (peer != NULL)
+        unix_sock_put(peer);
+}
+
 /*
  * unix_file_write - write data to a connected AF_UNIX socket
  *
@@ -1679,8 +1764,10 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
     if (sk == NULL)
         return -EBADF;
 
-    if (sk->shutdown_flags & UNIX_SHUT_WR)
+    if (sk->shutdown_flags & UNIX_SHUT_WR) {
+        unix_chrome_epipe_trace(sk, "self-write-shutdown", count, 0);
         return -EPIPE;
+    }
 
     if (sk->state != UNIX_STATE_CONNECTED &&
         unix_sock_connection_oriented(sk))
@@ -1694,10 +1781,14 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
         spin_lock(&sk->lock);
         if (sk->shutdown_flags & UNIX_SHUT_WR) {
             spin_unlock(&sk->lock);
+            unix_chrome_epipe_trace(sk, "self-write-shutdown-preflight",
+                                    count, total);
             return -EPIPE;
         }
         if (unix_peer_read_shutdown_locked(sk)) {
             spin_unlock(&sk->lock);
+            unix_chrome_epipe_trace(sk, "peer-read-shutdown-preflight",
+                                    count, total);
             return -EPIPE;
         }
         if (unix_packet_has_space_locked(sk) &&
@@ -1740,11 +1831,14 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
             struct unix_sock *peer = sk->peer;
             if (peer == NULL) {
                 spin_unlock(&sk->lock);
+                unix_chrome_epipe_trace(sk, "peer-null", count, total);
                 return total > 0 ? total : -EPIPE;
             }
             if ((sk->shutdown_flags & UNIX_SHUT_WR) ||
                 unix_peer_read_shutdown_locked(sk)) {
                 spin_unlock(&sk->lock);
+                unix_chrome_epipe_trace(sk, "shutdown-during-write", count,
+                                        total + (ssize_t)wrote);
                 return total > 0 ? total : -EPIPE;
             }
             unix_sock_get(peer);

@@ -8,6 +8,7 @@
 #include "proc/thread.h"
 #include "proc/rq.h"
 #include <smp/percpu.h>
+#include <smp/ipi.h>
 #include "defs.h"
 #include "printf.h"
 #include "timer/timer.h"
@@ -55,6 +56,8 @@ void spin_acquire(spinlock_t *lk) {
         if (__debug_count >= 10) {
             cpu_relax();
         }
+        if ((__debug_count & 0xff) == 0)
+            ipi_poll_tlb();
         // Periodically check if system panicked - if so, enable IPI-only
         // interrupts so we can receive the crash IPI.
         // Skip if this core already crashed (avoid IPI storm).

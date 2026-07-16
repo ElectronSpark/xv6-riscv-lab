@@ -184,11 +184,17 @@ void virtio_snd_init(void);
 int virtio_snd_available(void);
 int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
                      int rate, int channels, int nonblock);
+int virtio_snd_prequeue(int user, const void *buf, size_t count,
+                        int oss_format, int rate, int channels);
+int virtio_snd_start(void);
+int virtio_snd_flush_partial(void);
 void virtio_snd_reset(void);
 void virtio_snd_drain(void);
 uint64 virtio_snd_free_bytes(void);
 uint64 virtio_snd_pending_bytes(void);
 uint64 virtio_snd_played_bytes(void);
+uint64 virtio_snd_pcm_hw_bytes(void);
+uint64 virtio_snd_total_played_bytes(void);
 uint64 virtio_snd_period_bytes(void);
 uint64 virtio_snd_buffer_bytes(void);
 int virtio_snd_supported_oss_formats(void);

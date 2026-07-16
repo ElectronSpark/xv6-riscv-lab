@@ -47,6 +47,7 @@
 #include <smp/atomic.h>
 #include <smp/percpu.h>
 #include <smp/percpu_types.h>
+#include <smp/ipi.h>
 
 /* ── x86_64 page table entry bit definitions ── */
 #define X86_PTE_P       (1ULL << 0)     /* Present */
@@ -77,7 +78,8 @@
 
 extern volatile uint64 *tlb_flush_sync_req;
 extern volatile uint64 *tlb_flush_sync_ack;
-extern volatile uint64 tlb_flush_sync_epoch;
+extern volatile uint64 *tlb_flush_page_sync_req;
+extern volatile uint64 *tlb_flush_page_sync_ack;
 extern volatile uint64 *tlb_flush_va;
 
 static int x86_pcid_enabled_by_cmdline(void)
@@ -98,35 +100,39 @@ static int x86_pcid_enabled_by_cmdline(void)
     return value[0] == '1' || value[0] == 'y' || value[0] == 'Y';
 }
 
-static void x86_tlb_sync_begin(cpumask_t cpumask, uint64 *seqs)
+static void x86_tlb_sync_begin(cpumask_t cpumask, volatile uint64 *req,
+                               uint64 *seqs)
 {
-    if (cpumask == 0 || seqs == NULL || tlb_flush_sync_req == NULL)
+    if (cpumask == 0 || seqs == NULL || req == NULL)
         return;
 
-    uint64 seq = __atomic_add_fetch(&tlb_flush_sync_epoch, 1,
-                                    __ATOMIC_ACQ_REL);
     int ncpu = cpu_possible_count();
     for (int i = 0; i < ncpu && i < MAX_CPUS; i++) {
         seqs[i] = 0;
         if (!(cpumask & (1ULL << i)))
             continue;
-        seqs[i] = seq;
-        __atomic_store_n(&tlb_flush_sync_req[i], seq, __ATOMIC_RELEASE);
+        /* Allocate the ticket at publication time.  A global sequence plus
+         * a plain store can regress a per-CPU request when two senders
+         * publish out of order. */
+        seqs[i] = __atomic_add_fetch(&req[i], 1, __ATOMIC_ACQ_REL);
     }
 }
 
-static void x86_tlb_sync_wait(cpumask_t cpumask, uint64 *seqs)
+static void x86_tlb_sync_wait(cpumask_t cpumask, volatile uint64 *ack,
+                              uint64 *seqs)
 {
-    if (cpumask == 0 || seqs == NULL || tlb_flush_sync_ack == NULL)
+    if (cpumask == 0 || seqs == NULL || ack == NULL)
         return;
 
     int ncpu = cpu_possible_count();
     for (int i = 0; i < ncpu && i < MAX_CPUS; i++) {
         if (!(cpumask & (1ULL << i)) || seqs[i] == 0)
             continue;
-        while (__atomic_load_n(&tlb_flush_sync_ack[i], __ATOMIC_ACQUIRE) <
-               seqs[i])
+        while (__atomic_load_n(&ack[i], __ATOMIC_ACQUIRE) <
+               seqs[i]) {
+            ipi_poll_tlb();
             cpu_relax();
+        }
     }
 }
 
@@ -598,12 +604,12 @@ void vm_remote_sfence(vm_t *vm)
 
     uint64 seqs[MAX_CPUS] = {0};
     if (cpumask) {
-        x86_tlb_sync_begin(cpumask, seqs);
+        x86_tlb_sync_begin(cpumask, tlb_flush_sync_req, seqs);
         ipi_send_mask(cpumask, 0, IPI_REASON_TLB_FLUSH);
     }
 
     pop_off();
-    x86_tlb_sync_wait(cpumask, seqs);
+    x86_tlb_sync_wait(cpumask, tlb_flush_sync_ack, seqs);
 }
 
 void vm_remote_sfence_page(vm_t *vm, uint64 va)
@@ -635,7 +641,9 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
 
     uint64 seqs[MAX_CPUS] = {0};
     if (cpumask) {
-        x86_tlb_sync_begin(cpumask, seqs);
+        /* Publish the page mailbox before its ticket.  A receiver that
+         * observes the ticket must also observe the VA (or the contention
+         * sentinel) that the ticket covers. */
         for (int i = 0; i < cpu_possible_count(); i++) {
             if (!(cpumask & (1ULL << i)))
                 continue;
@@ -645,11 +653,12 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
                 __atomic_store_n(&tlb_flush_va[i], (uint64)-1,
                                  __ATOMIC_RELEASE);
         }
+        x86_tlb_sync_begin(cpumask, tlb_flush_page_sync_req, seqs);
         ipi_send_mask(cpumask, 0, IPI_REASON_TLB_FLUSH_PAGE);
     }
 
     pop_off();
-    x86_tlb_sync_wait(cpumask, seqs);
+    x86_tlb_sync_wait(cpumask, tlb_flush_page_sync_ack, seqs);
 }
 
 void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size)

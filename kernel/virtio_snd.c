@@ -154,7 +154,15 @@ struct vsnd_state {
     volatile struct virtio_snd_config *config;
     struct vsnd_queue q[VSND_NQUEUES];
     struct virtio_snd_event *events;
+    /*
+     * Software period assembler.  ALSA is allowed to issue writes as small as
+     * one frame, while one virtio-sound transfer consumes three descriptors.
+     * Keep fragments here until a useful transfer can be submitted so byte
+     * ring space cannot be exhausted by descriptor-chain fragmentation.
+     */
     uint8 *tx_buf;
+    uint32 staged_bytes;
+    int staged_start_if_needed;
     uint32 streams;
     uint32 stream_id;
     uint64 formats;
@@ -166,6 +174,8 @@ struct vsnd_state {
     int channels;
     uint64 submitted_bytes;
     uint64 completed_bytes;
+    /* Monotonic device-lifetime total retained across ALSA stream resets. */
+    uint64 total_played_bytes;
     uint32 last_latency_bytes;
     uint64 last_latency_ms;
     uint64 play_started_ms;
@@ -521,8 +531,9 @@ static uint64 vsnd_paced_played_bytes_locked(void)
     if (accepted > vsnd.submitted_bytes)
         accepted = vsnd.submitted_bytes;
 
+    /* Playback descriptors may be queued before PCM_START, as Linux does. */
     if (vsnd.play_started_ms == 0)
-        return accepted;
+        return 0;
 
     uint64 elapsed_ms = sched_timer_now_ms() - vsnd.play_started_ms;
     uint64 elapsed_bytes = (vsnd_bytes_per_second_locked() * elapsed_ms) /
@@ -531,6 +542,11 @@ static uint64 vsnd_paced_played_bytes_locked(void)
     if (elapsed_bytes > vsnd.submitted_bytes)
         elapsed_bytes = vsnd.submitted_bytes;
     return accepted < elapsed_bytes ? accepted : elapsed_bytes;
+}
+
+static void vsnd_roll_played_total_locked(void)
+{
+    vsnd.total_played_bytes += vsnd_paced_played_bytes_locked();
 }
 
 static int vsnd_stream_supports(int oss_format, int rate, int channels)
@@ -601,10 +617,12 @@ static int vsnd_configure_locked(int oss_format, int rate, int channels)
 
     vsnd.configured = 1;
     vsnd.started = 0;
+    spin_lock(&vsnd.lock);
+    /* Roll the previous stream using its previous format/rate. */
+    vsnd_roll_played_total_locked();
     vsnd.oss_format = oss_format;
     vsnd.rate = rate;
     vsnd.channels = channels;
-    spin_lock(&vsnd.lock);
     vsnd.submitted_bytes = 0;
     vsnd.completed_bytes = 0;
     vsnd.last_latency_bytes = 0;
@@ -614,6 +632,8 @@ static int vsnd_configure_locked(int oss_format, int rate, int channels)
     vsnd.tx_error_status = 0;
     vsnd.sync_in_flight = 0;
     vsnd.sync_bytes = 0;
+    vsnd.staged_bytes = 0;
+    vsnd.staged_start_if_needed = 0;
     vsnd.async_in_flight_mask = 0;
     vsnd.async_retired_mask = 0;
     memset(vsnd.async_bytes, 0, sizeof(vsnd.async_bytes));
@@ -635,6 +655,7 @@ static void vsnd_tx_timeout_recover_locked(struct vsnd_queue *q)
     }
 
     spin_lock(&vsnd.lock);
+    vsnd_roll_played_total_locked();
     vsnd.last_latency_bytes = 0;
     vsnd.last_latency_ms = 0;
     vsnd.play_started_ms = 0;
@@ -643,10 +664,13 @@ static void vsnd_tx_timeout_recover_locked(struct vsnd_queue *q)
     vsnd_retire_tx_locked();
     vsnd.submitted_bytes = 0;
     vsnd.completed_bytes = 0;
+    vsnd.staged_bytes = 0;
+    vsnd.staged_start_if_needed = 0;
     spin_unlock(&vsnd.lock);
 }
 
-static int vsnd_tx_period_nonblock_locked(int user, const void *buf, uint32 count)
+static int vsnd_tx_period_nonblock_locked(int user, const void *buf,
+                                          uint32 count, int start_if_needed)
 {
     struct vsnd_queue *q = &vsnd.q[VSND_QUEUE_TX];
     uint32 period = count;
@@ -675,16 +699,6 @@ static int vsnd_tx_period_nonblock_locked(int user, const void *buf, uint32 coun
     if (slot >= VSND_ASYNC_DEPTH)
         return -EAGAIN;
     head = VSND_ASYNC_BASE + slot * VSND_ASYNC_DESC_PER_SLOT;
-
-    if (!vsnd.started) {
-        int start_ret = vsnd_simple_cmd(VIRTIO_SND_R_PCM_START);
-        if (start_ret < 0)
-            return start_ret;
-        vsnd.started = 1;
-        spin_lock(&vsnd.lock);
-        vsnd.play_started_ms = sched_timer_now_ms();
-        spin_unlock(&vsnd.lock);
-    }
 
     if (user) {
         if (either_copyin(vsnd.async_tx_buf[slot], 1, (uint64)buf, period) < 0)
@@ -722,11 +736,97 @@ static int vsnd_tx_period_nonblock_locked(int user, const void *buf, uint32 coun
     spin_unlock(&q->lock);
 
     vsnd_notify(VSND_QUEUE_TX);
+    if (start_if_needed && !vsnd.started) {
+        int start_ret = vsnd_simple_cmd(VIRTIO_SND_R_PCM_START);
+        if (start_ret < 0)
+            return start_ret;
+        vsnd.started = 1;
+        spin_lock(&vsnd.lock);
+        vsnd.play_started_ms = sched_timer_now_ms();
+        spin_unlock(&vsnd.lock);
+    }
     return (int)period;
 }
 
-int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
-                     int rate, int channels, int nonblock)
+/* vsnd.op_lock serializes the staged buffer and every submit/reset path. */
+static int vsnd_stage_bytes_locked(int user, const void *buf, uint32 count,
+                                   int start_if_needed)
+{
+    uint32 staged;
+    uint32 chunk;
+
+    spin_lock(&vsnd.lock);
+    if (vsnd.tx_error) {
+        spin_unlock(&vsnd.lock);
+        return -EPIPE;
+    }
+    staged = vsnd.staged_bytes;
+    spin_unlock(&vsnd.lock);
+
+    if (staged >= VSND_PERIOD_BYTES)
+        return -EAGAIN;
+    chunk = VSND_PERIOD_BYTES - staged;
+    if (chunk > count)
+        chunk = count;
+
+    if (user) {
+        if (either_copyin(vsnd.tx_buf + staged, 1, (uint64)buf, chunk) < 0)
+            return -EFAULT;
+    } else {
+        memcpy(vsnd.tx_buf + staged, buf, chunk);
+    }
+
+    spin_lock(&vsnd.lock);
+    vsnd.staged_bytes += chunk;
+    if (start_if_needed)
+        vsnd.staged_start_if_needed = 1;
+    spin_unlock(&vsnd.lock);
+    return (int)chunk;
+}
+
+static int vsnd_submit_staged_nonblock_locked(void)
+{
+    uint32 staged;
+    int start_if_needed;
+    int ret;
+
+    spin_lock(&vsnd.lock);
+    staged = vsnd.staged_bytes;
+    start_if_needed = vsnd.staged_start_if_needed;
+    spin_unlock(&vsnd.lock);
+    if (staged == 0)
+        return 0;
+
+    ret = vsnd_tx_period_nonblock_locked(0, vsnd.tx_buf, staged,
+                                         start_if_needed);
+    if (ret > 0) {
+        spin_lock(&vsnd.lock);
+        vsnd.staged_bytes = 0;
+        vsnd.staged_start_if_needed = 0;
+        spin_unlock(&vsnd.lock);
+    }
+    return ret;
+}
+
+static int vsnd_submit_staged_wait_locked(int timeout_ms)
+{
+    for (int waited = 0;; waited++) {
+        int ret = vsnd_submit_staged_nonblock_locked();
+
+        if (ret != -EAGAIN)
+            return ret < 0 ? ret : 0;
+        if (waited >= timeout_ms) {
+            vsnd_tx_timeout_recover_locked(&vsnd.q[VSND_QUEUE_TX]);
+            return -EIO;
+        }
+        vsnd_poll_tx_completions();
+        sleep_ms(1);
+    }
+}
+
+static int vsnd_write_mode(int user, const void *buf, size_t count,
+                           int oss_format, int rate, int channels,
+                           int nonblock, int start_if_needed)
 {
     if (buf == NULL)
         return -EINVAL;
@@ -734,8 +834,31 @@ int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
         return -ENODEV;
 
     mutex_lock(&vsnd.op_lock);
-    int ret = vsnd_configure_locked(oss_format, rate, channels);
+    int configure_waited_ms = 0;
+    int ret;
+    for (;;) {
+        ret = vsnd_configure_locked(oss_format, rate, channels);
+        if (ret != -EAGAIN || nonblock)
+            break;
+
+        /*
+         * RELEASE completes every pending virtio-sound I/O message before
+         * its control response, but the used-ring update can become visible
+         * just after the response is consumed.  A blocking ALSA prequeue is
+         * allowed to bridge that reset/reconfigure boundary; exporting the
+         * transient EAGAIN makes PulseAudio abort in try_recover().
+         */
+        vsnd_poll_tx_completions();
+        sleep_ms(1);
+        if (++configure_waited_ms >= 1000) {
+            ret = -EIO;
+            break;
+        }
+    }
     if (ret < 0) {
+        if (ret == -EAGAIN)
+            printf("virtio_snd: write eagain source=configure nonblock=%d count=%lu\n",
+                   nonblock, (uint64)count);
         mutex_unlock(&vsnd.op_lock);
         return ret;
     }
@@ -743,11 +866,31 @@ int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
     size_t done = 0;
     int waited_ms = 0;
     while (done < count) {
-        uint32 chunk = (uint32)(count - done);
-        if (chunk > VSND_PERIOD_BYTES)
-            chunk = VSND_PERIOD_BYTES;
-        ret = vsnd_tx_period_nonblock_locked(user, (const uint8 *)buf + done,
-                                             chunk);
+        uint32 staged;
+
+        spin_lock(&vsnd.lock);
+        staged = vsnd.staged_bytes;
+        spin_unlock(&vsnd.lock);
+        if (staged < VSND_PERIOD_BYTES) {
+            uint32 chunk = (uint32)(count - done);
+            if (chunk > VSND_PERIOD_BYTES - staged)
+                chunk = VSND_PERIOD_BYTES - staged;
+            ret = vsnd_stage_bytes_locked(user, (const uint8 *)buf + done,
+                                          chunk, start_if_needed);
+            if (ret < 0) {
+                mutex_unlock(&vsnd.op_lock);
+                return done ? (int)done : ret;
+            }
+            done += (size_t)ret;
+            waited_ms = 0;
+            spin_lock(&vsnd.lock);
+            staged = vsnd.staged_bytes;
+            spin_unlock(&vsnd.lock);
+            if (staged < VSND_PERIOD_BYTES)
+                continue;
+        }
+
+        ret = vsnd_submit_staged_nonblock_locked();
         if (ret == -EAGAIN && !nonblock) {
             vsnd_poll_tx_completions();
             sleep_ms(1);
@@ -755,20 +898,76 @@ int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
                 vsnd_tx_timeout_recover_locked(&vsnd.q[VSND_QUEUE_TX]);
                 if (done != 0)
                     break;
-                ret = -EAGAIN;
+                ret = -EIO;
             } else {
                 continue;
             }
         }
+        if (ret == -EAGAIN)
+            break;
         if (ret < 0) {
             mutex_unlock(&vsnd.op_lock);
             return done ? (int)done : ret;
         }
         waited_ms = 0;
-        done += (size_t)ret;
     }
     mutex_unlock(&vsnd.op_lock);
     return (int)done;
+}
+
+int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
+                     int rate, int channels, int nonblock)
+{
+    return vsnd_write_mode(user, buf, count, oss_format, rate, channels,
+                           nonblock, 1);
+}
+
+int virtio_snd_prequeue(int user, const void *buf, size_t count,
+                        int oss_format, int rate, int channels)
+{
+    /* This is the serialized PREPARED -> RUNNING flush, never a user poll. */
+    return vsnd_write_mode(user, buf, count, oss_format, rate, channels,
+                           0, 0);
+}
+
+int virtio_snd_start(void)
+{
+    int ret = 0;
+
+    if (!vsnd.initialized)
+        return -ENODEV;
+    mutex_lock(&vsnd.op_lock);
+    if (!vsnd.configured) {
+        ret = -EBADFD;
+    } else {
+        ret = vsnd_submit_staged_wait_locked(5000);
+    }
+    if (ret == 0 && !vsnd.started) {
+        ret = vsnd_simple_cmd(VIRTIO_SND_R_PCM_START);
+        if (ret == 0) {
+            vsnd.started = 1;
+            spin_lock(&vsnd.lock);
+            vsnd.play_started_ms = sched_timer_now_ms();
+            spin_unlock(&vsnd.lock);
+        }
+    }
+    mutex_unlock(&vsnd.op_lock);
+    return ret;
+}
+
+int virtio_snd_flush_partial(void)
+{
+    int ret;
+
+    if (!vsnd.initialized)
+        return -ENODEV;
+    mutex_lock(&vsnd.op_lock);
+    if (!vsnd.configured)
+        ret = 0;
+    else
+        ret = vsnd_submit_staged_nonblock_locked();
+    mutex_unlock(&vsnd.op_lock);
+    return ret;
 }
 
 void virtio_snd_reset(void)
@@ -791,9 +990,12 @@ void virtio_snd_reset(void)
      * completion.  Retire them from the user-visible PCM stream, but do not
      * make their descriptor IDs reusable until QEMU returns used entries.
      */
+    vsnd_roll_played_total_locked();
     vsnd_retire_tx_locked();
     vsnd.submitted_bytes = 0;
     vsnd.completed_bytes = 0;
+    vsnd.staged_bytes = 0;
+    vsnd.staged_start_if_needed = 0;
     vsnd.last_latency_bytes = 0;
     vsnd.last_latency_ms = 0;
     vsnd.play_started_ms = 0;
@@ -809,6 +1011,14 @@ void virtio_snd_drain(void)
     uint64 start_ms = sched_timer_now_ms();
     uint64 last_progress_ms = start_ms;
     uint64 last_pending = ~0ULL;
+
+    mutex_lock(&vsnd.op_lock);
+    int flush_ret = vsnd_submit_staged_wait_locked(5000);
+    mutex_unlock(&vsnd.op_lock);
+    if (flush_ret < 0) {
+        printf("virtio_snd: drain staged submit failed ret=%d\n", flush_ret);
+        return;
+    }
 
     while (virtio_snd_pending_bytes() != 0) {
         uint64 pending = virtio_snd_pending_bytes();
@@ -838,7 +1048,7 @@ uint64 virtio_snd_pending_bytes(void)
     vsnd_poll_tx_completions();
     spin_lock(&vsnd.lock);
     uint64 played = vsnd_paced_played_bytes_locked();
-    uint64 pending = vsnd.submitted_bytes - played;
+    uint64 pending = vsnd.submitted_bytes + vsnd.staged_bytes - played;
     spin_unlock(&vsnd.lock);
     return pending;
 }
@@ -850,7 +1060,11 @@ uint64 virtio_snd_free_bytes(void)
     vsnd_poll_tx_completions();
     spin_lock(&vsnd.lock);
     uint64 busy_mask = vsnd.async_in_flight_mask;
+    uint32 staged = vsnd.staged_bytes;
+    int tx_error = vsnd.tx_error;
     spin_unlock(&vsnd.lock);
+    if (tx_error)
+        return 0;
     uint32 free_slots = 0;
     uint32 slot_limit = vsnd_async_slot_limit();
     for (uint32 i = 0; i < slot_limit; i++) {
@@ -861,6 +1075,8 @@ uint64 virtio_snd_free_bytes(void)
     if (pending >= VSND_BUFFER_BYTES)
         return 0;
     uint64 transport_free = (uint64)free_slots * VSND_PERIOD_BYTES;
+    if (staged < VSND_PERIOD_BYTES)
+        transport_free += VSND_PERIOD_BYTES - staged;
     uint64 logical_free = VSND_BUFFER_BYTES - pending;
     return transport_free < logical_free ? transport_free : logical_free;
 }
@@ -872,6 +1088,30 @@ uint64 virtio_snd_played_bytes(void)
     vsnd_poll_tx_completions();
     spin_lock(&vsnd.lock);
     uint64 played = vsnd_paced_played_bytes_locked();
+    spin_unlock(&vsnd.lock);
+    return played;
+}
+
+uint64 virtio_snd_pcm_hw_bytes(void)
+{
+    uint64 played;
+    if (!vsnd.initialized)
+        return 0;
+    vsnd_poll_tx_completions();
+    spin_lock(&vsnd.lock);
+    played = vsnd_paced_played_bytes_locked();
+    spin_unlock(&vsnd.lock);
+    return played;
+}
+
+uint64 virtio_snd_total_played_bytes(void)
+{
+    if (!vsnd.initialized)
+        return 0;
+    vsnd_poll_tx_completions();
+    spin_lock(&vsnd.lock);
+    uint64 played = vsnd.total_played_bytes +
+                    vsnd_paced_played_bytes_locked();
     spin_unlock(&vsnd.lock);
     return played;
 }
@@ -1159,11 +1399,22 @@ int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
     (void)nonblock;
     return -ENODEV;
 }
+int virtio_snd_prequeue(int user, const void *buf, size_t count,
+                        int oss_format, int rate, int channels)
+{
+    (void)user; (void)buf; (void)count; (void)oss_format;
+    (void)rate; (void)channels;
+    return -ENODEV;
+}
+int virtio_snd_start(void) { return -ENODEV; }
+int virtio_snd_flush_partial(void) { return -ENODEV; }
 void virtio_snd_reset(void) {}
 void virtio_snd_drain(void) {}
 uint64 virtio_snd_free_bytes(void) { return 0; }
 uint64 virtio_snd_pending_bytes(void) { return 0; }
 uint64 virtio_snd_played_bytes(void) { return 0; }
+uint64 virtio_snd_pcm_hw_bytes(void) { return 0; }
+uint64 virtio_snd_total_played_bytes(void) { return 0; }
 uint64 virtio_snd_period_bytes(void) { return 0; }
 uint64 virtio_snd_buffer_bytes(void) { return 0; }
 int virtio_snd_supported_oss_formats(void) { return 0; }

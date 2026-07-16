@@ -17,6 +17,8 @@
 #include "uabi/poll.h"
 #include "dev/virtio.h"
 
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
 #define OSS_SOUND_MAJOR 14
 #define ALSA_SOUND_MAJOR 116
 
@@ -34,6 +36,7 @@
  */
 #define ALSA_MINOR_CONTROL0 1
 #define ALSA_MINOR_PCM0P    16
+#define ALSA_MINOR_TIMER    33
 
 #define OSS_VERSION 0x040090
 
@@ -173,6 +176,23 @@
 #define SNDRV_PCM_IOCTL_WRITEI_FRAMES 0x40184150
 #define SNDRV_PCM_IOCTL_LINK          0x40044160
 #define SNDRV_PCM_IOCTL_UNLINK        0x4161
+
+/* ALSA timer ABI used by alsa-lib's non-mmap PCM period-event path. */
+#define SNDRV_TIMER_VERSION          0x00020005
+#define SNDRV_TIMER_IOCTL_PVERSION   0x80045400
+#define SNDRV_TIMER_IOCTL_TREAD      0x40045402
+#define SNDRV_TIMER_IOCTL_SELECT     0x40345410
+#define SNDRV_TIMER_IOCTL_INFO       0x80e85411
+#define SNDRV_TIMER_IOCTL_PARAMS     0x40505412
+#define SNDRV_TIMER_IOCTL_STATUS     0x80605414
+#define SNDRV_TIMER_IOCTL_START      0x54a0
+#define SNDRV_TIMER_IOCTL_STOP       0x54a1
+#define SNDRV_TIMER_IOCTL_CONTINUE   0x54a2
+#define SNDRV_TIMER_IOCTL_PAUSE      0x54a3
+
+#define SNDRV_TIMER_CLASS_PCM        3
+#define SNDRV_TIMER_EVENT_TICK       1
+#define SNDRV_TIMER_PSFLG_AUTO       (1U << 0)
 
 #define SNDRV_PCM_SYNC_PTR_HWSYNC    (1U << 0)
 #define SNDRV_PCM_SYNC_PTR_APPL      (1U << 1)
@@ -514,6 +534,66 @@ typedef struct alsa_xferi {
     uint64 frames;
 } alsa_xferi_t;
 
+typedef struct alsa_timer_id {
+    int dev_class;
+    int dev_sclass;
+    int card;
+    int device;
+    int subdevice;
+} alsa_timer_id_t;
+
+typedef struct alsa_timer_select {
+    alsa_timer_id_t id;
+    unsigned char reserved[32];
+} alsa_timer_select_t;
+
+typedef struct alsa_timer_info {
+    uint flags;
+    int card;
+    unsigned char id[64];
+    unsigned char name[80];
+    uint64 reserved0;
+    uint64 resolution;
+    unsigned char reserved[64];
+} alsa_timer_info_t;
+
+typedef struct alsa_timer_params {
+    uint flags;
+    uint ticks;
+    uint queue_size;
+    uint reserved0;
+    uint filter;
+    unsigned char reserved[60];
+} alsa_timer_params_t;
+
+typedef struct alsa_timer_status {
+    alsa_timespec_t tstamp;
+    uint resolution;
+    uint lost;
+    uint overrun;
+    uint queue;
+    unsigned char reserved[64];
+} alsa_timer_status_t;
+
+typedef struct alsa_timer_tread {
+    int event;
+    int pad1;
+    alsa_timespec_t tstamp;
+    uint val;
+    int pad2;
+} alsa_timer_tread_t;
+
+struct alsa_timer_file {
+    struct vfs_file *file;
+    struct alsa_timer_file *next;
+    uint filter;
+    uint pending_ticks;
+    uint64 last_hw_ptr;
+    int selected;
+    int tread;
+    int active;
+};
+
 _Static_assert(sizeof(audio_buf_info_t) == 16, "audio_buf_info size");
 _Static_assert(sizeof(count_info_t) == 12, "count_info size");
 _Static_assert(sizeof(audio_errinfo_t) == 104, "audio_errinfo size");
@@ -532,6 +612,11 @@ _Static_assert(sizeof(alsa_pcm_channel_info_t) == 24,
                "alsa channel info size");
 _Static_assert(sizeof(alsa_pcm_sync_ptr_t) == 136, "alsa sync ptr size");
 _Static_assert(sizeof(alsa_xferi_t) == 24, "alsa xferi size");
+_Static_assert(sizeof(alsa_timer_select_t) == 52, "alsa timer select size");
+_Static_assert(sizeof(alsa_timer_info_t) == 232, "alsa timer info size");
+_Static_assert(sizeof(alsa_timer_params_t) == 80, "alsa timer params size");
+_Static_assert(sizeof(alsa_timer_status_t) == 96, "alsa timer status size");
+_Static_assert(sizeof(alsa_timer_tread_t) == 32, "alsa timer tread size");
 
 static int oss_format = OSS_DEFAULT_FORMAT;
 static int oss_rate = OSS_DEFAULT_RATE;
@@ -541,12 +626,15 @@ static int oss_volume = SOUND_MIXER_VALUE(100, 100);
 static uint64 oss_play_written_bytes;
 static uint64 oss_play_consumed_bytes;
 static uint64 oss_play_last_ms;
+static int oss_play_clock_running;
 static uint oss_rec_bytes;
 static int alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
 static uint64 alsa_appl_ptr;
 static uint64 alsa_hw_ptr;
 static uint64 alsa_hw_start_offset;
 static uint64 alsa_buffer_frames = OSS_BUFFER_BYTES /
+                                   (OSS_DEFAULT_CHANNELS * 2);
+static uint64 alsa_period_frames = OSS_BLOCK_SIZE /
                                    (OSS_DEFAULT_CHANNELS * 2);
 static uint64 alsa_start_threshold = 1;
 static uint64 alsa_stop_threshold = OSS_BUFFER_BYTES /
@@ -560,16 +648,29 @@ static int alsa_prestart_write_inflight;
 static uint64 alsa_prestart_generation;
 static struct vfs_file *oss_pcm_files[OSS_MAX_PCM_FILES];
 static int oss_notify_armed;
+static uint64 oss_notify_ticks;
+static uint64 oss_notify_scans;
+static uint64 oss_notify_ready;
+static uint64 oss_notify_suppressed;
+static struct alsa_timer_file *alsa_timer_files;
 static spinlock_t oss_lock;
 
 static struct vfs_file_ops oss_pcm_file_ops;
 static struct vfs_file_ops alsa_pcm_file_ops;
+static struct vfs_file_ops alsa_timer_file_ops;
 static struct vfs_file_ops oss_sndstat_file_ops;
 static void oss_reset_playback_locked(void);
 static int oss_any_pcm_file_locked(void);
 static uint64 alsa_device_buffer_bytes(void);
+static uint64 alsa_frame_bytes_locked(void);
+static void alsa_refresh_hw_ptr_locked(bool force);
+static uint64 alsa_playback_avail_frames_locked(void);
+static uint64 alsa_avail_min_frames_locked(void);
+static int alsa_pcm_write_ready_locked(void);
 static void oss_schedule_notify(void);
 static void oss_notify_writable_callback(void *arg);
+static int alsa_timer_notify(void);
+static int alsa_timer_any_active_locked(void);
 
 static int oss_copyout(uint64 uaddr, const void *src, size_t len) {
     if (uaddr == 0)
@@ -663,6 +764,8 @@ static uint64 oss_bytes_per_second_locked(void) {
 }
 
 static void oss_playback_update_locked(void) {
+    if (!oss_play_clock_running)
+        return;
     uint64 now = sched_timer_now_ms();
     if (oss_play_last_ms == 0) {
         oss_play_last_ms = now;
@@ -687,11 +790,19 @@ static void oss_playback_update_locked(void) {
     oss_play_consumed_bytes += consumed;
 }
 
-static void oss_note_playback_write_locked(uint64 bytes)
+static void oss_start_playback_clock_locked(void)
+{
+    if (oss_play_clock_running)
+        return;
+    oss_play_last_ms = sched_timer_now_ms();
+    oss_play_clock_running = 1;
+}
+
+static void oss_note_playback_write_locked(uint64 bytes, int start_clock)
 {
     oss_playback_update_locked();
-    if (oss_play_written_bytes == oss_play_consumed_bytes)
-        oss_play_last_ms = sched_timer_now_ms();
+    if (start_clock)
+        oss_start_playback_clock_locked();
     oss_play_written_bytes += bytes;
 }
 
@@ -785,22 +896,89 @@ static void oss_collect_pcm_files(struct vfs_file **files, int *count) {
     *count = n;
 }
 
-static void oss_notify_pcm_writers(void) {
+/*
+ * Return whether this open PCM file has a write event worth publishing.
+ *
+ * The timer is shared by the OSS and ALSA compatibility paths, but their
+ * readiness contracts are not interchangeable: ALSA uses avail_min frames,
+ * while OSS uses its byte low-water mark.  In particular, virtio transport
+ * room does not by itself mean that an ALSA client should receive POLLOUT.
+ * oss_lock must be held.
+ */
+static int oss_pcm_file_write_ready_locked(struct vfs_file *file,
+                                           int *needs_timer)
+{
+    *needs_timer = 0;
+    if (file->ops != &alsa_pcm_file_ops) {
+        int ready = oss_playback_writable_locked();
+        *needs_timer = !ready;
+        return ready;
+    }
+
+    alsa_refresh_hw_ptr_locked(false);
+    switch (alsa_pcm_state) {
+    case SNDRV_PCM_STATE_PREPARED:
+    case SNDRV_PCM_STATE_RUNNING: {
+        int ready = alsa_pcm_write_ready_locked();
+        *needs_timer = alsa_pcm_state == SNDRV_PCM_STATE_RUNNING && !ready;
+        return ready;
+    }
+    default:
+        /* ALSA poll reports POLLERR in every other state. */
+        return 1;
+    }
+}
+
+static int oss_notify_pcm_writers(void) {
     struct vfs_file *files[OSS_MAX_PCM_FILES];
     int count = 0;
+    int needs_timer = 0;
 
     oss_collect_pcm_files(files, &count);
     for (int i = 0; i < count; i++) {
-        vfs_file_knote_notify(files[i], EVFILT_WRITE, 0);
+        int file_needs_timer = 0;
+        int period_timer_active;
+        int ready;
+
+        spin_lock(&oss_lock);
+        ready = oss_pcm_file_write_ready_locked(files[i], &file_needs_timer);
+        period_timer_active = files[i]->ops == &alsa_pcm_file_ops &&
+                              alsa_timer_any_active_locked();
+        if (period_timer_active)
+            file_needs_timer = 0;
+        oss_notify_scans++;
+        if (ready && !period_timer_active)
+            oss_notify_ready++;
+        else
+            oss_notify_suppressed++;
+        spin_unlock(&oss_lock);
+
+        if (ready && !period_timer_active)
+            vfs_file_knote_notify(files[i], EVFILT_WRITE, 0);
+        if (file_needs_timer)
+            needs_timer = 1;
         vfs_fput(files[i]);
     }
+    return needs_timer;
+}
+
+static int alsa_timer_any_active_locked(void)
+{
+    struct alsa_timer_file *timer;
+
+    for (timer = alsa_timer_files; timer != NULL; timer = timer->next) {
+        if (timer->active)
+            return 1;
+    }
+    return 0;
 }
 
 static void oss_schedule_notify(void) {
     int arm = 0;
 
     spin_lock(&oss_lock);
-    if (!oss_notify_armed && oss_any_pcm_file_locked()) {
+    if (!oss_notify_armed &&
+        (oss_any_pcm_file_locked() || alsa_timer_any_active_locked())) {
         oss_notify_armed = 1;
         arm = 1;
     }
@@ -816,20 +994,27 @@ static void oss_schedule_notify(void) {
 
 static void oss_notify_writable_callback(void *arg) {
     (void)arg;
-    int writable;
-    int should_rearm = 0;
 
     spin_lock(&oss_lock);
     oss_notify_armed = 0;
-    writable = oss_playback_writable_locked();
-    if (oss_any_pcm_file_locked() &&
-        (!writable || alsa_pcm_state == SNDRV_PCM_STATE_RUNNING))
-        should_rearm = 1;
+    oss_notify_ticks++;
     spin_unlock(&oss_lock);
 
-    if (writable)
-        oss_notify_pcm_writers();
-    if (should_rearm)
+    /*
+     * Source notifications enqueue unconditionally; kqueue does not poll the
+     * file again on this path.  Publish only a true per-file transition and
+     * keep the 5 ms timer alive only while a running stream is not writable.
+     * A successful write schedules the next drain notification itself.
+     */
+    /*
+     * ALSA may write a single frame after rewind/recovery.  Give the virtio
+     * period assembler a bounded-latency flush from workqueue context before
+     * publishing the next hardware-pointer or write-ready observation.
+     */
+    if (virtio_snd_available())
+        (void)virtio_snd_flush_partial();
+    int keep_timer = alsa_timer_notify();
+    if (oss_notify_pcm_writers() || keep_timer)
         oss_schedule_notify();
 }
 
@@ -837,6 +1022,7 @@ static void oss_reset_playback_locked(void) {
     oss_play_written_bytes = 0;
     oss_play_consumed_bytes = 0;
     oss_play_last_ms = sched_timer_now_ms();
+    oss_play_clock_running = 0;
     alsa_appl_ptr = 0;
     alsa_hw_ptr = 0;
     alsa_hw_start_offset = 0;
@@ -1008,8 +1194,9 @@ static int oss_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     return count;
 }
 
-static int oss_pcm_write_data(struct vfs_file *file, bool user,
-                              const void *buf, size_t count) {
+static int oss_pcm_write_data_mode(struct vfs_file *file, bool user,
+                                   const void *buf, size_t count,
+                                   int start_playback) {
     if (buf == NULL)
         return -EINVAL;
 
@@ -1022,8 +1209,9 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
             spin_unlock(&oss_lock);
 
             if (free_bytes == 0) {
-                if (nonblock)
+                if (nonblock) {
                     return done ? (int)done : -EAGAIN;
+                }
                 sleep_ms(1);
                 continue;
             }
@@ -1034,10 +1222,15 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
             if (chunk > INT_MAX)
                 chunk = INT_MAX;
 
-            int ret = virtio_snd_write(user ? 1 : 0,
-                                       (const uint8 *)buf + done,
-                                       chunk, oss_format, oss_rate,
-                                       oss_channels, nonblock ? 1 : 0);
+            int ret = start_playback ?
+                virtio_snd_write(user ? 1 : 0,
+                                 (const uint8 *)buf + done,
+                                 chunk, oss_format, oss_rate,
+                                 oss_channels, nonblock ? 1 : 0) :
+                virtio_snd_prequeue(user ? 1 : 0,
+                                    (const uint8 *)buf + done,
+                                    chunk, oss_format, oss_rate,
+                                    oss_channels);
             if (ret == -ENODEV)
                 break;
             if (ret < 0)
@@ -1046,7 +1239,7 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
                 break;
 
             spin_lock(&oss_lock);
-            oss_note_playback_write_locked((uint64)ret);
+            oss_note_playback_write_locked((uint64)ret, start_playback);
             spin_unlock(&oss_lock);
             done += (size_t)ret;
 
@@ -1074,7 +1267,7 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
         size_t chunk = count - done;
         if ((uint64)chunk > free_bytes)
             chunk = (size_t)free_bytes;
-        oss_note_playback_write_locked((uint64)chunk);
+        oss_note_playback_write_locked((uint64)chunk, start_playback);
         done += chunk;
         spin_unlock(&oss_lock);
         if (nonblock)
@@ -1082,6 +1275,12 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
     }
     oss_schedule_notify();
     return (int)done;
+}
+
+static int oss_pcm_write_data(struct vfs_file *file, bool user,
+                              const void *buf, size_t count)
+{
+    return oss_pcm_write_data_mode(file, user, buf, count, 1);
 }
 
 static int oss_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
@@ -1108,23 +1307,71 @@ static ssize_t oss_pcm_file_write(struct vfs_file *file, const char *buf,
     return oss_pcm_write_data(file, user, buf, count);
 }
 
+static size_t oss_sndstat_format(char *text, size_t capacity)
+{
+    uint64 played;
+    uint64 pending;
+    uint64 buffer;
+    uint64 free_bytes;
+    uint64 appl_ptr;
+    uint64 hw_ptr;
+    uint64 notify_ticks;
+    uint64 notify_scans;
+    uint64 notify_ready;
+    uint64 notify_suppressed;
+    int state;
+    int virtio = virtio_snd_available();
+
+    spin_lock(&oss_lock);
+    oss_pending_locked();
+    /*
+     * /dev/sndstat is an observability interface, not an ALSA ring pointer.
+     * Keep its played counter monotonic across DROP/PREPARE and stream reopen
+     * just like Linux's cumulative trace counters.  ALSA hw_ptr calculations
+     * continue to use the per-stream virtio_snd_played_bytes() value.
+     */
+    played = virtio ? virtio_snd_total_played_bytes() :
+                      oss_played_bytes_locked();
+    pending = virtio ? virtio_snd_pending_bytes() : oss_pending_locked();
+    buffer = virtio ? virtio_snd_buffer_bytes() : OSS_BUFFER_BYTES;
+    free_bytes = virtio ? virtio_snd_free_bytes() : oss_free_locked();
+    appl_ptr = alsa_appl_ptr;
+    hw_ptr = alsa_hw_ptr;
+    notify_ticks = oss_notify_ticks;
+    notify_scans = oss_notify_scans;
+    notify_ready = oss_notify_ready;
+    notify_suppressed = oss_notify_suppressed;
+    state = alsa_pcm_state;
+    spin_unlock(&oss_lock);
+
+    int len = snprintf(text, capacity,
+        "%s\n"
+        "Audio devices:\n"
+        "0: %s /dev/dsp%s\n"
+        "Mixers:\n"
+        "0: xv6 virtual mixer /dev/mixer\n"
+        "xv6_audio_stats version=2 backend=%s played_bytes=%lu "
+        "pending_bytes=%lu free_bytes=%lu buffer_bytes=%lu "
+        "alsa_state=%d appl_ptr=%lu hw_ptr=%lu notify_ticks=%lu "
+        "notify_scans=%lu notify_ready=%lu notify_suppressed=%lu\n",
+        virtio ? "OSS 4.0 compatible audio" :
+                 "OSS 4.0 compatible virtual audio",
+        virtio ? "xv6 OSS PCM" : "xv6 OSS virtual PCM",
+        virtio ? " (virtio-sound)" : "",
+        virtio ? virtio_snd_backend_name() : "timer",
+        played, pending, free_bytes, buffer, state, appl_ptr, hw_ptr,
+        notify_ticks, notify_scans, notify_ready, notify_suppressed);
+    if (len < 0)
+        return 0;
+    if ((size_t)len >= capacity)
+        return capacity - 1;
+    return (size_t)len;
+}
+
 static int sndstat_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     (void)cdev;
-    static const char timer_text[] =
-        "OSS 4.0 compatible virtual audio\n"
-        "Audio devices:\n"
-        "0: xv6 OSS virtual PCM /dev/dsp\n"
-        "Mixers:\n"
-        "0: xv6 virtual mixer /dev/mixer\n";
-    static const char virtio_text[] =
-        "OSS 4.0 compatible audio\n"
-        "Audio devices:\n"
-        "0: xv6 OSS PCM /dev/dsp (virtio-sound)\n"
-        "Mixers:\n"
-        "0: xv6 virtual mixer /dev/mixer\n";
-    const char *text = virtio_snd_available() ? virtio_text : timer_text;
-    size_t len = sizeof(text) - 1;
-    len = strlen(text);
+    char text[512];
+    size_t len = oss_sndstat_format(text, sizeof(text));
     if (count < len)
         len = count;
     if (!user) {
@@ -1136,20 +1383,8 @@ static int sndstat_read(cdev_t *cdev, bool user, void *buf, size_t count) {
 
 static ssize_t oss_sndstat_file_read(struct vfs_file *file, char *buf,
                                      size_t count, bool user) {
-    static const char timer_text[] =
-        "OSS 4.0 compatible virtual audio\n"
-        "Audio devices:\n"
-        "0: xv6 OSS virtual PCM /dev/dsp\n"
-        "Mixers:\n"
-        "0: xv6 virtual mixer /dev/mixer\n";
-    static const char virtio_text[] =
-        "OSS 4.0 compatible audio\n"
-        "Audio devices:\n"
-        "0: xv6 OSS PCM /dev/dsp (virtio-sound)\n"
-        "Mixers:\n"
-        "0: xv6 virtual mixer /dev/mixer\n";
-    const char *text = virtio_snd_available() ? virtio_text : timer_text;
-    size_t len = strlen(text);
+    char text[512];
+    size_t len = oss_sndstat_format(text, sizeof(text));
 
     if (file->f_pos >= (loff_t)len)
         return 0;
@@ -2454,6 +2689,66 @@ static uint64 alsa_ptr_delta_locked(uint64 newer, uint64 older)
     return boundary - older + newer;
 }
 
+static int alsa_timer_notify(void)
+{
+    struct vfs_file *files[OSS_MAX_PCM_FILES];
+    struct alsa_timer_file *timer;
+    int count = 0;
+    int keep_timer = 0;
+
+    spin_lock(&oss_lock);
+    alsa_refresh_hw_ptr_locked(false);
+    for (timer = alsa_timer_files; timer != NULL; timer = timer->next) {
+        uint64 periods = 0;
+
+        if (!timer->active)
+            continue;
+        keep_timer = 1;
+        if (timer->selected && alsa_pcm_state == SNDRV_PCM_STATE_RUNNING &&
+            alsa_period_frames != 0) {
+            uint64 advanced = alsa_ptr_delta_locked(alsa_hw_ptr,
+                                                    timer->last_hw_ptr);
+            periods = advanced / alsa_period_frames;
+            /*
+             * The 5 ms sampler can observe hw_ptr just beyond a period
+             * boundary.  Carrying that residual into the next timer event
+             * can then wake alsa-lib before avail_min frames are writable
+             * (for example 48 frames), which Linux's period-event contract
+             * never promises.  Retain the phase, but defer publication until
+             * the PCM fd is genuinely writable at its negotiated low-water
+             * mark.
+             */
+            if (periods != 0 && alsa_pcm_write_ready_locked()) {
+                uint64 pending = (uint64)timer->pending_ticks + periods;
+                timer->pending_ticks = pending > 0xffffffffU ?
+                                       0xffffffffU : (uint)pending;
+                timer->last_hw_ptr =
+                    alsa_ptr_add_locked(timer->last_hw_ptr,
+                                        periods * alsa_period_frames);
+            } else {
+                periods = 0;
+            }
+        } else {
+            timer->last_hw_ptr = alsa_hw_ptr;
+        }
+        if (periods != 0 &&
+            (timer->filter == 0 ||
+             (timer->filter & (1U << SNDRV_TIMER_EVENT_TICK)) != 0) &&
+            timer->file != NULL && count < OSS_MAX_PCM_FILES) {
+            struct vfs_file *file = vfs_fdup(timer->file);
+            if (file != NULL)
+                files[count++] = file;
+        }
+    }
+    spin_unlock(&oss_lock);
+
+    for (int i = 0; i < count; i++) {
+        vfs_file_knote_notify(files[i], EVFILT_READ, 0);
+        vfs_fput(files[i]);
+    }
+    return keep_timer;
+}
+
 static uint64 alsa_buffer_frames_locked(void)
 {
     return alsa_buffer_frames != 0 ? alsa_buffer_frames :
@@ -2545,7 +2840,6 @@ static void alsa_start_playback_locked(void)
         return;
 
     alsa_hw_start_offset = alsa_hw_ptr;
-    oss_play_last_ms = sched_timer_now_ms();
     alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
 }
 
@@ -2778,8 +3072,8 @@ static int alsa_flush_prestart_playback(void)
         if (!running)
             break;
 
-        int ret = oss_pcm_write_data(NULL, 0, buf + done,
-                                     (size_t)bytes - done);
+        int ret = oss_pcm_write_data_mode(NULL, 0, buf + done,
+                                          (size_t)bytes - done, 0);
         spin_lock(&oss_lock);
         alsa_prestart_write_inflight = 0;
         spin_unlock(&oss_lock);
@@ -2814,26 +3108,47 @@ static int alsa_flush_prestart_playback(void)
         spin_unlock(&oss_lock);
     }
 
+    int start_ret = 0;
+    if (done == (size_t)bytes && virtio_snd_available())
+        start_ret = virtio_snd_start();
     spin_lock(&oss_lock);
+    if (done == (size_t)bytes && start_ret == 0)
+        oss_start_playback_clock_locked();
     alsa_prestart_flushing = 0;
     spin_unlock(&oss_lock);
     kvfree(buf);
-    return 0;
+    return start_ret;
 }
 
 static void alsa_refresh_hw_ptr_locked(bool may_xrun)
 {
     uint64 next_hw;
+    uint64 played_frames;
     uint64 queued_frames;
     uint64 buffer_frames;
 
     if (alsa_pcm_state != SNDRV_PCM_STATE_RUNNING)
         return;
 
-    next_hw = alsa_ptr_add_locked(alsa_hw_start_offset,
-                                  alsa_frames_from_bytes(
-                                      oss_played_bytes_locked()));
-    if (may_xrun && alsa_stop_threshold_reached_locked(next_hw)) {
+    played_frames = alsa_frames_from_bytes(
+        virtio_snd_available() ? virtio_snd_pcm_hw_bytes() :
+                                 oss_played_bytes_locked());
+    next_hw = alsa_ptr_add_locked(alsa_hw_start_offset, played_frames);
+    /*
+     * START with an empty playback ring is valid.  PipeWire deliberately uses
+     * DROP -> PREPARE -> START during xrun recovery, queries availability, and
+     * only then refills the ring.  Linux does not report a second xrun until
+     * the hardware clock has actually advanced.  Treating the initially empty
+     * ring as an underrun at played_frames == 0 made that first availability
+     * query fail with EPIPE and trapped PipeWire in recovery.
+     *
+     * The virtio stream itself starts on the first submitted PCM frame, so a
+     * nonzero played_frames value is also the precise local evidence that an
+     * underrun can have happened.  Once progress exists, retain the configured
+     * ALSA stop-threshold semantics unchanged.
+     */
+    if (may_xrun && played_frames != 0 &&
+        alsa_stop_threshold_reached_locked(next_hw)) {
         alsa_note_xrun_locked();
         return;
     }
@@ -3001,14 +3316,19 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
                 channels = OSS_DEFAULT_CHANNELS;
             uint buffer_frames =
                 alsa_hw_interval(&params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE)->min;
+            uint period_frames =
+                alsa_hw_interval(&params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->min;
             if (buffer_frames == 0)
                 buffer_frames = alsa_frames_from_bytes(
                     alsa_device_buffer_bytes());
+            if (period_frames == 0)
+                period_frames = OSS_BLOCK_SIZE / (channels * 2);
             spin_lock(&oss_lock);
             oss_format = AFMT_S16_LE;
             oss_rate = (int)rate;
             oss_channels = (int)channels;
             alsa_buffer_frames = buffer_frames;
+            alsa_period_frames = period_frames;
             alsa_start_threshold = 1;
             alsa_stop_threshold = buffer_frames;
             alsa_avail_min = 0;
@@ -3023,8 +3343,16 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
     }
     case SNDRV_PCM_IOCTL_SW_PARAMS: {
         alsa_pcm_sw_params_t params;
-        if (oss_copyin(&params, uarg, sizeof(params)) < 0)
+        int copyin_ret = oss_copyin(&params, uarg, sizeof(params));
+        if (copyin_ret < 0)
             memset(&params, 0, sizeof(params));
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: sw-params-in copyin=%d tstamp=%d period_step=%u sleep_min=%u avail_min=%lu xfer_align=%lu start=%lu stop=%lu silence_threshold=%lu silence_size=%lu boundary=%lu proto=%u tstamp_type=%u\n",
+                   copyin_ret, params.tstamp_mode, params.period_step,
+                   params.sleep_min, params.avail_min, params.xfer_align,
+                   params.start_threshold, params.stop_threshold,
+                   params.silence_threshold, params.silence_size,
+                   params.boundary, params.proto, params.tstamp_type);
         if (params.avail_min == 0)
             params.avail_min = OSS_BLOCK_SIZE / 4;
         if (params.boundary == 0)
@@ -3035,7 +3363,12 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         alsa_stop_threshold = params.stop_threshold;
         alsa_boundary = params.boundary;
         spin_unlock(&oss_lock);
-        return oss_copyout(uarg, &params, sizeof(params));
+        int copyout_ret = oss_copyout(uarg, &params, sizeof(params));
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: sw-params-out copyout=%d avail_min=%lu start=%lu stop=%lu boundary=%lu\n",
+                   copyout_ret, params.avail_min, params.start_threshold,
+                   params.stop_threshold, params.boundary);
+        return copyout_ret;
     }
     case SNDRV_PCM_IOCTL_HW_FREE:
         return alsa_reset_playback_serialized(SNDRV_PCM_STATE_OPEN);
@@ -3183,24 +3516,31 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
     }
     case SNDRV_PCM_IOCTL_REWIND: {
         uint64 frames = 0;
-        (void)oss_copyin(&frames, uarg, sizeof(frames));
-        spin_lock(&oss_lock);
-        if (frames > alsa_appl_ptr)
-            alsa_appl_ptr = 0;
-        else
-            alsa_appl_ptr -= frames;
-        spin_unlock(&oss_lock);
-        return 0;
+        int ret = oss_copyin(&frames, uarg, sizeof(frames));
+        if (ret < 0)
+            return ret;
+        /*
+         * Linux returns the number of frames actually rewound through the
+         * ioctl argument.  The virtio-sound path has no operation that can
+         * retract descriptors already submitted to the host, so changing
+         * only appl_ptr would manufacture free space while the transport is
+         * still full.  Report the truthful supported amount instead.
+         */
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: rewind requested=%lu actual=0\n", frames);
+        frames = 0;
+        return oss_copyout(uarg, &frames, sizeof(frames));
     }
     case SNDRV_PCM_IOCTL_FORWARD: {
         uint64 frames = 0;
-        (void)oss_copyin(&frames, uarg, sizeof(frames));
-        spin_lock(&oss_lock);
-        alsa_appl_ptr += frames;
-        if (alsa_appl_ptr < alsa_hw_ptr)
-            alsa_appl_ptr = alsa_hw_ptr;
-        spin_unlock(&oss_lock);
-        return 0;
+        int ret = oss_copyin(&frames, uarg, sizeof(frames));
+        if (ret < 0)
+            return ret;
+        /* Advancing without submitting silence would corrupt the same ring. */
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: forward requested=%lu actual=0\n", frames);
+        frames = 0;
+        return oss_copyout(uarg, &frames, sizeof(frames));
     }
     case SNDRV_PCM_IOCTL_LINK:
     case SNDRV_PCM_IOCTL_UNLINK:
@@ -3398,6 +3738,27 @@ static uint64 alsa_avail_min_frames_locked(void)
     return alsa_avail_min != 0 ? alsa_avail_min : OSS_BLOCK_SIZE / 4;
 }
 
+static int alsa_pcm_write_ready_locked(void)
+{
+    uint64 avail_min = alsa_avail_min_frames_locked();
+    uint64 frame_bytes = alsa_frame_bytes_locked();
+    uint64 required_bytes;
+
+    if (alsa_playback_avail_frames_locked() < avail_min)
+        return 0;
+    if (frame_bytes != 0 && avail_min > (~0ULL / frame_bytes))
+        return 0;
+    required_bytes = avail_min * frame_bytes;
+
+    /*
+     * A logical ALSA period is not writable when every virtio-sound TX slot
+     * is still owned by the host.  Linux PCM poll reflects the real DMA-ring
+     * capacity; mirror that contract so poll, period timers, and WRITEI agree
+     * instead of waking a nonblocking writer into EAGAIN.
+     */
+    return required_bytes == 0 || oss_free_locked() >= required_bytes;
+}
+
 static int alsa_pcm_file_poll(struct vfs_file *file, short events)
 {
     (void)file;
@@ -3411,8 +3772,7 @@ static int alsa_pcm_file_poll(struct vfs_file *file, short events)
     case SNDRV_PCM_STATE_PREPARED:
     case SNDRV_PCM_STATE_RUNNING:
         if (write_events != 0) {
-            uint64 avail = alsa_playback_avail_frames_locked();
-            int writable = avail >= alsa_avail_min_frames_locked();
+            int writable = alsa_pcm_write_ready_locked();
 
             if (writable)
                 revents |= write_events;
@@ -3437,6 +3797,236 @@ static int alsa_pcm_file_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static uint64 alsa_timer_resolution_ns_locked(void)
+{
+    uint64 rate = oss_rate > 0 ? (uint64)oss_rate : OSS_DEFAULT_RATE;
+    uint64 period = alsa_period_frames != 0 ? alsa_period_frames :
+                    OSS_BLOCK_SIZE / alsa_frame_bytes_locked();
+
+    return period * 1000000000ULL / rate;
+}
+
+static int alsa_timer_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct alsa_timer_file *timer = file ? file->private_data : NULL;
+    uint64 uarg = (uint64)arg;
+
+    if (timer == NULL)
+        return -ENODEV;
+    switch ((uint)cmd) {
+    case SNDRV_TIMER_IOCTL_PVERSION:
+        return oss_put_int(uarg, SNDRV_TIMER_VERSION);
+    case SNDRV_TIMER_IOCTL_TREAD: {
+        int tread;
+        int ret = oss_get_int(uarg, &tread);
+        if (ret < 0)
+            return ret;
+        spin_lock(&oss_lock);
+        timer->tread = tread != 0;
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    case SNDRV_TIMER_IOCTL_SELECT: {
+        alsa_timer_select_t select;
+        if (oss_copyin(&select, uarg, sizeof(select)) < 0)
+            return -EFAULT;
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: timer-select class=%d sclass=%d card=%d device=%d subdevice=%d\n",
+                   select.id.dev_class, select.id.dev_sclass,
+                   select.id.card, select.id.device, select.id.subdevice);
+        if (select.id.dev_class != SNDRV_TIMER_CLASS_PCM ||
+            select.id.card != 0 || select.id.device != 0 ||
+            select.id.subdevice != 0)
+            return -ENODEV;
+        spin_lock(&oss_lock);
+        timer->selected = 1;
+        timer->last_hw_ptr = alsa_hw_ptr;
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    case SNDRV_TIMER_IOCTL_INFO: {
+        alsa_timer_info_t info;
+        memset(&info, 0, sizeof(info));
+        info.card = 0;
+        alsa_put_ustr(info.id, sizeof(info.id), "xv6-pcm-period");
+        alsa_put_ustr(info.name, sizeof(info.name), "xv6 PCM period timer");
+        spin_lock(&oss_lock);
+        info.resolution = alsa_timer_resolution_ns_locked();
+        spin_unlock(&oss_lock);
+        return oss_copyout(uarg, &info, sizeof(info));
+    }
+    case SNDRV_TIMER_IOCTL_PARAMS: {
+        alsa_timer_params_t params;
+        if (oss_copyin(&params, uarg, sizeof(params)) < 0)
+            return -EFAULT;
+        spin_lock(&oss_lock);
+        if (!timer->selected) {
+            spin_unlock(&oss_lock);
+            return -ENODEV;
+        }
+        timer->filter = params.filter;
+        timer->pending_ticks = 0;
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    case SNDRV_TIMER_IOCTL_STATUS: {
+        alsa_timer_status_t status;
+        uint64 now_ms = sched_timer_now_ms();
+        memset(&status, 0, sizeof(status));
+        status.tstamp.tv_sec = now_ms / 1000;
+        status.tstamp.tv_nsec = (now_ms % 1000) * 1000000;
+        spin_lock(&oss_lock);
+        status.resolution = (uint)alsa_timer_resolution_ns_locked();
+        status.queue = timer->pending_ticks;
+        spin_unlock(&oss_lock);
+        return oss_copyout(uarg, &status, sizeof(status));
+    }
+    case SNDRV_TIMER_IOCTL_START:
+    case SNDRV_TIMER_IOCTL_CONTINUE:
+        spin_lock(&oss_lock);
+        if (!timer->selected) {
+            spin_unlock(&oss_lock);
+            return -ENODEV;
+        }
+        timer->active = 1;
+        timer->pending_ticks = 0;
+        alsa_refresh_hw_ptr_locked(false);
+        timer->last_hw_ptr = alsa_hw_ptr;
+        spin_unlock(&oss_lock);
+        oss_schedule_notify();
+        return 0;
+    case SNDRV_TIMER_IOCTL_STOP:
+    case SNDRV_TIMER_IOCTL_PAUSE:
+        spin_lock(&oss_lock);
+        timer->active = 0;
+        timer->pending_ticks = 0;
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+
+    if (alsa_ioctl_trace_enabled())
+        printf("alsa-ioctl: timer unknown cmd=0x%lx\n", cmd);
+    return -ENOTTY;
+}
+
+static ssize_t alsa_timer_file_read(struct vfs_file *file, char *buf,
+                                    size_t count, bool user)
+{
+    struct alsa_timer_file *timer = file ? file->private_data : NULL;
+    uint ticks;
+    int tread;
+    uint64 resolution;
+    uint64 now_ms;
+
+    if (timer == NULL)
+        return -ENODEV;
+    spin_lock(&oss_lock);
+    ticks = timer->pending_ticks;
+    tread = timer->tread;
+    resolution = alsa_timer_resolution_ns_locked();
+    if (ticks != 0)
+        timer->pending_ticks = 0;
+    spin_unlock(&oss_lock);
+    if (ticks == 0)
+        return -EAGAIN;
+
+    now_ms = sched_timer_now_ms();
+    if (tread) {
+        alsa_timer_tread_t event;
+        if (count < sizeof(event))
+            return -EINVAL;
+        memset(&event, 0, sizeof(event));
+        event.event = SNDRV_TIMER_EVENT_TICK;
+        event.tstamp.tv_sec = now_ms / 1000;
+        event.tstamp.tv_nsec = (now_ms % 1000) * 1000000;
+        event.val = ticks;
+        return either_copyout(user ? 1 : 0, (uint64)buf, &event,
+                              sizeof(event)) < 0 ? -EFAULT :
+               (ssize_t)sizeof(event);
+    }
+
+    struct {
+        uint resolution;
+        uint ticks;
+    } event = { (uint)resolution, ticks };
+    if (count < sizeof(event))
+        return -EINVAL;
+    return either_copyout(user ? 1 : 0, (uint64)buf, &event,
+                          sizeof(event)) < 0 ? -EFAULT :
+           (ssize_t)sizeof(event);
+}
+
+static int alsa_timer_file_poll(struct vfs_file *file, short events)
+{
+    struct alsa_timer_file *timer = file ? file->private_data : NULL;
+    short read_events = events & (POLLIN | POLLRDNORM | POLLRDBAND);
+    short revents = 0;
+    int active = 0;
+
+    if (timer == NULL)
+        return POLLERR;
+    spin_lock(&oss_lock);
+    if (timer->pending_ticks != 0)
+        revents = read_events;
+    active = timer->active;
+    spin_unlock(&oss_lock);
+    if (active)
+        oss_schedule_notify();
+    return revents;
+}
+
+static int alsa_timer_file_release(struct vfs_inode *inode,
+                                   struct vfs_file *file)
+{
+    struct alsa_timer_file *timer = file ? file->private_data : NULL;
+    struct alsa_timer_file **link;
+
+    (void)inode;
+    if (timer == NULL)
+        return 0;
+    spin_lock(&oss_lock);
+    for (link = &alsa_timer_files; *link != NULL; link = &(*link)->next) {
+        if (*link == timer) {
+            *link = timer->next;
+            break;
+        }
+    }
+    timer->active = 0;
+    timer->file = NULL;
+    spin_unlock(&oss_lock);
+    file->private_data = NULL;
+    kvfree(timer);
+    return 0;
+}
+
+static int alsa_timer_open_file(cdev_t *cdev, struct vfs_file *file)
+{
+    struct alsa_timer_file *timer;
+
+    if (cdev == NULL || cdev->dev.minor != ALSA_MINOR_TIMER)
+        return -EINVAL;
+    timer = kvmalloc(sizeof(*timer));
+    if (timer == NULL)
+        return -ENOMEM;
+    memset(timer, 0, sizeof(*timer));
+    timer->file = file;
+    spin_lock(&oss_lock);
+    timer->next = alsa_timer_files;
+    alsa_timer_files = timer;
+    spin_unlock(&oss_lock);
+    file->private_data = timer;
+    file->ops = &alsa_timer_file_ops;
+    return 0;
+}
+
+static int alsa_timer_cdev_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+{
+    (void)cdev;
+    if ((uint)cmd == SNDRV_TIMER_IOCTL_PVERSION)
+        return oss_put_int((uint64)arg, SNDRV_TIMER_VERSION);
+    return -ENOTTY;
+}
+
 static int oss_pcm_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
     (void)file;
     return oss_ioctl(NULL, cmd, arg);
@@ -3456,6 +4046,13 @@ static struct vfs_file_ops alsa_pcm_file_ops = {
     .release = oss_pcm_file_release,
     .poll = alsa_pcm_file_poll,
     .ioctl = alsa_pcm_file_ioctl,
+};
+
+static struct vfs_file_ops alsa_timer_file_ops = {
+    .read = alsa_timer_file_read,
+    .release = alsa_timer_file_release,
+    .poll = alsa_timer_file_poll,
+    .ioctl = alsa_timer_file_ioctl,
 };
 
 static struct vfs_file_ops oss_sndstat_file_ops = {
@@ -3531,6 +4128,9 @@ static cdev_t alsa_control0_cdev =
 static cdev_t alsa_pcm0p_cdev =
     ALSA_CDEV("snd/pcmC0D0p", ALSA_MINOR_PCM0P, alsa_pcm_cdev_ioctl,
               alsa_pcm_open_file);
+static cdev_t alsa_timer_cdev =
+    ALSA_CDEV("snd/timer", ALSA_MINOR_TIMER, alsa_timer_cdev_ioctl,
+              alsa_timer_open_file);
 
 void ossaudiodevinit(void) {
     spin_init(&oss_lock, "ossaudio");
@@ -3556,6 +4156,8 @@ void ossaudiodevinit(void) {
     ret = cdev_register(&alsa_pcm0p_cdev);
     assert(ret == 0, "ossaudio: failed to register /dev/snd/pcmC0D0p: %d",
            ret);
+    ret = cdev_register(&alsa_timer_cdev);
+    assert(ret == 0, "ossaudio: failed to register /dev/snd/timer: %d", ret);
 
-    printf("audio: registered OSS /dev/dsp and ALSA /dev/snd/pcmC0D0p\n");
+    printf("audio: registered OSS /dev/dsp and ALSA /dev/snd/pcmC0D0p + timer\n");
 }

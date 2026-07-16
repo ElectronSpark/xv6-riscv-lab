@@ -215,8 +215,11 @@ static int audio_unix_ipc_trace_mode(void)
         if (cmdline_get_param("audio_unix_ipc_trace", value,
                               sizeof(value)) == 0 &&
             value[0] != '0' && value[0] != 'n' && value[0] != 'N') {
-            mode = (value[0] == '2' || value[0] == 'a' ||
-                    value[0] == 'A') ? 2 : 1;
+            if (value[0] == '3')
+                mode = 3;
+            else
+                mode = (value[0] == '2' || value[0] == 'a' ||
+                        value[0] == 'A') ? 2 : 1;
         }
         initialized = 1;
     }
@@ -237,6 +240,17 @@ static int audio_unix_ipc_trace_process(void)
         return 0;
 
     name = current->name;
+    if (mode >= 3) {
+        if (strncmp(name, "pipewire-pulse", 14) == 0 ||
+            strncmp(name, "chromium-pulse", 14) == 0)
+            return 1;
+        if (current->thread_group == NULL)
+            return 0;
+        path = current->thread_group->exec_path;
+        return strstr(path, "/pipewire-pulse") != NULL ||
+               strstr(path, "/chromium-pulse-stream-reducer") != NULL;
+    }
+
     if (strncmp(name, "aplay", 5) == 0 ||
         strncmp(name, "pactl", 5) == 0 ||
         strncmp(name, "pacat", 5) == 0 ||

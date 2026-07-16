@@ -270,7 +270,9 @@ uint64 sys_sigwait(void) {
 uint64 sys_rt_sigtimedwait(void) {
     uint64 set_addr, info_addr, timeout_addr;
     int sigsetsize;
-    sigset_t set, pending;
+    sigset_t set;
+    bool timed = false;
+    uint64 timeout_ms = 0;
 
     argaddr(0, &set_addr);
     argaddr(1, &info_addr);
@@ -301,19 +303,20 @@ uint64 sys_rt_sigtimedwait(void) {
             return -EINVAL;
         }
 
-        if (timeout.tv_sec == 0 && timeout.tv_nsec == 0) {
-            int ret = sigpending(current, &pending);
-            if (ret < 0) {
-                return ret;
-            }
-            if ((pending & set) == 0) {
-                return -EAGAIN;
-            }
+        timed = true;
+        if ((uint64)timeout.tv_sec >
+            ((uint64)-1 - 999999ULL) / 1000ULL) {
+            timeout_ms = (uint64)-1;
+        } else {
+            uint64 timeout_ns = (uint64)timeout.tv_nsec;
+            timeout_ms = (uint64)timeout.tv_sec * 1000ULL +
+                         (timeout_ns + 999999ULL) / 1000000ULL;
         }
     }
 
     int sig;
-    int ret = sigwait(&set, &sig);
+    int ret = timed ? sigtimedwait(&set, &sig, timeout_ms) :
+                      sigwait(&set, &sig);
     if (ret < 0) {
         return ret;
     }

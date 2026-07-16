@@ -421,7 +421,6 @@ struct virtio_gpu_stats {
     uint64 submits;
     uint64 fences;
     uint64 last_fence;
-    uint64 irq_completions;
     uint64 poll_fallbacks;
     uint64 async_posted;
     uint64 async_posted_submit_3d;
@@ -798,6 +797,8 @@ struct virtio_gpu {
     struct virtio_gpu_resource resources[VIRTIO_GPU_MAX_RESOURCES];
     struct virtio_gpu_resource *scanout_resource;
     struct virtio_gpu_stats stats;
+    /* IRQ-owned statistic: never take g->lock from interrupt context. */
+    uint64 irq_completions;
     uint32 scanout_width;
     uint32 scanout_height;
     uint32 num_capsets;
@@ -1123,9 +1124,7 @@ static void virtio_gpu_count_poll_fallback(struct virtio_gpu *g)
 
 static void virtio_gpu_count_irq_completion(struct virtio_gpu *g)
 {
-    spin_lock(&g->lock);
-    g->stats.irq_completions++;
-    spin_unlock(&g->lock);
+    __atomic_fetch_add(&g->irq_completions, 1, __ATOMIC_RELAXED);
 }
 
 static void virtio_gpu_count_command(struct virtio_gpu *g, uint32 type)
@@ -2441,6 +2440,17 @@ static void virtio_gpu_reap_wq_init(struct virtio_gpu *g)
                      (uint64)g);
 }
 
+static void virtio_gpu_queue_reap_from_irq(void)
+{
+    if (virtio_gpu_reap_wq != NULL &&
+        !__atomic_exchange_n(&virtio_gpu_reap_work_queued, 1,
+                             __ATOMIC_ACQ_REL)) {
+        if (!queue_work(virtio_gpu_reap_wq, &virtio_gpu_reap_work))
+            __atomic_store_n(&virtio_gpu_reap_work_queued, 0,
+                             __ATOMIC_RELEASE);
+    }
+}
+
 static void virtio_gpu_intr(int irq, void *data, device_t *dev)
 {
     struct virtio_gpu *g = (struct virtio_gpu *)data;
@@ -2458,7 +2468,18 @@ static void virtio_gpu_intr(int irq, void *data, device_t *dev)
     }
 
     q = &g->ctrlq;
-    spin_lock(&q->lock);
+    /*
+     * Process context posts and reaps with q->lock held and does not mask the
+     * device IRQ.  Spinning here can therefore deadlock against the thread
+     * this interrupt preempted.  A busy queue already has an active owner;
+     * defer observation to the existing single-consumer reap worker instead.
+     */
+    if (!spin_trylock(&q->lock)) {
+        virtio_gpu_queue_reap_from_irq();
+        return;
+    }
+    /* spin_trylock's acquire is conditional and needs explicit sparse state. */
+    __acquire_context(&q->lock);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (virtio_gpu_complete_pending_locked(g, q))
         virtio_gpu_count_irq_completion(g);
@@ -2467,13 +2488,8 @@ static void virtio_gpu_intr(int irq, void *data, device_t *dev)
     kick_reap = q->used->idx != q->used_idx;
     spin_unlock(&q->lock);
 
-    if (kick_reap && virtio_gpu_reap_wq != NULL &&
-        !__atomic_exchange_n(&virtio_gpu_reap_work_queued, 1,
-                             __ATOMIC_ACQ_REL)) {
-        if (!queue_work(virtio_gpu_reap_wq, &virtio_gpu_reap_work))
-            __atomic_store_n(&virtio_gpu_reap_work_queued, 0,
-                             __ATOMIC_RELEASE);
-    }
+    if (kick_reap)
+        virtio_gpu_queue_reap_from_irq();
 }
 
 /*

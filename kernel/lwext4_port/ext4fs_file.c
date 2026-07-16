@@ -379,17 +379,20 @@ retry:
     spin_unlock(&pc->spinlock);
 }
 
-/* P3 gate: opt-in single-page direct fill that releases the esb mutex
- * across the device wait (kernel cmdline ext4_read_page_direct=1,
- * default off). */
+/* Single-page direct fill releases the esb mutex across the device wait.
+ * It is the normal path; ext4_read_page_direct=0 retains a diagnostic
+ * escape hatch for matched comparisons. */
 static int ext4_read_page_direct_enabled(void)
 {
     static int cached = -1;
     char value[8];
 
     if (cached == -1) {
-        cached = cmdline_get_param("ext4_read_page_direct", value,
-                                   sizeof(value)) == 0 && value[0] != '0';
+        if (cmdline_get_param("ext4_read_page_direct", value,
+                              sizeof(value)) == 0)
+            cached = value[0] != '0';
+        else
+            cached = 1;
     }
     return cached;
 }

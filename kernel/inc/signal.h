@@ -106,6 +106,7 @@ int tkill(int tid, int signum);
 int killed(struct thread *);
 int sigsuspend(const sigset_t *mask);
 int sigwait(const sigset_t *set, int *sig);
+int sigtimedwait(const sigset_t *set, int *sig, uint64 timeout_ms);
 
 /* Linux convention — matches musl */
 #define SIG_BLOCK   0

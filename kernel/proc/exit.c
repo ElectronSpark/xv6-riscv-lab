@@ -83,6 +83,9 @@ void reparent(struct thread *p) {
         attach_child(initproc, child);
     }
 
+    if (zombie_found)
+        pid_child_event_notify();
+
     pid_wunlock();
     rcu_read_unlock();
 
@@ -368,6 +371,8 @@ void exit(int status) {
         reparent(p);
 
         // Remove from thread group and proc table atomically under pid_wlock.
+        struct thread *last_group_parent = NULL;
+        int last_group_exit_signal = 0;
         pid_wlock();
         pgroup_remove_thread(p);
         session_remove_thread(p->session, p);
@@ -375,6 +380,27 @@ void exit(int status) {
             last_in_group = thread_group_remove(p);
         }
         proctab_proc_remove(p);
+
+        /*
+         * Publish the delayed leader zombie and its final status before the
+         * child-event wake.  A waiter cannot rescan until pid_wunlock(), so
+         * every leader field it needs is complete when it becomes reapable.
+         */
+        if (last_in_group && tg != NULL && tg->group_leader != NULL) {
+            struct thread *leader = tg->group_leader;
+            leader->xstate = status;
+            if (tg->group_exit_signo > 0) {
+                leader->killed_signo = tg->group_exit_signo;
+                leader->killed_code = tg->group_exit_kill_code;
+            } else if (!thread_group_exiting(tg) && p->killed_signo > 0) {
+                leader->killed_signo = p->killed_signo;
+                leader->killed_code = p->killed_code;
+            }
+            pidfd_notify_exit(leader);
+            last_group_parent = leader->parent;
+            last_group_exit_signal = leader->signal.esignal;
+            pid_child_event_notify();
+        }
         pid_wunlock();
 
         if (last_in_group) {
@@ -403,26 +429,10 @@ void exit(int status) {
         // If we're the last thread and the leader is already zombie,
         // wake the parent so it can reap the leader.
         // Must happen before thread_group_put drops our reference.
-        if (last_in_group && tg != NULL && tg->group_leader != NULL) {
-            struct thread *leader = tg->group_leader;
-            leader->xstate = status;
-            if (tg->group_exit_signo > 0) {
-                leader->killed_signo = tg->group_exit_signo;
-                leader->killed_code = tg->group_exit_kill_code;
-            } else if (!thread_group_exiting(tg) && p->killed_signo > 0) {
-                leader->killed_signo = p->killed_signo;
-                leader->killed_code = p->killed_code;
-            }
-            pidfd_notify_exit(leader);
-            pid_rlock();
-            struct thread *parent = leader->parent;
-            pid_runlock();
-            if (parent != NULL) {
-                if (leader->signal.esignal > 0) {
-                    kill_thread(parent, leader->signal.esignal);
-                }
-                scheduler_wakeup_interruptible(parent);
-            }
+        if (last_group_parent != NULL) {
+            if (last_group_exit_signal > 0)
+                kill_thread(last_group_parent, last_group_exit_signal);
+            scheduler_wakeup_interruptible(last_group_parent);
         }
 
         // Self-cleanup: release resources that thread_destroy would
@@ -514,19 +524,18 @@ void exit(int status) {
     /* kqueue: notify EVFILT_PROC watchers of exit */
     kqueue_proc_notify(p, NOTE_EXIT, status);
 
+    pid_wlock();
     tcb_lock(p);
     p->xstate = status;
     __thread_state_set(p, THREAD_ZOMBIE);
     tcb_unlock(p);
-    if (last_in_group || tg == NULL)
+    if (last_in_group || tg == NULL) {
         pidfd_notify_exit(p);
-
-    // Read parent under pid_rlock to avoid racing with reparent() on
-    // another CPU which temporarily NULLs child->parent inside
-    // detach_child before attach_child sets it to initproc.
-    pid_rlock();
+        pid_child_event_notify();
+    }
     struct thread *parent = p->parent;
-    pid_runlock();
+    int parent_exit_signal = p->signal.esignal;
+    pid_wunlock();
 
     // For a group leader: only notify parent if this is the last thread
     // (or if there's no thread group). Non-last leaders stay zombie silently
@@ -548,8 +557,8 @@ void exit(int status) {
         // (parent already woken by signal_notify) or the primary wake
         // (when the exit signal is 0 or ignored).
         if (parent != NULL) {
-            if (p->signal.esignal > 0) {
-                kill_thread(parent, p->signal.esignal);
+            if (parent_exit_signal > 0) {
+                kill_thread(parent, parent_exit_signal);
             }
             // Wake all threads in the parent's thread group — any of them
             // may be blocked in wait()/waitpid() now that POSIX allows
@@ -575,11 +584,10 @@ void exit(int status) {
 // Wait for a child thread to exit and return its pid.
 // Return -1 if this thread has no children.
 //
-// Uses the Linux "set-state-before-check" pattern to avoid lost wakeups:
-// 1. Set state to INTERRUPTIBLE before scanning children
-// 2. Scan for zombies - if found, restore RUNNING and return
-// 3. If not found, yield (scheduler_yield will abort if we were woken)
-// 4. Loop back to step 1
+// Uses a child-state wait queue to make scan-to-sleep atomic with respect to
+// child exit.  The queue wait releases and reacquires pid_rlock around the
+// scheduler sleep, so a completed transition is durable even if its signal is
+// ignored or coalesced.
 //
 // POSIX semantics: any thread in a process can wait on children forked
 // by any other thread in the same process, so we scan the children lists
@@ -598,11 +606,6 @@ int wait(uint64 addr) {
     pid_rlock();
 
     for (;;) {
-        // Set INTERRUPTIBLE BEFORE scanning - this is the Linux pattern.
-        // Any child that calls wakeup_interruptible() while we're scanning
-        // will change our state back to RUNNING (or WAKENING if on_cpu).
-        __thread_state_set(p, THREAD_INTERRUPTIBLE);
-
         int matching_children = 0;
 
         // Scan children of ALL threads in our thread group.
@@ -658,11 +661,21 @@ int wait(uint64 addr) {
             goto ret;
         }
 
-        pid_runlock();
-        scheduler_yield();
-        pid_rlock();
-        // State will be set to INTERRUPTIBLE at the start of next loop
-        // iteration
+        int wait_ret = pid_wait_child_event();
+        if (wait_ret < 0) {
+            /*
+             * The generic thread queue reports -EINTR when a waiter is
+             * woken asynchronously rather than dequeued by its queue.  A
+             * scheduler wake is not, by itself, a userspace interruption:
+             * only return EINTR when a deliverable signal is actually
+             * pending.  Otherwise rescan the child condition under pid_lock.
+             */
+            if (wait_ret == -EINTR && !signal_pending(p))
+                continue;
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = wait_ret;
+            goto ret;
+        }
     }
 
 ret:
@@ -715,8 +728,6 @@ int waitpid(int target_pid, uint64 addr, int options) {
 
     for (;;) {
         bool has_match = false;
-
-        __thread_state_set(p, THREAD_INTERRUPTIBLE);
 
         // Scan children of ALL threads in our thread group.
         struct thread *thr, *thr_tmp;
@@ -795,9 +806,15 @@ int waitpid(int target_pid, uint64 addr, int options) {
             goto ret;
         }
 
-        pid_runlock();
-        scheduler_yield();
-        pid_rlock();
+        int wait_ret = pid_wait_child_event();
+        if (wait_ret < 0) {
+            /* See wait(): asynchronous non-signal wakes require a rescan. */
+            if (wait_ret == -EINTR && !signal_pending(p))
+                continue;
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = wait_ret;
+            goto ret;
+        }
     }
 
 ret:
@@ -869,8 +886,6 @@ uint64 sys_waitid(void) {
     pid_rlock();
     for (;;) {
         bool has_match = false;
-        __thread_state_set(p, THREAD_INTERRUPTIBLE);
-
         struct thread *thr, *thr_tmp;
         list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
             if ((opts & __WNOTHREAD) && thr != p)
@@ -959,9 +974,15 @@ uint64 sys_waitid(void) {
             return 0;
         }
 
-        pid_runlock();
-        scheduler_yield();
-        pid_rlock();
+        int wait_ret = pid_wait_child_event();
+        if (wait_ret < 0) {
+            /* See wait(): asynchronous non-signal wakes require a rescan. */
+            if (wait_ret == -EINTR && !signal_pending(p))
+                continue;
+            __thread_state_set(p, THREAD_RUNNING);
+            pid_runlock();
+            return (uint64)wait_ret;
+        }
     }
 
 copyout:

@@ -87,4 +87,16 @@ int ipi_send_all_but_self(int reason);
  */
 int ipi_send_all(int reason);
 
+/**
+ * Service pending local TLB-shootdown work without enabling interrupts.
+ *
+ * Spin-lock and synchronous-shootdown wait paths use this to avoid a cycle in
+ * which a CPU waits for our TLB acknowledgement while we spin with IRQs off on
+ * a lock that CPU owns.  Implementations must consume only TLB reasons; all
+ * other pending IPI work remains queued for the normal interrupt handler.
+ *
+ * @return nonzero when at least one TLB reason was serviced.
+ */
+int ipi_poll_tlb(void);
+
 #endif /* __KERNEL_IPI_H */

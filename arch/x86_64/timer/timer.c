@@ -967,16 +967,21 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     }
     bool inserted = false;
     struct timer_node *pos, *tmp;
-    list_foreach_node_safe(&timer->list_head, pos, tmp, list_entry) {
-        if (__timer_node_before(node, pos)) {
-            list_entry_insert(LIST_PREV_ENTRY(&pos->list_entry),
-                              &node->list_entry);
+    /*
+     * New scheduler timers almost always expire at or after the existing
+     * tail (now + 1/20 ms for poll/epoll).  Search backward so that common
+     * insertion is O(1), while preserving the proven ordered-list storage
+     * and its (expires, address) tie-break semantics.
+     */
+    list_foreach_node_inv_safe(&timer->list_head, pos, tmp, list_entry) {
+        if (__timer_node_before(pos, node)) {
+            list_node_insert(pos, node, list_entry);
             inserted = true;
             break;
         }
     }
     if (!inserted)
-        list_node_push(&timer->list_head, node, list_entry);
+        list_node_push_back(&timer->list_head, node, list_entry);
     node->timer = timer;
     __timer_update_next_tick(timer);
     timer_root_unlock(timer);
@@ -1045,8 +1050,13 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         return;
     }
 
-    struct timer_node *node, *next;
-    list_foreach_node_safe(&timer->list_head, node, next, list_entry) {
+    for (;;) {
+        struct timer_node *node = LIST_FIRST_NODE(
+            &timer->list_head, struct timer_node, list_entry);
+        void (*callback)(struct timer_node *);
+
+        if (node == NULL)
+            break;
         if (node->expires > ticks)
             break;
         if (node->callback == NULL) {
@@ -1054,11 +1064,25 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             __timer_remove_unlocked(node->timer, node);
             continue;
         }
+        callback = node->callback;
         node->retry++;
         if (node->retry >= node->retry_limit) {
             __timer_remove_unlocked(node->timer, node);
+
+            /*
+             * Scheduler-timer callbacks wake threads and may take RCU and
+             * run-queue locks.  Keeping the global timer lock across those
+             * operations serializes every CPU trying to arm a short poll
+             * timeout.  One-shot nodes are detached before their callback,
+             * so no timer-list lifetime is exposed while the lock is open.
+             */
+            timer_root_unlock(timer);
+            callback(node);
+            timer_root_lock(timer);
+            continue;
         }
-        node->callback(node);
+        /* Preserve the legacy retry-node locking contract. */
+        callback(node);
     }
 
     timer_root_unlock(timer);

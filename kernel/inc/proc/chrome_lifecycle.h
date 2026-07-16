@@ -87,6 +87,15 @@ static inline int chrome_lifecycle_audio_service_match(struct thread *p)
     return (roles & TG_CHROME_TRACE_AUDIO_SERVICE) != 0;
 }
 
+static inline int chrome_lifecycle_gpu_process_match(struct thread *p)
+{
+    if (p == NULL || p->thread_group == NULL)
+        return 0;
+    uint32 roles = __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                                   __ATOMIC_RELAXED);
+    return (roles & TG_CHROME_TRACE_GPU_PROCESS) != 0;
+}
+
 static inline uint32 chrome_lifecycle_roles(struct thread *p)
 {
     if (p == NULL || p->thread_group == NULL)

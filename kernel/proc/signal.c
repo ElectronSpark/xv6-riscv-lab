@@ -1991,7 +1991,71 @@ int sigsuspend(const sigset_t *mask) {
  * Returns 0 on success, or negative errno on failure.
  * This is POSIX/pthread-compatible behavior.
  */
-int sigwait(const sigset_t *set, int *sig) {
+static int sigwait_dequeue_locked(struct thread *p, const sigset_t *set,
+                                  int *sig)
+{
+    sigset_t pending_wanted = p->signal.sig_pending_mask & *set;
+    struct thread_group *tg = p->thread_group;
+
+    if (tg != NULL)
+        pending_wanted |= tg->shared_pending.sig_pending_mask & *set;
+    if (pending_wanted == 0)
+        return -EAGAIN;
+
+    for (int signo = 1; signo <= NSIG; signo++) {
+        if (!sigismember(&pending_wanted, signo))
+            continue;
+
+        if (sigismember(&p->signal.sig_pending_mask, signo)) {
+            sigpending_t *sq = &p->signal.sig_pending[signo - 1];
+            if (!LIST_IS_EMPTY(&sq->queue)) {
+                ksiginfo_t *ksi =
+                    LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
+                if (ksi != NULL) {
+                    list_entry_detach(&ksi->list_entry);
+                    ksiginfo_free(ksi);
+                }
+            }
+            if (LIST_IS_EMPTY(&sq->queue))
+                sigdelset(&p->signal.sig_pending_mask, signo);
+        } else if (tg != NULL &&
+                   sigismember(&tg->shared_pending.sig_pending_mask, signo)) {
+            ksiginfo_t *ksi = tg_dequeue_signal(tg, signo);
+            if (ksi != NULL)
+                ksiginfo_free(ksi);
+        }
+
+        *sig = signo;
+        recalc_sigpending_tsk(p);
+        return 0;
+    }
+
+    return -EAGAIN;
+}
+
+static void sigwait_handle_stop(struct thread *p)
+{
+    if (!signal_test_clear_stopped(p))
+        return;
+
+    tcb_lock(p);
+    __thread_state_set(p, THREAD_STOPPED);
+    tcb_unlock(p);
+
+    pid_rlock();
+    struct thread *parent = p->parent;
+    pid_runlock();
+    if (parent != NULL) {
+        scheduler_wakeup_interruptible(parent);
+        kill_proc(parent, SIGCHLD);
+    }
+
+    scheduler_yield();
+}
+
+static int sigwait_common(const sigset_t *set, int *sig, bool timed,
+                          uint64 timeout_ms)
+{
     struct thread *p = current;
     if (!p || !set || !sig) {
         return -EINVAL;
@@ -2000,53 +2064,25 @@ int sigwait(const sigset_t *set, int *sig) {
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigwait: sigacts is NULL");
 
+    uint64 deadline_ms = 0;
+    if (timed) {
+        uint64 now_ms = sched_timer_now_ms();
+        deadline_ms = timeout_ms > (uint64)-1 - now_ms ?
+            (uint64)-1 : now_ms + timeout_ms;
+    }
+
     while (1) {
         sigacts_lock(sa);
 
-        // Check for pending signals in the wait set (per-thread)
-        sigset_t pending_wanted = p->signal.sig_pending_mask & *set;
-        // Also check thread group shared pending
-        struct thread_group *tg = p->thread_group;
-        if (tg != NULL) {
-            pending_wanted |= tg->shared_pending.sig_pending_mask & *set;
+        if (sigwait_dequeue_locked(p, set, sig) == 0) {
+            sigacts_unlock(sa);
+            return 0;
         }
 
-        if (pending_wanted != 0) {
-            // Find the first pending signal in the set
-            for (int signo = 1; signo <= NSIG; signo++) {
-                if (!sigismember(&pending_wanted, signo)) {
-                    continue;
-                }
-
-                // Try per-thread pending first
-                if (sigismember(&p->signal.sig_pending_mask, signo)) {
-                    sigpending_t *sq = &p->signal.sig_pending[signo - 1];
-                    if (!LIST_IS_EMPTY(&sq->queue)) {
-                        ksiginfo_t *ksi =
-                            LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
-                        if (ksi) {
-                            list_entry_detach(&ksi->list_entry);
-                            ksiginfo_free(ksi);
-                        }
-                    }
-                    if (LIST_IS_EMPTY(&sq->queue)) {
-                        sigdelset(&p->signal.sig_pending_mask, signo);
-                    }
-                } else if (tg != NULL &&
-                           sigismember(&tg->shared_pending.sig_pending_mask,
-                                       signo)) {
-                    // Dequeue from shared pending
-                    ksiginfo_t *ksi = tg_dequeue_signal(tg, signo);
-                    if (ksi) {
-                        ksiginfo_free(ksi);
-                    }
-                }
-
-                *sig = signo;
-                recalc_sigpending_tsk(p);
-                sigacts_unlock(sa);
-                return 0;
-            }
+        uint64 now_ms = timed ? sched_timer_now_ms() : 0;
+        if (timed && now_ms >= deadline_ms) {
+            sigacts_unlock(sa);
+            return -EAGAIN;
         }
 
         // No signal yet — temporarily unblock the waited signals so that
@@ -2058,22 +2094,55 @@ int sigwait(const sigset_t *set, int *sig) {
         sigdelset(&p->signal.sig_mask, SIGKILL);
         sigdelset(&p->signal.sig_mask, SIGSTOP);
         recalc_sigpending_tsk(p);
+
+        /*
+         * Publish the sleep state and arm the deadline while sigacts remains
+         * locked.  A sender must take the same lock to enqueue a signal, so
+         * after it observes the temporary mask it is guaranteed to observe a
+         * sleep state that signal_notify() can wake.  This closes the old
+         * unlock-before-sleep lost-wakeup window as well as implementing the
+         * rt_sigtimedwait deadline.
+         */
+        struct timer_node tn = {0};
+        bool timer_armed = false;
+        bool timer_failed = false;
+        int intr = intr_off_save();
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+        if (timed) {
+            uint64 remaining_ms = deadline_ms - now_ms;
+            if (remaining_ms == 0)
+                remaining_ms = 1;
+            if (sched_timer_set(&tn, remaining_ms) == 0)
+                timer_armed = true;
+            else {
+                __thread_state_set(p, THREAD_RUNNING);
+                timer_failed = true;
+            }
+        }
         sigacts_unlock(sa);
 
-        // Sleep until one arrives
-        __thread_state_set(p, THREAD_INTERRUPTIBLE);
-        scheduler_yield();
+        if (!timer_failed)
+            scheduler_yield();
+        if (timer_armed)
+            sched_timer_done(&tn);
+        intr_restore(intr);
 
         // Restore the original mask before re-checking
         sigacts_lock(sa);
         p->signal.sig_mask = saved_mask;
         recalc_sigpending_tsk(p);
+        sigset_t other_pending =
+            p->signal.sig_pending_mask & ~p->signal.sig_mask & ~(*set);
+        struct thread_group *tg = p->thread_group;
+        if (tg != NULL) {
+            other_pending |= tg->shared_pending.sig_pending_mask &
+                             ~p->signal.sig_mask & ~(*set);
+        }
         sigacts_unlock(sa);
 
         // Check if we were killed
-        if (killed(p)) {
+        if (killed(p))
             return -EINTR;
-        }
 
         /*
          * A stop signal may have woken us even when it is not part of the
@@ -2081,20 +2150,21 @@ int sigwait(const sigset_t *set, int *sig) {
          * left pending; Linux enters the stopped state before the syscall can
          * continue.
          */
-        if (signal_test_clear_stopped(p)) {
-            tcb_lock(p);
-            __thread_state_set(p, THREAD_STOPPED);
-            tcb_unlock(p);
+        sigwait_handle_stop(p);
 
-            pid_rlock();
-            struct thread *parent = p->parent;
-            pid_runlock();
-            if (parent != NULL) {
-                scheduler_wakeup_interruptible(parent);
-                kill_proc(parent, SIGCHLD);
-            }
-
-            scheduler_yield();
-        }
+        if (timed && other_pending != 0)
+            return -EINTR;
+        if (timed && timer_failed)
+            return -EAGAIN;
     }
+}
+
+int sigwait(const sigset_t *set, int *sig)
+{
+    return sigwait_common(set, sig, false, 0);
+}
+
+int sigtimedwait(const sigset_t *set, int *sig, uint64 timeout_ms)
+{
+    return sigwait_common(set, sig, true, timeout_ms);
 }

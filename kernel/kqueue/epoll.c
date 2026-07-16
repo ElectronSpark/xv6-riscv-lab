@@ -112,6 +112,7 @@ _Static_assert(sizeof(struct k_epoll_event) == 16,
 
 /* Max events per epoll_pwait / epoll_ctl */
 #define EPOLL_MAX_EVENTS 256
+#define EPOLL_STACK_OUT_EVENTS 64
 #define EPOLL_TIMEOUT_MAX_MS 0x7fffffff
 
 #define NSEC_PER_SEC  1000000000ULL
@@ -597,14 +598,16 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
      */
     int kev_max = EPOLL_MAX_EVENTS;
 
-    size_t kev_bytes = (size_t)kev_max * sizeof(struct kevent);
-    struct kevent *kevents = kvmalloc(kev_bytes);
-    if (kevents == NULL) {
-        if (use_mask)
-            sigmask_swap(&oldmask, NULL);
-        vfs_fput(fp);
-        return (uint64)-ENOMEM;
-    }
+    /*
+     * epoll_wait is a hot syscall: Chromium frequently polls several epoll
+     * fds with timeout=0.  kvmalloc() maps at least two pages for this 8 KiB
+     * batch, so the old implementation entered the global kernel-VM and buddy
+     * locks on every poll.  Under browser startup all vCPUs could pile up in
+     * those allocator locks.  Kernel threads have 32 KiB stacks; keep this
+     * fixed 8 KiB scratch batch on the calling thread's stack instead.
+     */
+    struct kevent kevents_storage[EPOLL_MAX_EVENTS];
+    struct kevent *kevents = kevents_storage;
 
     /*
      * WebKit/GLib commonly uses epoll as an edge-style async wake source.
@@ -639,7 +642,6 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
     }
 
     if (nkev < 0) {
-        kvfree(kevents);
         if (use_mask)
             sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
@@ -655,19 +657,23 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
      * network process.
      */
     int out_max = maxevents < kev_max ? maxevents : kev_max;
-    struct k_epoll_event *out_events =
-        kvmalloc((size_t)out_max * sizeof(struct k_epoll_event));
+    struct k_epoll_event out_events_storage[EPOLL_STACK_OUT_EVENTS];
+    uint64 out_ident_storage[EPOLL_STACK_OUT_EVENTS];
+    int out_heap = out_max > EPOLL_STACK_OUT_EVENTS;
+    struct k_epoll_event *out_events = out_heap ?
+        kvmalloc((size_t)out_max * sizeof(struct k_epoll_event)) :
+        out_events_storage;
     if (out_events == NULL) {
-        kvfree(kevents);
         if (use_mask)
             sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
         return (uint64)-ENOMEM;
     }
-    uint64 *out_ident = kvmalloc((size_t)out_max * sizeof(uint64));
+    uint64 *out_ident = out_heap ?
+        kvmalloc((size_t)out_max * sizeof(uint64)) : out_ident_storage;
     if (out_ident == NULL) {
-        kvfree(out_events);
-        kvfree(kevents);
+        if (out_heap)
+            kvfree(out_events);
         if (use_mask)
             sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
@@ -728,9 +734,10 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
         uint64 dest = uevents + (uint64)i * sizeof(struct k_epoll_event);
         if (vm_copyout(current->vm, dest, &out_events[i],
                        sizeof(out_events[i])) < 0) {
-            kvfree(out_ident);
-            kvfree(out_events);
-            kvfree(kevents);
+            if (out_heap) {
+                kvfree(out_ident);
+                kvfree(out_events);
+            }
             if (use_mask)
                 sigmask_swap(&oldmask, NULL);
             vfs_fput(fp);
@@ -780,9 +787,10 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
         }
     }
 
-    kvfree(out_ident);
-    kvfree(out_events);
-    kvfree(kevents);
+    if (out_heap) {
+        kvfree(out_ident);
+        kvfree(out_events);
+    }
     if (use_mask)
         sigmask_swap(&oldmask, NULL);
     vfs_fput(fp);

@@ -1180,6 +1180,7 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     struct virtio_gpu_stats vg_stats;
     uint64 async_pending;
     uint64 async_depth;
+    uint64 irq_completions;
     uint64 hot_shape_owners = 0;
     uint64 hot_shape_submit_calls = 0;
     uint64 hot_shape_make_room_calls = 0;
@@ -1240,6 +1241,8 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
         hot_shape_mixed += c->shape_mixed;
     }
     spin_unlock(&g->lock);
+    irq_completions =
+        __atomic_load_n(&g->irq_completions, __ATOMIC_RELAXED);
 
     stats->virtio_commands = vg_stats.commands;
     stats->virtio_failures = vg_stats.failures;
@@ -1259,7 +1262,7 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     stats->virtio_submits = vg_stats.submits;
     stats->virtio_fences = vg_stats.fences;
     stats->virtio_last_fence = vg_stats.last_fence;
-    stats->virtio_irq_completions = vg_stats.irq_completions;
+    stats->virtio_irq_completions = irq_completions;
     stats->virtio_poll_fallbacks = vg_stats.poll_fallbacks;
     stats->virtio_async_posted = vg_stats.async_posted;
     stats->virtio_async_posted_submit_3d = vg_stats.async_posted_submit_3d;
