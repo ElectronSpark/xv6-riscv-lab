@@ -125,20 +125,52 @@ unsafe extern "C" {
     // original either — reimplemented locally below, same precedent as
     // `vfs/inode.rs`'s `ln_init`/`ln_detach`). Nothing extern here.
 
-    // mm/slab.rs.
-    safe fn slab_cache_init(
-        cache: *mut slab_cache_t,
-        name: *mut c_char,
-        obj_size: usize,
-        flags: u64,
-    ) -> c_int;
-    safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    safe fn slab_free(obj: *mut c_void);
-    safe fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int;
+}
 
-    // mm/kalloc.rs.
-    safe fn kalloc() -> *mut c_void;
-    safe fn kfree(pa: *mut c_void);
+// P3-D3a: the slab entry points are genuinely `unsafe fn` in
+// `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
+// file's original extern declarations asserted `safe fn` (usual FFI
+// facade) and typed the cache pointer as the bindgen `slab_cache_t`
+// rather than `crate::mm::slab::SlabCache` (same layout — see
+// `cffi::raw`'s identical note). Thin cast + safe-facade wrappers
+// preserve both.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
+    unsafe { crate::mm::slab_cache_shrink(cache as *mut crate::mm::slab::SlabCache, nums) }
+}
+
+// `kalloc`/`kfree` are genuinely `unsafe fn` in `crate::mm::kalloc`; thin
+// safe wrappers preserve the `safe fn` facade the old redeclarations
+// asserted.
+/// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
+#[inline]
+fn kalloc() -> *mut c_void {
+    unsafe { crate::mm::kalloc() }
+}
+/// SAFETY: `pa` must originate from `kalloc` above.
+#[inline]
+fn kfree(pa: *mut c_void) {
+    unsafe { crate::mm::kfree(pa) };
 }
 // P3-1D mesh sweep: dev/cdev.rs, dev/blkdev.rs, dev/dev.rs, net.rs, and
 // sysnet.rs are all in scope for this wave; these become plain crate-path

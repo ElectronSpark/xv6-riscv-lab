@@ -49,11 +49,6 @@ use crate::bindings::{
 unsafe extern "C" {
     // printf.rs -- C-variadic.
 
-    // mm/slab.rs.
-    safe fn slab_cache_init(cache: *mut slab_cache_t, name: *const c_char, obj_size: usize, flags: u64) -> c_int;
-    safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    safe fn slab_free(obj: *mut c_void);
-
     // lock module (100% Rust).
     safe fn spin_lock(l: *mut spinlock_t);
     safe fn spin_unlock(l: *mut spinlock_t);
@@ -69,6 +64,38 @@ unsafe extern "C" {
     // kernel/bio.c (classic xv6 buffer cache, unchanged C).
     safe fn bread(dev: u32, blockno: u32) -> *mut buf;
     safe fn brelse(b: *mut buf);
+}
+
+// P3-D3a: the slab entry points are genuinely `unsafe fn` in
+// `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
+// file's original extern declarations asserted `safe fn` (usual FFI
+// facade) and typed the cache pointer as the bindgen `slab_cache_t`
+// rather than `crate::mm::slab::SlabCache` (same layout) and `name` as
+// `*const c_char` rather than the real `*mut c_char` (the callee only
+// reads it). Thin cast + safe-facade wrappers preserve both.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *const c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(
+            cache as *mut crate::mm::slab::SlabCache,
+            name as *mut c_char,
+            obj_size,
+            flags,
+        )
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 
 #[inline(always)]

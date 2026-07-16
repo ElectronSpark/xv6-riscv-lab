@@ -92,17 +92,8 @@ unsafe extern "C" {
     pub safe fn argint64(n: c_int, p: *mut i64);
     pub safe fn argaddr(n: c_int, p: *mut u64);
 
-    // Userspace copies (mm/vm.h).
-    pub safe fn either_copyin(dst: *mut c_void, user_src: c_int,
-                              src: u64, len: u64) -> c_int;
-    pub safe fn either_copyout(user_dst: c_int, dst: u64,
-                               src: *const c_void, len: u64) -> c_int;
-    pub safe fn vm_copyin(vm: *mut bindings::vm, dst: *mut c_void,
-                          uaddr: u64, len: u64) -> c_int;
-
     // Process / thread primitives.
     pub safe fn exit(status: c_int) -> !;
-    pub safe fn vm_growheap(vm: *mut bindings::vm, n: i64) -> c_int;
 
     // Time.
     pub safe fn get_jiffs() -> u64;
@@ -113,6 +104,22 @@ unsafe extern "C" {
 
     // Extern variable: KERNBASE physical address.
     static __physical_memory_start: u64;
+}
+
+// P3-D3a: `either_copyin`/`vm_copyin`/`vm_growheap` (mm/vm.rs) are
+// ordinary (safe) Rust fns now that their `#[no_mangle]` exports are
+// gone; reached as crate-path items instead of the `extern "C"`
+// redeclarations that used to sit in the block above (identical
+// signatures).
+use crate::mm::{either_copyin, vm_copyin, vm_growheap};
+
+// Divergence the old `either_copyout` redeclaration papered over: it
+// typed `src` as `*const c_void`, while the real fn takes `*mut c_void`
+// (the callee only reads through it) — the thin cast adapter preserves
+// this file's read-only call-site types.
+#[inline]
+fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_int {
+    crate::mm::either_copyout(user_dst, dst, src as *mut c_void, len)
 }
 
 // P3-1B mesh sweep: the callees below are demoted (no more `#[no_mangle]`)

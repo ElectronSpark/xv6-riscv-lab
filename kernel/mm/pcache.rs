@@ -1305,8 +1305,7 @@ fn xv6_page_pcache_set_pcache(page: *mut Page, p: *mut Pcache) {
 /// fixed here as a minimal, behavior-preserving re-export so the kernel
 /// links. `vm.rs`/`pcache.rs` are otherwise out of scope for the WP3
 /// mm/page/slab/vm_pgtab refactor this file is part of.
-#[no_mangle]
-pub extern "C" fn xv6_page_pcache_get_node(page: *mut Page) -> *mut PcacheNode {
+pub(crate) fn xv6_page_pcache_get_node(page: *mut Page) -> *mut PcacheNode {
     unsafe { (*page).__bindgen_anon_2.pcache.pcache_node }
 }
 fn xv6_page_pcache_set_node(page: *mut Page, n: *mut PcacheNode) {
@@ -2363,8 +2362,7 @@ fn pcache_evict_lru(p: *mut Pcache) -> *mut Page {
 // Public API
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn pcache_global_init() {
+pub(crate) fn pcache_global_init() {
     xv6_pcache_globals_init();
     let ret = xv6_pcache_node_slab_init();
     assert_msg(ret == 0, b"Failed to initialize pcache node slab\0");
@@ -2377,8 +2375,7 @@ pub extern "C" fn pcache_global_init() {
     create_flusher_thread();
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_init(p: *mut Pcache)-> c_int  {
+pub(crate) fn pcache_init(p: *mut Pcache)-> c_int  {
     // C-ABI boundary: convert `Result<(), Errno>` to a negative-errno
     // `c_int` exactly once, here.
     if let Err(e) = pcache_init_validate(p) {
@@ -2416,8 +2413,7 @@ pub extern "C" fn pcache_init(p: *mut Pcache)-> c_int  {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_teardown(p: *mut Pcache) {
+pub(crate) fn pcache_teardown(p: *mut Pcache) {
     if p.is_null() { return; }
 
     // 1. unregister
@@ -2489,8 +2485,7 @@ pub extern "C" fn pcache_teardown(p: *mut Pcache) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_get_page(p: *mut Pcache, blkno: u64)-> *mut Page  {
+pub(crate) fn pcache_get_page(p: *mut Pcache, blkno: u64)-> *mut Page  {
     if p.is_null() || !pcache_is_active(p) { return ptr::null_mut(); }
     let base_blkno = xv6_pcache_align_blkno(blkno);
     let blk_count = xv6_pcache_blk_count(p);
@@ -2589,8 +2584,7 @@ pub extern "C" fn pcache_get_page(p: *mut Pcache, blkno: u64)-> *mut Page  {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_put_page(p: *mut Pcache, page: *mut Page) {
+pub(crate) fn pcache_put_page(p: *mut Pcache, page: *mut Page) {
     if p.is_null() || page.is_null() { return; }
 
     let _gp = lock_pcache_local(p);
@@ -2644,8 +2638,7 @@ pub extern "C" fn pcache_put_page(p: *mut Pcache, page: *mut Page) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page)-> c_int  {
+pub(crate) fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page)-> c_int  {
     if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
     let mut ret: c_int = 0;
 
@@ -2728,8 +2721,7 @@ pub(crate) fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64)-> c_int  {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_discard_blk(p: *mut Pcache, blkno: u64)-> c_int  {
+pub(crate) fn pcache_discard_blk(p: *mut Pcache, blkno: u64)-> c_int  {
     if p.is_null() || !pcache_is_active(p) { return -(EINVAL as c_int); }
     let base_blkno = xv6_pcache_align_blkno(blkno);
 
@@ -2767,8 +2759,7 @@ pub extern "C" fn pcache_discard_blk(p: *mut Pcache, blkno: u64)-> c_int  {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_flush(p: *mut Pcache)-> c_int  {
+pub(crate) fn pcache_flush(p: *mut Pcache)-> c_int  {
     if p.is_null() { return -(EINVAL as c_int); }
     let _gp = lock_pcache_local(p);
     if !pcache_is_active(p) {
@@ -2792,8 +2783,7 @@ pub(crate) fn pcache_sync()-> c_int  {
     pcache_wait_flusher()
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_read_page(p: *mut Pcache, page: *mut Page)-> c_int  {
+pub(crate) fn pcache_read_page(p: *mut Pcache, page: *mut Page)-> c_int  {
     if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
 
     'retry_locked: loop {
@@ -2915,8 +2905,7 @@ pub(crate) fn pcache_shrink_caches() {
     slab_cache_shrink(node_slab(), 0x7fff_ffff);
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sync()-> u64  {
+pub(crate) extern "C" fn sys_sync()-> u64  {
     let ret = pcache_sync();
     if ret != 0 {
         xv6_pcache_printf_sys_sync_failed(ret);
@@ -2924,8 +2913,7 @@ pub extern "C" fn sys_sync()-> u64  {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_dumppcache()-> u64  {
+pub(crate) extern "C" fn sys_dumppcache()-> u64  {
     dump_all_pcache_stats();
     0
 }

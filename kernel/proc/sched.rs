@@ -80,7 +80,18 @@ unsafe extern "C" {
     fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
     fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
 
-    safe fn page_free(ptr: *mut c_void, order: c_int);
+}
+
+// P3-D3a: `page_free` is genuinely `unsafe fn` in `crate::mm::page` now
+// that its `#[no_mangle]` export is gone; this file's original extern
+// declaration asserted `safe fn` (usual FFI facade) and typed `order` as
+// `c_int` rather than the real `u64` (non-negative small value under the
+// old C ABI). The thin wrapper preserves both.
+/// SAFETY: `ptr` must originate from the paired `page_alloc`
+/// (see `crate::mm::page::page_free`'s contract).
+#[inline]
+fn page_free(ptr: *mut c_void, order: c_int) {
+    unsafe { crate::mm::page_free(ptr, order as u64) };
 }
 
 // ---------------- macros / helpers --------------------------------------

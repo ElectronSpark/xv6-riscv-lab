@@ -5,8 +5,10 @@
 //! to the `vm_*` functions in `kernel/mm/vm.c`.
 //!
 //! All algorithmic logic lives in safe Rust; only the FFI boundary
-//! (`mod ffi`), the per-CPU `tp` register read, and the `#[no_mangle]
-//! extern "C"` syscall entry points are `unsafe`.
+//! (`mod ffi`) and the per-CPU `tp` register read are `unsafe`. The
+//! `sys_*` entry points are `pub(crate) extern "C"` (P3-D3a): no
+//! `#[no_mangle]` C-symbol surface, but `irq/syscall.rs`'s dispatch
+//! table stores them as `extern "C" fn() -> u64` pointer values.
 
 
 use core::ffi::{c_int, c_uchar, c_void};
@@ -178,28 +180,24 @@ fn arg_int(n: i32) -> i32 {
 // Public C ABI — thin wrappers.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn sys_mmap()-> u64 {
+pub(crate) extern "C" fn sys_mmap()-> u64 {
     Vm::current().mmap(arg_addr(0), arg_int(1) as usize,
                        arg_int(2), arg_int(3), arg_int(4), arg_addr(5))
 }
 
-#[no_mangle]
-pub extern "C" fn sys_munmap()-> u64 {
+pub(crate) extern "C" fn sys_munmap()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().munmap(arg_addr(0), length as usize) as i64 as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_mprotect()-> u64 {
+pub(crate) extern "C" fn sys_mprotect()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().mprotect(arg_addr(0), length as usize, arg_int(2)) as i64 as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_mremap()-> u64 {
+pub(crate) extern "C" fn sys_mremap()-> u64 {
     let old_size = arg_int(1);
     let new_size = arg_int(2);
     if old_size < 0 || new_size <= 0 { return neg_errno(EINVAL); }
@@ -207,15 +205,13 @@ pub extern "C" fn sys_mremap()-> u64 {
                          new_size as usize, arg_int(3), arg_addr(4))
 }
 
-#[no_mangle]
-pub extern "C" fn sys_msync()-> u64 {
+pub(crate) extern "C" fn sys_msync()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().msync(arg_addr(0), length as usize, arg_int(2)) as i64 as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_mincore()-> u64 {
+pub(crate) extern "C" fn sys_mincore()-> u64 {
     let addr = arg_addr(0);
     let length = arg_int(1);
     let vec_uaddr = arg_addr(2);
@@ -241,8 +237,7 @@ pub extern "C" fn sys_mincore()-> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_madvise()-> u64 {
+pub(crate) extern "C" fn sys_madvise()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().madvise(arg_addr(0), length as usize, arg_int(2)) as i64 as u64

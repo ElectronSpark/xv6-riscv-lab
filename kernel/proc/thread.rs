@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use crate::bindings::{
     context, fs_struct, list_node_t, hlist_entry_t, page_t, pgroup, rcu_head_t,
     rq, sched_attr, sched_entity, session, sigacts as sigacts_t, spinlock_t, thread,
-    thread_group, thread_state, utrapframe, vfs_fdtable, vfs_inode, vfs_inode_ref, vm,
+    thread_group, thread_state, utrapframe, vfs_fdtable, vfs_inode, vfs_inode_ref,
 };
 use crate::lock::rcu::rcu_check_callbacks;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
@@ -82,9 +82,6 @@ fn __proctab_set_initproc(p: *mut thread) {
     crate::proc::pid::__proctab_set_initproc(p as *mut c_void as *mut crate::proc::pid::Thread);
 }
 
-// vm_t typedef
-type vm_t = vm;
-
 // ---------------- constants ----------------------------------------------
 const PAGE_SHIFT: u32 = 12;
 const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
@@ -136,12 +133,6 @@ unsafe extern "C" {
     fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
     fn safestrcpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
 
-    // memory
-    fn page_alloc(order: u64, flags: u64) -> *mut c_void;
-    safe fn page_free(ptr: *mut c_void, order: c_int);
-    fn vm_init() -> *mut vm_t;
-    fn vm_put(vm: *mut vm_t);
-
     // NOTE: `vfs_struct_lock`/`vfs_struct_unlock` (kernel/inc/vfs/fs.h) are
     // `static inline` wrappers around `spin_lock`/`spin_unlock` — there is
     // no linker symbol to bind to, so `install_user_root_finish` below
@@ -161,6 +152,25 @@ unsafe extern "C" {
 
     // RCU
     fn call_rcu(head: *mut rcu_head_t, func: Option<unsafe extern "C" fn(*mut c_void)>, data: *mut c_void);
+}
+
+// P3-D3a: `vm_init`/`vm_put` (mm/vm.rs, ordinary safe Rust fns now that
+// their `#[no_mangle]` exports are gone) and `page_alloc` (genuinely
+// `unsafe fn` in `crate::mm::page`; its call site below already sits in
+// an `unsafe` context) are reached as crate-path items instead of the
+// `extern "C"` redeclarations that used to sit in the block above
+// (the old decls' `vm_t` was this file's alias for `crate::bindings::vm`).
+use crate::mm::{page_alloc, vm_init, vm_put};
+
+// `page_free` is genuinely `unsafe fn` in `crate::mm::page`; this file's
+// original extern declaration asserted `safe fn` (usual FFI facade) and
+// typed `order` as `c_int` rather than the real `u64` (the C ABI only
+// ever read a non-negative small value). The thin wrapper preserves both.
+/// SAFETY: `ptr` must originate from `page_alloc` (see
+/// `crate::mm::page::page_free`'s contract).
+#[inline]
+fn page_free(ptr: *mut c_void, order: c_int) {
+    unsafe { crate::mm::page_free(ptr, order as u64) };
 }
 
 // P3-1C mesh sweep: tty/session.rs and vfs/{fs,inode,fdtable}.rs are in

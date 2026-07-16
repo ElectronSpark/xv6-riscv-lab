@@ -109,11 +109,26 @@ unsafe extern "C" {
     // file-private is both sufficient and correct.
     safe fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> *mut Thread;
     safe fn thread_destroy(t: *mut Thread);
-    pub safe fn vm_dup(vm: *mut Vm) -> *mut Vm;
-    pub safe fn vm_copy(vm: *mut Vm) -> *mut Vm;
     safe fn attach_child(parent: *mut Thread, child: *mut Thread);
 
     pub safe fn rcu_check_callbacks();
+}
+
+// P3-D3a: `vm_dup`/`vm_copy` (mm/vm.rs) are ordinary (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone. This file's `Vm` is an
+// opaque `c_void` stand-in for the real `crate::bindings::vm`
+// (layout-identical pointer, same cast-adapter precedent as exit.rs's
+// `sigacts_put`). Divergence the old redeclaration papered over: it
+// claimed `vm_dup` returns `*mut Vm`, but the real fn returns `()` (the
+// C ABI let the caller read a stale return register) — the only call
+// site discards the "return value", so the adapter returns `()`.
+#[inline]
+fn vm_dup(vm: *mut Vm) {
+    crate::mm::vm_dup(vm as *mut crate::bindings::vm)
+}
+#[inline]
+fn vm_copy(vm: *mut Vm) -> *mut Vm {
+    crate::mm::vm_copy(vm as *mut crate::bindings::vm) as *mut Vm
 }
 
 // P3-D2b: the signal/thread-group/pgroup entry points (proc/{signal,

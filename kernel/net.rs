@@ -55,13 +55,18 @@ unsafe extern "C" {
     safe fn __panic_start();
     safe fn __panic_end() -> !;
 
-    // mm/kalloc.rs, string.rs.
-    fn kalloc() -> *mut c_void;
-    fn kfree(pa: *mut c_void);
+    // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
 }
+
+// P3-D3a: `kalloc`/`kfree` are genuinely `unsafe fn` in
+// `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations were plain (non-`safe`) `fn`,
+// so every call site already sits in an `unsafe` context — the plain
+// `use` keeps them unchanged.
+use crate::mm::{kalloc, kfree};
 // P3-1D mesh sweep: dev/netdev.rs/sysnet.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.

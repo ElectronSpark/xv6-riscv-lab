@@ -80,7 +80,7 @@ use core::ptr;
 
 use crate::bindings::{
     cdev_t, fs_struct, mode_t, stat, statfs, termios, thread, vfs_dentry, vfs_dir_iter, vfs_fdtable,
-    vfs_file, vfs_inode, vfs_inode_ref, vfs_superblock, vm, winsize, work_struct, workqueue,
+    vfs_file, vfs_inode, vfs_inode_ref, vfs_superblock, winsize, work_struct, workqueue,
     EACCES, EBADF, EEXIST, EFAULT, EINTR, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENODEV,
     ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
 };
@@ -106,10 +106,6 @@ unsafe extern "C" {
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     safe fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
-    // mm/kalloc.rs.
-    safe fn kmm_alloc(n: usize) -> *mut c_void;
-    safe fn kmm_free(ptr: *mut c_void);
-
     // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
     safe fn sleep_ms(ms: u64);
 
@@ -134,12 +130,17 @@ unsafe extern "C" {
     safe fn argaddr(n: c_int, ip: *mut u64);
     safe fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int;
 
-    // mm/vm.rs.
-    safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-    safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
-    safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
-
 }
+
+// P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; reached as crate-path items
+// instead of the `extern "C"` redeclarations that used to sit in the
+// block above (identical signatures). `kmm_alloc`/`kmm_free` are
+// genuinely `unsafe fn` in `crate::mm::kalloc`; `cffi::raw`'s existing
+// thin safe wrappers (identical signatures) preserve the `safe fn`
+// facade the old redeclarations asserted.
+use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
+use crate::mm::{either_copyin, either_copyout, vm_copyout};
 
 // P3-1C mesh sweep: vfs/{inode,file,fdtable,fs}.rs are in scope for this
 // wave; converted from `extern "C"` redeclarations to plain crate-path

@@ -571,8 +571,7 @@ pub(crate) fn vm_get_cpumask(vm_ptr: *mut vm) -> u64 {
 /// Mark a CPU as using this VM. Updates the per-CPU trapframe PTE if a
 /// trapframe is currently registered for the calling thread. Returns the
 /// trapframe base virtual address for `cpu`.
-#[no_mangle]
-pub extern "C" fn vm_cpu_online(vm_ptr: *mut vm, cpu: c_int) -> u64 {
+pub(crate) fn vm_cpu_online(vm_ptr: *mut vm, cpu: c_int) -> u64 {
     // SAFETY: every caller passes a live `vm_ptr` (a `vm` owned by some
     // thread group); `trapframe_pte`, when non-null, points at a live PTE
     // array sized for `NCPU` trapframe slots, and `pte_idx` is derived
@@ -610,8 +609,7 @@ pub extern "C" fn vm_cpu_online(vm_ptr: *mut vm, cpu: c_int) -> u64 {
 }
 
 /// Clear the calling CPU from `vm->cpumask`.
-#[no_mangle]
-pub extern "C" fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int) {
+pub(crate) fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int) {
     if vm_ptr.is_null() {
         return;
     }
@@ -686,7 +684,7 @@ fn pg_round_down(a: u64) -> u64 {
 // Slab pools — storage moved to Rust (formerly in vm_shims.c as
 // `slab_cache_t __vma_pool = {0};` and `slab_cache_t __vm_pool = {0};`).
 // They are not referenced by any surviving C code; everything goes through
-// `__vma_pool_init` / `__vm_pool_init` (still no_mangle in Rust) for setup
+// `__vma_pool_init` / `__vm_pool_init` (`pub(crate)` Rust fns) for setup
 // and through __vma_alloc / __vma_free / etc. internally.
 // SAFETY: `VmPoolStorage` is used only for `__VMA_POOL`/`__VM_POOL`
 // below; both are written in full by `slab_cache_init` (called from
@@ -1094,8 +1092,7 @@ pub(crate) fn pte2vma_flags(pte_flags: u64) -> u64 {
 /// `atomic_inc(&vm->refcount)`. The C side uses a non-atomic `int`
 /// field that is updated through atomic GCC builtins; treating the
 /// storage as `AtomicI32` is layout-compatible.
-#[no_mangle]
-pub extern "C" fn vm_dup(vm_ptr: *mut vm) {
+pub(crate) fn vm_dup(vm_ptr: *mut vm) {
     if vm_ptr.is_null() {
         return;
     }
@@ -1114,30 +1111,26 @@ pub extern "C" fn vm_dup(vm_ptr: *mut vm) {
 // ---------------------------------------------------------------------------
 
 /// Acquire VM read lock for VMA-tree traversal (rwsem, sleepable).
-#[no_mangle]
-pub extern "C" fn vm_rlock(vm_ptr: *mut vm) {
+pub(crate) fn vm_rlock(vm_ptr: *mut vm) {
     // SAFETY: caller supplies a live `vm` (C-ABI lock entry point; the
     // paired `vm_runlock` is always called before `vm_ptr` is freed).
     unsafe { rwsem_acquire_read(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
 }
 
 /// Release VM read lock.
-#[no_mangle]
-pub extern "C" fn vm_runlock(vm_ptr: *mut vm) {
+pub(crate) fn vm_runlock(vm_ptr: *mut vm) {
     // SAFETY: caller supplies a live `vm` currently read-locked by `vm_rlock`.
     unsafe { rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
 }
 
 /// Acquire VM write lock for VMA-tree modification (rwsem, sleepable).
-#[no_mangle]
-pub extern "C" fn vm_wlock(vm_ptr: *mut vm) {
+pub(crate) fn vm_wlock(vm_ptr: *mut vm) {
     // SAFETY: caller supplies a live `vm`.
     unsafe { rwsem_acquire_write(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
 }
 
 /// Release VM write lock.
-#[no_mangle]
-pub extern "C" fn vm_wunlock(vm_ptr: *mut vm) {
+pub(crate) fn vm_wunlock(vm_ptr: *mut vm) {
     // SAFETY: caller supplies a live `vm` currently write-locked by `vm_wlock`.
     unsafe { rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
 }
@@ -1158,8 +1151,8 @@ pub(crate) fn vm_pgtable_unlock(vm_ptr: *mut vm) {
 // ---------------------------------------------------------------------------
 // RAII guards over the three lock wrappers above. `vm_rlock` / `vm_runlock`
 // / `vm_wlock` / `vm_wunlock` / `vm_pgtable_lock` / `vm_pgtable_unlock`
-// themselves stay exactly as-is (exact `#[no_mangle]` symbols, called in
-// paired form from `trap.c` / `exec.c` across function boundaries). These
+// themselves stay exactly as-is (`pub(crate)` fns since P3-D3a, called in
+// paired form from `irq/trap.rs` / `exec.rs` across function boundaries). These
 // guards only wrap *internal* same-function lock/unlock call sites within
 // this file, mirroring the `PcLocalGuard`-style helpers in `pcache.rs`.
 //
@@ -1270,8 +1263,8 @@ fn lock_vm_pgtable<'a>(vm_ptr: *mut vm) -> VmPgtableGuard<'a> {
 const VM_DESTROYED_MAGIC: u64 = 0xDEAD0BADu64;
 
 /// Destroy a VM: free all VMAs, unmap trapframe / pagetable, then slab-free.
-/// Direct port of the C `__vm_destroy` static helper; exported (no_mangle)
-/// because `vm_put` is the only caller and lives in the same staticlib.
+/// Direct port of the C `__vm_destroy` static helper; `vm_put` is the
+/// only caller and lives in the same crate.
 pub(crate) fn __vm_destroy(vm_ptr: *mut vm) {
     // SAFETY: `vm_ptr`, when non-null (checked first thing below), is a
     // live `vm` about to be torn down; every `vma` reached through
@@ -1337,8 +1330,7 @@ pub(crate) fn __vm_destroy(vm_ptr: *mut vm) {
 /// The C macro `atomic_dec_unless(&refcount, 1)` returns true if it
 /// successfully decremented (i.e. the value was != 1) and false otherwise.
 /// We model the same control flow with a CAS loop over `AtomicI32`.
-#[no_mangle]
-pub extern "C" fn vm_put(vm_ptr: *mut vm) {
+pub(crate) fn vm_put(vm_ptr: *mut vm) {
     if vm_ptr.is_null() {
         return;
     }
@@ -1378,8 +1370,7 @@ static VM_RW_LOCK_NAME: &[u8] = b"vm_rw_lock\0";
 ///
 /// On any failure the partially-constructed VM is torn down via
 /// `__vm_destroy` and the function returns `null`.
-#[no_mangle]
-pub extern "C" fn vm_init() -> *mut vm {
+pub(crate) fn vm_init() -> *mut vm {
     // SAFETY: `raw`, when non-null (checked first thing below), is a
     // fresh, exclusively-owned `size_of::<vm>()`-sized allocation from
     // `vm_pool_ptr()`; every subsequent field write/read is into that
@@ -1445,8 +1436,7 @@ pub extern "C" fn vm_init() -> *mut vm {
 
 /// Find the VMA containing virtual address `va` in `vm`'s rb-tree.
 /// Returns `null` if `va` is out of bounds or not mapped.
-#[no_mangle]
-pub extern "C" fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma {
+pub(crate) fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma {
     if vm_ptr.is_null() || va >= UVMTOP as u64 || va < UVMBOTTOM as u64 {
         return core::ptr::null_mut();
     }
@@ -1473,8 +1463,7 @@ pub extern "C" fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma {
 
 /// Copy data to either a user or kernel destination, dispatched on
 /// `user_dst`. Mirrors the C `either_copyout`.
-#[no_mangle]
-pub extern "C" fn either_copyout(
+pub(crate) fn either_copyout(
     user_dst: c_int,
     dst: u64,
     src: *mut c_void,
@@ -1494,8 +1483,7 @@ pub extern "C" fn either_copyout(
 
 /// Copy data from either a user or kernel source, dispatched on `user_src`.
 /// Mirrors the C `either_copyin`.
-#[no_mangle]
-pub extern "C" fn either_copyin(
+pub(crate) fn either_copyin(
     dst: *mut c_void,
     user_src: c_int,
     src: u64,
@@ -1847,8 +1835,7 @@ pub(crate) fn vma_free(vm_ptr: *mut vm, mut vma_ptr: *mut vma) -> c_int {
 /// with unmapped pages it drops the pgtable spinlock, invokes the file
 /// fault handler (sleeps allowed), then re-walks. For already-mapped pages
 /// delegates to `xv6_vm_validate_pte` (anonymous PTE / COW handling).
-#[no_mangle]
-pub extern "C" fn vma_validate(
+pub(crate) fn vma_validate(
     vma_ptr: *mut vma,
     va_in: u64,
     size: u64,
@@ -2011,8 +1998,7 @@ fn vma_size_of(v: *mut vma) -> u64 {
 // V5.1: user-memory access — vm_copyout / vm_copyin / vm_copyinstr
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_copyout(
+pub(crate) fn vm_copyout(
     vm_ptr: *mut vm,
     mut dstva: u64,
     src_in: *const c_void,
@@ -2063,8 +2049,7 @@ pub extern "C" fn vm_copyout(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_copyin(
+pub(crate) fn vm_copyin(
     vm_ptr: *mut vm,
     dst_in: *mut c_void,
     mut srcva: u64,
@@ -2104,8 +2089,7 @@ pub extern "C" fn vm_copyin(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_copyinstr(
+pub(crate) fn vm_copyinstr(
     vm_ptr: *mut vm,
     dst_in: *mut c_char,
     mut srcva: u64,
@@ -2294,8 +2278,7 @@ pub(crate) fn vm_growstack(vm_ptr: *mut vm, change_size: i64) -> c_int {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int {
+pub(crate) fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int {
     // Fully safe body: `_g` (a `VmWriteGuard`) carries the `vm` reference
     // for every field read below via `Deref`, and `machine::vma_start` is
     // the existing safe accessor for the one `vma` field (`stack.start`)
@@ -2325,8 +2308,7 @@ pub extern "C" fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int {
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
+pub(crate) fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
     let mut ret: c_int = 0;
     let mut _g = wlock_vm(vm_ptr);
     'done: {
@@ -2412,8 +2394,7 @@ pub extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
 // V5.4: vm_copy (fork-time VM duplication)
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_copy(src: *mut vm) -> *mut vm {
+pub(crate) fn vm_copy(src: *mut vm) -> *mut vm {
     // Fully safe body: `_src_g`/`_dst_g` (a `VmReadGuard`/`VmWriteGuard`
     // pair) carry the `vm` references for every `src`/`dst` field access
     // below via `Deref`/`DerefMut`, and `machine::vma_start`/
@@ -2475,8 +2456,7 @@ pub extern "C" fn vm_copy(src: *mut vm) -> *mut vm {
 // V5.5: vm_mmap_region_locked / vm_mmap_region / vm_munmap_region
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_mmap_region_locked(
+pub(crate) fn vm_mmap_region_locked(
     vm_ptr: *mut vm,
     start_in: u64,
     size_in: usize,

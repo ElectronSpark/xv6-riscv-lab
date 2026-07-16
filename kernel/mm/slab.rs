@@ -1259,8 +1259,7 @@ impl SlabCache {
 ///   code is concurrently accessing.
 /// - `name`, if used by `init_impl`, must be a valid NUL-terminated
 ///   C string for at least as long as the cache retains it.
-#[no_mangle]
-pub unsafe extern "C" fn slab_cache_init(
+pub(crate) unsafe fn slab_cache_init(
     cache: *mut SlabCache,
     name: *mut c_char,
     obj_size: usize,
@@ -1314,8 +1313,7 @@ pub(crate) unsafe fn slab_cache_destroy(cache: *mut SlabCache) -> c_int {
 /// - `cache`, if non-null, must be a live `*mut SlabCache` previously
 ///   returned by [`slab_cache_create`] or initialized via
 ///   [`slab_cache_init`].
-#[no_mangle]
-pub unsafe extern "C" fn slab_cache_shrink(
+pub(crate) unsafe fn slab_cache_shrink(
     cache: *mut SlabCache,
     nums: c_int,
 ) -> c_int {
@@ -1340,8 +1338,7 @@ pub unsafe extern "C" fn slab_cache_shrink(
 /// - `cache`, if non-null, must be a live `*mut SlabCache` previously
 ///   returned by [`slab_cache_create`] or initialized via
 ///   [`slab_cache_init`].
-#[no_mangle]
-pub unsafe extern "C" fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {
+pub(crate) unsafe fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {
     let Some(cache) = cache.as_mut() else { return ptr::null_mut(); };
     cache.alloc_impl()
 }
@@ -1578,8 +1575,7 @@ impl SlabCache {
 /// - `obj`, if non-null, must be a pointer previously returned by
 ///   [`slab_alloc`] on some live cache, not already freed (no double
 ///   free), and not concurrently accessed by another hart.
-#[no_mangle]
-pub unsafe extern "C" fn slab_free(obj: *mut c_void) {
+pub(crate) unsafe fn slab_free(obj: *mut c_void) {
     if let Some(cache) =
         slab_free_core(obj, b"slab_free\0".as_ptr() as *const c_char)
     {

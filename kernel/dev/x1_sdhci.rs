@@ -119,8 +119,6 @@ unsafe extern "C" {
     safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-    // mm/page.rs.
-    safe fn __page_to_pa(page: *mut page_t) -> u64;
     // lock/completion.rs.
     safe fn completion_reinit(c: *mut crate::bindings::completion_t);
     safe fn complete_all(c: *mut crate::bindings::completion_t);
@@ -128,6 +126,18 @@ unsafe extern "C" {
     // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
     // anchor, see that file's own comment) -- this extern stays valid.
     static mut platform: platform_info;
+}
+
+// P3-D3a: `__page_to_pa` is genuinely `unsafe fn` in `crate::mm::page`
+// now that its `#[no_mangle]` export is gone; this file's original
+// extern declaration asserted `safe fn` (usual FFI facade) with the
+// bindgen `page_t` view rather than page.rs's own `Page` struct (same
+// layout, different Rust name). The thin wrapper preserves both.
+/// SAFETY: `page` must be a live `Page`
+/// (see [`crate::mm::page::__page_to_pa`]'s contract).
+#[inline]
+fn __page_to_pa(page: *mut page_t) -> u64 {
+    unsafe { crate::mm::__page_to_pa(page as *mut crate::mm::page::Page) }
 }
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an

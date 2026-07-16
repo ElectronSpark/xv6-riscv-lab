@@ -50,10 +50,6 @@ use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 unsafe extern "C" {
     // printf.rs — C-variadic.
 
-    // mm/kalloc.rs.
-    safe fn kmm_alloc(size: usize) -> *mut c_void;
-    safe fn kmm_free(ptr: *mut c_void);
-
     // string.rs.
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
     safe fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
@@ -69,6 +65,12 @@ unsafe extern "C" {
     safe fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void;
     safe fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
 }
+
+// P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
+// `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;
+// `cffi::raw`'s existing thin safe wrappers (identical signatures)
+// preserve the `safe fn` facade the old redeclarations asserted.
+use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 
 // `kassert!`/`is_err`'s canonical homes are `crate::kstd`/crate root
 // (P3-CS1 centralization). See `superblock.rs`. P3-CS13: the four

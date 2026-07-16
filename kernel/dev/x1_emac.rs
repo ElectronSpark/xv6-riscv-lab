@@ -92,8 +92,6 @@ unsafe extern "C" {
     safe fn kthread_create(name: *const c_char, entry: *mut c_void, arg1: u64, arg2: u64, stack_order: c_int) -> *mut thread;
     // lock/spinlock.rs.
     safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    // mm/kalloc.rs.
-    fn kalloc() -> *mut c_void;
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
@@ -102,6 +100,12 @@ unsafe extern "C" {
     // anchor, see that file's own comment) -- this extern stays valid.
     static mut platform: platform_info;
 }
+
+// P3-D3a: `kalloc` is genuinely `unsafe fn` in `crate::mm::kalloc` now
+// that its `#[no_mangle]` export is gone; this file's original extern
+// declaration was a plain (non-`safe`) `fn`, so every call site already
+// sits in an `unsafe` context — the plain `use` keeps them unchanged.
+use crate::mm::kalloc;
 // P3-1D mesh sweep: net.rs/dev/netdev.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.

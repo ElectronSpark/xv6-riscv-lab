@@ -78,7 +78,7 @@ use core::mem::size_of;
 
 use crate::bindings::{
     cpu_local, ksiginfo as ksiginfo_t, sigaction as sigaction_t, siginfo_t, sigset_t, stack_t,
-    thread, trapframe, vm, vma, MAXVA, NCPU, PAGE_SHIFT, PGSIZE, PROT_EXEC, PROT_READ,
+    thread, trapframe, MAXVA, NCPU, PAGE_SHIFT, PGSIZE, PROT_EXEC, PROT_READ,
     PROT_WRITE, PTE_R, PTE_W, VMA_FLAG_USER,
 };
 use crate::machine;
@@ -178,22 +178,8 @@ unsafe extern "C" {
     safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
 
-    // mm/vm.rs
-    safe fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int);
-    safe fn vm_cpu_online(vm_ptr: *mut vm, cpu: c_int) -> u64;
-    safe fn vm_rlock(vm_ptr: *mut vm);
-    safe fn vm_runlock(vm_ptr: *mut vm);
-    safe fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma;
-    safe fn vma_validate(vma_ptr: *mut vma, va_in: u64, size: u64, flags: u64) -> c_int;
-    safe fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int;
-    safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-    safe fn vm_copyin(vm_ptr: *mut vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;
-
     // mm/vm_pgtab.rs
     safe fn kvmmap(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int);
-
-    // mm/page.rs
-    fn page_alloc(order: u64, flags: u64) -> *mut c_void;
 
     // proc/exit.rs
     safe fn exit(status: c_int) -> !;
@@ -221,6 +207,17 @@ unsafe extern "C" {
     #[link_name = "cpus"]
     static mut CPUS: [cpu_local; NCPU as usize];
 }
+
+// P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; reached as crate-path items
+// instead of the `extern "C"` redeclarations that used to sit in the
+// block above (signatures identical). `page_alloc` stays a genuinely
+// `unsafe fn` (`crate::mm::page`); its one call site below already sits
+// in an `unsafe` block, so the plain `use` keeps it unchanged too.
+use crate::mm::{
+    page_alloc, vm_copyin, vm_copyout, vm_cpu_offline, vm_cpu_online, vm_find_area, vm_rlock,
+    vm_runlock, vm_try_growstack, vma_validate,
+};
 
 /// `trampoline_userret = TRAMPOLINE + (userret - trampoline)`, computed
 /// once by [`trapinit`]. `None` until then; every real call site runs

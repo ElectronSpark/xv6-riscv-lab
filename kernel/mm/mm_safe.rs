@@ -91,8 +91,8 @@ mod ffi {
 
     // `crate::mm::page::{__page_alloc,__page_free,__page_to_pa,__pa_to_page}`
     // and `crate::mm::slab::{slab_alloc,slab_free}` are all genuinely
-    // `unsafe fn`/`unsafe extern "C" fn` (still `#[no_mangle]`, unchanged —
-    // out-of-scope callers still reach them via C-ABI extern blocks); this
+    // `unsafe fn` (`pub(crate)` since P3-D3a — no `#[no_mangle]` export
+    // surface remains anywhere in the mm cluster); this
     // module's original extern declaration asserted `pub safe fn` (usual
     // FFI-facade convention) and, unlike most other consumers in this
     // crate, already used the exact canonical `Page`/`SlabCache` types

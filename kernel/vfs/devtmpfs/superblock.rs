@@ -155,10 +155,12 @@ unsafe extern "C" {
     safe fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // mm/kalloc.rs.
-    safe fn kmm_alloc(size: usize) -> *mut c_void;
-    safe fn kmm_free(ptr: *mut c_void);
 }
+// P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
+// `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;
+// `cffi::raw`'s existing thin safe wrappers (identical signatures)
+// preserve the `safe fn` facade the old redeclarations asserted.
+use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 // P3-1D mesh sweep: dev/dev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.

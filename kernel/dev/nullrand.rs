@@ -64,10 +64,16 @@ use super::cdev::cdev_register;
 unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
+}
 
-    /// `kernel/inc/mm/vm.h`: `int either_copyout(int user_dst, uint64
-    /// dst, void *src, uint64 len)`.
-    pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_int;
+// P3-D3a: `either_copyout` (mm/vm.rs) is an ordinary (safe) Rust fn now
+// that its `#[no_mangle]` export is gone. Divergence the old
+// redeclaration papered over: it typed `src` as `*const c_void`, while
+// the real fn takes `*mut c_void` (the callee only reads through it) —
+// the thin cast adapter preserves this file's read-only call-site types.
+#[inline]
+fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_int {
+    crate::mm::either_copyout(user_dst, dst, src as *mut c_void, len)
 }
 
 // `xv6_current_thread()` -- shim for the `current` macro (same precedent

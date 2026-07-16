@@ -133,23 +133,48 @@ unsafe extern "C" {
     // `crate::sync::KSpinlock` RAII, see the module doc).
     safe fn spin_init(l: *mut crate::bindings::spinlock_t, name: *mut c_char);
 
-    // mm/vm.rs.
-    safe fn vm_copyin(vm_ptr: *mut vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;
-    safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
+}
 
-    // mm/kalloc.rs.
-    safe fn kalloc() -> *mut c_void;
-    safe fn kfree(pa: *mut c_void);
+// P3-D3a: `vm_copyin`/`vm_copyout` (mm/vm.rs) are ordinary (safe) Rust
+// fns now that their `#[no_mangle]` exports are gone; reached as
+// crate-path items instead of the `extern "C"` redeclarations that used
+// to sit in the block above (identical signatures).
+use crate::mm::{vm_copyin, vm_copyout};
 
-    // mm/slab.rs.
-    safe fn slab_cache_init(
-        cache: *mut slab_cache_t,
-        name: *mut c_char,
-        obj_size: usize,
-        flags: u64,
-    ) -> c_int;
-    safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    safe fn slab_free(obj: *mut c_void);
+// `kalloc`/`kfree` and the slab entry points are genuinely `unsafe fn`
+// in `crate::mm::{kalloc,slab}`; this file's original extern
+// declarations asserted `safe fn` (usual FFI facade) and typed the cache
+// pointer as the bindgen `slab_cache_t` rather than
+// `crate::mm::slab::SlabCache` (same layout — see `cffi::raw`'s
+// identical note). Thin cast + safe-facade wrappers preserve both.
+/// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
+#[inline]
+fn kalloc() -> *mut c_void {
+    unsafe { crate::mm::kalloc() }
+}
+/// SAFETY: `pa` must originate from `kalloc` above.
+#[inline]
+fn kfree(pa: *mut c_void) {
+    unsafe { crate::mm::kfree(pa) };
+}
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 
 // `kassert!`'s canonical home is `crate::kstd`/crate root

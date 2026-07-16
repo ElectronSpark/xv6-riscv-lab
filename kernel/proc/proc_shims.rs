@@ -16,8 +16,36 @@
 use crate::u;
 
 use crate::bindings::{
-    ksiginfo, pgroup, session, slab_alloc, slab_cache_init, slab_cache_t, slab_free, thread, thread_group, SLAB_FLAG_EMBEDDED,
+    ksiginfo, pgroup, session, slab_cache_t, thread, thread_group, SLAB_FLAG_EMBEDDED,
 };
+
+// P3-D3a: `slab_alloc`/`slab_free`/`slab_cache_init` used to be imported
+// from `crate::bindings` (bindgen extern decls resolved at link time
+// against mm/slab.rs's `#[no_mangle]` exports — now gone). Thin unsafe
+// cast adapters keep this file's bindgen `slab_cache_t` call-site types
+// (same layout as `crate::mm::slab::SlabCache`, see `cffi::raw`'s
+// identical note); genuinely `unsafe fn`, exactly like the old bindgen
+// declarations, so every call site keeps its existing `unsafe` context.
+/// # Safety
+/// See `crate::mm::slab::slab_cache_init`'s contract.
+#[inline]
+unsafe fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+}
+/// # Safety
+/// `cache` must originate from `slab_cache_init` above.
+#[inline]
+unsafe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache)
+}
+/// # Safety
+/// `obj` must originate from `slab_alloc` above.
+#[inline]
+unsafe fn slab_free(obj: *mut c_void) {
+    crate::mm::slab_free(obj)
+}
 use crate::proc::access::smp_load_acquire_i32;
 use crate::machine::smp_load_acquire_u64;
 use core::cell::UnsafeCell;

@@ -85,16 +85,24 @@ unsafe extern "C" {
     safe fn strnlen(s: *const c_char, maxlen: usize) -> usize;
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
 
-    // mm/pcache.rs.
-    safe fn pcache_teardown(pc: *mut crate::bindings::pcache);
-
-    // mm/slab.rs.
-    safe fn slab_free(obj: *mut c_void);
-
     // kernel/bio.c (classic xv6 buffer cache, unchanged C).
     safe fn bread(dev: u32, blockno: u32) -> *mut crate::bindings::buf;
     safe fn brelse(b: *mut crate::bindings::buf);
 
+}
+
+// P3-D3a: `pcache_teardown` (mm/pcache.rs) is an ordinary (safe) Rust fn
+// now that its `#[no_mangle]` export is gone; identical signature, plain
+// `use`. `slab_free` is genuinely `unsafe fn` in `crate::mm::slab`; the
+// thin wrapper preserves the `safe fn` facade the old redeclaration
+// asserted (see `cffi::raw`'s identical note).
+use crate::mm::pcache_teardown;
+
+/// SAFETY: `obj` must originate from the paired `slab_alloc`
+/// (see [`crate::mm::slab::slab_free`]'s contract).
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 
 // P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;

@@ -83,10 +83,6 @@ const THREAD_RUNNING: thread_state = 8;
 use crate::proc::{scheduler_yield, wakeup};
 
 unsafe extern "C" {
-    pub safe fn slab_cache_init(cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64) -> c_int;
-    pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    pub safe fn slab_free(obj: *mut c_void);
-
     pub safe fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue;
     pub safe fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool;
     pub safe fn init_work_struct(
@@ -98,6 +94,33 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
+}
+
+// P3-D3a: the slab entry points are genuinely `unsafe fn` in
+// `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
+// file's original extern declarations asserted `safe fn` (usual FFI
+// facade) and typed the cache pointer as the bindgen `slab_cache_t`
+// rather than `crate::mm::slab::SlabCache` (same layout — see
+// `cffi::raw`'s identical note). Thin cast + safe-facade wrappers
+// preserve both.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 
 /// Replicates the C `assert(expr, fmt)` macro expansion. Same pattern as

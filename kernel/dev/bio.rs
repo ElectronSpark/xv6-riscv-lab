@@ -70,14 +70,19 @@ unsafe extern "C" {
     fn kobject_put(obj: *mut kobject);
     fn kobject_refcount(obj: *mut kobject) -> i64;
 
-    // kernel/mm/kalloc.rs (kmm_alloc/kmm_free) + kernel/string.rs (memset).
-    fn kmm_alloc(n: usize) -> *mut c_void;
-    fn kmm_free(ptr: *mut c_void);
+    // kernel/string.rs.
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
     // kernel/lock/completion.rs.
     fn completion_init(c: *mut completion_t);
 }
+
+// P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
+// `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations were plain (non-`safe`) `fn`,
+// so every call site already sits in an `unsafe` context — the plain
+// `use` keeps them unchanged.
+use crate::mm::{kmm_alloc, kmm_free};
 
 // ---------------------------------------------------------------------------
 // Local constants -- mirrors `dev/bio.h`'s `#define`s. `BIO_MAX_VECS`/

@@ -1596,6 +1596,36 @@ guards are already done (8a–8d).
   (Worker: boot ×2, exitwait/reparent OK, stressfs.) Net diff 23 files,
   +323/−496.
 
+### Iteration 54 — 2026-07-15 — Wave P3-D3a: mm cluster C-ABI surface dismantled (vm/pcache/page/kalloc/slab/sysmm `no_mangle` 55→0)
+
+- Owner-driven mesh sweep, mm cluster: vm.rs 20→0, pcache.rs 12→0,
+  page.rs 7→0, kalloc.rs 5→0, slab.rs 4→0, sysmm.rs 7→0. Crate-wide
+  `#[no_mangle]` 194→**139**. (First attempt died on account spend limit
+  mid-survey, tree clean; retry incorporated its finding.)
+- **New consumer form discovered & handled**: 3 proc files consumed slab
+  symbols via `use crate::bindings::…` (bindgen extern decls) — demotion
+  produces loud link failures, converted alongside the extern-block form.
+  Scripted scan confirmed those 3 were the only bindings-import consumers
+  among all 55 names. wrapper.h/build.rs untouched (nativization's job).
+- **Latent ABI bug caught**: clone.rs's stale decl claimed
+  `vm_dup -> *mut Vm` but the real fn returns `()` — the C ABI silently
+  let the caller read a stale return register (call site discards it).
+  Unified to the real signature.
+- Kept-`extern "C"` exceptions (dropped no_mangle, evidence verified):
+  sysmm's 7 `sys_m*` + pcache's `sys_sync`/`sys_dumppcache` + page's
+  `sys_memstat` — all stored as fn-pointer values in irq/syscall.rs's
+  const SYSCALLS table (`type SyscallFn = extern "C" fn() -> u64`).
+  Dead exports: 0 (all 55 had live consumers).
+- 54 files touched (+967/−471): 17 vm consumers, safe-facade/cast
+  adapters for slab/page divergences (`*const c_char` names, `u64/u32`
+  sizes), kmm_* consumers switched to cffi's pre-existing safe wrappers.
+  Stale "still #[no_mangle]" comments fixed.
+- nm: all 55 names absent from linked kernel; keep-set present.
+- Verified (orchestrator): 0-warning clean rebuild; cache clean; boot
+  gate; **mmaptest 16/16 + "all tests passed"**; **testsig 21/21**;
+  **cowtest ALL PASSED**; no panics. (Worker: 4 boots, mmaptest ×2,
+  createdelete OK, stressfs completion, ENOENT.)
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

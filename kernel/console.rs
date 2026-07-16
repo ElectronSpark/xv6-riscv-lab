@@ -73,9 +73,6 @@ unsafe extern "C" {
 
     pub safe fn sleep_ms(ms: u64);
 
-    pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
-    pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
-
     pub safe fn kthread_create(
         name: *const c_char,
         entry: *mut c_void,
@@ -85,6 +82,12 @@ unsafe extern "C" {
     ) -> *mut thread;
 
 }
+
+// P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
+// Rust fns now that their `#[no_mangle]` exports are gone; reached as
+// crate-path items instead of the `extern "C"` redeclarations that used
+// to sit in the block above (identical signatures).
+use crate::mm::{either_copyin, either_copyout};
 
 // P3-D2b: the proc-object entry points (proc/{signal,pid}.rs) are plain
 // crate-path items now that their `#[no_mangle]` exports are gone

@@ -127,15 +127,17 @@ unsafe extern "C" {
     safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
     safe fn holding_mutex(m: *mut mutex_t) -> c_int;
 
-    // mm/kalloc.rs
-    safe fn kmm_alloc(size: usize) -> *mut c_void;
-    safe fn kmm_free(ptr: *mut c_void);
-
     // string.rs
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
     safe fn strtok_r(s: *mut c_char, delim: *const c_char, saveptr: *mut *mut c_char) -> *mut c_char;
     safe fn strlen(s: *const c_char) -> usize;
 }
+
+// P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
+// `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;
+// `cffi::raw`'s existing thin safe wrappers (identical signatures)
+// preserve the `safe fn` facade the old redeclarations asserted.
+use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 
 // P3-1C mesh sweep: vfs/fs.rs is in scope for this wave; these were its
 // superblock lock/refcount + inode-cache/dentry/orphan helpers,

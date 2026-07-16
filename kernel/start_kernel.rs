@@ -185,8 +185,7 @@ unsafe extern "C" {
     // kobject.rs
     fn kobject_global_init();
 
-    // mm/kalloc.rs, mm/vm_pgtab.rs
-    fn kinit();
+    // mm/vm_pgtab.rs
     fn kvminit();
     fn kvminithart();
 
@@ -206,8 +205,6 @@ unsafe extern "C" {
     // demoted (many out-of-scope callers elsewhere).
     fn sleep_ms(ms: u64);
 
-    fn pcache_global_init();
-
     // lock/rwsem_test.rs, lock/semaphore_test.rs — always linked in
     // (compiled unconditionally); only the *calls* below are feature-gated.
     // Stay `extern`: out of this wave's scope (lock/*, mm/*).
@@ -221,6 +218,13 @@ unsafe extern "C" {
     // `sbi_start_secondary_harts`, never called directly from Rust.
     static _entry: u8;
 }
+
+// P3-D3a: `pcache_global_init` (mm/pcache.rs, an ordinary safe Rust fn
+// now that its `#[no_mangle]` export is gone) and `kinit` (genuinely
+// `unsafe fn` in `crate::mm::kalloc`; its call site already sits in an
+// `unsafe` context) are reached as crate-path items instead of the
+// `extern "C"` redeclarations that used to sit in the block above.
+use crate::mm::{kinit, pcache_global_init};
 // P3-1D mesh sweep: dev/{fdt,dev,netdev,x1_emac,x1_sdhci,nullrand}.rs,
 // sbi.rs, backtrace.rs, pci.rs, virtio_disk.rs, ramdisk.rs, sysnet.rs are
 // all in scope for this wave; these become plain crate-path imports

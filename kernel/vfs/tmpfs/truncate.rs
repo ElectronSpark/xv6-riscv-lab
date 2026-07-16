@@ -19,7 +19,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use crate::bindings::{loff_t, page_t, pcache, pcache_node, tmpfs_inode, vfs_inode, EFBIG, ENOMEM, PAGE_SHIFT, PGSIZE};
+use crate::bindings::{loff_t, pcache, tmpfs_inode, vfs_inode, EFBIG, ENOMEM, PAGE_SHIFT, PGSIZE};
 
 use super::TMPFS_MAX_FILE_SIZE;
 
@@ -31,19 +31,18 @@ unsafe extern "C" {
     // string.rs.
     safe fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // mm/pcache.rs.
-    safe fn pcache_get_page(p: *mut pcache, blkno: u64) -> *mut page_t;
-    safe fn pcache_put_page(p: *mut pcache, page: *mut page_t);
-    safe fn pcache_read_page(p: *mut pcache, page: *mut page_t) -> c_int;
-    safe fn pcache_mark_page_dirty(p: *mut pcache, page: *mut page_t) -> c_int;
-    safe fn pcache_discard_blk(p: *mut pcache, blkno: u64) -> c_int;
-    safe fn pcache_teardown(p: *mut pcache);
-
-    // mm/page.rs -- `page->pcache.pcache_node` accessor (pre-existing,
-    // exported for `mm/vm.rs`'s own extern call site; reused here rather
-    // than reaching into the bindgen union ourselves).
-    safe fn xv6_page_pcache_get_node(page: *mut page_t) -> *mut pcache_node;
 }
+
+// P3-D3a: the mm/pcache.rs entry points are ordinary (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone, with identical signatures
+// (pcache.rs's `Pcache`/`Page`/`PcacheNode` are aliases of the same
+// bindgen `pcache`/`page_t`/`pcache_node` this file already uses) —
+// plain `use` instead of the `extern "C"` redeclarations that used to
+// sit in the block above.
+use crate::mm::{
+    pcache_discard_blk, pcache_get_page, pcache_mark_page_dirty, pcache_put_page,
+    pcache_read_page, pcache_teardown, xv6_page_pcache_get_node,
+};
 
 /* Convert block size to 512-byte units for pcache. */
 const PCACHE_BLKS_PER_PAGE: u64 = PGSIZE as u64 / 512;

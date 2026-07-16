@@ -61,17 +61,6 @@ unsafe extern "C" {
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // mm/slab.rs.
-    safe fn slab_cache_init(cache: *mut slab_cache_t, name: *const c_char, obj_size: usize, flags: u64) -> c_int;
-    safe fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int;
-    safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    safe fn slab_free(obj: *mut c_void);
-
-    // mm/pcache.rs.
-    safe fn pcache_init(p: *mut pcache) -> c_int;
-    // mm/page.rs -- `page->pcache.pcache_node` accessor (pre-existing).
-    safe fn xv6_page_pcache_get_node(page: *mut page_t) -> *mut crate::bindings::pcache_node;
-
     // lock module (100% Rust).
     safe fn wait_for_completion(c: *mut completion_t);
     safe fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int;
@@ -81,6 +70,48 @@ unsafe extern "C" {
     safe fn brelse(b: *mut buf);
     safe fn bwrite(b: *mut buf);
 
+}
+
+// P3-D3a: `pcache_init`/`xv6_page_pcache_get_node` (mm/pcache.rs) are
+// ordinary (safe) Rust fns now that their `#[no_mangle]` exports are
+// gone; identical signatures, plain `use`.
+use crate::mm::{pcache_init, xv6_page_pcache_get_node};
+
+// The slab entry points are genuinely `unsafe fn` in `crate::mm::slab`;
+// this file's original extern declarations asserted `safe fn` (usual FFI
+// facade) and typed the cache pointer as the bindgen `slab_cache_t`
+// rather than `crate::mm::slab::SlabCache` (same layout — see
+// `cffi::raw`'s identical note) and `name` as `*const c_char` rather
+// than the real `*mut c_char` (the callee only reads it). Thin cast +
+// safe-facade wrappers preserve all of this file's call-site types.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *const c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(
+            cache as *mut crate::mm::slab::SlabCache,
+            name as *mut c_char,
+            obj_size,
+            flags,
+        )
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
+    unsafe { crate::mm::slab_cache_shrink(cache as *mut crate::mm::slab::SlabCache, nums) }
+}
+/// SAFETY: see `slab_cache_shrink` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 // P3-1D mesh sweep: dev/bio.rs + dev/blkdev.rs (block I/O submission
 // path) are in scope for this wave; signatures are identical, so these

@@ -34,9 +34,11 @@ use crate::bindings::{bool_, pipe, tty, tty_ops};
 // Externs.
 // ===========================================================================
 
-unsafe extern "C" {
-    pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
-}
+// P3-D3a: `either_copyin` (mm/vm.rs) is an ordinary (safe) Rust fn now
+// that its `#[no_mangle]` export is gone; reached as a crate-path item
+// instead of the `extern "C"` redeclaration that used to sit here
+// (identical signature).
+use crate::mm::either_copyin;
 
 // P3-1C mesh sweep: tty/tty.rs and vfs/pipe.rs are in scope for this
 // wave; converted from `extern "C"` redeclarations to plain crate-path

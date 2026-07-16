@@ -1449,8 +1449,7 @@ pub(crate) unsafe fn page_buddy_init() -> c_int {
 /// # Safety
 ///
 /// - `page_buddy_init` must have completed before this is called.
-#[no_mangle]
-pub unsafe extern "C" fn __page_alloc(order: u64, flags: u64) -> *mut Page {
+pub(crate) unsafe fn __page_alloc(order: u64, flags: u64) -> *mut Page {
     if order > PAGE_BUDDY_MAX_ORDER { return ptr::null_mut(); }
     match buddy_get(order, flags) {
         Some(p) => p as *mut Page,
@@ -1470,8 +1469,7 @@ pub unsafe extern "C" fn __page_alloc(order: u64, flags: u64) -> *mut Page {
 ///   caller must hold no other reference into the `count`-page group
 ///   starting at `page` for the duration of this call.
 /// - `page_buddy_init` must have completed before this is called.
-#[no_mangle]
-pub unsafe extern "C" fn __page_free(page: *mut Page, order: u64) {
+pub(crate) unsafe fn __page_free(page: *mut Page, order: u64) {
     let Some(p) = page_ref(page) else { return };
     if order > PAGE_BUDDY_MAX_ORDER {
         ffi::panic(b"__page_free(): order too large\0");
@@ -1523,8 +1521,7 @@ pub unsafe extern "C" fn __page_free(page: *mut Page, order: u64) {
 ///
 /// - Same preconditions as [`__page_alloc`]: `page_buddy_init` must
 ///   have completed before this is called.
-#[no_mangle]
-pub unsafe extern "C" fn page_alloc(order: u64, flags: u64) -> *mut c_void {
+pub(crate) unsafe fn page_alloc(order: u64, flags: u64) -> *mut c_void {
     let page = __page_alloc(order, flags);
     if page.is_null() { return ptr::null_mut(); }
     let pa = __page_to_pa(page) as *mut c_void;
@@ -1543,8 +1540,7 @@ pub unsafe extern "C" fn page_alloc(order: u64, flags: u64) -> *mut c_void {
 ///   as [`__page_free`]: a live, previously-allocated block at this
 ///   `order`, not already freed, with no other outstanding reference
 ///   into the group.
-#[no_mangle]
-pub unsafe extern "C" fn page_free(ptr: *mut c_void, order: u64) {
+pub(crate) unsafe fn page_free(ptr: *mut c_void, order: u64) {
     let page = __pa_to_page(ptr as u64);
     __page_free(page, order);
 }
@@ -1770,8 +1766,7 @@ pub(crate) unsafe fn page_ref_dec(ptr: *mut c_void) -> c_int {
 ///
 /// - `page_buddy_init` must have completed before this is called
 ///   (`__pages`/`__managed_start`/`__managed_end` must be set).
-#[no_mangle]
-pub unsafe extern "C" fn __pa_to_page(physical: u64) -> *mut Page {
+pub(crate) unsafe fn __pa_to_page(physical: u64) -> *mut Page {
     match pa_to_page(physical) {
         Some(p) => p as *mut Page,
         None => ptr::null_mut(),
@@ -1784,8 +1779,7 @@ pub unsafe extern "C" fn __pa_to_page(physical: u64) -> *mut Page {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array.
-#[no_mangle]
-pub unsafe extern "C" fn __page_to_pa(page: *mut Page) -> u64 {
+pub(crate) unsafe fn __page_to_pa(page: *mut Page) -> u64 {
     match page_ref(page) {
         Some(p) => p.physical_address,
         None => 0,
@@ -2175,8 +2169,7 @@ const MEMSTAT_INCLUDE_BUDDY: u32 = 1 << 3;
 const MEMSTAT_ADD_FREE: u32 = 1 << 4;
 const MEMSTAT_ADD_USED: u32 = 1 << 5;
 
-#[no_mangle]
-pub extern "C" fn sys_memstat() -> u64 {
+pub(crate) extern "C" fn sys_memstat() -> u64 {
     let mut flags_arg: c_int = 0;
     ffi::argint(0, &mut flags_arg);
     let flags = flags_arg as u32;

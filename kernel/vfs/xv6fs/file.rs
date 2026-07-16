@@ -63,24 +63,32 @@ unsafe extern "C" {
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // mm/vm.rs.
-    safe fn vm_copyout(vm_ptr: *mut crate::bindings::vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-    safe fn vm_copyin(vm_ptr: *mut crate::bindings::vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;
+}
 
-    // mm/page.rs.
-    safe fn page_alloc(order: u64, flags: u64) -> *mut c_void;
-    safe fn page_free(ptr: *mut c_void, order: u64);
+// P3-D3a: the mm-cluster entry points are ordinary Rust fns now that
+// their `#[no_mangle]` exports are gone; the vm/pcache ones are safe fns
+// with identical signatures (pcache.rs's `Pcache`/`Page`/`PcacheNode`
+// are aliases of the same bindgen `pcache`/`page_t`/`pcache_node` this
+// file already uses) — plain `use` instead of the `extern "C"`
+// redeclarations that used to sit in the block above.
+use crate::mm::{
+    pcache_flush, pcache_get_page, pcache_mark_page_dirty, pcache_put_page, pcache_read_page,
+    vm_copyin, vm_copyout, xv6_page_pcache_get_node,
+};
 
-    // mm/pcache.rs.
-    safe fn pcache_get_page(p: *mut pcache, blkno: u64) -> *mut page_t;
-    safe fn pcache_put_page(p: *mut pcache, page: *mut page_t);
-    safe fn pcache_read_page(p: *mut pcache, page: *mut page_t) -> c_int;
-    safe fn pcache_mark_page_dirty(p: *mut pcache, page: *mut page_t) -> c_int;
-    safe fn pcache_flush(p: *mut pcache) -> c_int;
-
-    // mm/page.rs -- `page->pcache.pcache_node` accessor (pre-existing).
-    safe fn xv6_page_pcache_get_node(page: *mut page_t) -> *mut pcache_node;
-
+// `page_alloc`/`page_free` are genuinely `unsafe fn` in
+// `crate::mm::page`; this file's original extern declarations asserted
+// `safe fn` (usual FFI facade). Thin safe wrappers preserve that facade,
+// per the `cffi::raw` precedent.
+/// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
+#[inline]
+fn page_alloc(order: u64, flags: u64) -> *mut c_void {
+    unsafe { crate::mm::page_alloc(order, flags) }
+}
+/// SAFETY: `ptr` must originate from `page_alloc` above.
+#[inline]
+fn page_free(ptr: *mut c_void, order: u64) {
+    unsafe { crate::mm::page_free(ptr, order) };
 }
 
 // P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;

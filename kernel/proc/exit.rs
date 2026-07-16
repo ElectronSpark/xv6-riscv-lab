@@ -120,10 +120,14 @@ mod raw {
         crate::proc::sigacts_put(sa as *mut crate::bindings::sigacts)
     }
 
-    unsafe extern "C" {
-        // SAFETY: the caller in `ffi::*` enforces the "valid live kernel
-        // pointer" precondition documented in the module header.
-        pub safe fn vm_put(vm: *mut Vm);
+    // P3-D3a: `vm_put` (mm/vm.rs) is an ordinary (safe) Rust fn now that
+    // its `#[no_mangle]` export is gone; this module's `Vm` is an opaque
+    // `c_void` stand-in for the real `crate::bindings::vm`
+    // (layout-identical pointer, same cast-adapter precedent as
+    // `sigacts_put` above).
+    #[inline]
+    pub fn vm_put(vm: *mut Vm) {
+        crate::mm::vm_put(vm as *mut crate::bindings::vm)
     }
 
     // P3-1C mesh sweep: tty/session.rs and vfs/{fdtable,fs}.rs are in

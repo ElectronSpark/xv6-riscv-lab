@@ -65,23 +65,42 @@ use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_read, pipe_write};
 // ===========================================================================
 
 unsafe extern "C" {
-    pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    pub safe fn slab_free(obj: *mut c_void);
-    pub safe fn slab_cache_init(
-        cache: *mut slab_cache_t,
-        name: *mut c_char,
-        obj_size: usize,
-        flags: u64,
-    ) -> c_int;
-
-
-    pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
-    pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
-
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
+}
+
+// P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
+// Rust fns now that their `#[no_mangle]` exports are gone; reached as
+// crate-path items instead of the `extern "C"` redeclarations that used
+// to sit in the block above (identical signatures).
+use crate::mm::{either_copyin, either_copyout};
+
+// `slab_alloc`/`slab_free`/`slab_cache_init` are genuinely `unsafe fn` in
+// `crate::mm::slab`; this file's original extern declarations asserted
+// `pub safe fn` (usual FFI facade) and typed the cache pointer as the
+// bindgen `slab_cache_t` rather than `crate::mm::slab::SlabCache` (same
+// layout, "locally convenient pointer type" idiom — see `cffi::raw`'s
+// identical note). Thin cast + safe-facade wrappers preserve both.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 
 // ===========================================================================

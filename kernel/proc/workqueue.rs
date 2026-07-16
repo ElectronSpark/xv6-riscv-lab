@@ -115,17 +115,38 @@ unsafe extern "C" {
 
     pub safe fn exit(code: c_int) -> !;
 
-    pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    pub safe fn slab_free(p: *mut c_void);
-    pub safe fn slab_cache_init(
-        cache: *mut slab_cache_t, name: *mut c_char, sz: usize, flags: u64,
-    ) -> c_int;
-
     pub safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
 
     safe fn kthread_create(
         name: *const c_char, entry: *mut c_void, arg: u64, prio: c_int, order: c_int,
     ) -> *mut thread;
+}
+
+// P3-D3a: the slab entry points are genuinely `unsafe fn` in
+// `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
+// file's original extern declarations asserted `safe fn` (usual FFI
+// facade) and typed the cache pointer as the bindgen `slab_cache_t`
+// rather than `crate::mm::slab::SlabCache` (same layout — see
+// `cffi::raw`'s identical note). Thin cast + safe-facade wrappers
+// preserve both.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
 }
 
 // P3-D2a: the scheduler entry points (`kernel/proc/sched.rs`) and the

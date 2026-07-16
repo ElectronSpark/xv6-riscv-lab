@@ -51,7 +51,7 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use crate::bindings::{mbuf, spinlock_t, thread, vm, EFAULT, EINTR, ENOMEM};
+use crate::bindings::{mbuf, spinlock_t, thread, EFAULT, EINTR, ENOMEM};
 use crate::proc::proc_shims::xv6_current_thread;
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
 // crate-path items instead of `extern "C"` redeclarations.
@@ -72,14 +72,16 @@ unsafe extern "C" {
     safe fn spin_lock(l: *mut spinlock_t);
     safe fn spin_unlock(l: *mut spinlock_t);
 
-    // string.rs.
-    fn kfree(pa: *mut c_void);
-
-    // mm/vm.rs.
-    safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-    safe fn vm_copyin(vm_ptr: *mut vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;
-
 }
+
+// P3-D3a: `vm_copyout`/`vm_copyin` (mm/vm.rs) are ordinary (safe) Rust
+// fns now that their `#[no_mangle]` exports are gone; reached as
+// crate-path items instead of the `extern "C"` redeclarations that used
+// to sit in the block above (identical signatures). `kfree` stays a
+// genuinely `unsafe fn` (`crate::mm::kalloc`); its one call site below
+// already sits in an `unsafe` block, so the plain `use` keeps it
+// unchanged too.
+use crate::mm::{kfree, vm_copyin, vm_copyout};
 // P3-1D mesh sweep: net.rs is in scope for this wave; signatures are
 // identical, so these become plain crate-path imports instead of `extern
 // "C"` redeclarations.

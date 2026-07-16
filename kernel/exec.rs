@@ -151,35 +151,35 @@ unsafe extern "C" {
     safe fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 
-    // mm/kalloc.rs.
-    safe fn kalloc() -> *mut c_void;
-    safe fn kfree(pa: *mut c_void);
-
-    // mm/vm.rs.
-    safe fn vm_init() -> *mut vm;
-    safe fn vm_put(vm_ptr: *mut vm);
-    safe fn vm_wlock(vm_ptr: *mut vm);
-    safe fn vm_wunlock(vm_ptr: *mut vm);
-    safe fn vm_rlock(vm_ptr: *mut vm);
-    safe fn vm_runlock(vm_ptr: *mut vm);
-    safe fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma;
-    safe fn vma_validate(vma_ptr: *mut vma, va: u64, size: u64, flags: u64) -> c_int;
-    safe fn vm_mmap_region_locked(
-        vm_ptr: *mut vm,
-        start: u64,
-        size: usize,
-        flags: u64,
-        file: *mut vfs_file,
-        pgoff: u64,
-        pa: *mut c_void,
-    ) -> c_int;
-    safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-
     // irq/syscall.rs — arg-fetch helpers (`sys_exec` only).
     safe fn argaddr(n: c_int, ip: *mut u64);
     safe fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int;
     safe fn fetchaddr(addr: u64, ip: *mut u64) -> c_int;
     safe fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int;
+}
+
+// P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; reached as crate-path items
+// instead of the `extern "C"` redeclarations that used to sit in the
+// block above. Signatures are identical to the old redeclarations.
+use crate::mm::{
+    vm_copyout, vm_find_area, vm_init, vm_mmap_region_locked, vm_put, vm_rlock, vm_runlock,
+    vm_wlock, vm_wunlock, vma_validate,
+};
+
+// `kalloc`/`kfree` are genuinely `unsafe fn` in `crate::mm::kalloc`; this
+// file's original extern declarations asserted `safe fn` (the usual
+// FFI-boilerplate-collapsing facade). Thin safe wrappers preserve that
+// facade, per the `cffi::raw`/`bufcache.rs` precedent.
+/// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
+#[inline]
+fn kalloc() -> *mut c_void {
+    unsafe { crate::mm::kalloc() }
+}
+/// SAFETY: `pa` must originate from `kalloc` above.
+#[inline]
+fn kfree(pa: *mut c_void) {
+    unsafe { crate::mm::kfree(pa) };
 }
 
 // ===========================================================================

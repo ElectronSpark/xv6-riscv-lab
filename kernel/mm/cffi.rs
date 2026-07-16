@@ -109,7 +109,7 @@ pub mod raw {
 pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6_list_init, xv6_list_is_detached, xv6_list_is_empty, xv6_list_last, xv6_list_pop_front, xv6_list_push_back, xv6_list_push_front, xv6_pop_off, xv6_push_off};
 
     // `kmm_alloc`/`kmm_free`/`memset` are genuinely `unsafe fn` in their
-    // canonical (still-`#[no_mangle]`) modules; the original extern
+    // canonical modules (`pub(crate)` since P3-D3a); the original extern
     // declarations here asserted `pub safe fn` (this whole module's
     // documented purpose — see the doc comment above `pub mod raw`: "lets
     // callers invoke them from outside an unsafe block ... the safe

@@ -14,7 +14,8 @@
 //!   * `slab_cache_t_alloc/free`   — descriptor pool for slab caches.
 //!
 //! All algorithmic logic lives in safe Rust. The only `unsafe` is the
-//! FFI boundary (`mod ffi`) and the thin `#[no_mangle] extern "C"` wrappers.
+//! FFI boundary (`mod ffi`) and the thin `pub(crate) unsafe fn` entry
+//! points (P3-D3a: no more `#[no_mangle] extern "C"` surface).
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -63,7 +64,7 @@ mod ffi {
         pub safe fn __panic_end() -> !;
     }
     // The functions below are all genuinely `unsafe fn` in their canonical
-    // (still-`#[no_mangle]` or newly-`pub(crate)`) modules; this file's
+    // (`pub(crate)`, P3-D3a) modules; this file's
     // original extern declarations asserted `pub safe fn` (this crate's
     // usual FFI-boilerplate-collapsing facade) and additionally typed the
     // page/slab-cache pointers as the generic-allocator `*mut c_void`
@@ -342,8 +343,7 @@ fn page_alloc_legacy() -> *mut c_void {
 // Public C ABI — thin wrappers.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn kinit() {
+pub(crate) unsafe fn kinit() {
     init_kmm()
 }
 
@@ -367,16 +367,14 @@ pub(crate) unsafe fn slab_cache_t_free(cache_desc: *mut c_void) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kmm_alloc(size: usize) -> *mut c_void {
+pub(crate) unsafe fn kmm_alloc(size: usize) -> *mut c_void {
     match slab_index_for(size) {
         Some(idx) => kmm_cache(idx).alloc(),
         None      => core::ptr::null_mut(),
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kmm_free(ptr: *mut c_void) {
+pub(crate) unsafe fn kmm_free(ptr: *mut c_void) {
     ffi::slab_free(ptr)
 }
 
@@ -390,12 +388,10 @@ pub(crate) unsafe fn get_total_free_pages() -> u64 {
     total_free_pages()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kfree(pa: *mut c_void) {
+pub(crate) unsafe fn kfree(pa: *mut c_void) {
     page_free(pa)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kalloc() -> *mut c_void {
+pub(crate) unsafe fn kalloc() -> *mut c_void {
     page_alloc_legacy()
 }

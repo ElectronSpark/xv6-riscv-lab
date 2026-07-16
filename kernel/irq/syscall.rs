@@ -55,7 +55,7 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::size_of;
 
-use crate::bindings::{vm, ENOSYS};
+use crate::bindings::ENOSYS;
 use crate::machine;
 
 // ===========================================================================
@@ -108,24 +108,18 @@ unsafe extern "C" {
     // string.rs
     fn strlen(s: *const c_char) -> usize;
 
-    // mm/vm.rs
-    safe fn vm_copyin(vm_ptr: *mut vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;
-    safe fn vm_copyinstr(vm_ptr: *mut vm, dst: *mut c_char, srcva: u64, max: u64) -> c_int;
-
-    // ---- Syscall implementations already ported to Rust ----
-    // mm/sysmm.rs
-    safe fn sys_mmap() -> u64;
-    safe fn sys_munmap() -> u64;
-    safe fn sys_mprotect() -> u64;
-    safe fn sys_mremap() -> u64;
-    safe fn sys_msync() -> u64;
-    safe fn sys_mincore() -> u64;
-    safe fn sys_madvise() -> u64;
-    // mm/page.rs, mm/pcache.rs
-    safe fn sys_memstat() -> u64;
-    safe fn sys_dumppcache() -> u64;
-    safe fn sys_sync() -> u64;
 }
+
+// P3-D3a: the mm-cluster entry points are ordinary Rust fns now that
+// their `#[no_mangle]` exports are gone; reached as crate-path items
+// instead of the `extern "C"` redeclarations that used to sit in the
+// block above (signatures identical). The `sys_*` syscall entries keep
+// their `extern "C"` ABI at the definition site — [`SYSCALLS`] stores
+// them as `SyscallFn` (`extern "C" fn() -> u64`) fn-pointer values.
+use crate::mm::{
+    sys_dumppcache, sys_madvise, sys_memstat, sys_mincore, sys_mmap, sys_mprotect, sys_mremap,
+    sys_msync, sys_munmap, sys_sync, vm_copyin, vm_copyinstr,
+};
 
 // ===========================================================================
 // Arg-fetch helpers (`kernel/inc/defs.h`'s `argraw`/`argint`/`argint64`/

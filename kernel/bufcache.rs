@@ -177,7 +177,7 @@ pub(crate) use crate::lock::completion::{wait_for_completion, wait_for_completio
 pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};
 
 // `page_alloc`/`__pa_to_page` are genuinely `unsafe fn` in `crate::mm::page`
-// (still `#[no_mangle]`, unchanged); this file's original extern
+// (`pub(crate)` since P3-D3a); this file's original extern
 // declaration asserted `pub safe fn` (this crate's usual "collapse the
 // FFI boilerplate" facade) and additionally typed `__pa_to_page`'s return
 // as `*mut page_t` (the bindgen type `bio_add_seg` below still expects)

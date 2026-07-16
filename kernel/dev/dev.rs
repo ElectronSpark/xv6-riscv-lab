@@ -109,26 +109,6 @@ use crate::sync::KSpinlock;
 // ---------------------------------------------------------------------------
 
 unsafe extern "C" {
-    // mm/slab.rs -- signature matches kernel/lock/rcu.rs's own (already
-    // proven, boot-tested) declaration rather than mm/slab.rs's literal
-    // Rust definition; both resolve to the same C symbol/ABI (RISC-V lp64d
-    // integer args narrower than XLEN are extended by the caller either
-    // way), kept consistent with the working precedent instead of
-    // "correcting" it in a way nothing has exercised.
-    pub safe fn slab_cache_init(
-        cache: *mut slab_cache_t,
-        name: *const c_char,
-        obj_size: u64,
-        flags: u32,
-    ) -> c_int;
-    pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    pub safe fn slab_free(obj: *mut c_void);
-
-    // mm/page.rs -- real C signature (kernel/inc/mm/page.h): both args are
-    // uint64.
-    pub safe fn page_alloc(order: u64, flags: u64) -> *mut c_void;
-    pub safe fn page_free(ptr: *mut c_void, order: u64);
-
     // kernel/kobject.rs. Genuinely unsafe (raw kobject* + caller-upheld
     // refcount invariants), kept as plain (non-`safe`) externs.
     fn kobject_init(obj: *mut kobject);
@@ -139,6 +119,50 @@ unsafe extern "C" {
     fn call_rcu(head: *mut rcu_head_t, func: rcu_callback_t, data: *mut c_void);
 
     // printf.rs -- variadic, cannot be marked `safe`.
+}
+
+// P3-D3a: the mm page/slab entry points are genuinely `unsafe fn` in
+// `crate::mm::{page,slab}` now that their `#[no_mangle]` exports are
+// gone; this file's original extern declarations asserted `pub safe fn`
+// (usual FFI facade) and typed the cache pointer as the bindgen
+// `slab_cache_t` (same layout as `crate::mm::slab::SlabCache`), `name`
+// as `*const c_char` (callee only reads it), and `obj_size`/`flags` as
+// `u64`/`u32` rather than the real `usize`/`u64` (same-register widths
+// under the old C ABI). Thin cast + safe-facade wrappers preserve all of
+// this file's call-site types.
+/// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *const c_char, obj_size: u64, flags: u32,
+) -> c_int {
+    unsafe {
+        crate::mm::slab_cache_init(
+            cache as *mut crate::mm::slab::SlabCache,
+            name as *mut c_char,
+            obj_size as usize,
+            flags as u64,
+        )
+    }
+}
+/// SAFETY: `cache` must originate from `slab_cache_init` above.
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    unsafe { crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+}
+/// SAFETY: `obj` must originate from `slab_alloc` above.
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    unsafe { crate::mm::slab_free(obj) };
+}
+/// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
+#[inline]
+fn page_alloc(order: u64, flags: u64) -> *mut c_void {
+    unsafe { crate::mm::page_alloc(order, flags) }
+}
+/// SAFETY: `ptr` must originate from `page_alloc` above.
+#[inline]
+fn page_free(ptr: *mut c_void, order: u64) {
+    unsafe { crate::mm::page_free(ptr, order) };
 }
 // P3-1C mesh sweep: vfs/devtmpfs/superblock.rs is in scope for this wave;
 // signatures are identical (same `mode_t`/`dev_t` types), so these become
