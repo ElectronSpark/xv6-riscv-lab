@@ -103,6 +103,111 @@ use crate::lock::rcu::KRcuRead;
 use crate::sync::KSpinlock;
 
 // ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N4 (device core family).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/dev/
+// dev_types.h`'s `struct device_major`/`struct device_ops`/`struct
+// device_instance` now: `build.rs` blocklists the bindgen-generated
+// forms and injects `pub use crate::dev::dev::... as ...;` facade
+// re-exports (struct name + `_t` typedef alias each), so every
+// `crate::bindings::{device_major(_t),device_ops(_t),device_instance,
+// device_t}` path across the crate resolves here. The ops-table
+// fn-pointer fields reproduce bindgen's forms exactly
+// (`Option<unsafe extern "C" fn ...>`); trait-ifying the ops tables is
+// P3-10's job, not this wave's. The still-bindgen `rcu_head_t` is
+// embedded *by value* (`DeviceMajor::rcu_head`) — the sanctioned
+// mixed-tier pattern (P3-N2/N3). `dev_type_e` stays the bindgen
+// constified-enum `c_uint` alias.
+//
+// Copy fidelity: `device_major`/`device_ops` derived Copy/Clone in the
+// pre-nativization bindgen output; `device_instance` derived NEITHER
+// (bindgen's derive analysis, kobject-embedder pattern — same as the
+// still-bindgen `vfs_fs_type`), so `DeviceInstance` deliberately has no
+// derives and `build.rs`'s callbacks answer Copy=No for it.
+// ---------------------------------------------------------------------------
+
+/// `struct device_major` (`kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DeviceMajor {
+    pub num_minors: c_int,
+    pub minors: *mut *mut DeviceInstance,
+    pub rcu_head: crate::bindings::rcu_head_t,
+}
+
+/// `struct device_ops` (`kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DeviceOps {
+    pub open: Option<unsafe extern "C" fn(dev: *mut DeviceInstance) -> c_int>,
+    pub release: Option<unsafe extern "C" fn(dev: *mut DeviceInstance) -> c_int>,
+    pub ioctl: Option<
+        unsafe extern "C" fn(
+            dev: *mut DeviceInstance,
+            cmd: crate::bindings::uint64,
+            arg: *mut c_void,
+        ) -> c_int,
+    >,
+}
+
+/// `struct device_instance` (typedef `device_t`,
+/// `kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+pub struct DeviceInstance {
+    pub kobj: Kobject,
+    pub major: c_int,
+    pub minor: c_int,
+    pub type_: dev_type_e,
+    pub unregistering: c_int,
+    pub ops: DeviceOps,
+    pub devname: *const c_char,
+    pub devmode: crate::bindings::mode_t,
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// device_major { num_minors: c_int, minors: *mut *mut device_t,
+// rcu_head: rcu_head_t }`, `pub struct device_ops { open/release:
+// Option<unsafe extern "C" fn(*mut device_t) -> c_int>, ioctl:
+// Option<unsafe extern "C" fn(*mut device_t, uint64, *mut c_void) ->
+// c_int> }`, `pub struct device_instance { kobj: kobject, major/minor:
+// c_int, type_: dev_type_e, unregistering: c_int, ops: device_ops_t,
+// devname: *const c_char, devmode: mode_t }`) and independently
+// confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
+// (rv64gc/lp64d) against `kernel/inc/dev/dev_types.h` — see the P3-N4
+// wave record: device_major 56/8 offsets 0/8/16 (rcu_head_t itself
+// 40/8), device_ops 24/8 offsets 0/8/16, device_instance 96/8 offsets
+// 0/40/44/48/52/56/80/88 (kobject itself proven 40/8 by kobject.rs's
+// own gate).
+const _: () = {
+    assert!(core::mem::size_of::<crate::bindings::rcu_head_t>() == 40, "rcu_head_t size");
+    assert!(core::mem::align_of::<crate::bindings::rcu_head_t>() == 8, "rcu_head_t alignment");
+    assert!(core::mem::size_of::<DeviceMajor>() == 56, "device_major size");
+    assert!(core::mem::align_of::<DeviceMajor>() == 8, "device_major alignment");
+    assert!(core::mem::offset_of!(DeviceMajor, num_minors) == 0, "device_major.num_minors offset");
+    assert!(core::mem::offset_of!(DeviceMajor, minors) == 8, "device_major.minors offset");
+    assert!(core::mem::offset_of!(DeviceMajor, rcu_head) == 16, "device_major.rcu_head offset");
+    assert!(core::mem::size_of::<DeviceOps>() == 24, "device_ops size");
+    assert!(core::mem::align_of::<DeviceOps>() == 8, "device_ops alignment");
+    assert!(core::mem::offset_of!(DeviceOps, open) == 0, "device_ops.open offset");
+    assert!(core::mem::offset_of!(DeviceOps, release) == 8, "device_ops.release offset");
+    assert!(core::mem::offset_of!(DeviceOps, ioctl) == 16, "device_ops.ioctl offset");
+    assert!(core::mem::size_of::<DeviceInstance>() == 96, "device_instance size");
+    assert!(core::mem::align_of::<DeviceInstance>() == 8, "device_instance alignment");
+    assert!(core::mem::offset_of!(DeviceInstance, kobj) == 0, "device_instance.kobj offset");
+    assert!(core::mem::offset_of!(DeviceInstance, major) == 40, "device_instance.major offset");
+    assert!(core::mem::offset_of!(DeviceInstance, minor) == 44, "device_instance.minor offset");
+    assert!(core::mem::offset_of!(DeviceInstance, type_) == 48, "device_instance.type_ offset");
+    assert!(
+        core::mem::offset_of!(DeviceInstance, unregistering) == 52,
+        "device_instance.unregistering offset"
+    );
+    assert!(core::mem::offset_of!(DeviceInstance, ops) == 56, "device_instance.ops offset");
+    assert!(core::mem::offset_of!(DeviceInstance, devname) == 80, "device_instance.devname offset");
+    assert!(core::mem::offset_of!(DeviceInstance, devmode) == 88, "device_instance.devmode offset");
+};
+
+// ---------------------------------------------------------------------------
 // External C symbols. Declared locally rather than via bindgen's function
 // allowlist, matching the established per-file convention (irq/trap.rs,
 // tty/session.rs, mm/vm.rs, vfs/inode.rs, vfs/devtmpfs/superblock.rs, ...).

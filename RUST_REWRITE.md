@@ -1815,6 +1815,73 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   remove interrupted waiter from queue", matches RUST_REWRITE.md's
   documented signature).
 
+### Iteration 60 — 2026-07-16 — Wave P3-N4: signal + device families nativized (16 structs + 3 anon bitfields + 1 anon union)
+
+- Fourth nativization wave via the 41f268e/8768b10/219b6fb technique,
+  four sub-families, tree green after each: **signal** — `sigaction`
+  (+ its anonymous handler *union*, the first anon-union nativization
+  since N2's tnode: real Rust `union SigActionHandler` under field name
+  `handler`), `sigacts`(`_t`), `sigpending`(`_t`), `ksiginfo`,
+  `tg_shared_pending` (all in proc/signal.rs, `mod signal` promoted to
+  `pub(crate)`); **dev core** — `device_major`(`_t`)/`device_ops`(`_t`)/
+  `device_instance`+`device_t` (dev/dev.rs), `cdev_ops`(`_t`)/`cdev`(`_t`)
+  (dev/cdev.rs), `blkdev_ops`(`_t`)/`blkdev`(`_t`) (dev/blkdev.rs);
+  **bio** — `bio_vec`/`bio` (dev/bio.rs); `buf` (bufcache.rs); **netdev**
+  — `netdev` (dev/netdev.rs). bindgen emits ZERO struct defs for all 16;
+  every `crate::bindings::X` path resolves through `pub use` raw-line
+  redirects (struct + `_t` typedef names both).
+- **Ops tables reproduced, not trait-ified**: the fn-pointer STRUCT
+  fields (`device_ops`/`cdev_ops`/`blkdev_ops`, `bio.end_io`,
+  `sigaction`'s handler union) keep bindgen's exact
+  `Option<unsafe extern "C" fn ...>` forms — trait-ifying them is
+  P3-10's job. `netdev_ops` + `netdev_link_cb_t` and `dev_type_e` stay
+  bindgen (pointer-only/alias references; anchored blocklist regexes
+  leave them untouched).
+- **Anonymous C bitfields**: cdev/blkdev readable+writable and bio
+  valid+rw+done became `CdevFlagBits`/`BlkdevFlagBits`/`BioFlagBits`
+  8/8 `{bits,_pad}` holders under field name `flags` (N3 pattern,
+  little-endian bit order identical to bindgen's unit accessors); all
+  ~30 `__bindgen_anon_1` consumer sites re-pointed (cdev.rs, blkdev.rs,
+  bio.rs, tty_dev.rs, ptmx.rs, nullrand.rs, console.rs, virtio_disk.rs,
+  ramdisk.rs, x1_sdhci.rs; sigaction union sites in trap.rs, signal.rs,
+  access.rs incl. its raw_set! path).
+- **Mixed-tier embeds**: native `KsigInfo` embeds still-bindgen
+  `siginfo_t` by value; `DeviceMajor` embeds `rcu_head_t`; N3's
+  `ThreadGroup.shared_pending` alias re-pointed onto the new native
+  `TgSharedPending` transparently (its 520/8 assert unchanged). Bindgen's
+  explicit padding fields reproduced 1:1 (`bio._pad0: [u64; 2]`,
+  `buf._pad0: [u64; 5]` — the C `completion_t`/`mutex_t` *typedefs*
+  carry `__ALIGNED_CACHELINE`, natives genuinely 128/64). `bio.bvecs`
+  (C flexible array member) keeps bindgen's zero-sized
+  `__IncompleteArrayField` helper — first FAM nativization; call sites
+  (`bvecs.as_mut_ptr()`) unchanged.
+- Layout evidence: cross-compiler `_Static_assert` probe
+  (riscv64-unknown-elf-gcc, rv64gc/lp64d, -I kernel/inc) proved every
+  size/align/offset — sigaction 24/8, sigacts 896/64 (spinlock_t-typedef
+  align via first member), sigpending 16/8, ksiginfo 80/8,
+  tg_shared_pending 520/8, device_major 56/8, device_ops 24/8,
+  device_instance 96/8, cdev_ops 56/8, cdev 160/8, blkdev_ops 24/8,
+  blkdev 136/8, bio_vec 16/8, bio 256/64 (io_completion at 128, bvecs
+  at 256), buf 320/64 (lock at 64, mutex_t 128/64), netdev 80/8 — all
+  hardcoded into const asserts in the owning modules. **Copy fidelity
+  split**: Copy=Yes for the PODs/ops tables, Copy=**No** for
+  `device_instance`/`cdev`/`blkdev`/`bio` (bindgen's kobject-embedder
+  derive pattern — they had NO derives pre-change; natives faithfully
+  have none, NONCOPY_NATIVE_TYPES extended). `sigpending_t` Copy=Yes is
+  load-bearing: still embedded by value by bindgen `thread_signal`
+  (derive line verified unchanged).
+- Verified (worker): 0-warning clean rebuild (`cargo clean` + full
+  cmake, grep = 0); cache clean before+after (BUILD_TYPE empty,
+  toolchain gcc); bindgen emission grep = 0 structs, 20 redirect
+  `pub use` lines; 4 boots each with exactly one `init: starting sh`;
+  **testsig 21/21 ALL PASSED**; `ls /dev` full 12-node listing;
+  `cat README.md | wc` = 714/3365/26018; `cat /nonexistent` → ENOENT;
+  usertests createdelete OK (single-test "lost some free pages" =
+  documented pre-existing artifact); stressfs completed (full
+  write+read phases, prompt returned); **forkforkfork identical
+  pre-existing panic** ("Failed to remove interrupted waiter from
+  queue", matches the documented tq-bug signature).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

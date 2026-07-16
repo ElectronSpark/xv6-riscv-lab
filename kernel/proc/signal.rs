@@ -58,6 +58,158 @@ unsafe fn slab_free(obj: *mut c_void) {
     crate::mm::slab_free(obj)
 }
 use crate::lock::spinlock::spin_holding;
+
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N4 (signal type family).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/uabi/signal.h`'s
+// `struct sigaction` (+ its anonymous handler union), `kernel/inc/
+// signal_types.h`'s `struct sigacts`/`struct sigpending`/`struct ksiginfo`,
+// and `kernel/inc/proc/thread_group_types.h`'s `struct tg_shared_pending`
+// now: `build.rs` blocklists the bindgen-generated forms and injects
+// `pub use crate::proc::signal::... as ...;` facade re-exports, so every
+// `crate::bindings::{sigaction,sigacts,sigacts_t,sigpending,sigpending_t,
+// ksiginfo,tg_shared_pending}` path across the crate resolves here. The
+// still-bindgen `siginfo_t` is embedded *by value* (`KsigInfo::info`) —
+// the sanctioned mixed-tier pattern (P3-N2/N3); when the siginfo family
+// later nativizes, the alias re-points transparently. `SigPending` is
+// likewise still embedded by value by the remaining bindgen
+// `thread_signal` (`sig_pending: [sigpending_t; 32]`), which is why
+// `build.rs`'s `NativeTypeCallbacks` answers Copy=Yes for it. The C
+// `_Atomic int` member (`sigacts.refcount`) stays a plain `c_int` field,
+// exactly as bindgen lowered it; atomic access goes through pointer
+// views, unchanged.
+// ---------------------------------------------------------------------------
+
+/// Native replacement for the anonymous C union inside `struct sigaction`
+/// (`kernel/inc/uabi/signal.h`): bindgen's `sigaction__bindgen_ty_1`,
+/// two fn-pointer arms, 8/8. Field forms reproduce bindgen's exactly
+/// (`Option<unsafe extern "C" fn ...>`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union SigActionHandler {
+    pub sa_handler: Option<unsafe extern "C" fn(arg1: c_int)>,
+    pub sa_sigaction: Option<
+        unsafe extern "C" fn(
+            arg1: c_int,
+            arg2: *mut crate::bindings::siginfo_t,
+            arg3: *mut c_void,
+        ),
+    >,
+}
+
+/// `struct sigaction` (`kernel/inc/uabi/signal.h`). The anonymous union
+/// became the named `handler` field (consumers re-pointed from bindgen's
+/// `__bindgen_anon_1`, N3 precedent).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SigAction {
+    pub handler: SigActionHandler,
+    pub sa_mask: sigset_t,
+    pub sa_flags: c_int,
+}
+
+/// `struct sigacts` (`kernel/inc/signal_types.h`). The align(64) is the
+/// `spinlock_t` *typedef*'s `__ALIGNED_CACHELINE` riding in through the
+/// first member — the record type `RawSpinlock` is 24/8, so the embedder
+/// carries the alignment itself, exactly as bindgen emitted it
+/// (`#[repr(C)] #[repr(align(64))]`).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct SigActs {
+    pub lock: spinlock_t,
+    pub sa: [SigAction; 33],
+    pub sa_sigterm: sigset_t,
+    pub sa_sigstop: sigset_t,
+    pub sa_sigcont: sigset_t,
+    pub sa_sigignore: sigset_t,
+    pub refcount: c_int,
+}
+
+/// `struct sigpending` (`kernel/inc/signal_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SigPending {
+    pub queue: list_node_t,
+}
+
+/// `struct ksiginfo` (`kernel/inc/signal_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KsigInfo {
+    pub list_entry: list_node_t,
+    pub receiver: *mut thread,
+    pub sender: *mut thread,
+    pub signo: c_int,
+    pub info: crate::bindings::siginfo_t,
+}
+
+/// `struct tg_shared_pending` (`kernel/inc/proc/thread_group_types.h`) —
+/// embedded by value by the native `ThreadGroup` (P3-N3), whose
+/// `crate::bindings::tg_shared_pending` path now resolves here.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TgSharedPending {
+    pub sig_pending_mask: sigset_t,
+    pub sig_pending: [SigPending; 32],
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// sigaction { __bindgen_anon_1: sigaction__bindgen_ty_1, sa_mask:
+// sigset_t, sa_flags: c_int }`, `pub struct sigacts { lock: spinlock_t,
+// sa: [sigaction; 33], sa_sigterm/sa_sigstop/sa_sigcont/sa_sigignore:
+// sigset_t, refcount: c_int }` (`#[repr(align(64))]`), `pub struct
+// sigpending { queue: list_node_t }`, `pub struct ksiginfo { list_entry:
+// list_node_t, receiver/sender: *mut thread, signo: c_int, info:
+// siginfo_t }`, `pub struct tg_shared_pending { sig_pending_mask:
+// sigset_t, sig_pending: [sigpending_t; 32] }`) and independently
+// confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
+// (rv64gc/lp64d) against the headers above — see the P3-N4 wave record:
+// sigaction 24/8 offsets 0/0/8/16, sigacts 896/64 offsets
+// 0/24/816/824/832/840/848, sigpending 16/8, ksiginfo 80/8 offsets
+// 0/16/24/32/40, tg_shared_pending 520/8 offsets 0/8 (siginfo_t itself
+// proven 40/8 by the same probe).
+const _: () = {
+    assert!(core::mem::size_of::<SigActionHandler>() == 8, "sigaction handler union size");
+    assert!(core::mem::align_of::<SigActionHandler>() == 8, "sigaction handler union alignment");
+    assert!(core::mem::size_of::<SigAction>() == 24, "sigaction size");
+    assert!(core::mem::align_of::<SigAction>() == 8, "sigaction alignment");
+    assert!(core::mem::offset_of!(SigAction, handler) == 0, "sigaction.handler offset");
+    assert!(core::mem::offset_of!(SigAction, sa_mask) == 8, "sigaction.sa_mask offset");
+    assert!(core::mem::offset_of!(SigAction, sa_flags) == 16, "sigaction.sa_flags offset");
+    assert!(core::mem::size_of::<SigActs>() == 896, "sigacts size");
+    assert!(core::mem::align_of::<SigActs>() == 64, "sigacts alignment");
+    assert!(core::mem::offset_of!(SigActs, lock) == 0, "sigacts.lock offset");
+    assert!(core::mem::offset_of!(SigActs, sa) == 24, "sigacts.sa offset");
+    assert!(core::mem::offset_of!(SigActs, sa_sigterm) == 816, "sigacts.sa_sigterm offset");
+    assert!(core::mem::offset_of!(SigActs, sa_sigstop) == 824, "sigacts.sa_sigstop offset");
+    assert!(core::mem::offset_of!(SigActs, sa_sigcont) == 832, "sigacts.sa_sigcont offset");
+    assert!(core::mem::offset_of!(SigActs, sa_sigignore) == 840, "sigacts.sa_sigignore offset");
+    assert!(core::mem::offset_of!(SigActs, refcount) == 848, "sigacts.refcount offset");
+    assert!(core::mem::size_of::<SigPending>() == 16, "sigpending size");
+    assert!(core::mem::align_of::<SigPending>() == 8, "sigpending alignment");
+    assert!(core::mem::offset_of!(SigPending, queue) == 0, "sigpending.queue offset");
+    assert!(core::mem::size_of::<crate::bindings::siginfo_t>() == 40, "siginfo_t size");
+    assert!(core::mem::align_of::<crate::bindings::siginfo_t>() == 8, "siginfo_t alignment");
+    assert!(core::mem::size_of::<KsigInfo>() == 80, "ksiginfo size");
+    assert!(core::mem::align_of::<KsigInfo>() == 8, "ksiginfo alignment");
+    assert!(core::mem::offset_of!(KsigInfo, list_entry) == 0, "ksiginfo.list_entry offset");
+    assert!(core::mem::offset_of!(KsigInfo, receiver) == 16, "ksiginfo.receiver offset");
+    assert!(core::mem::offset_of!(KsigInfo, sender) == 24, "ksiginfo.sender offset");
+    assert!(core::mem::offset_of!(KsigInfo, signo) == 32, "ksiginfo.signo offset");
+    assert!(core::mem::offset_of!(KsigInfo, info) == 40, "ksiginfo.info offset");
+    assert!(core::mem::size_of::<TgSharedPending>() == 520, "tg_shared_pending size");
+    assert!(core::mem::align_of::<TgSharedPending>() == 8, "tg_shared_pending alignment");
+    assert!(
+        core::mem::offset_of!(TgSharedPending, sig_pending_mask) == 0,
+        "tg_shared_pending.sig_pending_mask offset"
+    );
+    assert!(
+        core::mem::offset_of!(TgSharedPending, sig_pending) == 8,
+        "tg_shared_pending.sig_pending offset"
+    );
+};
 use crate::machine::{cpuid, CpuLocal};
 use crate::proc::proc_shims::{
     xv6_current_thread, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
@@ -1280,7 +1432,7 @@ pub(crate) fn handle_signal() {
                 for signo in 1..=NSIG {
                     if sigismember(sigcont, signo) > 0 && sigismember(pending_cont, signo) > 0 {
                         let act = &raw const (*sa).sa[signo as usize];
-                        let h = (*act).__bindgen_anon_1.sa_handler;
+                        let h = (*act).handler.sa_handler;
                         let is_dfl = h.is_none();
                         let is_ign = matches!(h, Some(f) if (f as *const () as usize) == 1);
                         if !is_dfl && !is_ign { user_handler = true; break; }

@@ -596,8 +596,8 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
     unsafe {
         (*pair).slave_cdev.dev.major = PTS_MAJOR;
         (*pair).slave_cdev.dev.minor = dev_minor;
-        (*pair).slave_cdev.__bindgen_anon_1.set_readable(1);
-        (*pair).slave_cdev.__bindgen_anon_1.set_writable(1);
+        (*pair).slave_cdev.flags.set_readable(1);
+        (*pair).slave_cdev.flags.set_writable(1);
         (*pair).slave_cdev.ops = cdev_ops_t {
             read: None,
             write: None,
@@ -670,8 +670,8 @@ pub(crate) extern "C" fn ptmxinit() {
         (*cdev).dev.minor = PTMX_MINOR;
         (*cdev).dev.devname = c"ptmx".as_ptr();
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).__bindgen_anon_1.set_readable(1);
-        (*cdev).__bindgen_anon_1.set_writable(1);
+        (*cdev).flags.set_readable(1);
+        (*cdev).flags.set_writable(1);
         (*cdev).ops = cdev_ops_t {
             read: None,
             write: None,

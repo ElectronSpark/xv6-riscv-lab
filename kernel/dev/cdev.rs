@@ -38,6 +38,132 @@ const fn neg(e: u32) -> c_int {
 use crate::kstd::{err_ptr, is_err};
 
 // ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N4 (device core family, cdev half).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/dev/
+// dev_types.h`'s `struct cdev_ops`/`struct cdev` now: `build.rs`
+// blocklists the bindgen-generated forms and injects `pub use
+// crate::dev::cdev::... as ...;` facade re-exports (struct name + `_t`
+// typedef alias each). The ops-table fn-pointer fields reproduce
+// bindgen's forms exactly; the anonymous C bitfield struct
+// `struct { uint64 readable : 1; uint64 writable : 1; }` became the
+// named 8/8 `{bits,_pad}` holder `CdevFlagBits` with safe masking
+// accessors bit-identical to bindgen's little-endian unit (N3
+// precedent; consumers' `__bindgen_anon_1` sites re-pointed to
+// `.flags`). Copy fidelity: `cdev_ops` derived Copy/Clone in the
+// pre-nativization bindgen output; `cdev` derived NEITHER (it embeds
+// the non-Copy `device_t`), so `Cdev` deliberately has no derives.
+// ---------------------------------------------------------------------------
+
+/// `struct cdev_ops` (typedef `cdev_ops_t`, `kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CdevOps {
+    pub read: Option<
+        unsafe extern "C" fn(
+            cdev: *mut Cdev,
+            user: bool_,
+            buf: *mut c_void,
+            count: usize,
+        ) -> c_int,
+    >,
+    pub write: Option<
+        unsafe extern "C" fn(
+            cdev: *mut Cdev,
+            user: bool_,
+            buf: *const c_void,
+            count: usize,
+        ) -> c_int,
+    >,
+    pub open: Option<unsafe extern "C" fn(cdev: *mut Cdev) -> c_int>,
+    pub release: Option<unsafe extern "C" fn(cdev: *mut Cdev) -> c_int>,
+    pub ioctl: Option<
+        unsafe extern "C" fn(
+            cdev: *mut Cdev,
+            cmd: crate::bindings::uint64,
+            arg: *mut c_void,
+        ) -> c_int,
+    >,
+    pub poll: Option<
+        unsafe extern "C" fn(cdev: *mut Cdev, events: ::core::ffi::c_short) -> c_int,
+    >,
+    pub open_file: Option<
+        unsafe extern "C" fn(cdev: *mut Cdev, file: *mut crate::bindings::vfs_file) -> c_int,
+    >,
+}
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 readable : 1; uint64 writable : 1; }` inside
+/// `struct cdev` (bindgen's `cdev__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `readable` at bit 0 and
+/// `writable` at bit 1 of the (8-byte) unit's byte 0 — identical to
+/// bindgen's `get(0,1)`/`get(1,1)` accessors reproduced below.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct CdevFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl CdevFlagBits {
+    #[inline]
+    pub(crate) fn readable(&self) -> u64 {
+        (self.bits & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_readable(&mut self, val: u64) {
+        self.bits = (self.bits & !0b01) | (((val as u8) & 0b01) << 0);
+    }
+    #[inline]
+    pub(crate) fn writable(&self) -> u64 {
+        ((self.bits & 0b10) >> 1) as u64
+    }
+    #[inline]
+    pub(crate) fn set_writable(&mut self, val: u64) {
+        self.bits = (self.bits & !0b10) | (((val as u8) & 0b01) << 1);
+    }
+}
+
+/// `struct cdev` (typedef `cdev_t`, `kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+pub struct Cdev {
+    pub dev: device_t,
+    pub flags: CdevFlagBits,
+    pub ops: CdevOps,
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// cdev_ops { read, write, open, release, ioctl, poll, open_file }` (all
+// `Option<unsafe extern "C" fn ...>`), `pub struct cdev { dev: device_t,
+// __bindgen_anon_1: cdev__bindgen_ty_1, ops: cdev_ops_t }`) and
+// independently confirmed by a riscv64-unknown-elf-gcc `_Static_assert`
+// probe (rv64gc/lp64d) against `kernel/inc/dev/dev_types.h` — see the
+// P3-N4 wave record: cdev_ops 56/8 offsets 0/8/16/24/32/40/48, cdev
+// 160/8 offsets 0/[96]/104 (the anonymous bitfield struct occupies
+// [96,104), pinned in the probe by its predecessor plus the `ops`
+// offset).
+const _: () = {
+    assert!(core::mem::size_of::<CdevOps>() == 56, "cdev_ops size");
+    assert!(core::mem::align_of::<CdevOps>() == 8, "cdev_ops alignment");
+    assert!(core::mem::offset_of!(CdevOps, read) == 0, "cdev_ops.read offset");
+    assert!(core::mem::offset_of!(CdevOps, write) == 8, "cdev_ops.write offset");
+    assert!(core::mem::offset_of!(CdevOps, open) == 16, "cdev_ops.open offset");
+    assert!(core::mem::offset_of!(CdevOps, release) == 24, "cdev_ops.release offset");
+    assert!(core::mem::offset_of!(CdevOps, ioctl) == 32, "cdev_ops.ioctl offset");
+    assert!(core::mem::offset_of!(CdevOps, poll) == 40, "cdev_ops.poll offset");
+    assert!(core::mem::offset_of!(CdevOps, open_file) == 48, "cdev_ops.open_file offset");
+    assert!(core::mem::size_of::<CdevFlagBits>() == 8, "cdev anon bitfield size");
+    assert!(core::mem::align_of::<CdevFlagBits>() == 8, "cdev anon bitfield alignment");
+    assert!(core::mem::size_of::<Cdev>() == 160, "cdev size");
+    assert!(core::mem::align_of::<Cdev>() == 8, "cdev alignment");
+    assert!(core::mem::offset_of!(Cdev, dev) == 0, "cdev.dev offset");
+    assert!(core::mem::offset_of!(Cdev, flags) == 96, "cdev anon bitfield offset");
+    assert!(core::mem::offset_of!(Cdev, ops) == 104, "cdev.ops offset");
+};
+
+// ---------------------------------------------------------------------------
 // Underlying device_ops_t vtable: forwards device_t-level calls into the
 // registrant's cdev_ops_t.
 // ---------------------------------------------------------------------------
@@ -195,7 +321,7 @@ pub(crate) extern "C" fn cdev_read(cdev: *mut cdev_t, user: bool_, buf: *mut c_v
         if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
             return neg(ENODEV); // not a character device
         }
-        if (*cdev).__bindgen_anon_1.readable() == 0 || (*cdev).ops.read.is_none() {
+        if (*cdev).flags.readable() == 0 || (*cdev).ops.read.is_none() {
             return neg(ENOSYS); // read operation not supported
         }
         (*cdev).ops.read.unwrap()(cdev, user, buf, count)
@@ -218,7 +344,7 @@ pub(crate) extern "C" fn cdev_write(
         if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
             return neg(ENODEV); // not a character device
         }
-        if (*cdev).__bindgen_anon_1.writable() == 0 || (*cdev).ops.write.is_none() {
+        if (*cdev).flags.writable() == 0 || (*cdev).ops.write.is_none() {
             return neg(ENOSYS); // write operation not supported
         }
         (*cdev).ops.write.unwrap()(cdev, user, buf, count)

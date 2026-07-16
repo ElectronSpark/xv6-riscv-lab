@@ -90,6 +90,39 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "thread_group",
             // kernel/tty/session.rs (P3-N3)
             "session",
+            // kernel/proc/signal.rs (P3-N4). All derived Copy/Clone in
+            // the pre-nativization bindgen output; `sigpending`/
+            // `sigpending_t` is still embedded by value by the remaining
+            // bindgen `thread_signal` (`sig_pending: [sigpending_t; 32]`),
+            // so an accurate Yes is what keeps *its* derive line
+            // unchanged.
+            "sigaction",
+            "sigacts",
+            "sigacts_t",
+            "sigpending",
+            "sigpending_t",
+            "ksiginfo",
+            "tg_shared_pending",
+            // kernel/dev/{dev,cdev,blkdev}.rs (P3-N4). The ops tables +
+            // `device_major` derived Copy/Clone in the pre-nativization
+            // bindgen output; the instance structs (`device_instance`/
+            // `cdev`/`blkdev`) derived neither — see NONCOPY below.
+            "device_major",
+            "device_major_t",
+            "device_ops",
+            "device_ops_t",
+            "cdev_ops",
+            "cdev_ops_t",
+            "blkdev_ops",
+            "blkdev_ops_t",
+            // kernel/dev/bio.rs + kernel/bufcache.rs (P3-N4). Both
+            // derived Copy/Clone in the pre-nativization bindgen output
+            // (`bio` itself did not — see NONCOPY below).
+            "bio_vec",
+            "buf",
+            // kernel/dev/netdev.rs (P3-N4). Derived Copy/Clone in the
+            // pre-nativization bindgen output.
+            "netdev",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -101,6 +134,22 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // kernel/proc/thread_queue.rs (P3-N2)
             "tnode",
             "tnode_t",
+            // kernel/dev/{dev,cdev,blkdev}.rs (P3-N4): the instance
+            // structs derived neither Copy nor Clone in the
+            // pre-nativization bindgen output (kobject-embedder derive
+            // pattern, same as the still-bindgen `vfs_fs_type`); the
+            // natives faithfully have no derives. Nothing in the
+            // remaining bindgen output embeds them by value (verified),
+            // but an accurate No keeps any future embedder honest.
+            "device_instance",
+            "device_t",
+            "cdev",
+            "cdev_t",
+            "blkdev",
+            "blkdev_t",
+            // kernel/dev/bio.rs (P3-N4): same kobject-embedder derive
+            // pattern as `device_instance` above.
+            "bio",
         ];
         let is_copy = if NATIVE_TYPES.contains(&name) {
             true
@@ -469,6 +518,78 @@ fn main() {
         // (native: `SessionFlagBits`).
         .blocklist_type("session|session__bindgen_ty_1")
         .raw_line("pub use crate::tty::session::Session as session;");
+
+    // ------------------------------------------------------------------
+    // P3-N4 nativization: the signal + device type families. Same
+    // blocklist + `pub use` re-export technique as P3-N2/N3 above.
+    builder = builder
+        // kernel/inc/uabi/signal.h `struct sigaction` +
+        // kernel/inc/signal_types.h `struct sigacts`/`struct sigpending`/
+        // `struct ksiginfo` + kernel/inc/proc/thread_group_types.h
+        // `struct tg_shared_pending` -> kernel/proc/signal.rs.
+        // `sigaction__bindgen_ty_1` is the anonymous-union shell bindgen
+        // would otherwise still emit as an orphan (native: the real Rust
+        // union `SigActionHandler`, N2's `tnode` precedent). The
+        // `sigacts_t`/`sigpending_t` typedefs are blocklisted alongside
+        // and re-exported under both names; no `sigaction_t`/
+        // `ksiginfo_t`/`tg_shared_pending` typedefs ever appeared in the
+        // bindgen output (consumers alias in their `use` items). NOTE:
+        // `siginfo`/`sigval`/`stack`/`thread_signal` deliberately stay
+        // bindgen-emitted (out of this wave's scope); the native
+        // `KsigInfo` embeds `siginfo_t` *by value* via its
+        // `crate::bindings` path — the sanctioned mixed-tier pattern.
+        .blocklist_type("sigaction|sigaction__bindgen_ty_1|sigacts|sigacts_t|sigpending|sigpending_t|ksiginfo|tg_shared_pending")
+        .raw_line("pub use crate::proc::signal::SigAction as sigaction;")
+        .raw_line("pub use crate::proc::signal::SigActs as sigacts;")
+        .raw_line("pub use crate::proc::signal::SigActs as sigacts_t;")
+        .raw_line("pub use crate::proc::signal::SigPending as sigpending;")
+        .raw_line("pub use crate::proc::signal::SigPending as sigpending_t;")
+        .raw_line("pub use crate::proc::signal::KsigInfo as ksiginfo;")
+        .raw_line("pub use crate::proc::signal::TgSharedPending as tg_shared_pending;")
+        // kernel/inc/dev/dev_types.h device core family ->
+        // kernel/dev/{dev,cdev,blkdev}.rs. Every struct has a `_t`
+        // typedef; both names are re-exported. `dev_type_e` (constified
+        // enum) stays bindgen-emitted. `cdev__bindgen_ty_1`/
+        // `blkdev__bindgen_ty_1` are the anonymous-bitfield-struct
+        // shells bindgen would otherwise still emit as orphans (natives:
+        // `CdevFlagBits`/`BlkdevFlagBits`).
+        .blocklist_type("device_major|device_major_t|device_ops|device_ops_t|device_instance|device_t")
+        .raw_line("pub use crate::dev::dev::DeviceMajor as device_major;")
+        .raw_line("pub use crate::dev::dev::DeviceMajor as device_major_t;")
+        .raw_line("pub use crate::dev::dev::DeviceOps as device_ops;")
+        .raw_line("pub use crate::dev::dev::DeviceOps as device_ops_t;")
+        .raw_line("pub use crate::dev::dev::DeviceInstance as device_instance;")
+        .raw_line("pub use crate::dev::dev::DeviceInstance as device_t;")
+        .blocklist_type("cdev|cdev_t|cdev_ops|cdev_ops_t|cdev__bindgen_ty_1")
+        .raw_line("pub use crate::dev::cdev::CdevOps as cdev_ops;")
+        .raw_line("pub use crate::dev::cdev::CdevOps as cdev_ops_t;")
+        .raw_line("pub use crate::dev::cdev::Cdev as cdev;")
+        .raw_line("pub use crate::dev::cdev::Cdev as cdev_t;")
+        .blocklist_type("blkdev|blkdev_t|blkdev_ops|blkdev_ops_t|blkdev__bindgen_ty_1")
+        .raw_line("pub use crate::dev::blkdev::BlkdevOps as blkdev_ops;")
+        .raw_line("pub use crate::dev::blkdev::BlkdevOps as blkdev_ops_t;")
+        .raw_line("pub use crate::dev::blkdev::Blkdev as blkdev;")
+        .raw_line("pub use crate::dev::blkdev::Blkdev as blkdev_t;")
+        // kernel/inc/dev/bio_types.h `struct bio_vec`/`struct bio` (no
+        // typedefs) -> kernel/dev/bio.rs. `bio__bindgen_ty_1` is the
+        // anonymous-bitfield-struct shell (native: `BioFlagBits`). The
+        // C flexible array member keeps bindgen's own zero-sized
+        // `__IncompleteArrayField` helper (still bindgen-emitted).
+        .blocklist_type("bio|bio_vec|bio__bindgen_ty_1")
+        .raw_line("pub use crate::dev::bio::BioVec as bio_vec;")
+        .raw_line("pub use crate::dev::bio::Bio as bio;")
+        // kernel/inc/dev/buf.h `struct buf` (no typedef) ->
+        // kernel/bufcache.rs.
+        .blocklist_type("buf")
+        .raw_line("pub use crate::bufcache::Buf as buf;")
+        // kernel/inc/dev/netdev.h `struct netdev` (no typedef) ->
+        // kernel/dev/netdev.rs. `netdev_ops` and the `netdev_link_cb_t`
+        // fn-pointer typedef stay bindgen-emitted (pointer-only
+        // references; their `*mut netdev` parameters resolve to the
+        // native via the re-export — the bindgen blocklist regex is
+        // anchored, so `netdev` does not match them).
+        .blocklist_type("netdev")
+        .raw_line("pub use crate::dev::netdev::Netdev as netdev;");
 
     let bindings = builder
         .generate()

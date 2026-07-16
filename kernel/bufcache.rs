@@ -167,6 +167,70 @@ use crate::sync::SpinLock;
 
 use crate::proc::proc_shims::xv6_panic;
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N4.
+//
+// `Buf` IS the kernel-wide Rust definition of `kernel/inc/dev/buf.h`'s
+// `struct buf` now: `build.rs` blocklists the bindgen-generated form and
+// injects `pub use crate::bufcache::Buf as buf;` (no `_t` typedef exists),
+// so every `crate::bindings::buf` path across the crate resolves here.
+// The explicit `_pad0` field reproduces bindgen's `__bindgen_padding_0:
+// [u64; 5]` (`blockno`+4 → 8-aligned 24 → 64): the C `mutex_t` *typedef*
+// carries `__ALIGNED_CACHELINE`, and its native `RawMutex` is genuinely
+// 128/64, so `lock` lands at 64 either way — the field is kept for
+// byte-for-byte form fidelity with the pre-nativization output. The
+// struct-level align(64) is C's own `__ALIGNED_CACHELINE` on `struct
+// buf` itself (it also pads the size 264 → 320). Copy fidelity: `buf`
+// derived Copy/Clone in the pre-nativization bindgen output (kept —
+// `lookup_key` below returns a `buf` by value).
+// ---------------------------------------------------------------------------
+
+/// `struct buf` (`kernel/inc/dev/buf.h`).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Buf {
+    pub valid: c_int,
+    pub disk: c_int,
+    pub dirty: c_int,
+    pub dev: crate::bindings::dev_t,
+    pub blockno: crate::bindings::uint,
+    pub(crate) _pad0: [u64; 5],
+    pub lock: mutex_t,
+    pub refcnt: crate::bindings::uint,
+    pub hlist_entry: hlist_entry_t,
+    pub free_entry: list_node_t,
+    pub dirty_entry: list_node_t,
+    pub data: *mut crate::bindings::uchar,
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct buf
+// { valid/disk/dirty: c_int, dev: dev_t, blockno: uint,
+// __bindgen_padding_0: [u64; 5], lock: mutex_t, refcnt: uint,
+// hlist_entry: hlist_entry_t, free_entry: list_node_t, dirty_entry:
+// list_node_t, data: *mut uchar }`, `#[repr(align(64))]`) and
+// independently confirmed by a riscv64-unknown-elf-gcc `_Static_assert`
+// probe (rv64gc/lp64d) against `kernel/inc/dev/buf.h` — see the P3-N4
+// wave record: buf 320/64, offsets 0/4/8/12/16/64/192/200/224/240/256
+// (mutex_t itself proven 128/64 by the same probe).
+const _: () = {
+    assert!(core::mem::size_of::<mutex_t>() == 128, "mutex_t size");
+    assert!(core::mem::align_of::<mutex_t>() == 64, "mutex_t alignment");
+    assert!(core::mem::size_of::<Buf>() == 320, "buf size");
+    assert!(core::mem::align_of::<Buf>() == 64, "buf alignment");
+    assert!(core::mem::offset_of!(Buf, valid) == 0, "buf.valid offset");
+    assert!(core::mem::offset_of!(Buf, disk) == 4, "buf.disk offset");
+    assert!(core::mem::offset_of!(Buf, dirty) == 8, "buf.dirty offset");
+    assert!(core::mem::offset_of!(Buf, dev) == 12, "buf.dev offset");
+    assert!(core::mem::offset_of!(Buf, blockno) == 16, "buf.blockno offset");
+    assert!(core::mem::offset_of!(Buf, lock) == 64, "buf.lock offset");
+    assert!(core::mem::offset_of!(Buf, refcnt) == 192, "buf.refcnt offset");
+    assert!(core::mem::offset_of!(Buf, hlist_entry) == 200, "buf.hlist_entry offset");
+    assert!(core::mem::offset_of!(Buf, free_entry) == 224, "buf.free_entry offset");
+    assert!(core::mem::offset_of!(Buf, dirty_entry) == 240, "buf.dirty_entry offset");
+    assert!(core::mem::offset_of!(Buf, data) == 256, "buf.data offset");
+};
+
 // P3-1D mesh sweep: kernel/dev/{dev,blkdev,bio}.rs are in scope for this
 // wave; signatures are identical, so these become plain crate-path
 // imports instead of `extern "C"` redeclarations.

@@ -42,6 +42,67 @@ use crate::bindings::{netdev, netdev_link_cb_t};
 use crate::string::strncmp;
 
 // ---------------------------------------------------------------------------
+// Native layout — Wave P3-N4.
+//
+// `Netdev` IS the kernel-wide Rust definition of `kernel/inc/dev/
+// netdev.h`'s `struct netdev` now: `build.rs` blocklists the
+// bindgen-generated form and injects `pub use crate::dev::netdev::Netdev
+// as netdev;` (no `_t` typedef exists), so every
+// `crate::bindings::netdev` path across the crate (this file, e1000.rs,
+// x1_emac.rs, net.rs) resolves here. `struct netdev_ops` and the
+// `netdev_link_cb_t` fn-pointer typedef deliberately stay
+// bindgen-emitted (only referenced by pointer/alias; their `*mut netdev`
+// parameters resolve to the native via the re-export — N3's workqueue-cb
+// precedent). The `priv_` field name keeps bindgen's keyword-escape
+// rename of C's `priv` (e1000.rs constructs the struct with a field
+// literal using exactly that spelling).
+// ---------------------------------------------------------------------------
+
+/// `struct netdev` (`kernel/inc/dev/netdev.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Netdev {
+    pub name: [c_char; 16],
+    pub mac: [crate::bindings::uint8; 6],
+    pub ip: crate::bindings::uint32,
+    pub mtu: c_int,
+    pub link_up: c_int,
+    pub speed: c_int,
+    pub full_duplex: c_int,
+    pub index: c_int,
+    pub ops: *mut crate::bindings::netdev_ops,
+    pub priv_: *mut core::ffi::c_void,
+    pub next: *mut Netdev,
+    pub link_cb: netdev_link_cb_t,
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// netdev { name: [c_char; 16], mac: [uint8; 6], ip: uint32, mtu/
+// link_up/speed/full_duplex/index: c_int, ops: *mut netdev_ops, priv_:
+// *mut c_void, next: *mut netdev, link_cb: netdev_link_cb_t }`) and
+// independently confirmed by a riscv64-unknown-elf-gcc `_Static_assert`
+// probe (rv64gc/lp64d) against `kernel/inc/dev/netdev.h` — see the
+// P3-N4 wave record: netdev 80/8, offsets
+// 0/16/24/28/32/36/40/44/48/56/64/72.
+const _: () = {
+    assert!(core::mem::size_of::<Netdev>() == 80, "netdev size");
+    assert!(core::mem::align_of::<Netdev>() == 8, "netdev alignment");
+    assert!(core::mem::offset_of!(Netdev, name) == 0, "netdev.name offset");
+    assert!(core::mem::offset_of!(Netdev, mac) == 16, "netdev.mac offset");
+    assert!(core::mem::offset_of!(Netdev, ip) == 24, "netdev.ip offset");
+    assert!(core::mem::offset_of!(Netdev, mtu) == 28, "netdev.mtu offset");
+    assert!(core::mem::offset_of!(Netdev, link_up) == 32, "netdev.link_up offset");
+    assert!(core::mem::offset_of!(Netdev, speed) == 36, "netdev.speed offset");
+    assert!(core::mem::offset_of!(Netdev, full_duplex) == 40, "netdev.full_duplex offset");
+    assert!(core::mem::offset_of!(Netdev, index) == 44, "netdev.index offset");
+    assert!(core::mem::offset_of!(Netdev, ops) == 48, "netdev.ops offset");
+    assert!(core::mem::offset_of!(Netdev, priv_) == 56, "netdev.priv_ offset");
+    assert!(core::mem::offset_of!(Netdev, next) == 64, "netdev.next offset");
+    assert!(core::mem::offset_of!(Netdev, link_cb) == 72, "netdev.link_cb offset");
+};
+
+// ---------------------------------------------------------------------------
 // External C symbols.
 // ---------------------------------------------------------------------------
 unsafe extern "C" {

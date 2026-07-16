@@ -47,7 +47,11 @@ pub(crate) mod thread_queue;
 mod thread;
 mod sched;
 mod rq;
-mod signal;
+// pub(crate) (P3-N4): `build.rs` injects `pub use crate::proc::signal::
+// SigAction as sigaction;` (+ sigacts/sigpending/ksiginfo/
+// tg_shared_pending) facade re-exports into `crate::bindings`, which
+// needs the module nameable from the crate root (N2/N3 precedent).
+pub(crate) mod signal;
 
 pub use sched_idle::*;
 pub use sched_fifo::*;

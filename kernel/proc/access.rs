@@ -1429,7 +1429,7 @@ impl<'a> SigActionAccess<'a> {
     #[inline] pub fn and_mask(&self, v: u64) { self.set_mask(self.mask() & v); }
     #[inline] pub fn handler_addr(&self) -> usize {
         unsafe {
-            match (*self.raw.as_ptr()).__bindgen_anon_1.sa_handler {
+            match (*self.raw.as_ptr()).handler.sa_handler {
                 Some(f) => f as *const () as usize,
                 None => 0,
             }
@@ -1440,7 +1440,7 @@ impl<'a> SigActionAccess<'a> {
     #[inline] pub fn has_user_handler(&self) -> bool { !self.is_default() && !self.is_ignore() }
     #[inline]
     pub fn clear_handler_and_metadata(&self) {
-        raw_set!(self, __bindgen_anon_1.sa_handler, None);
+        raw_set!(self, handler.sa_handler, None);
         self.set_flags(0);
         self.set_mask(0);
     }

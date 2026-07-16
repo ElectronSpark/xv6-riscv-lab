@@ -50,6 +50,102 @@ use crate::kstd::{err_ptr, is_err};
 use super::bio::bio_validate;
 
 // ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N4 (device core family, blkdev half).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/dev/
+// dev_types.h`'s `struct blkdev_ops`/`struct blkdev` now: `build.rs`
+// blocklists the bindgen-generated forms and injects `pub use
+// crate::dev::blkdev::... as ...;` facade re-exports (struct name +
+// `_t` typedef alias each). The ops-table fn-pointer fields reproduce
+// bindgen's forms exactly; the anonymous C bitfield struct became the
+// named 8/8 `{bits,_pad}` holder `BlkdevFlagBits` (N3 precedent;
+// consumers' `__bindgen_anon_1` sites re-pointed to `.flags`). Copy
+// fidelity: `blkdev_ops` derived Copy/Clone in the pre-nativization
+// bindgen output; `blkdev` derived NEITHER (it embeds the non-Copy
+// `device_t`), so `Blkdev` deliberately has no derives.
+// ---------------------------------------------------------------------------
+
+/// `struct blkdev_ops` (typedef `blkdev_ops_t`,
+/// `kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct BlkdevOps {
+    pub open: Option<unsafe extern "C" fn(blkdev: *mut Blkdev) -> c_int>,
+    pub release: Option<unsafe extern "C" fn(blkdev: *mut Blkdev) -> c_int>,
+    pub submit_bio: Option<
+        unsafe extern "C" fn(blkdev: *mut Blkdev, bio: *mut bio) -> c_int,
+    >,
+}
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 readable : 1; uint64 writable : 1; }` inside
+/// `struct blkdev` (bindgen's `blkdev__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `readable` at bit 0 and
+/// `writable` at bit 1 of the (8-byte) unit's byte 0 — identical to
+/// bindgen's `get(0,1)`/`get(1,1)` accessors reproduced below.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct BlkdevFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl BlkdevFlagBits {
+    #[inline]
+    pub(crate) fn readable(&self) -> u64 {
+        (self.bits & 0b01) as u64
+    }
+    #[inline]
+    pub(crate) fn set_readable(&mut self, val: u64) {
+        self.bits = (self.bits & !0b01) | (((val as u8) & 0b01) << 0);
+    }
+    #[inline]
+    pub(crate) fn writable(&self) -> u64 {
+        ((self.bits & 0b10) >> 1) as u64
+    }
+    #[inline]
+    pub(crate) fn set_writable(&mut self, val: u64) {
+        self.bits = (self.bits & !0b10) | (((val as u8) & 0b01) << 1);
+    }
+}
+
+/// `struct blkdev` (typedef `blkdev_t`, `kernel/inc/dev/dev_types.h`).
+#[repr(C)]
+pub struct Blkdev {
+    pub dev: device_t,
+    pub flags: BlkdevFlagBits,
+    pub block_shift: crate::bindings::uint16,
+    pub ops: BlkdevOps,
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// blkdev_ops { open, release, submit_bio }` (all `Option<unsafe extern
+// "C" fn ...>`), `pub struct blkdev { dev: device_t, __bindgen_anon_1:
+// blkdev__bindgen_ty_1, block_shift: uint16, ops: blkdev_ops_t }`) and
+// independently confirmed by a riscv64-unknown-elf-gcc `_Static_assert`
+// probe (rv64gc/lp64d) against `kernel/inc/dev/dev_types.h` — see the
+// P3-N4 wave record: blkdev_ops 24/8 offsets 0/8/16, blkdev 136/8
+// offsets 0/[96]/104/112 (the anonymous bitfield struct occupies
+// [96,104)).
+const _: () = {
+    assert!(core::mem::size_of::<BlkdevOps>() == 24, "blkdev_ops size");
+    assert!(core::mem::align_of::<BlkdevOps>() == 8, "blkdev_ops alignment");
+    assert!(core::mem::offset_of!(BlkdevOps, open) == 0, "blkdev_ops.open offset");
+    assert!(core::mem::offset_of!(BlkdevOps, release) == 8, "blkdev_ops.release offset");
+    assert!(core::mem::offset_of!(BlkdevOps, submit_bio) == 16, "blkdev_ops.submit_bio offset");
+    assert!(core::mem::size_of::<BlkdevFlagBits>() == 8, "blkdev anon bitfield size");
+    assert!(core::mem::align_of::<BlkdevFlagBits>() == 8, "blkdev anon bitfield alignment");
+    assert!(core::mem::size_of::<Blkdev>() == 136, "blkdev size");
+    assert!(core::mem::align_of::<Blkdev>() == 8, "blkdev alignment");
+    assert!(core::mem::offset_of!(Blkdev, dev) == 0, "blkdev.dev offset");
+    assert!(core::mem::offset_of!(Blkdev, flags) == 96, "blkdev anon bitfield offset");
+    assert!(core::mem::offset_of!(Blkdev, block_shift) == 104, "blkdev.block_shift offset");
+    assert!(core::mem::offset_of!(Blkdev, ops) == 112, "blkdev.ops offset");
+};
+
+// ---------------------------------------------------------------------------
 // Underlying device_ops_t vtable: forwards device_t-level calls into the
 // registrant's blkdev_ops_t. Block devices have no ioctl (`.ioctl: None`,
 // matching the C's `{ .open = ..., .release = ... }` designated
@@ -195,9 +291,9 @@ pub(crate) extern "C" fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut 
         if (*blkdev).ops.submit_bio.is_none() {
             return neg(ENOSYS);
         }
-        let rw = (*bio_ptr).__bindgen_anon_1.rw() != 0;
-        let writable = (*blkdev).__bindgen_anon_1.writable() != 0;
-        let readable = (*blkdev).__bindgen_anon_1.readable() != 0;
+        let rw = (*bio_ptr).flags.rw() != 0;
+        let writable = (*blkdev).flags.writable() != 0;
+        let readable = (*blkdev).flags.readable() != 0;
         if rw && !writable {
             return neg(EACCES);
         }

@@ -114,6 +114,151 @@ const fn neg(e: u32) -> c_int {
 use crate::kstd::{result_to_errptr, Errno, KResult};
 
 // ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N4 (bio family).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/dev/
+// bio_types.h`'s `struct bio_vec`/`struct bio` now: `build.rs`
+// blocklists the bindgen-generated forms and injects `pub use
+// crate::dev::bio::... as ...;` facade re-exports (no `_t` typedefs
+// exist for either). The anonymous C bitfield struct
+// `struct { uint64 valid : 1; uint64 rw : 1; uint64 done : 1; }` became
+// the named 8/8 `{bits,_pad}` holder `BioFlagBits` (N3 precedent;
+// consumers' `__bindgen_anon_1` sites re-pointed to `.flags`). The C
+// flexible array member `struct bio_vec bvecs[0]` keeps bindgen's own
+// zero-sized `__IncompleteArrayField` representation (same helper type,
+// same accessors — `bvecs.as_mut_ptr()` call sites unchanged). The
+// explicit `_pad0` field reproduces bindgen's `__bindgen_padding_0:
+// [u64; 2]` (`error`+4 → 8-aligned 112 → 128): the C `completion_t`
+// *typedef* carries `__ALIGNED_CACHELINE`, and its native
+// `RawCompletion` is genuinely 128/64, so `io_completion` lands at 128
+// either way — the field is kept for byte-for-byte form fidelity with
+// the pre-nativization output.
+//
+// Copy fidelity: `bio_vec` derived Copy/Clone in the pre-nativization
+// bindgen output; `bio` derived NEITHER (kobject-embedder derive
+// pattern, same as `device_instance`), so `Bio` deliberately has no
+// derives.
+// ---------------------------------------------------------------------------
+
+/// `struct bio_vec` (`kernel/inc/dev/bio_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct BioVec {
+    pub bv_page: *mut page_t,
+    pub len: crate::bindings::uint16,
+    pub offset: crate::bindings::uint16,
+}
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 valid : 1; uint64 rw : 1; uint64 done : 1; }`
+/// inside `struct bio` (bindgen's `bio__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `valid` at bit 0, `rw` at
+/// bit 1 and `done` at bit 2 of the (8-byte) unit's byte 0 — identical
+/// to bindgen's `get(0,1)`/`get(1,1)`/`get(2,1)` accessors reproduced
+/// below.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct BioFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl BioFlagBits {
+    #[inline]
+    pub(crate) fn valid(&self) -> u64 {
+        (self.bits & 0b001) as u64
+    }
+    #[inline]
+    pub(crate) fn set_valid(&mut self, val: u64) {
+        self.bits = (self.bits & !0b001) | (((val as u8) & 0b01) << 0);
+    }
+    #[inline]
+    pub(crate) fn rw(&self) -> u64 {
+        ((self.bits & 0b010) >> 1) as u64
+    }
+    #[inline]
+    pub(crate) fn set_rw(&mut self, val: u64) {
+        self.bits = (self.bits & !0b010) | (((val as u8) & 0b01) << 1);
+    }
+    #[inline]
+    pub(crate) fn done(&self) -> u64 {
+        ((self.bits & 0b100) >> 2) as u64
+    }
+    #[inline]
+    pub(crate) fn set_done(&mut self, val: u64) {
+        self.bits = (self.bits & !0b100) | (((val as u8) & 0b01) << 2);
+    }
+}
+
+/// `struct bio` (`kernel/inc/dev/bio_types.h`). The align(64) is the
+/// `completion_t` typedef's `__ALIGNED_CACHELINE` riding in through the
+/// `io_completion` member, exactly as bindgen emitted it
+/// (`#[repr(C)] #[repr(align(64))]`).
+#[repr(C, align(64))]
+pub struct Bio {
+    pub kobj: Kobject,
+    pub list_entry: crate::bindings::list_node_t,
+    pub bdev: *mut blkdev_t,
+    pub block_shift: crate::bindings::uint16,
+    pub vec_length: crate::bindings::int16,
+    pub size: crate::bindings::uint16,
+    pub done_size: crate::bindings::uint16,
+    pub blkno: crate::bindings::uint64,
+    pub flags: BioFlagBits,
+    pub end_io: Option<unsafe extern "C" fn(bio: *mut Bio)>,
+    pub private_data: *mut c_void,
+    pub error: c_int,
+    pub(crate) _pad0: [u64; 2],
+    pub io_completion: crate::bindings::completion_t,
+    pub bvecs: crate::bindings::__IncompleteArrayField<BioVec>,
+}
+
+// P3-N4 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// bio_vec { bv_page: *mut page_t, len: uint16, offset: uint16 }`,
+// `pub struct bio { kobj: kobject, list_entry: list_node_t, bdev: *mut
+// blkdev_t, block_shift: uint16, vec_length: int16, size: uint16,
+// done_size: uint16, blkno: uint64, __bindgen_anon_1: bio__bindgen_ty_1,
+// end_io: Option<unsafe extern "C" fn(*mut bio)>, private_data: *mut
+// c_void, error: c_int, __bindgen_padding_0: [u64; 2], io_completion:
+// completion_t, bvecs: __IncompleteArrayField<bio_vec> }`,
+// `#[repr(align(64))]`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe (rv64gc/lp64d) against
+// `kernel/inc/dev/bio_types.h` — see the P3-N4 wave record: bio_vec
+// 16/8 offsets 0/8/10, bio 256/64 offsets 0/40/56/64/66/68/70/72/[80]/
+// 88/96/104/128/256 (the anonymous bitfield struct occupies [80,88);
+// completion_t itself proven 128/64 by the same probe; `bvecs` — the
+// C flexible array member — sits at the padded struct end, 256).
+const _: () = {
+    assert!(core::mem::size_of::<BioVec>() == 16, "bio_vec size");
+    assert!(core::mem::align_of::<BioVec>() == 8, "bio_vec alignment");
+    assert!(core::mem::offset_of!(BioVec, bv_page) == 0, "bio_vec.bv_page offset");
+    assert!(core::mem::offset_of!(BioVec, len) == 8, "bio_vec.len offset");
+    assert!(core::mem::offset_of!(BioVec, offset) == 10, "bio_vec.offset offset");
+    assert!(core::mem::size_of::<BioFlagBits>() == 8, "bio anon bitfield size");
+    assert!(core::mem::align_of::<BioFlagBits>() == 8, "bio anon bitfield alignment");
+    assert!(core::mem::size_of::<crate::bindings::completion_t>() == 128, "completion_t size");
+    assert!(core::mem::align_of::<crate::bindings::completion_t>() == 64, "completion_t alignment");
+    assert!(core::mem::size_of::<Bio>() == 256, "bio size");
+    assert!(core::mem::align_of::<Bio>() == 64, "bio alignment");
+    assert!(core::mem::offset_of!(Bio, kobj) == 0, "bio.kobj offset");
+    assert!(core::mem::offset_of!(Bio, list_entry) == 40, "bio.list_entry offset");
+    assert!(core::mem::offset_of!(Bio, bdev) == 56, "bio.bdev offset");
+    assert!(core::mem::offset_of!(Bio, block_shift) == 64, "bio.block_shift offset");
+    assert!(core::mem::offset_of!(Bio, vec_length) == 66, "bio.vec_length offset");
+    assert!(core::mem::offset_of!(Bio, size) == 68, "bio.size offset");
+    assert!(core::mem::offset_of!(Bio, done_size) == 70, "bio.done_size offset");
+    assert!(core::mem::offset_of!(Bio, blkno) == 72, "bio.blkno offset");
+    assert!(core::mem::offset_of!(Bio, flags) == 80, "bio anon bitfield offset");
+    assert!(core::mem::offset_of!(Bio, end_io) == 88, "bio.end_io offset");
+    assert!(core::mem::offset_of!(Bio, private_data) == 96, "bio.private_data offset");
+    assert!(core::mem::offset_of!(Bio, error) == 104, "bio.error offset");
+    assert!(core::mem::offset_of!(Bio, io_completion) == 128, "bio.io_completion offset");
+    assert!(core::mem::offset_of!(Bio, bvecs) == 256, "bio.bvecs offset");
+};
+
+// ---------------------------------------------------------------------------
 // KArc<bio> plumbing (Phase 3 P3-9b).
 // ---------------------------------------------------------------------------
 
@@ -196,7 +341,7 @@ fn bio_alloc_inner(
         (*bio_ptr).bdev = bdev;
         (*bio_ptr).block_shift = (*bdev).block_shift;
         (*bio_ptr).vec_length = vec_length;
-        (*bio_ptr).__bindgen_anon_1.set_rw(rw as u64);
+        (*bio_ptr).flags.set_rw(rw as u64);
         (*bio_ptr).end_io = end_io;
         (*bio_ptr).private_data = private_data;
         (*bio_ptr).kobj.name = c"bio".as_ptr();
@@ -223,7 +368,7 @@ pub(crate) extern "C" fn bio_add_seg(bio_ptr: *mut bio, page: *mut page_t, idx: 
     // plain, in-bounds access on that live allocation once `idx` is
     // validated against `vec_length` just below.
     unsafe {
-        if (*bio_ptr).__bindgen_anon_1.valid() != 0 || (*bio_ptr).__bindgen_anon_1.done() != 0 {
+        if (*bio_ptr).flags.valid() != 0 || (*bio_ptr).flags.done() != 0 {
             return neg(crate::bindings::EIO);
         }
         if (*bio_ptr).vec_length <= 0 || (*bio_ptr).vec_length > BIO_MAX_VECS {
@@ -307,7 +452,7 @@ pub(crate) extern "C" fn bio_validate(bio_ptr: *mut bio, blkdev: *mut blkdev_t) 
         if (*bio_ptr).error != 0 {
             return neg(crate::bindings::EINVAL);
         }
-        if (*bio_ptr).__bindgen_anon_1.valid() != 0 || (*bio_ptr).__bindgen_anon_1.done() != 0 {
+        if (*bio_ptr).flags.valid() != 0 || (*bio_ptr).flags.done() != 0 {
             return neg(crate::bindings::EINVAL);
         }
 

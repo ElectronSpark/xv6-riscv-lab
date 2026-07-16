@@ -223,8 +223,8 @@ pub(crate) extern "C" fn ttydevinit() {
         (*cdev).dev.minor = TTY_DEV_MINOR;
         (*cdev).dev.devname = c"tty".as_ptr();
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).__bindgen_anon_1.set_readable(1);
-        (*cdev).__bindgen_anon_1.set_writable(1);
+        (*cdev).flags.set_readable(1);
+        (*cdev).flags.set_writable(1);
         (*cdev).ops = TTY_CDEV_OPS;
 
         let ret = cdev_register(cdev);

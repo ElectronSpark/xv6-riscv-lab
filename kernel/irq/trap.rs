@@ -891,7 +891,7 @@ pub(crate) extern "C" fn push_sigframe(
     // SAFETY: see function-level `# Safety`; every dereference below is
     // reached only after the corresponding pointer is checked non-null.
     unsafe {
-        if sa.is_null() || (*sa).__bindgen_anon_1.sa_handler.is_none() || p.is_null() {
+        if sa.is_null() || (*sa).handler.sa_handler.is_none() || p.is_null() {
             return -1; // Invalid arguments
         }
 
@@ -1011,7 +1011,7 @@ pub(crate) extern "C" fn push_sigframe(
         (*tf).trapframe.a2 = new_ucontext; // Set the third argument
         // Set the handler address.
         (*tf).trapframe.t0 = (*sa)
-            .__bindgen_anon_1
+            .handler
             .sa_handler
             .map_or(0, |f| f as usize as u64);
         (*p).signal.sig_ucontext = new_ucontext;

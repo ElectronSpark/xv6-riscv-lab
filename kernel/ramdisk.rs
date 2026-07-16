@@ -145,7 +145,7 @@ unsafe fn bio_iter_copy_bvec(bio_ptr: *mut bio, it: &BioIter, bvec: *mut bio_vec
 #[inline(always)]
 unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
     // SAFETY: caller contract.
-    unsafe { (*bio_ptr).__bindgen_anon_1.rw() != 0 }
+    unsafe { (*bio_ptr).flags.rw() != 0 }
 }
 
 /// # Safety
@@ -153,7 +153,7 @@ unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
 unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
     // SAFETY: caller contract.
     unsafe {
-        (*bio_ptr).__bindgen_anon_1.set_done(0);
+        (*bio_ptr).flags.set_done(0);
         (*bio_ptr).done_size = 0;
         (*bio_ptr).error = 0;
         completion_reinit(&raw mut (*bio_ptr).io_completion);
@@ -165,7 +165,7 @@ unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
 /// `bio_ptr` must be live.
 unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
     // SAFETY: caller contract.
-    unsafe { (*bio_ptr).__bindgen_anon_1.set_done(1) };
+    unsafe { (*bio_ptr).flags.set_done(1) };
     fence(Ordering::SeqCst);
 }
 
@@ -382,8 +382,8 @@ pub(crate) extern "C" fn ramdisk_init() {
         (*dev).dev.minor = 1;
         (*dev).dev.devname = c"ramdisk".as_ptr();
         (*dev).dev.devmode = (S_IFBLK | 0o600) as mode_t;
-        (*dev).__bindgen_anon_1.set_readable(1);
-        (*dev).__bindgen_anon_1.set_writable(1);
+        (*dev).flags.set_readable(1);
+        (*dev).flags.set_writable(1);
         (*dev).block_shift = 0; // 2^0 * 512 = 512 bytes per block
         (*dev).ops = RAMDISK_OPS;
     }

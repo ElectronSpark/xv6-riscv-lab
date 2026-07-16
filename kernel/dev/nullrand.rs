@@ -357,8 +357,8 @@ pub(crate) extern "C" fn nullranddevinit() {
         (*cdev).dev.minor = NULL_MINOR;
         (*cdev).dev.devname = c"null".as_ptr();
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).__bindgen_anon_1.set_readable(1);
-        (*cdev).__bindgen_anon_1.set_writable(1);
+        (*cdev).flags.set_readable(1);
+        (*cdev).flags.set_writable(1);
         (*cdev).ops = NULL_CDEV_OPS;
         let ret = cdev_register(cdev);
         assert_registered(ret, c"null", c"nullranddevinit");
@@ -368,8 +368,8 @@ pub(crate) extern "C" fn nullranddevinit() {
         (*cdev).dev.minor = RANDOM_MINOR;
         (*cdev).dev.devname = c"random".as_ptr();
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).__bindgen_anon_1.set_readable(1);
-        (*cdev).__bindgen_anon_1.set_writable(1);
+        (*cdev).flags.set_readable(1);
+        (*cdev).flags.set_writable(1);
         (*cdev).ops = RANDOM_CDEV_OPS;
         let ret = cdev_register(cdev);
         assert_registered(ret, c"random", c"nullranddevinit");
@@ -379,8 +379,8 @@ pub(crate) extern "C" fn nullranddevinit() {
         (*cdev).dev.minor = ZERO_MINOR;
         (*cdev).dev.devname = c"zero".as_ptr();
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).__bindgen_anon_1.set_readable(1);
-        (*cdev).__bindgen_anon_1.set_writable(1);
+        (*cdev).flags.set_readable(1);
+        (*cdev).flags.set_writable(1);
         (*cdev).ops = ZERO_CDEV_OPS;
         let ret = cdev_register(cdev);
         assert_registered(ret, c"zero", c"nullranddevinit");
