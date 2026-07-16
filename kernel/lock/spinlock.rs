@@ -1,9 +1,8 @@
 //! Rust port of `kernel/lock/spinlock.c`.
 //!
-//! The exported functions keep the C ABI bit-for-bit (`#[no_mangle]
-//! pub unsafe extern "C" fn spin_*`); both the original C call sites
-//! and the bindgen-imported declarations in this crate resolve to the
-//! symbols defined here.
+//! The entry points (`pub unsafe fn spin_*`) keep the exact C names and
+//! signatures; every consumer in the crate reaches them by crate path
+//! (P3-D3c: the `#[no_mangle] extern "C"` C-ABI surface is gone).
 //!
 //! Centralised-unsafe pattern: every raw atomic access on
 //! `spinlock_t::locked` and `spinlock_t::cpu` is encapsulated in one
@@ -84,9 +83,11 @@ const _: () = {
 // ---------------------------------------------------------------------------
 // Externs: the few C helpers we still rely on.
 // ---------------------------------------------------------------------------
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
 }
 
 
@@ -233,8 +234,10 @@ fn acquire_contended(lk: *mut RawSpinlock) {
 // ===========================================================================
 
 /// Initialise a spinlock. Mirrors C `spin_init`.
-#[no_mangle]
-pub unsafe extern "C" fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now (directly, via `cffi::raw`'s typed safe wrappers, or
+// via per-file safe-facade adapters).
+pub unsafe fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
     let lk = as_native(lk);
     set_name(lk, name);
     set_locked_plain(lk, 0);
@@ -289,8 +292,10 @@ pub(crate) unsafe fn spin_trylock(lk: *mut spinlock_t) -> c_int {
 
 /// Returns 1 if the current hart holds `lk`, 0 otherwise. Interrupts
 /// must be disabled by the caller (the per-hart check uses `tp`).
-#[no_mangle]
-pub unsafe extern "C" fn spin_holding(lk: *mut spinlock_t) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now (directly, via `cffi::raw`'s typed safe wrappers, or
+// via per-file safe-facade adapters).
+pub unsafe fn spin_holding(lk: *mut spinlock_t) -> c_int {
     if holding(as_native(lk)) {
         1
     } else {
@@ -299,15 +304,19 @@ pub unsafe extern "C" fn spin_holding(lk: *mut spinlock_t) -> c_int {
 }
 
 /// Default `spin_lock`: disables interrupts and acquires.
-#[no_mangle]
-pub unsafe extern "C" fn spin_lock(lk: *mut spinlock_t) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now (directly, via `cffi::raw`'s typed safe wrappers, or
+// via per-file safe-facade adapters).
+pub unsafe fn spin_lock(lk: *mut spinlock_t) {
     push_off();
     spin_acquire(lk);
 }
 
 /// Default `spin_unlock`: releases and re-enables interrupts.
-#[no_mangle]
-pub unsafe extern "C" fn spin_unlock(lk: *mut spinlock_t) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now (directly, via `cffi::raw`'s typed safe wrappers, or
+// via per-file safe-facade adapters).
+pub unsafe fn spin_unlock(lk: *mut spinlock_t) {
     spin_release(lk);
     pop_off();
 }

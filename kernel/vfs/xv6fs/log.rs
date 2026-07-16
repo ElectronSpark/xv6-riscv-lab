@@ -60,20 +60,29 @@ unsafe extern "C" {
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // lock module (100% Rust).
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-
-    // kernel/bio.c (classic xv6 buffer cache, unchanged C).
-    safe fn bread(dev: u32, blockno: u32) -> *mut buf;
-    safe fn brelse(b: *mut buf);
-    safe fn bwrite(b: *mut buf);
-    safe fn bwrite_async(b: *mut buf);
-    safe fn bsync();
-    safe fn bpin(b: *mut buf);
-    safe fn bunpin(b: *mut buf);
 }
+
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(l) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(l) }
+}
+
+// P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
+use crate::bufcache::{bpin, bread, brelse, bsync, bunpin, bwrite, bwrite_async};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {

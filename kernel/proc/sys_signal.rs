@@ -26,10 +26,10 @@ const SIZEOF_SIGACTION: u64 = 24;
 
 type sigset_t = u64;
 
-unsafe extern "C" {
-    pub safe fn argint(n: c_int, p: *mut c_int);
-    pub safe fn argaddr(n: c_int, p: *mut u64);
-}
+// P3-D3c: `irq/syscall.rs`'s arg-fetch helpers are plain (safe) Rust fns
+// now that their `#[no_mangle]` exports are gone; identical signatures,
+// plain `use`.
+use crate::irq::syscall::{argaddr, argint};
 
 // P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
 // Rust fns now that their `#[no_mangle]` exports are gone; reached as

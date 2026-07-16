@@ -85,8 +85,9 @@ unsafe fn rb_node_dye_as(target: *mut RbNode, source: *mut RbNode) {
 /// # Safety
 /// `root` must be null or point to a live `rb_root`; `node` must be null
 /// or point to a live, detached `rb_node`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_insert_color(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn rb_insert_color(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
     unsafe {
         if root.is_null() || node.is_null() {
             return ptr::null_mut();
@@ -299,8 +300,9 @@ unsafe fn rb_do_delete_node_color(
 /// # Safety
 /// `root` must point to a live `rb_root`; `node` must be null or point to
 /// a live `rb_node`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_delete_node_color(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn rb_delete_node_color(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
     unsafe {
         let mut parent = ptr::null_mut();
         let link = __rb_node_link(root, node, ptr::addr_of_mut!(parent));

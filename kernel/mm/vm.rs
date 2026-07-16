@@ -47,6 +47,10 @@ const BLK_SIZE: u64 = 512; // from kernel/inc/dev/bio.h
 // implemented as private Rust `unsafe fn xv6_vm_*` below (search this file
 // for "// =====  xv6_vm_* shims (Rust)  =====").
 mod ffi {
+    // P3-D3c: `printf.rs`'s panic plumbing -- plain crate-path re-exports
+    // now that the `#[no_mangle]` exports are gone.
+    pub(crate) use crate::printf::{__panic_end, __panic_start};
+
     use super::*;
     use core::ffi::{c_char, c_int, c_void};
     unsafe extern "C" {
@@ -71,8 +75,6 @@ mod ffi {
         // Real kernel panic helpers (kernel/printf.c) — replace the
         // `xv6_vm_panic` shim that lived in vm_pgtab_shims.c (still declared
         // here for now; see __vm_panic_str below).
-        pub safe fn __panic_start();
-        pub safe fn __panic_end() -> !;
     }
 pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_write, rwsem_init, rwsem_is_write_holding, rwsem_release};
 pub(crate) use crate::mm::vm_pgtab::{mappages, uvmcreate, uvmfree, vm_dump_flags, walkaddr, xv6_vm_sfence_vma};

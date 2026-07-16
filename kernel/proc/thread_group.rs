@@ -107,10 +107,13 @@ const THREAD_ZOMBIE: thread_state = 11;
 // to be `extern "C"` redeclarations in the block below.
 use crate::proc::{get_pid_thread, pgroup_remove_tg};
 
+// P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
+// `#[no_mangle]` export is gone -- imported via its private sibling module
+// path.
+use super::exit::exit;
 // ---------------- extern C primitives -----------------------------------
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-    safe fn exit(code: c_int) -> !;
 
     // signal helpers
 

@@ -46,25 +46,47 @@ use crate::bindings::{
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
 
-unsafe extern "C" {
-    // printf.rs -- C-variadic.
-
-    // lock module (100% Rust).
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-
-    // kernel/bintree.rs + kernel/rbtree.rs (Phase 2 Wave 1).
-    safe fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
-    safe fn rb_last_node(root: *mut rb_root) -> *mut rb_node;
-    safe fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
-    safe fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
-    safe fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
-
-    // kernel/bio.c (classic xv6 buffer cache, unchanged C).
-    safe fn bread(dev: u32, blockno: u32) -> *mut buf;
-    safe fn brelse(b: *mut buf);
+// P3-D3c: the spinlock and rbtree/bintree primitives are genuinely
+// `unsafe fn`s in `crate::lock::spinlock`/`crate::{rbtree,bintree}` now
+// that their `#[no_mangle]` exports are gone; this file's original extern
+// declarations asserted `safe fn` (usual FFI-facade convention). Thin
+// wrappers preserve that safe facade for the unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(l) }
 }
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(l) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
+}
+/// SAFETY: see [`crate::bintree::rb_first_node`]'s contract.
+fn rb_first_node(root: *mut rb_root) -> *mut rb_node {
+    unsafe { crate::bintree::rb_first_node(root) }
+}
+/// SAFETY: see [`crate::bintree::rb_last_node`]'s contract.
+fn rb_last_node(root: *mut rb_root) -> *mut rb_node {
+    unsafe { crate::bintree::rb_last_node(root) }
+}
+/// SAFETY: see [`crate::bintree::rb_next_node`]'s contract.
+fn rb_next_node(node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::bintree::rb_next_node(node) }
+}
+/// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
+fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::rbtree::rb_insert_color(root, node) }
+}
+/// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
+fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::rbtree::rb_delete_node_color(root, node) }
+}
+
+// P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
+use crate::bufcache::{bread, brelse};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this

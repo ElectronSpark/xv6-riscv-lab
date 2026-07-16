@@ -36,13 +36,10 @@ use crate::kstd::neg_errno;
 // ---------------------------------------------------------------------------
 mod ffi {
     use super::*;
-    unsafe extern "C" {
-        // Arg extraction (kernel/irq/syscall.c).
-        pub safe fn argaddr(n: c_int, ip: *mut u64);
-        pub safe fn argint(n: c_int, ip: *mut c_int);
-
-        // vm.h prototypes.
-    }
+    // P3-D3c: arg extraction (`irq/syscall.rs`) -- plain (safe) Rust fns
+    // now that their `#[no_mangle]` exports are gone; re-exported so the
+    // `ffi::arg*` call sites compile unchanged.
+    pub(crate) use crate::irq::syscall::{argaddr, argint};
 
     // `Vm` above only ever carries an opaque `*mut c_void` (it never
     // touches the real `vm` layout); this file's original extern

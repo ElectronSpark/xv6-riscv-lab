@@ -61,9 +61,11 @@ use super::cdev::cdev_register;
 // External C symbols, declared locally per this crate's established
 // per-file convention (irq/trap.rs, tty/session.rs, mm/vm.rs, ...).
 // ---------------------------------------------------------------------------
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
 }
 
 // P3-D3a: `either_copyout` (mm/vm.rs) is an ordinary (safe) Rust fn now

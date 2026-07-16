@@ -108,15 +108,12 @@ use crate::sync::KSpinlock;
 // tty/session.rs, mm/vm.rs, vfs/inode.rs, vfs/devtmpfs/superblock.rs, ...).
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" {
-    // kernel/kobject.rs. Genuinely unsafe (raw kobject* + caller-upheld
-    // refcount invariants), kept as plain (non-`safe`) externs.
-    fn kobject_init(obj: *mut kobject);
-    fn kobject_try_get(obj: *mut kobject) -> bool;
-    fn kobject_put(obj: *mut kobject);
-
-    // printf.rs -- variadic, cannot be marked `safe`.
-}
+// P3-D3c: `kobject.rs`'s entry points are genuinely `unsafe fn`s (raw
+// kobject* + caller-upheld refcount invariants) now that their
+// `#[no_mangle]` exports are gone; the old plain (non-`safe`) externs
+// meant every call site already sits in an `unsafe` context -- the plain
+// `use` keeps them unchanged.
+use crate::kobject::{kobject_init, kobject_put, kobject_try_get};
 
 // P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
 // that its `#[no_mangle]` export is gone; reached by crate path (the call

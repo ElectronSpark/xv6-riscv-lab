@@ -51,9 +51,11 @@ use crate::bindings::mbuf;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    safe fn __panic_start();
-    safe fn __panic_end() -> !;
 
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;

@@ -16,14 +16,13 @@ use core::ffi::c_int;
 use crate::machine::cpuid;
 
 /// PLIC MMIO base address. Resolved from the FDT at boot
-/// (`dev/fdt.c::fdt_apply_platform_config` writes it through the `extern
-/// uint64 __plic_mmio_base` declaration in `kernel/inc/dev/plic.h`,
-/// unchanged by this port); defaults to the QEMU `virt` machine's PLIC
-/// address, matching the C initializer. Same "FDT-configured global becomes
-/// `#[no_mangle] pub static mut`, still written by `dev/fdt.c`" pattern as
-/// `uart.rs`'s `__uart0_*` statics (Wave 4).
-#[no_mangle]
-pub static mut __plic_mmio_base: u64 = 0x0c00_0000;
+/// (`dev/fdt.rs::fdt_apply_platform_config` writes it by direct crate path
+/// since P3-D3c -- the old `extern uint64 __plic_mmio_base` redeclaration
+/// and its `#[no_mangle]` anchor are gone); defaults to the QEMU `virt`
+/// machine's PLIC address, matching the C initializer. Other reader:
+/// `mm/vm_pgtab.rs`'s `kvmmake` (thin accessor in its `ffi` module, P3-1D
+/// `__uart0_mmio_base` pattern).
+pub(crate) static mut __plic_mmio_base: u64 = 0x0c00_0000;
 
 const PLIC_ENABLE_BASE: u64 = 0x2000;
 const PLIC_PRIORITY_THRESH_BASE: u64 = 0x20_0000;

@@ -66,6 +66,10 @@ use crate::proc::{__proctab_get_initproc, pid_wlock, pid_wunlock,
 // this sidesteps).
 use crate::exec::exec;
 use crate::irq::trap::usertrapret;
+// P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
+// `#[no_mangle]` export is gone -- imported via its private sibling module
+// path.
+use super::exit::exit;
 use crate::start_kernel::start_kernel_post_init;
 use crate::proc::pid::{__alloc_pid, __free_pid};
 
@@ -139,17 +143,16 @@ unsafe extern "C" {
     // reimplements them natively via `crate::sync::KSpinlock` instead of
     // declaring them here.
 
-    // exec / trap
-    fn exit(code: c_int) -> !;
-
     // CPU / interrupts (only the cpuid trampoline exists as a real symbol)
 
-    // spinlock
-    fn spin_init(lock: *mut spinlock_t, name: *mut c_char);
-    fn spin_lock(lock: *mut spinlock_t);
-    fn spin_unlock(lock: *mut spinlock_t);
-    fn spin_holding(lock: *mut spinlock_t) -> c_int;
 }
+
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations were plain (non-`safe`) `fn`s,
+// so every call site already sits in an `unsafe` context -- the plain
+// `use` keeps them unchanged.
+use crate::lock::spinlock::{spin_holding, spin_init, spin_lock, spin_unlock};
 
 // P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
 // that its `#[no_mangle]` export is gone; reached by crate path (the call

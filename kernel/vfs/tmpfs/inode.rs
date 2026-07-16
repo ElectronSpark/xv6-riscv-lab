@@ -54,16 +54,31 @@ unsafe extern "C" {
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
     safe fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+}
 
-    // hlist.rs (Wave 1) -- the generic exported hash-table primitives
-    // (bucket lookup/insert/remove); this file's own `hlist_first_entry`/
-    // `hlist_next_entry` below reimplement the two non-exported
-    // `static inline` walk helpers `hlist.h` never turns into real
-    // symbols, same precedent as `hlist.rs`'s own module doc.
-    safe fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_struct) -> c_int;
-    safe fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-    safe fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void;
-    safe fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
+// P3-D3c: the hlist primitives (bucket lookup/insert/remove) are
+// genuinely `unsafe fn`s in `crate::hlist` now that their `#[no_mangle]`
+// exports are gone; this file's original extern declarations asserted
+// `safe fn` (usual FFI-facade convention). Thin wrappers preserve that
+// safe facade for the unchanged call sites. This file's own
+// `hlist_first_entry`/`hlist_next_entry` below still reimplement the two
+// non-exported `static inline` walk helpers `hlist.h` never turns into
+// real symbols, same precedent as `hlist.rs`'s own module doc.
+/// SAFETY: see [`crate::hlist::hlist_init`]'s contract.
+fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_struct) -> c_int {
+    unsafe { crate::hlist::hlist_init(hlist, bucket_cnt, func) }
+}
+/// SAFETY: see [`crate::hlist::hlist_get`]'s contract.
+fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
+    unsafe { crate::hlist::hlist_get(hlist, node) }
+}
+/// SAFETY: see [`crate::hlist::hlist_put`]'s contract.
+fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void {
+    unsafe { crate::hlist::hlist_put(hlist, node, replace) }
+}
+/// SAFETY: see [`crate::hlist::hlist_pop`]'s contract.
+fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
+    unsafe { crate::hlist::hlist_pop(hlist, node) }
 }
 
 // P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in

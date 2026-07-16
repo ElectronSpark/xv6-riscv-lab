@@ -63,13 +63,13 @@ use crate::kobject::{HasKobject, Kobject};
 // same crate.
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" {
-    // kernel/kobject.rs.
-    fn kobject_init(obj: *mut kobject);
-    fn kobject_get(obj: *mut kobject);
-    fn kobject_put(obj: *mut kobject);
-    fn kobject_refcount(obj: *mut kobject) -> i64;
+// P3-D3c: `kobject.rs`'s entry points are genuinely `unsafe fn`s now that
+// their `#[no_mangle]` exports are gone; this file's original extern
+// declarations were plain (non-`safe`) `fn`s, so every call site already
+// sits in an `unsafe` context -- the plain `use` keeps them unchanged.
+use crate::kobject::{kobject_get, kobject_init, kobject_put, kobject_refcount};
 
+unsafe extern "C" {
     // kernel/string.rs.
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 }

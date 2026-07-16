@@ -102,11 +102,21 @@ const THREAD_INTERRUPTIBLE: c_int = 2;
 unsafe extern "C" {
     pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     pub safe fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
-
-    pub safe fn exit(code: c_int) -> !;
-
-    pub safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
 }
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
+}
+// P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
+// `#[no_mangle]` export is gone -- imported via its private sibling module
+// path (the `crate::proc` glob would work too, but the direct path is
+// unambiguous by construction).
+use super::exit::exit;
 
 // P3-D3b: `tcb_lock`/`tcb_unlock`/`kthread_create`
 // (kernel/proc/thread.rs) are plain safe Rust fns now that their

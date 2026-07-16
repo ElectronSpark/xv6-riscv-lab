@@ -73,9 +73,9 @@ use crate::printf::trigger_panic;
 // redeclarations.
 use crate::proc::{scheduler_yield, tq_init, tq_wakeup_all, wakeup, wakeup_interruptible};
 
-unsafe extern "C" {
-    pub safe fn sleep_ms(ms: u64);
-}
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -147,17 +147,22 @@ struct CpuSlot(cpu_local);
 // only through atomic ops on both sides of the FFI boundary.
 unsafe impl Sync for CpuSlot {}
 
-unsafe extern "C" {
-    #[link_name = "cpus"]
-    static CPUS: [CpuSlot; NCPU as usize];
-}
-
 #[inline]
 fn cpu_rcu_ts(i: usize) -> &'static AtomicU64 {
+    // P3-D3c: the per-CPU array is `ipi.rs`'s `pub(crate) static mut
+    // cpus: CpuLocalArray` (a `#[repr(C)]` wrapper whose sole field sits
+    // at offset 0), reached by crate path instead of this file's old
+    // `#[link_name = "cpus"] static CPUS: [CpuSlot; NCPU]` view; the cast
+    // below reproduces that view (`CpuSlot` is `#[repr(transparent)]`
+    // over `cpu_local`).
     // SAFETY: `AtomicU64` is layout-compatible with `u64`. The C
     // kernel touches `rcu_timestamp` only via `__atomic_*` builtins
-    // which match the atomic ABI used by `AtomicU64`.
-    unsafe { &*(&CPUS[i].0.rcu_timestamp as *const u64 as *const AtomicU64) }
+    // which match the atomic ABI used by `AtomicU64`; `i` is a valid CPU
+    // index (< NCPU), so the offset stays inside the static.
+    unsafe {
+        let slot = (&raw const crate::ipi::cpus).cast::<CpuSlot>().add(i);
+        &*(&(*slot).0.rcu_timestamp as *const u64 as *const AtomicU64)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -91,21 +91,10 @@ pub mod raw {
     use super::{Spinlock, ListNode};
     use core::ffi::{c_char, c_int, c_void};
 
-    unsafe extern "C" {
-        // --- Spinlocks (kernel/lock/spin.c) -----------------------------
-
-        // --- Per-CPU primitives (vm_pgtab_shims.c / slab_shims.c) ------
-
-        // --- Intrusive list helpers (slab_shims.c) ---------------------
-
-        // --- Generic kernel heap (kalloc.rs) ---------------------------
-
-        // --- libc-shaped primitives (kernel/string.c) ------------------
-
-        // --- Kernel panic helpers (kernel/printf.c) --------------------
-        pub safe fn __panic_start();
-        pub safe fn __panic_end() -> !;
-    }
+    // P3-D3c: the kernel panic helpers (`printf.rs`) are plain crate-path
+    // re-exports now that their `#[no_mangle]` exports are gone (the
+    // extern block that used to sit here is deleted).
+    pub(crate) use crate::printf::{__panic_end, __panic_start};
 pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6_list_init, xv6_list_is_detached, xv6_list_is_empty, xv6_list_last, xv6_list_pop_front, xv6_list_push_back, xv6_list_push_front, xv6_pop_off, xv6_push_off};
 
     // `kmm_alloc`/`kmm_free`/`memset` are genuinely `unsafe fn` in their
@@ -296,8 +285,9 @@ pub(crate) fn xv6_cpuid() -> c_int {
 }
 
 /// Disable interrupts, tracking nesting depth (mirrors `push_off()`).
-#[no_mangle]
-pub extern "C" fn xv6_push_off() {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path (directly or via `cffi::raw`'s re-export).
+pub(crate) fn xv6_push_off() {
     let old = intr_get_raw();
     if old {
         intr_off_raw();
@@ -316,8 +306,8 @@ pub extern "C" fn xv6_push_off() {
 
 /// Re-enable interrupts once the nesting depth reaches zero (mirrors
 /// `pop_off()`).
-#[no_mangle]
-pub extern "C" fn xv6_pop_off() {
+// P3-D3c: same demotion as `xv6_push_off` above.
+pub(crate) fn xv6_pop_off() {
     // SAFETY: see `xv6_push_off`.
     unsafe {
         let c = mycpu_local();
@@ -384,8 +374,8 @@ pub(crate) fn xv6_list_push_front(head: *mut ListNode, entry: *mut ListNode) {
     list_insert_after(head, entry);
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode) {
+// P3-D3c: same demotion as `xv6_push_off` above.
+pub(crate) fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode) {
     // SAFETY: `head` is a valid, initialized `ListNode`.
     unsafe { list_insert_after((*head).prev, entry) };
 }

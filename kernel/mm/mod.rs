@@ -13,7 +13,9 @@ pub(crate) mod page;
 pub(crate) mod slab;
 mod sysmm;
 mod kalloc;
-mod early_allocator;
+// P3-D3c: `pub(crate)` so `dev/fdt.rs`/`start_kernel.rs` can import
+// `early_alloc*` by crate path (their `extern "C"` redeclarations are gone).
+pub(crate) mod early_allocator;
 mod pcache;
 mod vm_pgtab;
 mod vm;

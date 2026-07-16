@@ -111,12 +111,17 @@ use crate::sync::{KMutex, KSpinlock};
 // already proved non-null. `printf` (C-variadic) is the one exception.
 // ===========================================================================
 
+// P3-D3c: `crate::lock::spinlock::spin_init` is genuinely `unsafe fn` now
+// that its `#[no_mangle]` export is gone; this file's original extern
+// declaration asserted `safe fn` (usual FFI-facade convention). The thin
+// wrapper preserves that safe facade for the unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
+}
+
 unsafe extern "C" {
     // printf.rs — C-variadic.
-
-    // lock/spinlock.rs — `__vfs_ftable_lock` init only (lock/unlock go
-    // through `crate::sync::KSpinlock` RAII, see the module doc).
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
 
     // list.rs (list.h static inlines have no external linkage in the C
     // original either — reimplemented locally below, same precedent as

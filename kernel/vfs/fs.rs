@@ -110,35 +110,74 @@ use crate::lock::rwsem::{
 // `__MOUNT_MUTEX`).
 use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};
 
+// P3-D3c: the spinlock primitives (`vfs_superblock.spinlock`,
+// `fs_struct.lock`) are genuinely `unsafe fn`s in `crate::lock::spinlock`
+// now that their `#[no_mangle]` exports are gone; thin wrappers preserve
+// the `safe fn` facade the old redeclarations asserted.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(l) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(l) }
+}
+
 unsafe extern "C" {
     // printf.rs — C-variadic.
-
-    // lock/spinlock.rs — `vfs_superblock.spinlock`, `fs_struct.lock`.
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
 
     // string.rs.
     safe fn strlen(s: *const c_char) -> usize;
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
     safe fn strncmp(p: *const c_char, q: *const c_char, n: usize) -> c_int;
 
-    // hlist.rs (Wave 1) — generic hash-list primitives; the header's
-    // `static inline` bucket/entry walkers (`hlist_first_entry`,
-    // `hlist_next_entry`, `HLIST_FIRST_NODE`, ...) have no external
-    // linkage in the C original and are reimplemented below,
-    // specialized to `vfs_superblock.inodes`/`.inodes_buckets`.
-    safe fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_t) -> i32;
-    safe fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-    safe fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void;
-    safe fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-    safe fn hlist_len(hlist: *mut hlist_t) -> usize;
+}
 
-    // kobject.rs (Wave 1) — `vfs_fs_type.kobj`.
-    safe fn kobject_init(obj: *mut kobject);
-    safe fn kobject_get(obj: *mut kobject);
-    safe fn kobject_put(obj: *mut kobject);
-
+// P3-D3c: the hlist and kobject primitives are genuinely `unsafe fn`s in
+// `crate::{hlist,kobject}` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites (`hlist_t`/`hlist_func_t`/`kobject` are the same
+// bindgen types as the owners' `Hlist`/`HlistFunc`/`Kobject` aliases).
+// The `static inline` bucket/entry walkers (`hlist_first_entry`,
+// `hlist_next_entry`, `HLIST_FIRST_NODE`, ...) have no external linkage
+// in the C original and are reimplemented below, specialized to
+// `vfs_superblock.inodes`/`.inodes_buckets`.
+/// SAFETY: see [`crate::hlist::hlist_init`]'s contract.
+fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_t) -> i32 {
+    unsafe { crate::hlist::hlist_init(hlist, bucket_cnt, func) }
+}
+/// SAFETY: see [`crate::hlist::hlist_get`]'s contract.
+fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
+    unsafe { crate::hlist::hlist_get(hlist, node) }
+}
+/// SAFETY: see [`crate::hlist::hlist_put`]'s contract.
+fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void {
+    unsafe { crate::hlist::hlist_put(hlist, node, replace) }
+}
+/// SAFETY: see [`crate::hlist::hlist_pop`]'s contract.
+fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
+    unsafe { crate::hlist::hlist_pop(hlist, node) }
+}
+/// SAFETY: see [`crate::hlist::hlist_len`]'s contract.
+fn hlist_len(hlist: *mut hlist_t) -> usize {
+    unsafe { crate::hlist::hlist_len(hlist) }
+}
+/// SAFETY: see [`crate::kobject::kobject_init`]'s contract.
+fn kobject_init(obj: *mut kobject) {
+    unsafe { crate::kobject::kobject_init(obj) }
+}
+/// SAFETY: see [`crate::kobject::kobject_get`]'s contract.
+fn kobject_get(obj: *mut kobject) {
+    unsafe { crate::kobject::kobject_get(obj) }
+}
+/// SAFETY: see [`crate::kobject::kobject_put`]'s contract.
+fn kobject_put(obj: *mut kobject) {
+    unsafe { crate::kobject::kobject_put(obj) }
 }
 
 // P3-D3b: proc/workqueue.rs's entry points (the deferred-iput workqueue)

@@ -65,8 +65,10 @@ use crate::mm::page::Page;
 mod ffi {
     use super::*;
 
-    // `__panic_start`/`__panic_end` are declared once in `crate::mm::cffi`.
-    pub use crate::mm::cffi::raw::{__panic_start, __panic_end};
+    // `__panic_start`/`__panic_end` are plain crate-path re-exports
+    // (P3-D3c: `printf.rs` dropped their `#[no_mangle]` exports, so
+    // `cffi::raw`'s re-export is `pub(crate)` now -- match it here).
+    pub(crate) use crate::mm::cffi::raw::{__panic_start, __panic_end};
 
     // P3-1C mesh sweep: `uart.rs` is in scope for this wave; its
     // `__uart0_mmio_base` is now referenced via crate path. It's a
@@ -95,6 +97,41 @@ mod ffi {
         unsafe { crate::e1000::__e1000_pci_mmio_base }
     }
 
+    // P3-D3c mesh sweep: same "`static mut` -> thin accessor fn" treatment
+    // for the runtime physical-memory bounds (`start_kernel.rs`), the MMIO
+    // bases (`timer/goldfish_rtc.rs`, `irq/plic.rs`), the per-cpu array
+    // base (`ipi.rs`) and the boot-probed platform info (`dev/fdt.rs`) --
+    // all demoted from `#[no_mangle]` in the same wave.
+    pub fn __physical_memory_start() -> u64 {
+        // SAFETY: written only during single-hart early boot
+        // (`start_kernel.rs`/`dev/fdt.rs`), read-only afterwards.
+        unsafe { crate::start_kernel::__physical_memory_start }
+    }
+    pub fn __physical_memory_end() -> u64 {
+        // SAFETY: see `__physical_memory_start` above.
+        unsafe { crate::start_kernel::__physical_memory_end }
+    }
+    pub fn __goldfish_rtc_mmio_base() -> u64 {
+        // SAFETY: boot-time-constant (never written after its initializer;
+        // see that file's module doc), read-only for the kernel's life.
+        unsafe { crate::timer::goldfish_rtc::__goldfish_rtc_mmio_base }
+    }
+    pub fn __plic_mmio_base() -> u64 {
+        // SAFETY: single boot-time writer (`dev/fdt.rs`), read-only after.
+        unsafe { crate::irq::plic::__plic_mmio_base }
+    }
+    pub fn cpus_base() -> u64 {
+        // Address-of only (no dereference): `&raw const` on a (non-extern)
+        // `static mut` is a safe operation.
+        (&raw const crate::ipi::cpus) as u64
+    }
+    pub fn platform() -> &'static crate::bindings::platform_info {
+        // SAFETY: populated once by `fdt_init()` during single-hart early
+        // boot, read-only by the time `kvmmake` runs; shared-borrowing it
+        // afterwards is race-free.
+        unsafe { &*(&raw const crate::dev::fdt::platform) }
+    }
+
     unsafe extern "C" {
         // memory / pages
 
@@ -103,13 +140,6 @@ mod ffi {
         // vm.rs); formerly wrapped as `xv6_vm_vma_pool_init`/
         // `xv6_vm_vm_pool_init` by the deleted `vm_pgtab_shims.rs` for no
         // reason beyond naming symmetry -- call directly.
-
-        // Runtime physical-memory bounds and MMIO base symbols (resolved by
-        // FDT at boot) -- needed by `kvmmake` and the constant accessors.
-        pub safe static __physical_memory_start: u64;
-        pub safe static __physical_memory_end: u64;
-        pub safe static __goldfish_rtc_mmio_base: u64;
-        pub safe static __plic_mmio_base: u64;
 
         // Kernel image / per-cpu / trampoline symbols.
         pub safe static _entry: u8;
@@ -124,16 +154,12 @@ mod ffi {
         pub safe static _trampoline_data: u8;
         pub safe static sig_trampoline: u8;
         pub safe static _data_ktlb: u8;
-        pub safe static cpus: u8;
 
         // Kernel symbols sections.
         pub safe static _ksymbols_start: u8;
         pub safe static _ksymbols_end: u8;
         pub safe static _ksymbols_idx_start: u8;
         pub safe static _ksymbols_idx_end: u8;
-
-        // Global platform info (populated by fdt_init).
-        pub safe static platform: crate::bindings::platform_info;
 
         // Defined in trampoline.S.
         pub safe static mut trampoline_ksatp: u64;
@@ -339,9 +365,9 @@ const EINVAL: c_int = crate::bindings::EINVAL as c_int;
 const ERANGE: c_int = crate::bindings::ERANGE as c_int;
 
 #[inline]
-fn kernbase() -> u64 { ffi::__physical_memory_start }
+fn kernbase() -> u64 { ffi::__physical_memory_start() }
 #[inline]
-fn physstop() -> u64 { ffi::__physical_memory_end }
+fn physstop() -> u64 { ffi::__physical_memory_end() }
 
 // ---------------------------------------------------------------------------
 // Page-type helpers -- previously `xv6_vm_page_type_pgtable`/
@@ -773,8 +799,9 @@ pub(crate) fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
     pte.pa()
 }
 
-#[no_mangle]
-pub extern "C" fn kvmmap(
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- callers (`irq/trap.rs` and
+// this file) reach it by crate path now.
+pub(crate) fn kvmmap(
     kpgtbl: *mut u64,
     va: u64,
     pa: u64,
@@ -838,8 +865,9 @@ pub(crate) fn uvmfree(pagetable: *mut u64, _sz: u64) {
     freewalk(pagetable);
 }
 
-#[no_mangle]
-pub extern "C" fn kvminit() {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- the only external caller
+// (`start_kernel.rs`) imports it by crate path.
+pub(crate) fn kvminit() {
     ffi::__vma_pool_init();
     ffi::__vm_pool_init();
     let kpt = kvmmake();
@@ -847,8 +875,8 @@ pub extern "C" fn kvminit() {
     set_trampoline_ksatp(make_satp(kpt));
 }
 
-#[no_mangle]
-pub extern "C" fn kvminithart() {
+// P3-D3c: same demotion as `kvminit` above.
+pub(crate) fn kvminithart() {
     xv6_vm_sfence_vma();
     let satp = get_trampoline_ksatp();
     w_satp(satp);
@@ -1047,19 +1075,19 @@ fn kvmmake() -> *mut u64 {
     kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, (PTE_R | PTE_W) as c_int);
 
     // Goldfish RTC.
-    if ffi::__goldfish_rtc_mmio_base != 0 {
+    if ffi::__goldfish_rtc_mmio_base() != 0 {
         kvmmap(
-            kpgtbl, ffi::__goldfish_rtc_mmio_base, ffi::__goldfish_rtc_mmio_base,
+            kpgtbl, ffi::__goldfish_rtc_mmio_base(), ffi::__goldfish_rtc_mmio_base(),
             PGSIZE, (PTE_R | PTE_W) as c_int,
         );
     }
 
     // VirtIO devices.
-    if ffi::platform.has_virtio != 0 && ffi::platform.virtio_count > 0 {
-        let n = core::cmp::min(ffi::platform.virtio_count as usize, crate::bindings::N_VIRTIO as usize);
-        let limit = core::cmp::min(n, ffi::platform.virtio_base.len());
+    if ffi::platform().has_virtio != 0 && ffi::platform().virtio_count > 0 {
+        let n = core::cmp::min(ffi::platform().virtio_count as usize, crate::bindings::N_VIRTIO as usize);
+        let limit = core::cmp::min(n, ffi::platform().virtio_base.len());
         for i in 0..limit {
-            let base = ffi::platform.virtio_base[i];
+            let base = ffi::platform().virtio_base[i];
             if base != 0 {
                 kvmmap(kpgtbl, base, base, PGSIZE, (PTE_R | PTE_W) as c_int);
             }
@@ -1067,9 +1095,9 @@ fn kvmmake() -> *mut u64 {
     }
 
     // PCIe regions.
-    if ffi::platform.has_pcie != 0 && ffi::__pcie_ecam_mmio_base() != 0 {
-        for i in 0..(ffi::platform.pcie_reg_count as usize) {
-            let reg = &ffi::platform.pcie_reg[i];
+    if ffi::platform().has_pcie != 0 && ffi::__pcie_ecam_mmio_base() != 0 {
+        for i in 0..(ffi::platform().pcie_reg_count as usize) {
+            let reg = &ffi::platform().pcie_reg[i];
             let base = reg.base;
             let size = reg.size;
             if base == 0 || size == 0 { continue; }
@@ -1080,7 +1108,7 @@ fn kvmmake() -> *mut u64 {
                 (PTE_R | PTE_W) as c_int,
             );
         }
-        if ffi::platform.has_virtio != 0 && ffi::__e1000_pci_mmio_base() != 0 {
+        if ffi::platform().has_virtio != 0 && ffi::__e1000_pci_mmio_base() != 0 {
             kvmmap(
                 kpgtbl, ffi::__e1000_pci_mmio_base(), ffi::__e1000_pci_mmio_base(),
                 0x20000, (PTE_R | PTE_W) as c_int,
@@ -1089,19 +1117,19 @@ fn kvmmake() -> *mut u64 {
     }
 
     // PLIC.
-    if ffi::platform.plic_base != 0 && ffi::platform.plic_size != 0 {
+    if ffi::platform().plic_base != 0 && ffi::platform().plic_size != 0 {
         kvmmap(
-            kpgtbl, ffi::__plic_mmio_base, ffi::__plic_mmio_base,
-            ffi::platform.plic_size, (PTE_R | PTE_W) as c_int,
+            kpgtbl, ffi::__plic_mmio_base(), ffi::__plic_mmio_base(),
+            ffi::platform().plic_size, (PTE_R | PTE_W) as c_int,
         );
     }
 
     // EMAC.
-    if ffi::platform.has_emac != 0 {
-        let n = core::cmp::min(ffi::platform.emac_count as usize, crate::bindings::EMAC_MAX as usize);
-        let limit = core::cmp::min(n, ffi::platform.emac.len());
+    if ffi::platform().has_emac != 0 {
+        let n = core::cmp::min(ffi::platform().emac_count as usize, crate::bindings::EMAC_MAX as usize);
+        let limit = core::cmp::min(n, ffi::platform().emac.len());
         for i in 0..limit {
-            let e = &ffi::platform.emac[i];
+            let e = &ffi::platform().emac[i];
             if e.base != 0 && e.size != 0 {
                 let base = pgrounddown(e.base);
                 let size = pgroundup(e.base + e.size) - base;
@@ -1119,11 +1147,11 @@ fn kvmmake() -> *mut u64 {
     }
 
     // SDHCI.
-    if ffi::platform.has_sdhci != 0 {
-        let n = core::cmp::min(ffi::platform.sdhci_count as usize, crate::bindings::SDHCI_MAX as usize);
-        let limit = core::cmp::min(n, ffi::platform.sdhci.len());
+    if ffi::platform().has_sdhci != 0 {
+        let n = core::cmp::min(ffi::platform().sdhci_count as usize, crate::bindings::SDHCI_MAX as usize);
+        let limit = core::cmp::min(n, ffi::platform().sdhci.len());
         for i in 0..limit {
-            let s = &ffi::platform.sdhci[i];
+            let s = &ffi::platform().sdhci[i];
             if s.base != 0 && s.size != 0 {
                 let base = pgrounddown(s.base);
                 let size = pgroundup(s.base + s.size) - base;
@@ -1134,8 +1162,8 @@ fn kvmmake() -> *mut u64 {
                 kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
             }
         }
-        if ffi::platform.sdhci_count > 0 && ffi::platform.sdhci[0].apbc_base != 0 {
-            let apbc_aib = ffi::platform.sdhci[0].apbc_base as u64 + 0x3C;
+        if ffi::platform().sdhci_count > 0 && ffi::platform().sdhci[0].apbc_base != 0 {
+            let apbc_aib = ffi::platform().sdhci[0].apbc_base as u64 + 0x3C;
             let pg = pgrounddown(apbc_aib);
             kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
         }
@@ -1154,7 +1182,7 @@ fn kvmmake() -> *mut u64 {
     let trampoline_addr = &raw const ffi::trampoline as u64;
     let tramp_data_addr = &raw const ffi::_trampoline_data as u64;
     let sig_tramp_addr  = &raw const ffi::sig_trampoline as u64;
-    let cpus_addr       = &raw const ffi::cpus as u64;
+    let cpus_addr       = ffi::cpus_base();
 
     kvmmap(kpgtbl, TRAMPOLINE, trampoline_addr, PGSIZE, (PTE_R | PTE_X) as c_int);
     kvmmap(kpgtbl, TRAMPOLINE_DATA, tramp_data_addr, PGSIZE, PTE_R as c_int);
@@ -1186,7 +1214,7 @@ fn kvmmake() -> *mut u64 {
     kvmmap(kpgtbl, bss_addr, bss_addr, bss_end_addr - bss_addr, (PTE_R | PTE_W) as c_int);
     kvmmap(
         kpgtbl, bss_end_addr, bss_end_addr,
-        ffi::__physical_memory_end - bss_end_addr,
+        ffi::__physical_memory_end() - bss_end_addr,
         (PTE_R | PTE_W) as c_int,
     );
 

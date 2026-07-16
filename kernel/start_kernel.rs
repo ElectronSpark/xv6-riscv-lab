@@ -133,17 +133,14 @@ use crate::vfs::pipe::pipe_init;
 /// refined by `fdt_apply_platform_config()`. Read by `mm/kalloc.rs`,
 /// `mm/vm_pgtab.rs`'s `kernbase()`, and the backtrace/panic path's stack
 /// bounds check, among others.
-#[no_mangle]
-pub static mut __physical_memory_start: u64 = 0;
+pub(crate) static mut __physical_memory_start: u64 = 0;
 
 /// See [`__physical_memory_start`]. `mm/vm_pgtab.rs`'s `physstop()`.
-#[no_mangle]
-pub static mut __physical_memory_end: u64 = 0;
+pub(crate) static mut __physical_memory_end: u64 = 0;
 
 /// `(mem_size >> 12)` — total managed physical pages, consumed by
 /// `mm/page.rs`'s buddy allocator sizing.
-#[no_mangle]
-pub static mut __physical_total_pages: u64 = 0;
+pub(crate) static mut __physical_total_pages: u64 = 0;
 
 // ===========================================================================
 // Secondary-hart release flag.
@@ -179,36 +176,29 @@ const CPU_FLAG_BOOT_HART: u64 = 2;
 unsafe extern "C" {
     // printf.rs (variadic, so it cannot be declared `safe`).
 
-    // mm/early_allocator.rs
-    fn early_allocator_init(pa_start: *mut c_void, pa_end: *mut c_void);
-
-    // kobject.rs
-    fn kobject_global_init();
-
-    // mm/vm_pgtab.rs
-    fn kvminit();
-    fn kvminithart();
-
-    // kernel/bufcache.rs (Wave 22)
-    fn binit();
-
-    // timer/sched_timer.rs (Wave 8). `sleep_ms` stays `extern`: not
-    // demoted (many out-of-scope callers elsewhere).
-    fn sleep_ms(ms: u64);
-
-    // lock/rwsem_test.rs, lock/semaphore_test.rs — always linked in
-    // (compiled unconditionally); only the *calls* below are feature-gated.
-    // Stay `extern`: out of this wave's scope (lock/*, mm/*).
-    fn rwsem_launch_tests();
-    fn semaphore_launch_tests();
-    // mm/pcache_test.rs (Phase 4) — same story: always linked in, gated
-    // call site only.
-    fn pcache_launch_tests();
-
     // entry.S — `_entry` label; address taken below for
     // `sbi_start_secondary_harts`, never called directly from Rust.
     static _entry: u8;
 }
+
+// P3-D3c: every subsystem `_init()` entry point below is a plain
+// crate-path import now that its `#[no_mangle]` export is gone (the
+// `extern "C"` redeclarations that used to sit in the block above are
+// deleted). `early_allocator_init` is genuinely `unsafe fn`; its call
+// site already sits in an `unsafe` block. The `*_launch_tests` suites
+// are always linked in (compiled unconditionally); only the calls below
+// are feature-gated — launched by this Rust call, not by symbol name
+// from any external harness (verified against test/cmake/QemuTests.cmake:
+// the ctest suites only set `RWLOCK_TEST=1`-style env gates that become
+// cargo features).
+use crate::bufcache::binit;
+use crate::kobject::kobject_global_init;
+use crate::lock::rwsem_test::rwsem_launch_tests;
+use crate::lock::semaphore_test::semaphore_launch_tests;
+use crate::mm::early_allocator::early_allocator_init;
+use crate::mm::pcache_test::pcache_launch_tests;
+use crate::mm::{kvminit, kvminithart};
+use crate::timer::sched_timer::sleep_ms;
 
 // P3-D3a: `pcache_global_init` (mm/pcache.rs, an ordinary safe Rust fn
 // now that its `#[no_mangle]` export is gone) and `kinit` (genuinely
@@ -360,10 +350,10 @@ fn __start_kernel_secondary_hart(hartid: c_int) {
 }
 
 /// Ported from `kernel/start_kernel.c::start_kernel` — called by
-/// [`crate::start::start`] on every hart. See the module doc for the full
-/// boot-order/hart-synchronization contract.
-#[no_mangle]
-pub extern "C" fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: bool) {
+/// [`crate::start::start`] on every hart (a direct crate-path call since
+/// P3-D3c; no more `#[no_mangle] extern "C"` surface). See the module doc
+/// for the full boot-order/hart-synchronization contract.
+pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: bool) {
     // Boot hart initializes all cpu structs first, before any hart sets tp
     if is_boot_hart {
         // SAFETY: boot hart, runs once, before any secondary hart is
@@ -417,8 +407,9 @@ pub extern "C" fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_har
 /// by `proc/thread.rs`'s `init_entry`, from the first user thread's kernel
 /// context (**not** the bare-metal boot path above) — this is why it can
 /// call `sleep_ms`/anything that sleeps, unlike [`start_kernel`] itself.
-#[no_mangle]
-pub extern "C" fn start_kernel_post_init() {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- the only caller
+// (`proc/thread.rs`'s `init_entry`) already imports it by crate path.
+pub(crate) fn start_kernel_post_init() {
     // SAFETY: runs exactly once, on the boot hart, in `init_entry`'s
     // thread context, strictly before any secondary hart is released
     // (`STARTED.store` below is the release point) — matches the C

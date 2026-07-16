@@ -15,7 +15,8 @@
 //!
 //! All algorithmic logic lives in safe Rust. The only `unsafe` is the
 //! FFI boundary (`mod ffi`), the storage-init for the singleton, the
-//! chunk-header writes, and the thin `#[no_mangle] extern "C"` wrappers.
+//! chunk-header writes, and the thin `pub(crate) unsafe fn` entry points
+//! (P3-D3c: no more `#[no_mangle] extern "C"` surface).
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -340,16 +341,14 @@ fn align_up(x: u64, align: u64) -> u64 {
 // Public C ABI — thin wrappers.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn early_allocator_init(
+pub(crate) unsafe fn early_allocator_init(
     pa_start: *mut c_void,
     pa_end: *mut c_void,
 ) {
     allocator().init(pa_start as u64, pa_end as u64);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn early_alloc_align(size: usize, align: usize) -> *mut c_void {
+pub(crate) unsafe fn early_alloc_align(size: usize, align: usize) -> *mut c_void {
     allocator().alloc(size as u64, align as u64)
 }
 

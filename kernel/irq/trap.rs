@@ -173,16 +173,7 @@ unsafe extern "C" {
     // string.rs
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
-    // printf.rs panic/print infra
-    safe fn __panic_start();
-    safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
-
-    // mm/vm_pgtab.rs
-    safe fn kvmmap(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int);
-
-    // proc/exit.rs
-    safe fn exit(status: c_int) -> !;
 
     // kernelvec.S -- address taken (`w_stvec((uint64)kernelvec)`), never
     // called directly from Rust.
@@ -200,13 +191,20 @@ unsafe extern "C" {
 
     // Linker-script symbol: base of the kernel page table (`kernel.ld`).
     safe static _data_ktlb: u8;
-
-    // `kernel/ipi/ipi.c`'s `struct cpu_local cpus[NCPU]` (still C --
-    // Wave 9). Mirrors `lock/rcu.rs`'s own typed extern for the same
-    // array.
-    #[link_name = "cpus"]
-    static mut CPUS: [cpu_local; NCPU as usize];
 }
+
+// P3-D3c: `printf.rs`'s panic plumbing, `mm/vm_pgtab.rs`'s `kvmmap` and
+// `proc/exit.rs`'s `exit` are plain crate-path imports now that their
+// `#[no_mangle]` exports are gone (the extern redeclarations that used to
+// sit in the block above are deleted; signatures identical). `ipi.rs`'s
+// `struct cpu_local cpus[NCPU]` (`pub(crate) static mut cpus:
+// CpuLocalArray`, a `#[repr(C)]` wrapper whose sole field sits at offset
+// 0) replaces the old `#[link_name = "cpus"] static mut CPUS` typed view;
+// `trapinit` below casts the wrapper's base address to `*mut cpu_local`
+// exactly as `proc/rq.rs`/`lock/rcu.rs` do.
+use crate::mm::kvmmap;
+use crate::printf::{__panic_end, __panic_start};
+use crate::proc::exit;
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; reached as crate-path items
@@ -453,7 +451,7 @@ pub(crate) extern "C" fn trapinit() {
     // SAFETY: boot-time, single-hart execution (before any other hart is
     // started and before any `usertrapret()` call anywhere in the
     // kernel); every static/extern touched below is either write-once
-    // here or, for `CPUS`, exclusively owned by this hart's slice of the
+    // here or, for `ipi.rs`'s `cpus`, exclusively owned by this hart's slice of the
     // loop until other harts start.
     unsafe {
         let trampoline_addr = (&raw const trampoline) as u64;
@@ -499,8 +497,11 @@ pub(crate) extern "C" fn trapinit() {
             // as an actual array anywhere in the kernel; preserved
             // as-is for 1:1 fidelity rather than "fixed" at this wave's
             // boundary).
-            CPUS[i as usize].intr_stacks = kirqstack(i) as *mut *mut c_void;
-            CPUS[i as usize].intr_sp = CPUS[i as usize].intr_stacks as u64 + INTR_STACK_SIZE;
+            let cpu_i = (&raw mut crate::ipi::cpus)
+                .cast::<cpu_local>()
+                .add(i as usize);
+            (*cpu_i).intr_stacks = kirqstack(i) as *mut *mut c_void;
+            (*cpu_i).intr_sp = (*cpu_i).intr_stacks as u64 + INTR_STACK_SIZE;
             crate::kprintln!(
                 "trapinit: CPU {} intr_stack at {:x} -> {}",
                 i as c_int,

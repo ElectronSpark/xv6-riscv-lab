@@ -66,19 +66,36 @@ use crate::proc::{sleep_on_chan, wakeup, wakeup_on_chan};
 // Externs.
 // ===========================================================================
 
-unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
 
-    pub safe fn sleep_ms(ms: u64);
-
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites. (`name` cast: old redeclaration said
+// `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(lk: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(lk) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(lk: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(lk) }
 }
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export.
 use crate::proc::kthread_create;
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 
 // P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
 // Rust fns now that their `#[no_mangle]` exports are gone; reached as
@@ -105,9 +122,11 @@ use crate::proc::{__proctab_get_initproc, killed, pid_wlock, pid_wunlock, procdu
 /// layout-compatible with the C struct and the over-read is gone.
 use crate::irq::irq_core::{plic_irq, IrqDesc, PLIC_IRQ_OFFSET};
 
-unsafe extern "C" {
-    fn register_irq_handler(irq_num: c_int, desc: *mut IrqDesc) -> c_int;
-}
+// P3-D3c: `irq/irq_core.rs`'s `register_irq_handler` is a plain
+// crate-path import now that its `#[no_mangle]` export is gone (genuinely
+// `unsafe fn`; the call site below already sits in an `unsafe` block),
+// same as every other consumer of it in the tree.
+use crate::irq::irq_core::register_irq_handler;
 
 // P3-1C mesh sweep: tty/tty.rs and vfs/pipe.rs are in scope for this wave,
 // so these become plain crate-path imports instead of `extern "C"`
@@ -145,8 +164,6 @@ const fn ctrl(x: u8) -> c_int {
 // ===========================================================================
 
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
 }
 
 // P3-2 (zero-C wave): `console_assert_errno`/`console_assert_plain` used to

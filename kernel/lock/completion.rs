@@ -44,10 +44,18 @@ use crate::proc::{tq_bulk_move, tq_init, tq_size, tq_wait, tq_wait_cb, tq_wakeup
 // old C ABI), so the call sites drop their `!= 0`.
 use crate::proc::signal_pending;
 
-unsafe extern "C" {
-
-    pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
-    pub safe fn sched_timer_done(tn: *mut timer_node);
+// P3-D3c: `sched_timer_set`/`sched_timer_done` are genuinely `unsafe fn`
+// in `crate::timer::sched_timer` now that their `#[no_mangle]` exports are
+// gone; this file's original extern declarations asserted `pub safe fn`
+// (usual FFI-facade convention). The thin wrappers below preserve that
+// safe facade for the unchanged call sites.
+/// SAFETY: see [`crate::timer::sched_timer::sched_timer_set`]'s contract.
+fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int {
+    unsafe { crate::timer::sched_timer::sched_timer_set(tn, ticks) }
+}
+/// SAFETY: see [`crate::timer::sched_timer::sched_timer_done`]'s contract.
+fn sched_timer_done(tn: *mut timer_node) {
+    unsafe { crate::timer::sched_timer::sched_timer_done(tn) }
 }
 pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
 

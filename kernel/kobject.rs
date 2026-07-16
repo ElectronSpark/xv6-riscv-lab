@@ -200,8 +200,9 @@ unsafe fn detach(obj: *mut Kobject) {
 /// # Safety
 /// Must be called exactly once, before any other `kobject_*` entry point
 /// (no concurrent access to the registry statics yet).
-#[no_mangle]
-pub extern "C" fn kobject_global_init() {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) fn kobject_global_init() {
     unsafe { ln_init(kobject_list_head()) };
     kobject_lock().init(c"kobject_lock".as_ptr());
 }
@@ -210,8 +211,9 @@ pub extern "C" fn kobject_global_init() {
 /// `obj` must be null or point to a live `struct kobject` whose
 /// `refcount` is currently zero (fresh/never-initialised, or fully
 /// dropped and being reused).
-#[no_mangle]
-pub unsafe extern "C" fn kobject_init(obj: *mut Kobject) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn kobject_init(obj: *mut Kobject) {
     unsafe {
         kassert!(!obj.is_null(), "kobject_init: obj is NULL");
         ln_init(kobj_list_node(obj));
@@ -229,8 +231,9 @@ pub unsafe extern "C" fn kobject_init(obj: *mut Kobject) {
 /// `obj` must be null or point to a live `struct kobject` with a
 /// currently-nonzero `refcount` (i.e. the caller already holds a
 /// reference).
-#[no_mangle]
-pub unsafe extern "C" fn kobject_get(obj: *mut Kobject) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn kobject_get(obj: *mut Kobject) {
     unsafe {
         kassert!(!obj.is_null(), "kobject_get: obj is NULL");
         // Relaxed: incrementing from an already-held reference needs no
@@ -244,8 +247,9 @@ pub unsafe extern "C" fn kobject_get(obj: *mut Kobject) {
 
 /// # Safety
 /// `obj` must be null or point to a live `struct kobject`.
-#[no_mangle]
-pub unsafe extern "C" fn kobject_try_get(obj: *mut Kobject) -> bool {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn kobject_try_get(obj: *mut Kobject) -> bool {
     unsafe { kassert!(!obj.is_null(), "kobject_try_get: obj is NULL") };
     let rc = refcount_atomic(obj);
     let mut old = rc.load(Ordering::Relaxed);
@@ -276,8 +280,9 @@ pub unsafe extern "C" fn kobject_try_get(obj: *mut Kobject) -> bool {
 /// detached from the global registry and either freed via `kmm_free` (if
 /// `ops.release` is unset) or handed to `ops.release`, which must be safe
 /// to call with `obj` as its sole argument.
-#[no_mangle]
-pub unsafe extern "C" fn kobject_put(obj: *mut Kobject) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn kobject_put(obj: *mut Kobject) {
     unsafe {
         kassert!(!obj.is_null(), "kobject_put: obj is NULL");
         // Release: must publish every write this hart made to `*obj`
@@ -307,8 +312,9 @@ pub unsafe extern "C" fn kobject_put(obj: *mut Kobject) {
 
 /// # Safety
 /// `obj` must be null or point to a live `struct kobject`.
-#[no_mangle]
-pub unsafe extern "C" fn kobject_refcount(obj: *mut Kobject) -> i64 {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn kobject_refcount(obj: *mut Kobject) -> i64 {
     unsafe {
         kassert!(!obj.is_null(), "kobject_refcount: obj is NULL");
         // Relaxed: diagnostic snapshot read only (mirrors

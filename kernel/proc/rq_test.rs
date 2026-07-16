@@ -1,6 +1,12 @@
 //! Pure-Rust port of `kernel/proc/rq_test.c` (run-queue priority integration
-//! tests). Owns both `rq_test_run` (canonical) and `xv6_rqtest_pub_run`
-//! aliases. Translated from SECTION 14 of `proc_rust_shims.c`.
+//! tests). Entry point: [`rq_test_run`]. P3-D3c: 0-ref-verified across the
+//! whole tree (no Rust caller, no C caller -- the only non-Rust mention is
+//! a dead prototype in `kernel/proc/proc_private.h`; no ctest suite or
+//! cargo feature launches it), so the `#[no_mangle] extern "C"` C-ABI
+//! surface is gone and the old C-era `xv6_rqtest_pub_run` alias (a pure
+//! duplicate of `rq_test_run`) is deleted. The suite itself stays
+//! compiled (module-level `allow(dead_code)`), same "linked in, launch
+//! wiring may return later" posture as the other in-kernel suites.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -433,8 +439,9 @@ fn test_affinity_change() {
 }
 
 // --- main entry point -----------------------------------------------------
-#[no_mangle]
-pub extern "C" fn rq_test_run() {
+// P3-D3c: `#[no_mangle] extern "C"` dropped (0-ref-verified, see module
+// doc); kept compiled under the module's `allow(dead_code)`.
+pub(crate) fn rq_test_run() {
     rq_test_raw! {
         crate::kprintln!("\n========================================");
         crate::kprintln!("Run Queue Priority Integration Tests");
@@ -453,9 +460,4 @@ pub extern "C" fn rq_test_run() {
         crate::kprintln!("All Integration Tests PASSED!");
         crate::kprintln!("========================================\n");
     }
-}
-
-#[no_mangle]
-pub extern "C" fn xv6_rqtest_pub_run() {
-    rq_test_run()
 }

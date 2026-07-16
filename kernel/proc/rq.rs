@@ -43,10 +43,12 @@ const THREAD_WAKENING: i32 = 7;
 
 type cpumask_t = u64;
 
-unsafe extern "C" {
-    // Per-CPU array exported by C code.
-    static mut cpus: [crate::bindings::cpu_local; NCPU];
-}
+// P3-D3c: the per-CPU array is `ipi.rs`'s `pub(crate) static mut cpus:
+// CpuLocalArray` (a `#[repr(C)]` wrapper whose sole field sits at offset
+// 0), reached by crate path instead of this file's old locally-typed
+// `extern "C"` redeclaration; `cpu_local_ptr` below casts the wrapper's
+// base address to `*mut cpu_local` exactly as before.
+use crate::ipi::cpus;
 
 #[inline]
 fn thread_state_get(p: *mut thread) -> i32 {
@@ -179,7 +181,9 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 #[inline] fn rqg_active_mask() -> u64 { rqg_active_mask_atomic().load(Ordering::Acquire) }
 #[inline] fn rqg_or_active_mask(mask: u64) { rqg_active_mask_atomic().fetch_or(mask, Ordering::Release); }
 #[inline] fn cpu_local_ptr(cpu_id: c_int) -> *mut cpu_local {
-    unsafe { (&raw mut cpus).cast::<cpu_local>().wrapping_add(cpu_id as usize) }
+    // Address-of only (no dereference): `&raw mut` on a (non-extern)
+    // `static mut` is a safe operation.
+    (&raw mut cpus).cast::<cpu_local>().wrapping_add(cpu_id as usize)
 }
 
 #[inline] fn rqpc(cpu_id: c_int) -> *mut rq_percpu {

@@ -86,25 +86,26 @@ struct CloneArgs {
 // ---------------------------------------------------------------------------
 // FFI surface.
 // ---------------------------------------------------------------------------
+// P3-D3c: the arg-fetch helpers (`irq/syscall.rs`), `get_jiffs`
+// (`timer/timer_core.rs`) and the KERNBASE physical address
+// (`start_kernel.rs`) are plain crate-path imports now that their
+// `#[no_mangle]` exports are gone (the extern block that used to sit
+// here is deleted; `safestrcpy` moved to its own block below --
+// string.rs's libc-shaped exports are a mandated keep).
+use crate::irq::syscall::{argaddr, argint, argint64};
+use crate::start_kernel::__physical_memory_start;
+use crate::timer::timer_core::get_jiffs;
+
 unsafe extern "C" {
-    // Argument extraction (defs.h).
-    pub safe fn argint(n: c_int, p: *mut c_int);
-    pub safe fn argint64(n: c_int, p: *mut i64);
-    pub safe fn argaddr(n: c_int, p: *mut u64);
-
-    // Process / thread primitives.
-    pub safe fn exit(status: c_int) -> !;
-
-    // Time.
-    pub safe fn get_jiffs() -> u64;
-
     // Strings.
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char,
                            n: c_int) -> *mut c_char;
-
-    // Extern variable: KERNBASE physical address.
-    static __physical_memory_start: u64;
 }
+// P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
+// `#[no_mangle]` export is gone -- imported via its private sibling module
+// path (the `crate::proc` glob would work too, but the direct path is
+// unambiguous by construction).
+use super::exit::exit;
 
 // P3-D3a: `either_copyin`/`vm_copyin`/`vm_growheap` (mm/vm.rs) are
 // ordinary (safe) Rust fns now that their `#[no_mangle]` exports are

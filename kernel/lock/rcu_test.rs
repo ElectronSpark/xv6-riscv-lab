@@ -35,11 +35,10 @@ use crate::printf::trigger_panic;
 // instead of `extern "C"` redeclarations.
 use crate::proc::{scheduler_yield, wakeup};
 
-unsafe extern "C" {
-
-    pub safe fn sleep_ms(ms: u64);
-    pub safe fn get_jiffs() -> u64;
-}
+// P3-D3c: plain crate-path imports instead of `extern "C"` redeclarations
+// (both demoted from `#[no_mangle]` in the same wave).
+use crate::timer::sched_timer::sleep_ms;
+use crate::timer::timer_core::get_jiffs;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`

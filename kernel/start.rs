@@ -7,7 +7,7 @@
 //! there is no machine-mode delegation/PMP setup to do here — [`start`]
 //! only disables paging, unmasks the three supervisor interrupt-enable
 //! bits, arms the first timer interrupt, and falls through to
-//! `start_kernel()` (still C; Wave 27).
+//! `start_kernel()` (Rust, `kernel/start_kernel.rs`; Wave 27).
 
 #![allow(non_upper_case_globals)]
 
@@ -86,12 +86,12 @@ pub static mut stack0: Stack0 = Stack0([0u8; STACK0_LEN]);
 static BOOT_HARTID: AtomicI32 = AtomicI32::new(-1);
 
 // ===========================================================================
-// start_kernel — still C (`kernel/start_kernel.c`, Wave 27).
+// start_kernel — Rust (`kernel/start_kernel.rs`, Wave 27). P3-D3c: plain
+// crate-path import instead of an `extern "C"` redeclaration (demoted from
+// `#[no_mangle]` in the same wave).
 // ===========================================================================
 
-unsafe extern "C" {
-    fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: bool);
-}
+use crate::start_kernel::start_kernel;
 
 /// `entry.S` jumps here in supervisor mode, on `stack0`, once per hart.
 ///
@@ -127,31 +127,23 @@ pub extern "C" fn start(hartid: c_int, fdt_base: *mut c_void) {
     // Ask for clock interrupts.
     timerinit();
 
-    // Jump to main().
-    // SAFETY: `start_kernel` is the C boot-continuation entry point;
-    // `hartid`/`fdt_base` are forwarded unmodified from `entry.S`'s
-    // `a0`/`a1`, and `is_boot_hart` reflects the CAS above — an exact
-    // match for the C call site this replaces. `entry.S` guarantees a
-    // valid stack for this call (a `stack0` slice, cleared and fenced
-    // before use).
-    unsafe {
-        start_kernel(hartid, fdt_base, is_boot_hart);
-    }
+    // Jump to main(). `start_kernel` is the (safe, Rust) boot-continuation
+    // entry point; `hartid`/`fdt_base` are forwarded unmodified from
+    // `entry.S`'s `a0`/`a1`, and `is_boot_hart` reflects the CAS above.
+    // `entry.S` guarantees a valid stack for this call (a `stack0` slice,
+    // cleared and fenced before use).
+    start_kernel(hartid, fdt_base, is_boot_hart);
 }
 
 // ===========================================================================
 // timerinit — ask this hart to generate timer interrupts.
 // ===========================================================================
 
-unsafe extern "C" {
-    /// Owned by `kernel/timer/timer.c` (declared in
-    /// `kernel/inc/timer/timer.h`); this function and the platform probe
-    /// in `kernel/dev/fdt.c` are its only writers before the scheduler
-    /// starts. Mirrors the C `__jiff_ticks` global exactly (name and
-    /// all), so `kernel/timer/timer.c` and `kernel/dev/fdt.c` keep
-    /// working unchanged.
-    static mut __jiff_ticks: u64;
-}
+// Owned by `kernel/timer/timer_core.rs`; this function and the platform
+// probe in `kernel/dev/fdt.rs` are its only writers before the scheduler
+// starts. P3-D3c: plain crate-path import instead of an `extern "C"`
+// redeclaration (demoted from `#[no_mangle]` in the same wave).
+use crate::timer::timer_core::__jiff_ticks;
 
 /// Ask this hart to generate timer interrupts. When using OpenSBI, the
 /// firmware has already configured the `menvcfg.STCE` bit for the sstc

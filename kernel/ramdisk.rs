@@ -34,10 +34,12 @@ use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, page_t, plat
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    safe fn __panic_start();
-    safe fn __panic_end() -> !;
 
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
@@ -45,11 +47,13 @@ unsafe extern "C" {
     // string.rs.
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
-    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
-    // anchor, see that file's own comment) -- this extern stays valid.
-    static mut platform: platform_info;
 }
+
+// P3-D3c: `dev/fdt.rs`'s boot-probed platform config is a plain
+// crate-path import now that its `#[no_mangle]` export is gone (same
+// `platform_info` type, unchanged call sites -- reads of a `static mut`
+// stay `unsafe` either way).
+use crate::dev::fdt::platform;
 
 // P3-D3a: `__page_to_pa` is genuinely `unsafe fn` in `crate::mm::page`
 // now that its `#[no_mangle]` export is gone; this file's original

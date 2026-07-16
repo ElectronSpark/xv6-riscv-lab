@@ -62,10 +62,12 @@ use crate::bindings::pci_common_confspace_header;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    safe fn __panic_start();
-    safe fn __panic_end() -> !;
 }
 // P3-1D mesh sweep: e1000.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an

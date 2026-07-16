@@ -128,12 +128,16 @@ use crate::machine;
 // crate's established convention: every file redeclares the C-ABI symbols
 // it needs rather than reaching into another module's private items).
 // ===========================================================================
+// P3-D3c: `early_alloc_align` (`mm/early_allocator.rs`; the only allocator
+// live at the point `fdt_init`/`fdt_early_scan_memory` run) is a plain
+// crate-path import instead of an `extern "C"` redeclaration (demoted from
+// `#[no_mangle]` in the same wave). Same for the boot-configured globals
+// this file writes (see the write sites in `fdt_apply_platform_config`):
+// `__physical_memory_*` (`start_kernel.rs`), `__plic_mmio_base`
+// (`irq/plic.rs`), `__jiff_ticks` (`timer/timer_core.rs`).
+use crate::mm::early_allocator::early_alloc_align;
 unsafe extern "C" {
     /// Variadic; see `printf.rs`'s module doc for the ABI rationale.
-
-    /// `mm/early_allocator.rs` (Wave "core/misc"); the only allocator live
-    /// at the point `fdt_init`/`fdt_early_scan_memory` run.
-    fn early_alloc_align(size: usize, align: usize) -> *mut c_void;
 
     fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
@@ -141,21 +145,6 @@ unsafe extern "C" {
     fn strncmp(p: *const c_char, q: *const c_char, n: usize) -> c_int;
     fn strlen(s: *const c_char) -> usize;
     fn strnlen(s: *const c_char, maxlen: usize) -> usize;
-
-    // ---- Boot-configured globals this file writes (see module doc's
-    // "Written-globals inventory"). ----
-    /// `mm/page.rs`'s `kernbase()`/`phystop()`; still C-owned
-    /// (`kernel/start_kernel.c`, Wave 27) -- single boot-time writer
-    /// sequence (`start_kernel.c` first, this file refines second), both
-    /// on the boot hart before any other hart or interrupt is live.
-    static mut __physical_memory_start: u64;
-    static mut __physical_memory_end: u64;
-    static mut __physical_total_pages: u64;
-    /// `irq/plic.rs` (Wave 5) -- single boot-time writer (this file).
-    static mut __plic_mmio_base: u64;
-    /// `timer/timer_core.rs` (Wave 8) -- single boot-time writer sequence
-    /// (`start.rs`'s `timerinit()` first, this file refines second).
-    static mut __jiff_ticks: u64;
 }
 // P3-1D mesh sweep: pci.rs/virtio_disk.rs are in scope for this wave;
 // default-initialized nonzero, this file only overwrites them when the
@@ -178,12 +167,12 @@ const HZ: u64 = 1000;
 // (`platform_info`, already allowlisted in `build.rs` for those other
 // consumers) -- exact same struct every C/Rust reader already expects.
 // ===========================================================================
-// P3-1D mesh sweep: kept `#[no_mangle]` -- read via `extern` by 4
-// out-of-scope files (`mm/page.rs`, `mm/vm_pgtab.rs`, `uart.rs`,
-// `start_kernel.rs`); same "widely-shared data anchor, no benefit purely
-// for mesh-cosmetic reasons" judgment call `ipi.rs`'s `cpus` documents.
-#[no_mangle]
-pub static mut platform: platform_info = unsafe { core::mem::zeroed() };
+// P3-D3c: `#[no_mangle]` dropped -- every reader (`mm/page.rs`,
+// `mm/vm_pgtab.rs`, `dev/x1_emac.rs`, `dev/x1_sdhci.rs`, `ramdisk.rs`,
+// `virtio_disk.rs`) now reaches it by crate path (directly or through a
+// thin accessor in its own `ffi` module) instead of an
+// `extern`/`bindings::` redeclaration of the symbol.
+pub(crate) static mut platform: platform_info = unsafe { core::mem::zeroed() };
 
 // ===========================================================================
 // FDT token/header constants (`kernel/inc/dev/fdt.h`).
@@ -2629,9 +2618,13 @@ pub(crate) unsafe extern "C" fn fdt_apply_platform_config() {
     // Safety section.
     unsafe {
         if platform.mem_count > 0 && platform.mem[0].size > 0 {
-            __physical_memory_start = platform.mem[0].base;
-            __physical_memory_end = platform.mem[0].base + platform.mem[0].size;
-            __physical_total_pages = platform.mem[0].size >> 12;
+            // P3-D3c: single boot-time writer sequence (`start_kernel.rs`
+            // first, this file refines second), both on the boot hart
+            // before any other hart or interrupt is live; written via
+            // crate path instead of `extern "C"` redeclarations.
+            crate::start_kernel::__physical_memory_start = platform.mem[0].base;
+            crate::start_kernel::__physical_memory_end = platform.mem[0].base + platform.mem[0].size;
+            crate::start_kernel::__physical_total_pages = platform.mem[0].size >> 12;
         }
 
         if platform.uart_base != 0 {
@@ -2646,7 +2639,9 @@ pub(crate) unsafe extern "C" fn fdt_apply_platform_config() {
             crate::uart::__uart0_reg_io_width = platform.uart_reg_io_width;
         }
         if platform.plic_base != 0 {
-            __plic_mmio_base = platform.plic_base;
+            // P3-D3c: `irq/plic.rs` global, single boot-time writer (this
+            // file); written via crate path.
+            crate::irq::plic::__plic_mmio_base = platform.plic_base;
         }
 
         if platform.has_pcie != 0 {
@@ -2677,7 +2672,10 @@ pub(crate) unsafe extern "C" fn fdt_apply_platform_config() {
         }
 
         if platform.timebase_freq != 0 {
-            __jiff_ticks = platform.timebase_freq / HZ;
+            // P3-D3c: `timer/timer_core.rs` global, boot-time writer
+            // sequence (`start.rs`'s `timerinit()` first, this file
+            // refines second); written via crate path.
+            crate::timer::timer_core::__jiff_ticks = platform.timebase_freq / HZ;
         }
     }
 }

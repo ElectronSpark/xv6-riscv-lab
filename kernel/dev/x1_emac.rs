@@ -84,20 +84,32 @@ use crate::sync::KSpinlock;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+// (`name` cast: old redeclaration said `*const c_char`, real fn takes
+// `*mut c_char`; the callee only reads it.)
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
+}
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    // timer/sched_timer.rs.
-    safe fn sleep_ms(ms: u64);
-    // lock/spinlock.rs.
-    safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
-    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
-    // anchor, see that file's own comment) -- this extern stays valid.
-    static mut platform: platform_info;
 }
+
+// P3-D3c: `dev/fdt.rs`'s boot-probed platform config is a plain
+// crate-path import now that its `#[no_mangle]` export is gone (same
+// `platform_info` type, unchanged call sites -- reads of a `static mut`
+// stay `unsafe` either way).
+use crate::dev::fdt::platform;
 
 // P3-D3a: `kalloc` is genuinely `unsafe fn` in `crate::mm::kalloc` now
 // that its `#[no_mangle]` export is gone; this file's original extern

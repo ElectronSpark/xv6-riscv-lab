@@ -496,8 +496,7 @@ fn buf_cache_prealloc() {
 
 /// Initialise the buffer cache. Must be called exactly once, at boot,
 /// before any other entry point in this file.
-#[no_mangle]
-pub extern "C" fn binit() {
+pub(crate) fn binit() {
     // `BCACHE` starts life already in the "locked struct with zeroed
     // contents" state (`SpinLock::new` is a `const fn`) -- unlike the
     // pre-P3-8c version there is no separate `spin_init` call needed
@@ -642,8 +641,7 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
 /// Return a locked buffer with the contents of the indicated block.
 /// Returns null on OOM (bio allocation failure) or I/O error/interrupt
 /// -- callers must handle this gracefully.
-#[no_mangle]
-pub extern "C" fn bread(dev: u32, blockno: u32) -> *mut buf {
+pub(crate) fn bread(dev: u32, blockno: u32) -> *mut buf {
     let b = bget(dev, blockno);
     // SAFETY: `b` is locked (mutex held by this thread, per `bget`'s
     // postcondition) for the remainder of this function.
@@ -681,8 +679,7 @@ pub extern "C" fn bread(dev: u32, blockno: u32) -> *mut buf {
 }
 
 /// Write `b`'s contents to disk. Must be locked.
-#[no_mangle]
-pub extern "C" fn bwrite(b: *mut buf) {
+pub(crate) fn bwrite(b: *mut buf) {
     // `holding_mutex` is a safe FFI forward -- only the raw
     // address-of-field needs an (immediately-scoped) `unsafe`, matching
     // the C precondition.
@@ -728,8 +725,7 @@ pub extern "C" fn bwrite(b: *mut buf) {
 
 /// Mark buffer as dirty for later writeback. Must be locked. Much
 /// faster than [`bwrite`] since it doesn't block on disk I/O.
-#[no_mangle]
-pub extern "C" fn bwrite_async(b: *mut buf) {
+pub(crate) fn bwrite_async(b: *mut buf) {
     // See `bwrite`: only the raw address-of-field needs `unsafe`.
     // SAFETY: `b` caller-owned.
     if holding_mutex(unsafe { &raw mut (*b).lock }) == 0 {
@@ -752,8 +748,7 @@ pub extern "C" fn bwrite_async(b: *mut buf) {
 }
 
 /// Flush all dirty buffers to disk. Called periodically or on `sync()`.
-#[no_mangle]
-pub extern "C" fn bsync() {
+pub(crate) fn bsync() {
     loop {
         let mut bc = BCACHE.lock();
         if ln_is_empty(&raw mut bc.dirty_list) {
@@ -824,8 +819,7 @@ pub(crate) fn bdirty_count() -> u32 {
 
 /// Release a locked buffer. Move to the free list if no longer
 /// referenced.
-#[no_mangle]
-pub extern "C" fn brelse(b: *mut buf) {
+pub(crate) fn brelse(b: *mut buf) {
     // SAFETY: `b` caller-owned; lock-holding checked, then released --
     // matches the C precondition, before `bcache.lock` is taken below
     // (`holding_mutex`/`mutex_unlock` are safe FFI forwards; only the
@@ -853,8 +847,7 @@ pub extern "C" fn brelse(b: *mut buf) {
 
 /// Pin a buffer in the cache (prevent it from being recycled while
 /// `refcnt == 0`).
-#[no_mangle]
-pub extern "C" fn bpin(b: *mut buf) {
+pub(crate) fn bpin(b: *mut buf) {
     let _bc = BCACHE.lock();
     // SAFETY: `b` live, `_bc` held.
     unsafe {
@@ -867,8 +860,7 @@ pub extern "C" fn bpin(b: *mut buf) {
 }
 
 /// Undo a prior [`bpin`].
-#[no_mangle]
-pub extern "C" fn bunpin(b: *mut buf) {
+pub(crate) fn bunpin(b: *mut buf) {
     let mut bc = BCACHE.lock();
     // SAFETY: `b` live, `bc` held. `bc.free_list` -- a plain access
     // through the guard -- needs no `unsafe`; nested here only to match

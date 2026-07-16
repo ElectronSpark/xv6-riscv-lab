@@ -106,9 +106,11 @@ unsafe extern "C" {
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     safe fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
-    // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
-    safe fn sleep_ms(ms: u64);
 }
+
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 
 // P3-D3b: proc/workqueue.rs's entry points (deferred vfs_fput after an
 // RCU grace period) are plain safe Rust fns now that their
@@ -118,13 +120,12 @@ use crate::proc::{create_work_struct, free_work_struct, queue_work};
 
 unsafe extern "C" {
 
-    // irq/syscall.rs — arg-fetch helpers.
-    safe fn argint(n: c_int, ip: *mut c_int);
-    safe fn argint64(n: c_int, ip: *mut i64);
-    safe fn argaddr(n: c_int, ip: *mut u64);
-    safe fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int;
-
 }
+
+// P3-D3c: `irq/syscall.rs`'s arg-fetch helpers are plain (safe) Rust fns
+// now that their `#[no_mangle]` exports are gone; identical signatures,
+// plain `use`.
+use crate::irq::syscall::{argaddr, argint, argint64, argstr};
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; reached as crate-path items

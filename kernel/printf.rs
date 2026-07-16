@@ -52,18 +52,31 @@ use crate::backtrace::print_backtrace;
 // Externs.
 // ===========================================================================
 
-unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
-
-    /// FDT-configured kernel physical memory bounds
-    /// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros),
-    /// mirrored here exactly like `mm/page.rs`/`mm/vm_pgtab.rs`'s
-    /// identical extern pair.
-    pub safe static __physical_memory_start: u64;
-    pub safe static __physical_memory_end: u64;
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites. (`name` cast: old redeclaration said
+// `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
 }
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(lk: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(lk) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(lk: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(lk) }
+}
+
+// P3-D3c: the FDT-configured kernel physical memory bounds
+// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros) are
+// `pub(crate) static mut`s in `start_kernel.rs` now that their
+// `#[no_mangle]` exports are gone; the one read below already sits in an
+// `unsafe` block (boot-write-once, read-only afterwards).
+use crate::start_kernel::{__physical_memory_end, __physical_memory_start};
 
 /// Read the frame pointer (`s0`). Mirrors the C `r_fp()` static inline
 /// (`kernel/inc/riscv.h`); no equivalent exists yet in `machine.rs`
@@ -299,8 +312,9 @@ pub(crate) extern "C" fn panic_disable_bt() {
 // __panic_start / __panic_end / trigger_panic.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn __panic_start() {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer (panic
+// plumbing across the whole crate) imports it by crate path now.
+pub(crate) fn __panic_start() {
     // Set global panic state FIRST so other cores can see it.
     GLOBAL_PANIC_STATE.store(true, Ordering::Release);
 
@@ -370,8 +384,8 @@ pub(crate) extern "C" fn trigger_panic() -> ! {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn __panic_end() -> ! {
+// P3-D3c: same demotion as `__panic_start` above.
+pub(crate) fn __panic_end() -> ! {
     panic_msg_unlock();
     trigger_panic()
 }

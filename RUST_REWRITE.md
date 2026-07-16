@@ -1653,6 +1653,50 @@ guards are already done (8a–8d).
   at the identical pre-existing site** (0x80c3c000 region, same message).
   (Worker: boot ×3, forktest/createdelete OK, ENOENT, nm sweep.)
 
+### Iteration 56 — 2026-07-15 — Wave P3-D3c: final mesh sweep — **C-ABI mesh arc CLOSED, `#[no_mangle]` 96→22 (the mandated set)**
+
+- The closing sweep: hlist 8→0, bufcache 8→0, irq/syscall 7→0 (incl.
+  another latent ABI bug: pid.rs's stale decl claimed `argint -> i32`
+  vs the real `()` — third stale-register read caught this arc),
+  kobject 6→0, bintree 5→0 (backtrace.rs's bindgen-path link dependency
+  on `rb_find_key_rdown` eliminated by crate-path conversion),
+  start_kernel 5→0, printf 4→2, spinlock 4→0 (incl. a bindings-import
+  in signal.rs that surfaced as a loud link failure), timers 6→0,
+  vm_pgtab/cffi/rbtree/early_allocator/clone/exit/goldfish/plic/
+  irq_core/ipi-`cpus`/fdt-`platform` → 0, test files 5→0
+  (`xv6_rqtest_pub_run` deleted as a dead C-era alias).
+- `forkret_entry` keeps `extern "C"` (drops no_mangle): its address is
+  the swtch.S-restored `ra` — ABI load-bearing, name not. `cpus`
+  consumers' `#[link_name]` views replaced with offset-0 casts of the
+  `#[repr(C)]` wrapper (link_section unchanged).
+- **Test-launch investigation**: all 4 QEMU ctest suites launch via
+  cmake-env → cargo features → `#[cfg]`-gated direct Rust calls in
+  start_kernel.rs — nothing launches by symbol name; test exports
+  demoted safely.
+- **The 22 survivors (documented mandated set)**: string.rs 13 + printf
+  `puts`/`putchar` (LLVM-libcall class, RUST_FORCE_UNDEFINED);
+  irq/trap.rs `kerneltrap`/`kernel_irq`/`usertrap`/`user_kirq_entrance`
+  (kernelvec.S/trampoline.S asm contract); start.rs `start`/`stack0`
+  (entry.S); backtrace.rs `db_break` (external-debugger by-name anchor).
+- Verified (orchestrator): 0-warning clean rebuild (default target — the
+  gotcha: `--target fs_img` alone does not relink the kernel); nm
+  keep-set 6/6 present + swept names absent; boot gate; **testsig
+  21/21**; **mmaptest all passed**; forkfork OK; `ls /dev` clean; ENOENT;
+  no panics. (Worker: boot ×3, stressfs, all-features cargo check 0.)
+  86 files, +1094/−761.
+
+### C-ABI mesh dismantling arc (P3-D) — summary
+
+`#[no_mangle]` 1,438 (Phase-3 baseline) → P3-1 mesh waves → 571 →
+**P3-D1–D3c (7 waves, 2026-07-15) → 22**, every wave 0-warning +
+boot-gated + nm-verified, zero behavior change. ~570 consumer
+redeclarations converted to direct crate-path Rust calls; 66 dead
+exports deleted; 3 latent ABI bugs found & fixed (vm_dup phantom return,
+kthread_create arg drift, argint phantom return) — the exact silent-UB
+class the user's directive targets. Remaining C-compatible surface:
+the 22 mandated exports + bindgen type layer (nativization arc next) +
+C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

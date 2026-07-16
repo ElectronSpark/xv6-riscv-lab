@@ -126,10 +126,31 @@ use crate::proc::proc_shims::xv6_current_thread;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention; raw calls throughout, see the note that used to
+// sit in the extern block). Thin wrappers preserve that safe facade for
+// the unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(l) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(l) }
+}
+
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    safe fn __panic_start();
-    safe fn __panic_end() -> !;
 
     // lock/spinlock.rs -- raw calls (not `sync::KSpinlock` RAII): this
     // file's lock interacts with `tq_wait`'s internal release/reacquire
@@ -137,18 +158,16 @@ unsafe extern "C" {
     // as `kernel/vfs/xv6fs/log.rs`, which uses raw calls throughout the
     // whole file for the same reason (one consistent lock discipline
     // rather than mixing RAII and manual calls in the same module).
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
-
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
-    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
-    // anchor, see that file's own comment) -- this extern stays valid.
-    static mut platform: platform_info;
 }
+
+// P3-D3c: `dev/fdt.rs`'s boot-probed platform config is a plain
+// crate-path import now that its `#[no_mangle]` export is gone (same
+// `platform_info` type, unchanged call sites -- reads of a `static mut`
+// stay `unsafe` either way).
+use crate::dev::fdt::platform;
 
 // P3-D3a: `kalloc` (genuinely `unsafe fn` in `crate::mm::kalloc`; its
 // call sites already sit in `unsafe` contexts) is reached as a

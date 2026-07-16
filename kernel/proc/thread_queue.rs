@@ -233,13 +233,30 @@ const TYPE_TREE: u32 = 2;
 // ---------------------------------------------------------------------------
 // External C dependencies. `memset` remains unsafe because it writes raw memory.
 // ---------------------------------------------------------------------------
-unsafe extern "C" {
-    // rbtree primitives.
-    pub safe fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
-    pub safe fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
-    pub safe fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
-    pub safe fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
-    pub safe fn rb_find_key_rup(root: *mut rb_root, key: uint64) -> *mut rb_node;
+// P3-D3c: the rbtree/bintree primitives are genuinely `unsafe fn`s in
+// `crate::{rbtree,bintree}` now that their `#[no_mangle]` exports are
+// gone; this file's original extern declarations asserted `pub safe fn`
+// (usual FFI-facade convention). Thin wrappers preserve that safe facade
+// for the unchanged call sites.
+/// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
+fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::rbtree::rb_insert_color(root, node) }
+}
+/// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
+fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::rbtree::rb_delete_node_color(root, node) }
+}
+/// SAFETY: see [`crate::bintree::rb_first_node`]'s contract.
+fn rb_first_node(root: *mut rb_root) -> *mut rb_node {
+    unsafe { crate::bintree::rb_first_node(root) }
+}
+/// SAFETY: see [`crate::bintree::rb_next_node`]'s contract.
+fn rb_next_node(node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::bintree::rb_next_node(node) }
+}
+/// SAFETY: see [`crate::bintree::rb_find_key_rup`]'s contract.
+fn rb_find_key_rup(root: *mut rb_root, key: uint64) -> *mut rb_node {
+    unsafe { crate::bintree::rb_find_key_rup(root, key) }
 }
 
 // Scheduler hooks. P3-1B2: previously bridged via the `xv6_schport_*`

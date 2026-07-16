@@ -56,11 +56,9 @@ use crate::bindings::phy_state;
 // crate's established convention (see `kernel/dev/bio.rs`,
 // `kernel/dev/blkdev.rs`).
 // ---------------------------------------------------------------------------
-unsafe extern "C" {
-    // printf.rs -- variadic, cannot be marked `safe`.
-    // timer/sched_timer.rs.
-    safe fn sleep_ms(ms: u64);
-}
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 
 // P3-D2a: proc/sched.rs entry point, reached as a plain crate-path item
 // instead of an `extern "C"` redeclaration.

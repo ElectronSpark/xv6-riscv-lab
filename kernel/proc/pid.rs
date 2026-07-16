@@ -47,10 +47,12 @@ use crate::proc::proc_shims::{
     xv6_rcu_read_unlock,
 };
 
-unsafe extern "C" {
-    // syscall arg helper.
-    pub safe fn argint(n: i32, ip: *mut i32) -> i32;
-}
+// P3-D3c: `irq/syscall.rs`'s `argint` is a plain (safe) Rust fn now that
+// its `#[no_mangle]` export is gone. ABI-truth note: this file's old
+// redeclaration claimed `-> i32`; the real fn returns `()` -- the C ABI
+// silently let the `let _ =` call sites read a stale return register.
+// Unified to the real signature (both call sites drop their `let _ =`).
+use crate::irq::syscall::argint;
 
 #[cold]
 fn panic_pid(msg: &str) -> ! {
@@ -320,8 +322,8 @@ pub(crate) extern "C" fn procdump_sessions_sid(target_sid: i32) {
 pub(crate) extern "C" fn sys_dumpproc() -> u64 {
     let mut mode: i32 = 0;
     let mut id: i32 = 0;
-    let _ = argint(0, &mut mode);
-    let _ = argint(1, &mut id);
+    argint(0, &mut mode);
+    argint(1, &mut id);
     let target = if id >= 0 { Some(id) } else { None };
     match (mode, target) {
         (1, Some(pid)) => procdump_tree_pid(pid),

@@ -407,11 +407,11 @@ pub fn thread_pid(p: *mut crate::bindings::thread) -> core::ffi::c_int {
 // Kernel timebase
 // ===========================================================================
 
-unsafe extern "C" {
-    /// Runtime-initialised timebase frequency (Hz). Set once at boot
-    /// before any SMP activity; never changes afterwards.
-    pub static __timebase_frequency: u64;
-}
+// Runtime-initialised timebase frequency (Hz). Set once at boot before
+// any SMP activity; never changes afterwards. P3-D3c: plain crate-path
+// import instead of an `extern "C"` redeclaration (demoted from
+// `#[no_mangle]` in the same wave).
+use crate::timer::timer_core::__timebase_frequency;
 
 /// `__timebase_frequency / 1000` — number of raw ticks in one
 /// millisecond. Centralises the volatile read so the lock primitives
@@ -419,7 +419,7 @@ unsafe extern "C" {
 #[inline]
 pub fn tick_ms() -> u64 {
     // SAFETY: kernel-owned constant, read-only after boot.
-    let f = unsafe { core::ptr::read_volatile(&__timebase_frequency) };
+    let f = unsafe { core::ptr::read_volatile(&raw const __timebase_frequency) };
     f / 1000
 }
 
@@ -429,7 +429,7 @@ pub fn tick_ms() -> u64 {
 #[inline]
 pub fn tick_s() -> u64 {
     // SAFETY: see `tick_ms`.
-    unsafe { core::ptr::read_volatile(&__timebase_frequency) }
+    unsafe { core::ptr::read_volatile(&raw const __timebase_frequency) }
 }
 
 /// Convert a millisecond count into raw ticks, saturating on

@@ -339,8 +339,9 @@ pub(crate) unsafe fn __rb_node_link(
 
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_first_node(root: *mut RbRoot) -> *mut RbNode {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn rb_first_node(root: *mut RbRoot) -> *mut RbNode {
     if root.is_null() {
         return ptr::null_mut();
     }
@@ -358,8 +359,9 @@ pub unsafe extern "C" fn rb_first_node(root: *mut RbRoot) -> *mut RbNode {
 
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_last_node(root: *mut RbRoot) -> *mut RbNode {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn rb_last_node(root: *mut RbRoot) -> *mut RbNode {
     if root.is_null() {
         return ptr::null_mut();
     }
@@ -377,8 +379,9 @@ pub unsafe extern "C" fn rb_last_node(root: *mut RbRoot) -> *mut RbNode {
 
 /// # Safety
 /// `node` must be null or point to a live `rb_node`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_next_node(node: *mut RbNode) -> *mut RbNode {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn rb_next_node(node: *mut RbNode) -> *mut RbNode {
     unsafe {
         if rb_node_is_empty(node) {
             return ptr::null_mut();
@@ -510,8 +513,9 @@ pub(crate) unsafe fn __rb_find_key_link(
 
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_find_key_rup(root: *mut RbRoot, key: u64) -> *mut RbNode {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn rb_find_key_rup(root: *mut RbRoot, key: u64) -> *mut RbNode {
     unsafe {
         if !rb_root_is_initialized(root) {
             return ptr::null_mut();
@@ -538,14 +542,13 @@ pub unsafe extern "C" fn rb_find_key_rup(root: *mut RbRoot, key: u64) -> *mut Rb
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
 ///
-/// NOT demoted: `backtrace.rs` (out of this wave's scope) calls this via
-/// `crate::bindings::rb_find_key_rdown(...)` — the bindgen-generated
-/// extern declaration from `kernel/inc/bintree.h`'s prototype, resolved
-/// by the linker against this exact C symbol name, not a Rust-level
-/// `crate::bintree::` path call. Discovered as a real link failure
-/// (`undefined reference to 'rb_find_key_rdown'`) when first demoted.
-#[no_mangle]
-pub unsafe extern "C" fn rb_find_key_rdown(root: *mut RbRoot, key: u64) -> *mut RbNode {
+/// P3-D3c: demoted. The one consumer that used to resolve this by C
+/// symbol name (`backtrace.rs`, via the bindgen-generated
+/// `crate::bindings::rb_find_key_rdown` extern declaration -- the cause
+/// of the earlier link failure that kept this `#[no_mangle]`) now calls
+/// `crate::bintree::rb_find_key_rdown` directly, so no linker-resolved
+/// reference remains.
+pub(crate) unsafe fn rb_find_key_rdown(root: *mut RbRoot, key: u64) -> *mut RbNode {
     unsafe {
         if !rb_root_is_initialized(root) {
             return ptr::null_mut();

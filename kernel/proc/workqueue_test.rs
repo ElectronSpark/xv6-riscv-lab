@@ -92,9 +92,9 @@ use crate::proc::{
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::scheduler_yield;
 
-unsafe extern "C" {
-    pub safe fn sleep_ms(ms: u64);
-}
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 
 const WORK_STRUCT_FLAG_RUN_ON_DRAIN: u32 = 1 << 0;
 const WORK_STRUCT_FLAG_FREE_AFTER_RUN: u32 = 1 << 1;

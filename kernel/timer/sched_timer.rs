@@ -87,9 +87,11 @@ use crate::proc::{scheduler_yield, wakeup};
 // `crate::proc` glob re-export like `scheduler_yield`/`wakeup` above.
 use crate::proc::{init_work_struct, queue_work, workqueue_create};
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
 }
 
@@ -374,8 +376,9 @@ unsafe extern "C" fn sched_timer_callback(tn: *mut timer_node) {
 /// `tn`, if non-null, must point at caller-owned, writable storage for a
 /// `timer_node` (it is unconditionally reinitialized via
 /// [`timer_node_init`]) that outlives the subsequent sleep.
-#[no_mangle]
-pub unsafe extern "C" fn sched_timer_set(tn: *mut timer_node, ms: u64) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- callers
+// (`lock/{completion,mutex,rwsem,semaphore}.rs`) reach it by crate path.
+pub(crate) unsafe fn sched_timer_set(tn: *mut timer_node, ms: u64) -> c_int {
     if tn.is_null() {
         return -(crate::bindings::EINVAL as c_int);
     }
@@ -394,8 +397,8 @@ pub unsafe extern "C" fn sched_timer_set(tn: *mut timer_node, ms: u64) -> c_int 
 /// # Safety
 /// `tn`, if non-null, must point at a live `timer_node` (previously passed
 /// to [`sched_timer_set`]).
-#[no_mangle]
-pub unsafe extern "C" fn sched_timer_done(tn: *mut timer_node) {
+// P3-D3c: same demotion as `sched_timer_set` above.
+pub(crate) unsafe fn sched_timer_done(tn: *mut timer_node) {
     if tn.is_null() {
         return;
     }
@@ -404,8 +407,9 @@ pub unsafe extern "C" fn sched_timer_done(tn: *mut timer_node) {
 }
 
 /// Rust port of `sleep_ms()`.
-#[no_mangle]
-pub extern "C" fn sleep_ms(ms: u64) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- all callers reach it by
+// crate path now.
+pub(crate) fn sleep_ms(ms: u64) {
     if ms == 0 {
         return;
     }

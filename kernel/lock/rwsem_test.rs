@@ -6,10 +6,11 @@
 //!  3. Writers are mutually exclusive.
 //!  4. Data consistency under mixed reader/writer stress.
 //!
-//! Entry point: [`rwsem_launch_tests`] (`#[no_mangle] extern "C"`), called
-//! from `kernel/start_kernel.c` under `#ifdef RWAD_WRITE_TEST` — preserved
-//! verbatim from the deleted C file so that call site keeps working
-//! unmodified.
+//! Entry point: [`rwsem_launch_tests`], called from
+//! `kernel/start_kernel.rs` under `#[cfg(feature = "rwlock_test")]` via a
+//! direct crate-path call (P3-D3c: the `#[no_mangle] extern "C"` C-ABI
+//! surface is gone -- the ctest harness only toggles the cmake env gate,
+//! it never resolves this symbol by name).
 
 #![allow(non_camel_case_types, non_snake_case)]
 
@@ -613,11 +614,10 @@ extern "C" fn rwsem_test_master(_a1: u64, _a2: u64) {
     unsafe { crate::kprintln!("[rwsem] tests finished"); }
 }
 
-/// Spawn the rwsem test-suite master kthread. Preserves the original `void
-/// rwsem_launch_tests(void)` C-ABI entry point called from
-/// `kernel/start_kernel.c` under `#ifdef RWAD_WRITE_TEST`.
-#[no_mangle]
-pub extern "C" fn rwsem_launch_tests() {
+/// Spawn the rwsem test-suite master kthread. Called from
+/// `start_kernel.rs` under `#[cfg(feature = "rwlock_test")]` (P3-D3c:
+/// direct crate-path call, no more C-ABI entry point).
+pub fn rwsem_launch_tests() {
     if !spawn(c"rwsem_test_master", rwsem_test_master) {
         // SAFETY: static format string, no arguments.
         unsafe { crate::kprintln!("[rwsem] cannot create test master thread"); }

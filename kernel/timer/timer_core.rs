@@ -49,15 +49,14 @@ use crate::machine;
 use crate::sync::KSpinlock;
 
 // ===========================================================================
-// FDT/boot-configured globals. `__clint_timer_irqno`/`__timebase_frequency`
-// keep the exact C names/types: `start.rs`'s `timerinit()` writes
-// `__jiff_ticks` through its own `extern` declaration of this symbol (see
-// that file's module doc), `dev/fdt.c` (still C) writes both
-// `__jiff_ticks` and (indirectly) reads `__timebase_frequency` via
-// `machine::tick_ms()`/`tick_s()`'s existing `extern` declarations, and
-// `lock/spinlock.rs` reads `__timebase_frequency` through the same path.
-// Single boot-time writer, read-only thereafter — identical contract to
-// `uart.rs`'s `__uart0_*` / `irq/plic.rs`'s `__plic_mmio_base`.
+// FDT/boot-configured globals, exact C names/types preserved. P3-D3c: the
+// whole extern mesh around them is gone -- `start.rs`'s `timerinit()` and
+// `dev/fdt.rs`'s `fdt_apply_platform_config` write `__jiff_ticks` by crate
+// path, and `machine::tick_ms()`/`tick_s()` (through which everything else,
+// e.g. `lock/spinlock.rs`, reads the timebase) import
+// `__timebase_frequency` by crate path too. Single boot-time writer,
+// read-only thereafter — identical contract to `uart.rs`'s `__uart0_*` /
+// `irq/plic.rs`'s `__plic_mmio_base`.
 // ===========================================================================
 
 /// `RISCV_S_TIMER_INTERRUPT` (`kernel/inc/trap.h`).
@@ -67,14 +66,16 @@ const RISCV_S_TIMER_INTERRUPT: u64 = 5;
 // whole tree) -- demoted from `#[no_mangle]`.
 pub(crate) static mut __clint_timer_irqno: u64 = RISCV_S_TIMER_INTERRUPT;
 
-#[no_mangle]
-pub static mut __timebase_frequency: u64 = 10_000_000;
+// P3-D3c: `#[no_mangle]` dropped -- the readers (`ll/ll.rs`,
+// `machine/machine.rs`) reach it by crate path now instead of their own
+// `extern` redeclarations.
+pub(crate) static mut __timebase_frequency: u64 = 10_000_000;
 
 /// Owned here (was `kernel/timer/timer.c`); written once by `start.rs`'s
-/// `timerinit()` and by `dev/fdt.c`'s `fdt_apply_platform_config`, both
-/// during single-hart early boot before any interrupt is enabled.
-#[no_mangle]
-pub static mut __jiff_ticks: u64 = 0;
+/// `timerinit()` and by `dev/fdt.rs`'s `fdt_apply_platform_config`, both
+/// during single-hart early boot before any interrupt is enabled (both by
+/// crate path since P3-D3c -- no more `#[no_mangle]`/`extern` mesh).
+pub(crate) static mut __jiff_ticks: u64 = 0;
 
 const CPU_FLAG_NEEDS_RESCHED: u64 = 1;
 const CPU_FLAG_BOOT_HART: u64 = 2;
@@ -97,9 +98,11 @@ fn set_needs_resched() {
 // ===========================================================================
 use crate::proc::sched_holding;
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
 }
 
@@ -138,10 +141,10 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Rust port of `get_jiffs()`.
 // @TODO: consider overflow (matches the C original's own TODO comment).
-// Kept `#[no_mangle]`: read via `extern` by `mm/pcache.rs` and
-// `lock/rcu_test.rs` (both out of this wave's scope).
-#[no_mangle]
-pub extern "C" fn get_jiffs() -> u64 {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every reader (`mm/pcache.rs`,
+// `lock/rcu_test.rs`, `proc/sched.rs`, `proc/sysproc.rs`) now imports it by
+// crate path.
+pub(crate) fn get_jiffs() -> u64 {
     TICKS.load(Ordering::SeqCst)
 }
 

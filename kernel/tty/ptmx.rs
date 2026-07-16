@@ -45,10 +45,12 @@ use crate::dev::cdev::{cdev_register, cdev_unregister};
 // Externs.
 // ===========================================================================
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
 
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
 }
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in

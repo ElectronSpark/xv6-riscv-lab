@@ -13,8 +13,8 @@
 //!
 //! [`fetchaddr`]/[`fetchstr`]/[`argraw`]/[`argint`]/[`argint64`]/
 //! [`argaddr`]/[`argstr`] keep the exact C names and signatures from
-//! `kernel/inc/defs.h` -- roughly 90 call sites across both the remaining
-//! C tree (`kernel/exec.c`, `kernel/vfs/vfs_syscall.c`) and this crate's
+//! `kernel/inc/defs.h` -- roughly 90 call sites across the crate
+//! (`exec.rs`, `vfs/vfs_syscall.rs`, `proc/*`, `mm/*`) and this crate's
 //! own `#[no_mangle] pub extern "C" fn sys_*` implementations
 //! (`proc/sysproc.rs`, `proc/sys_signal.rs`, `mm/sysmm.rs`) depend on
 //! zero deviation here. `vm_copyin`/`vm_copyinstr` (both already Rust,
@@ -128,8 +128,9 @@ use crate::mm::{
 
 /// Fetch the `u64` at `addr` from the current thread's user address space.
 /// Rust port of `fetchaddr()`.
-#[no_mangle]
-pub extern "C" fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
     let p = machine::current_thread_ptr();
     // if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed,
     // in case of overflow
@@ -151,8 +152,9 @@ pub extern "C" fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
 /// Fetch the nul-terminated string at `addr` from the current thread's user
 /// address space. Returns the length of the string (not including the nul),
 /// or -1 on error. Rust port of `fetchstr()`.
-#[no_mangle]
-pub extern "C" fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
     let p = machine::current_thread_ptr();
     // SAFETY: `p` is the live current thread; `buf` is caller-owned space of
     // at least `max` bytes, per this function's C-ABI contract. `vm_copyinstr`
@@ -168,8 +170,9 @@ pub extern "C" fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
 
 /// Fetch the raw `u64` value of the `n`th system-call argument register
 /// (`a0`..`a5`). Rust port of `argraw()`.
-#[no_mangle]
-pub extern "C" fn argraw(n: c_int) -> u64 {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn argraw(n: c_int) -> u64 {
     let p = machine::current_thread_ptr();
     // SAFETY: `p` is the live current thread trapping into the kernel via a
     // syscall; `trapframe` is its live `utrapframe`, populated by
@@ -189,8 +192,9 @@ pub extern "C" fn argraw(n: c_int) -> u64 {
 }
 
 /// Fetch the nth 32-bit system call argument. Rust port of `argint()`.
-#[no_mangle]
-pub extern "C" fn argint(n: c_int, ip: *mut c_int) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn argint(n: c_int, ip: *mut c_int) {
     // SAFETY: `ip` is caller-owned space for one `c_int`, per this
     // function's C-ABI out-parameter contract (matches every call site
     // across the crate/tree).
@@ -198,16 +202,18 @@ pub extern "C" fn argint(n: c_int, ip: *mut c_int) {
 }
 
 /// Fetch the nth 64-bit system call argument. Rust port of `argint64()`.
-#[no_mangle]
-pub extern "C" fn argint64(n: c_int, ip: *mut i64) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn argint64(n: c_int, ip: *mut i64) {
     // SAFETY: see `argint`.
     unsafe { *ip = argraw(n) as i64 };
 }
 
 /// Retrieve an argument as a pointer. Doesn't check for legality, since
 /// copyin/copyout will do that. Rust port of `argaddr()`.
-#[no_mangle]
-pub extern "C" fn argaddr(n: c_int, ip: *mut u64) {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn argaddr(n: c_int, ip: *mut u64) {
     // SAFETY: see `argint`.
     unsafe { *ip = argraw(n) };
 }
@@ -216,8 +222,9 @@ pub extern "C" fn argaddr(n: c_int, ip: *mut u64) {
 /// string. Copies into `buf`, at most `max` bytes. Returns the string
 /// length on success (not including the nul, per `fetchstr`), or -1 on
 /// error. Rust port of `argstr()`.
-#[no_mangle]
-pub extern "C" fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+// by crate path now.
+pub(crate) fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int {
     let mut addr: u64 = 0;
     argaddr(n, &mut addr);
     fetchstr(addr, buf, max)

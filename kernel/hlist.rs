@@ -639,8 +639,9 @@ pub(crate) unsafe fn hlist_node_in_list(hlist: *mut Hlist, node: *mut c_void) ->
 /// # Safety
 /// `hlist` must be null or point to writable, zero-or-more-buckets-sized
 /// storage; `func` must be null or point to a live `HlistFunc`.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_init(hlist: *mut Hlist, bucket_cnt: u64, func: *mut HlistFunc) -> i32 {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_init(hlist: *mut Hlist, bucket_cnt: u64, func: *mut HlistFunc) -> i32 {
     unsafe {
         if hlist.is_null() || func.is_null() {
             return -1;
@@ -686,8 +687,9 @@ pub(crate) unsafe fn hlist_get_node_hash(hlist: *mut Hlist, node: *mut c_void) -
 /// # Safety
 /// `hlist` must be null or point to a live `Hlist`; `node` must be null
 /// or a live caller-owned node.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_get(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_get(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
     unsafe {
         if node.is_null() {
             return ptr::null_mut();
@@ -706,8 +708,9 @@ pub unsafe extern "C" fn hlist_get(hlist: *mut Hlist, node: *mut c_void) -> *mut
 /// # Safety
 /// `hlist` must be null or point to a live `Hlist`; `node` must be a live
 /// caller-owned node.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_put(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_put(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
     unsafe {
         if !validate(hlist) {
             return node;
@@ -747,8 +750,9 @@ pub unsafe extern "C" fn hlist_put(hlist: *mut Hlist, node: *mut c_void, replace
 /// # Safety
 /// `hlist` must be null or point to a live `Hlist`; `node` must be null
 /// or a live caller-owned node.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_pop(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_pop(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
     unsafe {
         if !validate(hlist) {
             return ptr::null_mut();
@@ -785,8 +789,9 @@ pub unsafe extern "C" fn hlist_pop(hlist: *mut Hlist, node: *mut c_void) -> *mut
 
 /// # Safety
 /// `hlist` must be null or point to a live `Hlist`.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_len(hlist: *mut Hlist) -> usize {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_len(hlist: *mut Hlist) -> usize {
     unsafe {
         if !validate(hlist) {
             return 0;
@@ -797,8 +802,9 @@ pub unsafe extern "C" fn hlist_len(hlist: *mut Hlist) -> usize {
 
 /// # Safety
 /// Same contract as [`hlist_get`]; caller holds `rcu_read_lock()`.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_get_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_get_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
     unsafe {
         if node.is_null() {
             return ptr::null_mut();
@@ -818,8 +824,9 @@ pub unsafe extern "C" fn hlist_get_rcu(hlist: *mut Hlist, node: *mut c_void) -> 
 /// Same contract as [`hlist_put`]; caller serializes writers externally
 /// (e.g. holds a lock) and defers freeing any replaced node past the next
 /// RCU grace period.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_put_rcu(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_put_rcu(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
     unsafe {
         if !validate(hlist) {
             return node;
@@ -860,8 +867,9 @@ pub unsafe extern "C" fn hlist_put_rcu(hlist: *mut Hlist, node: *mut c_void, rep
 /// # Safety
 /// Same contract as [`hlist_pop`]; caller serializes writers externally
 /// and defers freeing the returned node past the next RCU grace period.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_pop_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+// by crate path now.
+pub(crate) unsafe fn hlist_pop_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
     unsafe {
         if !validate(hlist) {
             return ptr::null_mut();

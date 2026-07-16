@@ -61,12 +61,11 @@ unsafe extern "C" {
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // kernel/bio.c (classic xv6 buffer cache, unchanged C).
-    safe fn bread(dev: u32, blockno: u32) -> *mut buf;
-    safe fn brelse(b: *mut buf);
-    safe fn bwrite(b: *mut buf);
-
 }
+
+// P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
+use crate::bufcache::{bread, brelse, bwrite};
 
 // P3-D3a: `pcache_init`/`xv6_page_pcache_get_node` (mm/pcache.rs) are
 // ordinary (safe) Rust fns now that their `#[no_mangle]` exports are

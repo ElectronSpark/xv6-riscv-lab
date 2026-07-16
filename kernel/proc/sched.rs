@@ -72,15 +72,19 @@ const CPU_FLAG_IN_ITR: u64 = 4;
 const IPI_REASON_RESCHEDULE: c_int = 2;
 
 // ---------------- extern C primitives -----------------------------------
+// P3-D3c: `timer/timer_core.rs`'s `get_jiffs` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::timer_core::get_jiffs;
+
 unsafe extern "C" {
-    safe fn get_jiffs() -> u64;
-
     fn __swtch_context(cur: *mut context, target: *mut context) -> *mut context;
-
-    fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
-    fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
-
 }
+
+// P3-D3c: `bintree.rs`'s iterators are genuinely `unsafe fn`s now that
+// their `#[no_mangle]` exports are gone; this file's original extern
+// declarations were plain (non-`safe`) `fn`s, so every call site already
+// sits in an `unsafe` context -- the plain `use` keeps them unchanged.
+use crate::bintree::{rb_first_node, rb_next_node};
 
 // P3-D3a: `page_free` is genuinely `unsafe fn` in `crate::mm::page` now
 // that its `#[no_mangle]` export is gone; this file's original extern

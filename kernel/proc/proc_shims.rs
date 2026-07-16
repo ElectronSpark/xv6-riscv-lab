@@ -15,6 +15,10 @@
 // See `crate::u`'s doc comment (kernel/lib.rs) for the macro's contract.
 use crate::u;
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 use crate::bindings::{
     ksiginfo, pgroup, session, slab_cache_t, thread, thread_group, SLAB_FLAG_EMBEDDED,
 };
@@ -208,8 +212,6 @@ use crate::proc::{tg_signal_send, tcb_lock, tcb_unlock};
 // `#[no_mangle]` C-ABI export is gone.
 // ===========================================================================
 unsafe extern "C" {
-    fn __panic_start();
-    fn __panic_end() -> !;
 }
 
 pub(crate) fn xv6_panic(msg: *const c_char) -> ! {
@@ -1307,13 +1309,13 @@ const NR_THREAD_HASH_BUCKETS: usize = 31;
 // atomic_inc_unless on allocated_cnt (`atomic_inc_unless(...,NR_THREAD)`).
 const NR_THREAD: i64 = 10000;
 
-unsafe extern "C" {
-    fn hlist_init(h: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_t) -> c_int;
-    fn hlist_get(h: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-    fn hlist_get_rcu(h: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-    fn hlist_put_rcu(h: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void;
-    fn hlist_pop_rcu(h: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-}
+// P3-D3c: `hlist.rs`'s entry points are genuinely `unsafe fn`s now that
+// their `#[no_mangle]` exports are gone; this file's original extern
+// declarations were plain (non-`safe`) `fn`s, so every call site already
+// sits in an `unsafe` context -- the plain `use` keeps them unchanged
+// (`hlist_t`/`hlist_func_t` are the same bindgen types as hlist.rs's
+// `Hlist`/`HlistFunc` aliases).
+use crate::hlist::{hlist_get, hlist_get_rcu, hlist_init, hlist_pop_rcu, hlist_put_rcu};
 
 // Direct crate-path imports (kernel/lock/rwlock.rs) — these used to be
 // C-ABI symbol redeclarations; the `#[no_mangle]` exports are gone. All

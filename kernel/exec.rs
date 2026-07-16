@@ -151,12 +151,12 @@ unsafe extern "C" {
     safe fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 
-    // irq/syscall.rs — arg-fetch helpers (`sys_exec` only).
-    safe fn argaddr(n: c_int, ip: *mut u64);
-    safe fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int;
-    safe fn fetchaddr(addr: u64, ip: *mut u64) -> c_int;
-    safe fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int;
 }
+
+// P3-D3c: `irq/syscall.rs`'s arg-fetch helpers are plain (safe) Rust fns
+// now that their `#[no_mangle]` exports are gone; identical signatures,
+// plain `use`.
+use crate::irq::syscall::{argaddr, argstr, fetchaddr, fetchstr};
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; reached as crate-path items

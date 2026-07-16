@@ -9,10 +9,11 @@
 //!  4. Producer/consumer stress validates ordering and wakeups under
 //!     contention.
 //!
-//! Entry point: [`semaphore_launch_tests`] (`#[no_mangle] extern "C"`),
-//! called from `kernel/start_kernel.c` under `#ifdef SEMAPHORE_RUNTIME_TEST`
-//! — preserved verbatim from the deleted C file so that call site keeps
-//! working unmodified.
+//! Entry point: [`semaphore_launch_tests`], called from
+//! `kernel/start_kernel.rs` under `#[cfg(feature = "semaphore_test")]` via
+//! a direct crate-path call (P3-D3c: the `#[no_mangle] extern "C"` C-ABI
+//! surface is gone -- the ctest harness only toggles the cmake env gate,
+//! it never resolves this symbol by name).
 
 #![allow(non_camel_case_types, non_snake_case)]
 
@@ -458,11 +459,10 @@ extern "C" fn semaphore_test_master(_a1: u64, _a2: u64) {
     crate::kprintln!("[sem] tests finished");
 }
 
-/// Spawn the semaphore test-suite master kthread. Preserves the original
-/// `void semaphore_launch_tests(void)` C-ABI entry point called from
-/// `kernel/start_kernel.c` under `#ifdef SEMAPHORE_RUNTIME_TEST`.
-#[no_mangle]
-pub extern "C" fn semaphore_launch_tests() {
+/// Spawn the semaphore test-suite master kthread. Called from
+/// `start_kernel.rs` under `#[cfg(feature = "semaphore_test")]` (P3-D3c:
+/// direct crate-path call, no more C-ABI entry point).
+pub fn semaphore_launch_tests() {
     if !spawn(c"semaphore_test_master", semaphore_test_master, 0, 0) {
         crate::kprintln!("[sem] cannot create test master thread");
     }

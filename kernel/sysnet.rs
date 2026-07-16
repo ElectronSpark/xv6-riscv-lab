@@ -65,13 +65,18 @@ use crate::sync::SpinLock;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
-unsafe extern "C" {
-    // lock/spinlock.rs -- raw calls (matches this crate's convention for
-    // straight-line critical sections with early-return-while-holding
-    // exit paths, e.g. `sockread`'s interrupted-sleep path).
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
-
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(l) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(l) }
 }
 
 // P3-D3a: `vm_copyout`/`vm_copyin` (mm/vm.rs) are ordinary (safe) Rust

@@ -219,9 +219,13 @@ fn clone_args_mut<'a>(args: *mut CloneArgs) -> Option<&'a mut CloneArgs> {
 
 // ---------------------------------------------------------------------------
 // forkret_entry — called from context switch via thread_create entry pointer.
+// P3-D3c: `#[no_mangle]` dropped (no caller anywhere resolves it by symbol
+// name; `thread_clone` below takes its address from Rust), but it KEEPS
+// `extern "C"`: the address is stored as a raw entry pointer and invoked
+// through the context-switch return path (`proc/swtch.S`-restored `ra`),
+// so the C ABI is load-bearing.
 // ---------------------------------------------------------------------------
-#[no_mangle]
-pub extern "C" fn forkret_entry(prev: *mut Context) {
+pub(crate) extern "C" fn forkret_entry(prev: *mut Context) {
     let cur = xv6_current_thread();
     xv6_forkret_assert_user(cur);
     if prev.is_null() {
@@ -250,8 +254,9 @@ fn check_ptr<T>(ptr: *mut T) -> Result<*mut T, c_int> {
 // ---------------------------------------------------------------------------
 // thread_clone — full port of C `thread_clone`.
 // ---------------------------------------------------------------------------
-#[no_mangle]
-pub extern "C" fn thread_clone(args: *mut CloneArgs) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- the only caller
+// (`proc/sysproc.rs`) already reaches it via `crate::proc::thread_clone`.
+pub(crate) fn thread_clone(args: *mut CloneArgs) -> c_int {
     let Some(args) = clone_args_mut(args) else { return -EINVAL };
     let p = xv6_current_thread();
 

@@ -266,7 +266,7 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
                             (*entry).filename_len = current_file.len() as u16;
 
                             crate::machine::rb_node_init(&raw mut (*entry).rb);
-                            crate::bindings::rb_insert_color(&raw mut KSYM_RB_ROOT, &raw mut (*entry).rb);
+                            crate::rbtree::rb_insert_color(&raw mut KSYM_RB_ROOT, &raw mut (*entry).rb);
                             KSYM_COUNT += 1;
                         }
                     }
@@ -319,7 +319,7 @@ fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
     // SAFETY: `search_root` is a valid (possibly-empty) `rb_root`;
     // `&dummy` is a live stack value for the duration of this call.
     let node = unsafe {
-        crate::bindings::rb_find_key_rdown(&raw mut search_root, &dummy as *const KSymEntry as u64)
+        crate::bintree::rb_find_key_rdown(&raw mut search_root, &dummy as *const KSymEntry as u64)
     };
     if node.is_null() {
         return None;
@@ -653,5 +653,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
 // name, e.g. `b db_break` in a `.gdbinit`), the same "genuinely external
 // consumer" class as the linker-script/`.S`-defined symbols, not a mesh
 // leftover.
+// P3-D3c (final sweep) re-verified: still 0 in-tree references by design;
+// stays in the mandated keep set as the one debugger-by-name anchor.
 #[no_mangle]
 pub extern "C" fn db_break() {}

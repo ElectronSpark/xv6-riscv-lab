@@ -92,12 +92,14 @@ use crate::tty::tty::{tty_ref, tty_unref};
 // now that their `#[no_mangle]` exports are gone; reached by crate path.
 use crate::lock::rcu::{rcu_read_lock, rcu_read_unlock};
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
 
     // printf/panic (matches `kernel/tty/tty.rs`'s own local
     // `tty_assert_errno` extern block exactly).
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
 }
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in

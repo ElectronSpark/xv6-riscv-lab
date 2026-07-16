@@ -52,6 +52,10 @@ const PAGE_TYPE_ANON:       u64   = 0;
 // FFI boundary.  Every raw C call lives here.
 // ---------------------------------------------------------------------------
 mod ffi {
+    // P3-D3c: `printf.rs`'s panic plumbing -- plain crate-path re-exports
+    // now that the `#[no_mangle]` exports are gone.
+    pub(crate) use crate::printf::{__panic_end, __panic_start};
+
     use super::*;
 
     unsafe extern "C" {
@@ -60,8 +64,6 @@ mod ffi {
         // Slab allocator.
 
         // libc-style helpers from C side.
-        pub safe fn __panic_start();
-        pub safe fn __panic_end() -> !;
     }
     // The functions below are all genuinely `unsafe fn` in their canonical
     // (`pub(crate)`, P3-D3a) modules; this file's

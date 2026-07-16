@@ -89,10 +89,11 @@
 //!
 //! Total: 23 + 2 + 5 = 30 cases.
 //!
-//! Entry point: [`pcache_launch_tests`] (`#[no_mangle] extern "C"`), called
-//! from `kernel/start_kernel.rs` under `#[cfg(feature = "pcache_test")]`
+//! Entry point: [`pcache_launch_tests`], called from
+//! `kernel/start_kernel.rs` under `#[cfg(feature = "pcache_test")]`
 //! (env var `PCACHE_TEST=1` at `cmake` configure time) — the Wave-27
-//! mechanism used by `lock/{rwsem,semaphore}_test.rs`.
+//! mechanism used by `lock/{rwsem,semaphore}_test.rs`. P3-D3c: a direct
+//! crate-path call; the `#[no_mangle] extern "C"` C-ABI surface is gone.
 
 #![allow(non_camel_case_types, non_snake_case)]
 
@@ -126,9 +127,9 @@ pub(crate) use crate::mm::{
 // instead of `extern "C"` redeclarations.
 use crate::proc::{scheduler_yield, wakeup};
 
-unsafe extern "C" {
-    pub safe fn sleep_ms(ms: u64);
-}
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -1378,11 +1379,10 @@ extern "C" fn pcache_test_master(_a1: u64, _a2: u64) {
     }
 }
 
-/// Spawns the pcache test-suite master kthread. `#[no_mangle] extern "C"`
-/// entry point called from `kernel/start_kernel.rs` under
-/// `#[cfg(feature = "pcache_test")]`.
-#[no_mangle]
-pub extern "C" fn pcache_launch_tests() {
+/// Spawns the pcache test-suite master kthread. Called from
+/// `kernel/start_kernel.rs` under `#[cfg(feature = "pcache_test")]`
+/// (P3-D3c: direct crate-path call, no more C-ABI entry point).
+pub fn pcache_launch_tests() {
     if !spawn(c"pcache_test_master", pcache_test_master, 0, 0) {
         crate::kprintln!("[pcache] cannot create test master thread");
     }

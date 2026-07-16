@@ -110,17 +110,20 @@ use crate::lock::mutex::mutex_init;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone -- crate-path import.
+use crate::timer::sched_timer::sleep_ms;
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    // timer/sched_timer.rs.
-    safe fn sleep_ms(ms: u64);
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
-    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
-    // anchor, see that file's own comment) -- this extern stays valid.
-    static mut platform: platform_info;
 }
+
+// P3-D3c: `dev/fdt.rs`'s boot-probed platform config is a plain
+// crate-path import now that its `#[no_mangle]` export is gone (same
+// `platform_info` type, unchanged call sites -- reads of a `static mut`
+// stay `unsafe` either way).
+use crate::dev::fdt::platform;
 
 // P3-D3a: `__page_to_pa` is genuinely `unsafe fn` in `crate::mm::page`
 // now that its `#[no_mangle]` export is gone; this file's original

@@ -37,13 +37,12 @@ use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 // ===========================================================================
 // MMIO base / IRQ number. See the module doc: fixed QEMU-`virt` defaults,
 // never written by `dev/fdt.c` (unlike `uart.rs`'s `__uart0_mmio_base` /
-// `irq/plic.rs`'s `__plic_mmio_base`). Kept as `#[no_mangle] pub static mut`
-// regardless, matching the C original's linkage and the one live external
-// reader: `mm/vm_pgtab.rs`'s `kvmmake` reserves this MMIO window via its own
-// `extern` declaration of `__goldfish_rtc_mmio_base`.
+// `irq/plic.rs`'s `__plic_mmio_base`). P3-D3c: `#[no_mangle]` dropped --
+// the one live external reader (`mm/vm_pgtab.rs`'s `kvmmake`) now reaches
+// it by crate path (thin accessor in its `ffi` module, same P3-1D
+// `__uart0_mmio_base` pattern) instead of an `extern` redeclaration.
 // ===========================================================================
-#[no_mangle]
-pub static mut __goldfish_rtc_mmio_base: u64 = 0x101000;
+pub(crate) static mut __goldfish_rtc_mmio_base: u64 = 0x101000;
 
 // P3-1B: no other file references this symbol (grep-verified) -- demoted
 // from `#[no_mangle]`.

@@ -149,11 +149,14 @@ use crate::sync::KSpinlock;
 // file already proved non-null.
 // ===========================================================================
 
-unsafe extern "C" {
-    // lock/spinlock.rs — init only (lock/unlock go through
-    // `crate::sync::KSpinlock` RAII or the caller-holds-it contract, see
-    // the module doc's Lock map).
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
 }
 
 // P3-D3b: lock/rcu.rs's read-side entry points are plain safe Rust fns

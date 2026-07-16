@@ -326,8 +326,9 @@ pub(crate) extern "C" fn reparent(p: *mut Thread) {
     reparent_impl(p)
 }
 
-#[no_mangle]
-pub extern "C" fn exit(mut status: c_int) -> ! {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every caller (irq/trap.rs
+// and the proc/* siblings) imports it by crate path now.
+pub(crate) fn exit(mut status: c_int) -> ! {
     let p = ffi::current();
     if ptr::eq(p, ffi::initproc()) {
         ffi::panic_msg("init exiting");

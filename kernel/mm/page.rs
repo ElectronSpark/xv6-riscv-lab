@@ -372,20 +372,12 @@ mod ffi {
         memset, __panic_start, __panic_end,
     };
 
-    unsafe extern "C" {
-        // Early allocator
-
-        // Slab interaction (for PCACHE refcount-zero teardown)
-
-        // Runtime physical-memory globals (provided by linker / startup)
-        pub safe static __physical_memory_start: u64;
-        pub safe static __physical_memory_end: u64;
-        pub safe static __physical_total_pages: u64;
-
-        // argint() -- syscall argument fetch (kernel/inc/defs.h), needed by
-        // `sys_memstat` below.
-        pub safe fn argint(n: c_int, ip: *mut c_int);
-    }
+    // P3-D3c: the runtime physical-memory globals (`start_kernel.rs`) and
+    // `argint` (`irq/syscall.rs`, needed by `sys_memstat` below) lost
+    // their `#[no_mangle]` exports; the globals are read through the
+    // accessors below (crate path + `unsafe`, boot-write-once contract)
+    // and `argint` is re-exported here so call sites compile unchanged.
+    pub(crate) use crate::irq::syscall::argint;
 pub(crate) use crate::mm::early_allocator::{early_alloc_align, early_alloc_end_ptr};
 pub(crate) use crate::mm::slab::slab_free;
 
@@ -403,9 +395,12 @@ pub(crate) use crate::mm::slab::slab_free;
     #[inline] pub fn list_push_front(h: &mut ListNode, e: *mut ListNode) { xv6_list_push_front(h, e) }
     #[inline] pub fn list_pop_front(h: &mut ListNode) -> *mut ListNode { xv6_list_pop_front(h) }
 
-    #[inline] pub fn kernbase() -> u64 { __physical_memory_start }
-    #[inline] pub fn phystop() -> u64 { __physical_memory_end }
-    #[inline] pub fn totalpages() -> u64 { __physical_total_pages }
+    // SAFETY (all three): written only during single-hart early boot
+    // (`start_kernel.rs`/`dev/fdt.rs`), read-only by the time any mm code
+    // runs -- same contract the old `pub safe static` externs asserted.
+    #[inline] pub fn kernbase() -> u64 { unsafe { crate::start_kernel::__physical_memory_start } }
+    #[inline] pub fn phystop() -> u64 { unsafe { crate::start_kernel::__physical_memory_end } }
+    #[inline] pub fn totalpages() -> u64 { unsafe { crate::start_kernel::__physical_total_pages } }
 
     // --- Platform info -- reads the bindgen `platform` global directly.
     // Previously ten `xv6_platform_*` round-trips through the deleted
@@ -416,26 +411,26 @@ pub(crate) use crate::mm::slab::slab_free;
         // SAFETY: `platform` is populated once by `fdt_init()` before any mm
         // init code runs; every reader here executes afterward on the
         // single boot CPU, so this plain field read is race-free.
-        unsafe { crate::bindings::platform.has_ramdisk != 0 }
+        unsafe { crate::dev::fdt::platform.has_ramdisk != 0 }
     }
-    #[inline] pub fn ramdisk_base() -> u64 { unsafe { crate::bindings::platform.ramdisk_base } }
-    #[inline] pub fn ramdisk_size() -> u64 { unsafe { crate::bindings::platform.ramdisk_size } }
-    #[inline] pub fn reserved_count() -> i32 { unsafe { crate::bindings::platform.reserved_count } }
+    #[inline] pub fn ramdisk_base() -> u64 { unsafe { crate::dev::fdt::platform.ramdisk_base } }
+    #[inline] pub fn ramdisk_size() -> u64 { unsafe { crate::dev::fdt::platform.ramdisk_size } }
+    #[inline] pub fn reserved_count() -> i32 { unsafe { crate::dev::fdt::platform.reserved_count } }
     #[inline]
     pub fn reserved_base(i: i32) -> u64 {
         // SAFETY: bounds-checked against `platform.reserved_count` before
         // indexing into the `platform.reserved` array.
         unsafe {
-            if i < 0 || i >= crate::bindings::platform.reserved_count { return 0; }
-            (*crate::bindings::platform.reserved.offset(i as isize)).base
+            if i < 0 || i >= crate::dev::fdt::platform.reserved_count { return 0; }
+            (*crate::dev::fdt::platform.reserved.offset(i as isize)).base
         }
     }
     #[inline]
     pub fn reserved_size(i: i32) -> u64 {
         // SAFETY: see `reserved_base`.
         unsafe {
-            if i < 0 || i >= crate::bindings::platform.reserved_count { return 0; }
-            (*crate::bindings::platform.reserved.offset(i as isize)).size
+            if i < 0 || i >= crate::dev::fdt::platform.reserved_count { return 0; }
+            (*crate::dev::fdt::platform.reserved.offset(i as isize)).size
         }
     }
 

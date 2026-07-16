@@ -228,10 +228,9 @@ pub fn list_first(head: *const ListNode) -> *mut ListNode {
     mm_raw::xv6_list_first(head)
 }
 
-// Declared in slab_shims.rs; re-declare here so we can call it as a `safe` fn.
-unsafe extern "C" {
-    pub safe fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode);
-}
+// P3-D3c: `mm/cffi.rs`'s `xv6_list_push_back` is a plain (safe) crate-path
+// re-export now that its `#[no_mangle]` export is gone.
+pub(crate) use crate::mm::cffi::xv6_list_push_back;
 
 #[inline]
 pub fn list_push_back(head: *mut ListNode, entry: *mut ListNode) {

@@ -85,11 +85,11 @@ unsafe extern "C" {
     safe fn strnlen(s: *const c_char, maxlen: usize) -> usize;
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
 
-    // kernel/bio.c (classic xv6 buffer cache, unchanged C).
-    safe fn bread(dev: u32, blockno: u32) -> *mut crate::bindings::buf;
-    safe fn brelse(b: *mut crate::bindings::buf);
-
 }
+
+// P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
+// their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
+use crate::bufcache::{bread, brelse};
 
 // P3-D3a: `pcache_teardown` (mm/pcache.rs) is an ordinary (safe) Rust fn
 // now that its `#[no_mangle]` export is gone; identical signature, plain

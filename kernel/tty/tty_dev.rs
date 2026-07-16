@@ -26,9 +26,11 @@ use crate::bindings::{bool_, cdev_ops_t, cdev_t, mode_t, session, tty};
 // Externs.
 // ===========================================================================
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
 }
 // P3-D2b: `pid_wlock`/`pid_wunlock` (proc/pid.rs) are plain crate-path
 // items now that their `#[no_mangle]` exports are gone (identical

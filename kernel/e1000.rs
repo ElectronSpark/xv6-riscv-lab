@@ -85,10 +85,12 @@ use crate::sync::SpinLock;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    safe fn __panic_start();
-    safe fn __panic_end() -> !;
 
     // string.rs.
     fn strncpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;

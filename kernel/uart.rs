@@ -154,13 +154,29 @@ fn write_reg(reg: u32, v: u32) {
 // Externs.
 // ===========================================================================
 
-unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
+// P3-D3c: `mm/cffi.rs`'s interrupt-nesting helpers are plain crate-path
+// imports now that their `#[no_mangle]` exports are gone.
+use crate::mm::cffi::{xv6_pop_off, xv6_push_off};
 
-    pub safe fn xv6_push_off();
-    pub safe fn xv6_pop_off();
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+// ABI-truth note: the old redeclaration typed `name` as `*const c_char`;
+// the real fn takes `*mut c_char` (the callee only reads it) -- the
+// wrapper carries the cast.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+fn spin_lock(lk: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(lk) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+fn spin_unlock(lk: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(lk) }
 }
 
 // P3-1C mesh sweep: console.rs is in scope for this wave, so

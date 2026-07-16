@@ -128,11 +128,14 @@ use crate::sync::KSpinlock;
 // in `a0` under the old C ABI), so its call sites drop their `!= 0`.
 use crate::proc::{killed, signal_pending};
 
-unsafe extern "C" {
-    // lock/spinlock.rs — init only (lock/unlock go through
-    // `crate::sync::KSpinlock` RAII, see the module doc).
-    safe fn spin_init(l: *mut crate::bindings::spinlock_t, name: *mut c_char);
-
+// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+// this file's original extern declarations asserted `safe fn` (usual
+// FFI-facade convention). Thin wrappers preserve that safe facade for the
+// unchanged call sites.
+/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+fn spin_init(l: *mut crate::bindings::spinlock_t, name: *mut c_char) {
+    unsafe { crate::lock::spinlock::spin_init(l, name) }
 }
 
 // P3-D3a: `vm_copyin`/`vm_copyout` (mm/vm.rs) are ordinary (safe) Rust

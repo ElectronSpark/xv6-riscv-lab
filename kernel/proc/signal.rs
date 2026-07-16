@@ -20,9 +20,15 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::bindings::{
     ksiginfo as ksiginfo_t, list_node_t, sigacts as sigacts_t, sigaction as sigaction_t,
     sigpending as sigpending_t, sigset_t, slab_cache_t,
-    spin_init, spin_lock, spin_unlock, spinlock_t, stack as stack_t,
+    spinlock_t, stack as stack_t,
     thread, thread_group, thread_signal_t, thread_state,
 };
+// P3-D3c: the spinlock primitives used to be imported from
+// `crate::bindings` (bindgen extern decls resolved at link time against
+// lock/spinlock.rs's `#[no_mangle]` exports -- now gone). Same genuinely
+// `unsafe fn` signatures at their crate path; every call site already
+// sits in an `unsafe` context.
+use crate::lock::spinlock::{spin_init, spin_lock, spin_unlock};
 
 // P3-D3a: `slab_alloc`/`slab_free`/`slab_cache_init` used to be imported
 // from `crate::bindings` (bindgen extern decls resolved at link time
@@ -165,10 +171,12 @@ const IPI_REASON_RESCHEDULE: c_int = 2;
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void;
-
-    // exit
-    safe fn exit(code: c_int) -> !;
 }
+// P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
+// `#[no_mangle]` export is gone -- imported via its private sibling module
+// path (the `crate::proc` glob would work too, but the direct path is
+// unambiguous by construction).
+use super::exit::exit;
 
 // P3-D3b: `tcb_lock`/`tcb_unlock` (kernel/proc/thread.rs) are plain safe
 // Rust fns now that their `#[no_mangle]` exports are gone; reached by

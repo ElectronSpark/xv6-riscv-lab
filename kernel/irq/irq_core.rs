@@ -73,9 +73,11 @@ pub struct IrqDesc {
 // their crate path instead of `extern "C"` redeclarations.
 use crate::irq::plic::{plic_claim, plic_complete, plic_enable_irq};
 
+// P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
+// that their `#[no_mangle]` exports are gone -- crate-path imports.
+use crate::printf::{__panic_end, __panic_start};
+
 unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
 }
 
@@ -225,8 +227,9 @@ pub(crate) extern "C" fn irq_desc_init() {
 /// for the duration of this call (its `handler`/`data`/`dev` fields are
 /// copied out; `irq`/`count`/`rcu_head` are overwritten, matching the C
 /// original's documented "ignored when registering" contract).
-#[no_mangle]
-pub unsafe extern "C" fn register_irq_handler(irq_num: c_int, desc: *mut IrqDesc) -> c_int {
+// P3-D3c: `#[no_mangle] extern "C"` dropped -- every caller imports it by
+// crate path.
+pub unsafe fn register_irq_handler(irq_num: c_int, desc: *mut IrqDesc) -> c_int {
     if !(0..IRQCNT as c_int).contains(&irq_num) {
         return neg(crate::bindings::EINVAL);
     }

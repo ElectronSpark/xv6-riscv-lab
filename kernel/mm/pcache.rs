@@ -90,17 +90,16 @@ mod ffi {
         // Slab (kernel/mm/slab.rs; redeclared with the bindgen
         // `slab_cache_t` view rather than slab.rs's own `SlabCache`).
 
-        // Timer (kernel/timer.c — not yet ported to Rust).
-        pub safe fn get_jiffs() -> u64;
-        pub safe fn sleep_ms(ms: u64);
-
         // Page-level primitives (kernel/mm/page.rs; redeclared with the
         // bindgen `page_t` view rather than page.rs's own `Page`).
-
-        // Panic/printf plumbing (kernel/printf.c).
-        pub safe fn __panic_start();
-        pub safe fn __panic_end() -> !;
     }
+// P3-D3c: timer (`timer/{timer_core,sched_timer}.rs`) and panic plumbing
+// (`printf.rs`) are plain safe Rust fns now that their `#[no_mangle]`
+// exports are gone; re-exported here so the module-wide `use ffi::*`
+// keeps resolving them (the extern redeclarations above are deleted).
+pub(crate) use crate::printf::{__panic_end, __panic_start};
+pub(crate) use crate::timer::sched_timer::sleep_ms;
+pub(crate) use crate::timer::timer_core::get_jiffs;
 pub(crate) use crate::lock::completion::{complete_all, completion_init, completion_reinit, wait_for_completion};
 pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
 // P3-D3b: `kthread_create` (proc/thread.rs) and the proc/workqueue.rs
@@ -1370,7 +1369,8 @@ fn xv6_pcache_ops_call_mark_dirty(p: *mut Pcache, page: *mut Page) {
 // ---------------------------------------------------------------------------
 // Thread / scheduling shims. `kthread_create`/`wakeup*`/`sleep_on_chan*`
 // are real Rust functions re-exported at the crate root (`kernel/proc/`);
-// `get_jiffs`/`sleep_ms` remain C (kernel/timer.c, not yet ported).
+// `get_jiffs`/`sleep_ms` are Rust too (`kernel/timer/`), imported via the
+// `ffi` module's crate-path re-exports (P3-D3c).
 // ---------------------------------------------------------------------------
 fn xv6_pcache_get_jiffs() -> u64 {
     get_jiffs()

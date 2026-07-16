@@ -115,19 +115,15 @@ use crate::sbi::sbi_send_ipi;
 // rather than imported by path -- `sbi.rs` and `proc/rq.rs` are explicitly
 // out of scope for edits in this wave.
 
-unsafe extern "C" {
-    pub safe fn __panic_start();
-    pub safe fn __panic_end() -> !;
-    // printf is variadic, so it cannot be declared `safe`.
-
-    /// FDT-configured kernel physical memory bounds
-    /// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros).
-    /// Defined in `kernel/start_kernel.c` (still C); mirrored here exactly
-    /// like `mm/page.rs`/`mm/vm_pgtab.rs`/`printf.rs`'s own identical
-    /// extern pairs -- each file that needs these declares its own copy.
-    pub safe static __physical_memory_start: u64;
-    pub safe static __physical_memory_end: u64;
-}
+// P3-D3c: `printf.rs`'s panic plumbing and `start_kernel.rs`'s
+// FDT-configured kernel physical memory bounds
+// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros) are plain
+// crate-path imports now that their `#[no_mangle]` exports are gone (the
+// extern redeclarations that used to sit here are deleted). The bounds
+// are `pub(crate) static mut`s; the read below sits in its own `unsafe`
+// block with the usual boot-write-once justification.
+use crate::printf::{__panic_end, __panic_start};
+use crate::start_kernel::{__physical_memory_end, __physical_memory_start};
 
 use crate::irq::irq_core::{register_irq_handler, IrqDesc};
 // P3-D2a: `kernel/proc/rq.rs` (SECTION 19 of the former
@@ -269,11 +265,13 @@ pub struct CpuLocalArray([cpu_local; NCPU]);
 const ZERO_CPU_LOCAL: cpu_local = unsafe { core::mem::zeroed() };
 
 /// `struct cpu_local cpus[NCPU]` (see module doc: read by `proc/rq.rs`,
-/// `lock/rcu.rs`, `irq/trap.rs`, `mm/vm_pgtab.rs` via their own typed
-/// `extern` declarations of this exact symbol).
-#[no_mangle]
+/// `lock/rcu.rs`, `irq/trap.rs`, `mm/vm_pgtab.rs` -- P3-D3c: all four now
+/// reach it by crate path with their own locally-typed raw-pointer casts,
+/// replacing their `extern`/`#[link_name]` redeclarations, so the
+/// `#[no_mangle]` anchor is gone. The `#[link_section]` placement is what
+/// the trampoline per-CPU mapping actually depends on and is unchanged).
 #[link_section = "cpu_local_sec"]
-pub static mut cpus: CpuLocalArray = CpuLocalArray([ZERO_CPU_LOCAL; NCPU]);
+pub(crate) static mut cpus: CpuLocalArray = CpuLocalArray([ZERO_CPU_LOCAL; NCPU]);
 
 /// `kernel/ipi/ipi.c`'s `static cpumask_t cpu_active_mask = 0;` -- private
 /// to this file both in C (never `extern`-declared anywhere) and here.
@@ -509,7 +507,10 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
                 CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
                 panic_msg_lock();
                 crate::kprintln!("[Core: {}] Received IPI_REASON_CRASH, crashing...", hartid);
-                // SAFETY: same as the removed `printf` call above.
+                // SAFETY: same as the removed `printf` call above; the
+                // physical-memory bounds are written only during
+                // single-hart early boot (start_kernel/fdt), read-only by
+                // the time any IPI can run.
                 unsafe {
                     print_backtrace(read_fp(), __physical_memory_start, __physical_memory_end);
                 }
