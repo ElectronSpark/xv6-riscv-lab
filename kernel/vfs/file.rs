@@ -102,6 +102,66 @@ use crate::bindings::{
 use crate::proc::proc_shims::xv6_current_thread;
 use crate::sync::{KMutex, KSpinlock};
 
+// ===========================================================================
+// Native uabi `struct stat` — P3-4b nativization (user directive: remove
+// the C-compatible interfaces; userspace-ABI scrutiny class).
+// `Stat` is the canonical KERNEL-SIDE definition of
+// `kernel/inc/uabi/stat.h`'s `struct stat`: `build.rs` blocklists the
+// bindgen emission and re-exports this type as `crate::bindings::stat`
+// (facade `pub use`, N2 pattern).
+//
+// *** USERSPACE ABI — HANDLE WITH P3-4 SCRUTINY *** The C header STAYS:
+// user/ programs (user.h's `fstat`/`stat` prototypes, ls.c, find.c, …)
+// compile against uabi/stat.h, and the kernel `either_copyout`s this
+// record BY VALUE into user buffers (sys_fstat/sys_stat paths in
+// vfs_syscall.rs). A layout slip here is SILENT userspace breakage —
+// `ls` printing garbage sizes, usertests failing — so this native and
+// that header are two independent spellings of one by-value boundary
+// contract. The byte-exact asserts below pin the native to the header.
+// HOST determination: no host-side tool consumes uabi/stat.h
+// (mkfs/mkfs.c includes only types.h/ondisk.h/param.h — grep-verified),
+// so the gcc probe is target-only (unlike P3-4a's two-arch ondisk gate).
+//
+// DERIVE DECISION (P3-4b): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (plain scalar fields).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4b_uabi_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native uabi `struct stat` (`kernel/inc/uabi/stat.h`) — the record
+/// `fstat(2)`/`stat(2)` copy out to userspace by value.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Stat {
+    /// File system's disk device.
+    pub dev: crate::bindings::int32,
+    /// Inode number.
+    pub ino: crate::bindings::uint64,
+    /// Permission and type bits (`S_IS*` macros).
+    pub mode: crate::bindings::mode_t,
+    /// Number of links to file.
+    pub nlink: crate::bindings::uint32,
+    /// Size of file in bytes.
+    pub size: crate::bindings::uint64,
+}
+
+// P3-4b hardcoded layout proof — the USERSPACE byte contract
+// (`uabi/stat.h` `struct stat`), every field. Values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the target gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<Stat>() == 32, "stat size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<Stat>() == 8, "stat alignment");
+    assert!(core::mem::offset_of!(Stat, dev) == 0, "stat.dev offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Stat, ino) == 8, "stat.ino offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Stat, mode) == 16, "stat.mode offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Stat, nlink) == 20, "stat.nlink offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Stat, size) == 24, "stat.size offset (USERSPACE ABI)");
+};
+
 // ---------------------------------------------------------------------------
 // Native layouts — Wave P3-N5 (VFS type family, file slice).
 //

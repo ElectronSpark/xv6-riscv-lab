@@ -2333,6 +2333,78 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   untouched (`git status`: only build.rs + the three xv6fs .rs files +
   this file). 5 files, ~+240/−27.
 
+### Iteration 68 — 2026-07-16 — Wave P3-4b: the userspace-ABI (uabi) types nativized (the silent-userspace-breakage class)
+
+- **The by-value user/kernel boundary records go native.** Seven types
+  from kernel/inc/uabi/, in three budget stages (tree GREEN after each):
+  `struct stat` (uabi/stat.h) → `Stat` in kernel/vfs/file.rs (32/8;
+  dev@0, ino@8, mode@16, nlink@20, size@24); `struct statfs`
+  (uabi/statfs.h) → `Statfs` in kernel/vfs/fs.rs (72/8; nine `uint64`s
+  at 0..64); `struct termios`/`struct winsize` (uabi/termios.h) →
+  `Termios`/`Winsize` in kernel/tty/tty.rs (40/4; c_iflag/c_oflag/
+  c_cflag/c_lflag@0/4/8/12, c_cc[NCCS=16]@16, c_ispeed/c_ospeed@32/36 —
+  and 8/2; ws_row/col/xpixel/ypixel@0/2/4/6); `union sigval`/`struct
+  siginfo`/`struct stack` (uabi/signal.h) → `SigVal`/`SigInfo`/
+  `SigStack` in kernel/proc/signal.rs (8/8 both arms @0; 40/8
+  si_signo/si_errno/si_code/si_pid@0/4/8/12, si_addr@16, si_status@24,
+  si_value@32 [+4 tail pad]; 24/8 ss_sp@0, ss_flags@8, ss_size@16).
+  Every uabi C header STAYS untouched — user/ programs (ls-in-sh, sh
+  line editing, testsig's SA_SIGINFO handlers, usertests' startup
+  `statfs("/")`) compile against them; the natives are pinned to the
+  headers by hardcoded size+align+every-field-offset const asserts.
+- **Union fidelity (the feared siginfo case turned out benign)**:
+  bindgen's `siginfo` emission has NO anonymous members — its union
+  member is the NAMED field `si_value: sigval`, and `sigval` itself is
+  a real 2-arm Rust `union` — so N2/N5 union reproduction sufficed and
+  ZERO consumer re-pointing was needed (no `__bindgen_anon` accessors
+  existed). `siginfo_t`/`stack_t` typedefs stay bindgen-emitted and
+  resolve through the facades; no `sigval_t` ever appeared.
+- **Layout evidence**: temporary in-tree `offset_of!` gate on the live
+  bindgen forms (built clean before any change) + toolchain-gcc
+  `_Static_assert` probe (rv64gc/lp64d, scratchpad p3_4b_uabi_probe.c)
+  — both agree on every value. **HOST determination (contrast with
+  P3-4a's two-arch gate)**: NO host-side tool consumes any uabi header
+  (mkfs.c includes only types.h/ondisk.h/param.h; `grep -rn uabi
+  mkfs/` empty), so the probe is target-only — documented in each
+  native's header comment.
+- **build.rs**: three anchored blocklists —
+  `^stat$|^statfs$`, `^termios$|^winsize$`, `^sigval$|^siginfo$|^stack$`
+  (bare `stat` must swallow neither `statfs` nor `thread_state`/
+  `phy_state`; `siginfo` not `ksiginfo`/`siginfo_t`; `stack` not
+  `stack_t`) — + 7 facade `pub use` raw_lines + NativeTypeCallbacks
+  Copy=Yes entries (all seven derived Copy/Clone in the
+  pre-nativization emission; the native `Tty` embeds
+  `Termios`/`Winsize`, `KsigInfo` embeds `siginfo_t`, `ThreadSignal`
+  embeds `stack` — all BY VALUE, so accurate Yes answers keep their own
+  derive lines). Mixed-tier notes from N4/N5/N8/N9 re-pointed
+  transparently exactly as predicted (ThreadSignal's 584/8 assert block
+  still passes, build-proven). bindgen emission: 31 structs + sigval →
+  25 structs + 1 union (only pci's anon-union shell remains).
+- **Verified** (cache C_COMPILER=toolchain gcc + BUILD_TYPE empty
+  checked before AND after the last QEMU run): 0-warning clean builds
+  after each stage; emission grep 0 for all seven; fs_img rebuilt;
+  boots ×3, each exactly ONE `init: starting sh`. **stat path**: `ls`
+  long listing correct ×2 (`-rw-r--r-- 1 26018 README.md`);
+  usertests createdelete OK (its startup `statfs("/")` succeeded —
+  statfs path); `cat README.md | wc` = 714 3365 26018 (byte-identity
+  with stat size). **termios/winsize path**: shell canonical-mode line
+  editing + echo + pipes across all three boots. **signal path**:
+  **testsig 21/21** with correct by-value SA_SIGINFO payloads
+  (`si_code=0 sival_int=0 pid=30` handler prints — the exact fields
+  this wave moved). **mmaptest 16/16**; stressfs write+read to
+  completion; `cat nosuchfile` → ENOENT. Pre-existing artifacts (NOT
+  regressions, matched against Iterations 65–67's A/B records):
+  usertests' single-test `lost some free pages` trailer; forkforkfork's
+  `Failed to remove interrupted waiter from queue` panic → IPI crash →
+  kerneltrap storm (scause=0xd, stval=0xfffffffffffffff1,
+  **same sepc 0x8022af58** as the recorded baselines; A/B'd in
+  Iteration 66's record). kernel/inc/uabi/* and user/
+  untouched (`git status`: build.rs + file.rs + fs.rs + tty.rs +
+  signal.rs + this file). rust-skills applied: unsafe-* n/a (no new
+  unsafe), mem-assert-type-size (the const gates), api-common-traits/
+  own-copy-small (derive fidelity), name-types-camel, doc-all-public.
+  6 files, ~+500/−32.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

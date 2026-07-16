@@ -255,6 +255,81 @@ impl VfsSuperblockFlagBits {
     sb_flag_bit!(attached, set_attached, 7);
 }
 
+// ===========================================================================
+// Native uabi `struct statfs` — P3-4b nativization (user directive:
+// remove the C-compatible interfaces; userspace-ABI scrutiny class).
+// `Statfs` is the canonical KERNEL-SIDE definition of
+// `kernel/inc/uabi/statfs.h`'s `struct statfs`: `build.rs` blocklists
+// the bindgen emission and re-exports this type as
+// `crate::bindings::statfs` (facade `pub use`, N2 pattern).
+//
+// *** USERSPACE ABI — HANDLE WITH P3-4 SCRUTINY *** The C header STAYS:
+// user/ programs compile against uabi/statfs.h, and the kernel
+// `either_copyout`s this record BY VALUE into user buffers
+// (sys_statfs path in vfs_syscall.rs; filled by the per-fs
+// `VfsSuperblockOps::statfs` ops). A layout slip here is SILENT
+// userspace breakage, so the byte-exact asserts below pin the native to
+// the header. HOST determination: no host-side tool consumes
+// uabi/statfs.h (grep-verified), so the gcc probe is target-only.
+//
+// DERIVE DECISION (P3-4b): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (nine plain `uint64`s).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4b_uabi_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native uabi `struct statfs` (`kernel/inc/uabi/statfs.h`) — the
+/// record `statfs(2)` copies out to userspace by value.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Statfs {
+    /// Type of filesystem.
+    pub f_type: crate::bindings::uint64,
+    /// Optimal transfer block size.
+    pub f_bsize: crate::bindings::uint64,
+    /// Total data blocks in filesystem.
+    pub f_blocks: crate::bindings::uint64,
+    /// Free blocks in filesystem.
+    pub f_bfree: crate::bindings::uint64,
+    /// Free blocks available to unprivileged user.
+    pub f_bavail: crate::bindings::uint64,
+    /// Total inodes in filesystem.
+    pub f_files: crate::bindings::uint64,
+    /// Free inodes in filesystem.
+    pub f_ffree: crate::bindings::uint64,
+    /// Maximum length of filenames.
+    pub f_namelen: crate::bindings::uint64,
+    /// Fragment size.
+    pub f_frsize: crate::bindings::uint64,
+}
+
+// P3-4b hardcoded layout proof — the USERSPACE byte contract
+// (`uabi/statfs.h` `struct statfs`), every field. Values captured from
+// the pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the target gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<Statfs>() == 72, "statfs size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<Statfs>() == 8, "statfs alignment");
+    assert!(core::mem::offset_of!(Statfs, f_type) == 0, "statfs.f_type offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Statfs, f_bsize) == 8, "statfs.f_bsize offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Statfs, f_blocks) == 16, "statfs.f_blocks offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Statfs, f_bfree) == 24, "statfs.f_bfree offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Statfs, f_bavail) == 32, "statfs.f_bavail offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Statfs, f_files) == 40, "statfs.f_files offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Statfs, f_ffree) == 48, "statfs.f_ffree offset (USERSPACE ABI)");
+    assert!(
+        core::mem::offset_of!(Statfs, f_namelen) == 56,
+        "statfs.f_namelen offset (USERSPACE ABI)"
+    );
+    assert!(
+        core::mem::offset_of!(Statfs, f_frsize) == 64,
+        "statfs.f_frsize offset (USERSPACE ABI)"
+    );
+};
+
 /// `struct vfs_superblock` (`kernel/inc/vfs/vfs_types.h`). The
 /// anonymous inode-hash struct is flattened into direct
 /// `inodes`/`inodes_buckets` fields (bindgen's `__bindgen_anon_1`, same

@@ -59,6 +59,126 @@ unsafe fn slab_free(obj: *mut c_void) {
 }
 use crate::lock::spinlock::spin_holding;
 
+// ===========================================================================
+// Native uabi signal trio — P3-4b nativization (user directive: remove
+// the C-compatible interfaces; userspace-ABI scrutiny class).
+// `SigVal`/`SigInfo`/`SigStack` are the canonical KERNEL-SIDE
+// definitions of `kernel/inc/uabi/signal.h`'s `union sigval`/`struct
+// siginfo`/`struct stack` (sigaltstack): `build.rs` blocklists the
+// bindgen emissions and re-exports them as
+// `crate::bindings::{sigval,siginfo,stack}` (facade `pub use`, N2
+// pattern). The `siginfo_t`/`stack_t` typedefs stay bindgen-emitted and
+// resolve through the facades unchanged.
+//
+// *** USERSPACE ABI — HANDLE WITH P3-4 SCRUTINY *** The C header STAYS:
+// user/ programs (testsig.c's SA_SIGINFO handlers, sigaltstack users)
+// compile against uabi/signal.h, and the kernel delivers `siginfo` BY
+// VALUE onto the user stack when it builds a signal frame
+// (`either_copyout` of `siginfo_t` next to the ucontext in
+// kernel/irq/trap.rs's sig_deliver path; `sigaltstack(2)` copies
+// `stack_t` both ways). A layout slip here silently corrupts every
+// SA_SIGINFO delivery. The byte-exact asserts below pin the natives to
+// the header. HOST determination: no host-side tool consumes any uabi
+// header (mkfs.c includes only types.h/ondisk.h/param.h,
+// grep-verified), so the gcc probe is target-only (unlike P3-4a's
+// two-arch ondisk gate).
+//
+// UNION FIDELITY (N2/N5 precedent): `sigval` is a real C union (int |
+// void*); bindgen emitted it as a real Rust `union` with Copy/Clone —
+// reproduced exactly below, both arms at offset 0, 8/8. `siginfo` has
+// NO anonymous members — its union member is the NAMED field
+// `si_value: sigval` (plus 4 bytes of tail padding after `si_status`
+// that the field offsets pin) — so no `__bindgen_anon` shells exist
+// and no consumer re-pointing is needed.
+//
+// DERIVE DECISION (P3-4b): all three Copy + Clone, exactly as the
+// pre-nativization bindgen output derived. The native `KsigInfo`
+// (below) embeds `siginfo_t` and the native `ThreadSignal` embeds
+// `stack` BY VALUE — their derive lines need build.rs's
+// `NativeTypeCallbacks` Copy=Yes answers for these.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4b_uabi_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native uabi `union sigval` (`kernel/inc/uabi/signal.h`) — the
+/// application-specific value carried inside [`SigInfo`].
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union SigVal {
+    pub sival_int: c_int,
+    pub sival_ptr: *mut c_void,
+}
+
+/// Native uabi `struct siginfo` / `siginfo_t` (`kernel/inc/uabi/
+/// signal.h`) — the record delivered by value onto the user stack for
+/// `SA_SIGINFO` handlers.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SigInfo {
+    /// Signal number.
+    pub si_signo: c_int,
+    /// If nonzero, errno value from errno.h.
+    pub si_errno: c_int,
+    /// Additional info (depends on signal).
+    pub si_code: c_int,
+    /// Sending process ID.
+    pub si_pid: c_int,
+    /// Address that caused the fault.
+    pub si_addr: *mut c_void,
+    /// Exit value.
+    pub si_status: c_int,
+    /// Application-specific value.
+    pub si_value: SigVal,
+}
+
+/// Native uabi `struct stack` / `stack_t` (`kernel/inc/uabi/signal.h`)
+/// — the `sigaltstack(2)` record, copied both ways across the user
+/// boundary and embedded by value in [`ThreadSignal::sig_stack`].
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SigStack {
+    /// Stack base pointer.
+    pub ss_sp: *mut c_void,
+    /// Flags (`SS_AUTOREARM`/`SS_ONSTACK`/`SS_DISABLE`).
+    pub ss_flags: c_int,
+    /// Stack size.
+    pub ss_size: usize,
+}
+
+// P3-4b hardcoded layout proof — the USERSPACE byte contract
+// (`uabi/signal.h` `union sigval`/`struct siginfo`/`struct stack`),
+// every field. Values captured from the pre-nativization bindgen
+// output via the temporary in-tree `offset_of!` gate and cross-checked
+// by the target gcc probe (which also pins both `sigval` arms at
+// offset 0).
+const _: () = {
+    assert!(core::mem::size_of::<SigVal>() == 8, "sigval size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<SigVal>() == 8, "sigval alignment");
+    assert!(core::mem::size_of::<SigInfo>() == 40, "siginfo size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<SigInfo>() == 8, "siginfo alignment");
+    assert!(core::mem::offset_of!(SigInfo, si_signo) == 0, "siginfo.si_signo offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(SigInfo, si_errno) == 4, "siginfo.si_errno offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(SigInfo, si_code) == 8, "siginfo.si_code offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(SigInfo, si_pid) == 12, "siginfo.si_pid offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(SigInfo, si_addr) == 16, "siginfo.si_addr offset (USERSPACE ABI)");
+    assert!(
+        core::mem::offset_of!(SigInfo, si_status) == 24,
+        "siginfo.si_status offset (USERSPACE ABI)"
+    );
+    assert!(
+        core::mem::offset_of!(SigInfo, si_value) == 32,
+        "siginfo.si_value offset (USERSPACE ABI)"
+    );
+    assert!(core::mem::size_of::<SigStack>() == 24, "stack size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<SigStack>() == 8, "stack alignment");
+    assert!(core::mem::offset_of!(SigStack, ss_sp) == 0, "stack.ss_sp offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(SigStack, ss_flags) == 8, "stack.ss_flags offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(SigStack, ss_size) == 16, "stack.ss_size offset (USERSPACE ABI)");
+};
+
 // ---------------------------------------------------------------------------
 // Native layouts — Wave P3-N4 (signal type family).
 //
@@ -70,9 +190,10 @@ use crate::lock::spinlock::spin_holding;
 // `pub use crate::proc::signal::... as ...;` facade re-exports, so every
 // `crate::bindings::{sigaction,sigacts,sigacts_t,sigpending,sigpending_t,
 // ksiginfo,tg_shared_pending}` path across the crate resolves here. The
-// still-bindgen `siginfo_t` is embedded *by value* (`KsigInfo::info`) —
-// the sanctioned mixed-tier pattern (P3-N2/N3); when the siginfo family
-// later nativizes, the alias re-points transparently. `SigPending` is
+// `siginfo_t` embedded *by value* (`KsigInfo::info`) was still-bindgen
+// through N4..P3-4a (the sanctioned mixed-tier pattern, P3-N2/N3) and
+// is native since P3-4b ([`SigInfo`] above) — the alias re-pointed
+// transparently, exactly as this note predicted. `SigPending` is
 // likewise still embedded by value by the remaining bindgen
 // `thread_signal` (`sig_pending: [sigpending_t; 32]`), which is why
 // `build.rs`'s `NativeTypeCallbacks` answers Copy=Yes for it. The C
@@ -159,10 +280,11 @@ pub struct TgSharedPending {
 /// native `Thread` (P3-N9). `crate::bindings::{thread_signal,
 /// thread_signal_t}` resolve here via the build.rs facade. The
 /// `sig_pending` array embeds the native `SigPending` (N4, transparent
-/// re-point); `sig_stack` stays typed as the bindgen `stack_t`
-/// (`crate::bindings::stack`, kernel/inc/uabi/signal.h) — the uabi
-/// class stays bindgen-emitted until P3-4, the sanctioned mixed-tier
-/// pattern (N2/N5 precedent, cf. `KsigInfo::info`).
+/// re-point); `sig_stack` (`crate::bindings::stack`,
+/// kernel/inc/uabi/signal.h) was still-bindgen through N9..P3-4a (the
+/// uabi class, sanctioned mixed-tier pattern) and is native since
+/// P3-4b ([`SigStack`] above) — the facade re-pointed the field
+/// transparently, and the 584/8 asserts below still pin the layout.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct ThreadSignal {

@@ -61,6 +61,110 @@ use super::termios::termios_init_default;
 use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_read, pipe_write};
 
 // ===========================================================================
+// Native uabi `struct termios` + `struct winsize` — P3-4b nativization
+// (user directive: remove the C-compatible interfaces; userspace-ABI
+// scrutiny class). `Termios`/`Winsize` are the canonical KERNEL-SIDE
+// definitions of `kernel/inc/uabi/termios.h`'s `struct termios`/
+// `struct winsize`: `build.rs` blocklists the bindgen emissions and
+// re-exports them as `crate::bindings::termios`/`winsize` (facade
+// `pub use`, N2 pattern).
+//
+// *** USERSPACE ABI — HANDLE WITH P3-4 SCRUTINY *** The C header STAYS:
+// user/ programs (sh's line editing via tcgetattr/tcsetattr wrappers)
+// compile against uabi/termios.h, and the kernel copies both records BY
+// VALUE across the boundary (TCGETS/TCSETS* and TIOCGWINSZ/TIOCSWINSZ
+// ioctls — `either_copyout`/`either_copyin` in vfs_syscall.rs and the
+// tty ioctl paths below). A layout slip here silently breaks shell
+// line editing/raw mode. The byte-exact asserts below pin the natives
+// to the header. HOST determination: no host-side tool consumes any
+// uabi header (grep-verified), so the gcc probe is target-only.
+//
+// DERIVE DECISION (P3-4b): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (plain scalar/array fields).
+// `Tty` (below) embeds both BY VALUE — its own derive line needs
+// build.rs's `NativeTypeCallbacks` Copy=Yes answers for them.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4b_uabi_probe.c); both agree on every value asserted
+// below (NCCS == 16 confirmed by the same probe).
+// ===========================================================================
+
+/// Native uabi `struct termios` (`kernel/inc/uabi/termios.h`) — the
+/// terminal mode record exchanged with userspace via TCGETS/TCSETS*.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Termios {
+    /// Input mode flags.
+    pub c_iflag: crate::bindings::tcflag_t,
+    /// Output mode flags.
+    pub c_oflag: crate::bindings::tcflag_t,
+    /// Control mode flags.
+    pub c_cflag: crate::bindings::tcflag_t,
+    /// Local mode flags.
+    pub c_lflag: crate::bindings::tcflag_t,
+    /// Control characters (`NCCS == 16`).
+    pub c_cc: [crate::bindings::cc_t; 16],
+    /// Input speed.
+    pub c_ispeed: crate::bindings::speed_t,
+    /// Output speed.
+    pub c_ospeed: crate::bindings::speed_t,
+}
+
+/// Native uabi `struct winsize` (`kernel/inc/uabi/termios.h`) — the
+/// window-size record exchanged with userspace via TIOCGWINSZ/TIOCSWINSZ.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Winsize {
+    /// Rows, in characters.
+    pub ws_row: crate::bindings::uint16,
+    /// Columns, in characters.
+    pub ws_col: crate::bindings::uint16,
+    /// Horizontal size, in pixels.
+    pub ws_xpixel: crate::bindings::uint16,
+    /// Vertical size, in pixels.
+    pub ws_ypixel: crate::bindings::uint16,
+}
+
+// P3-4b hardcoded layout proof — the USERSPACE byte contract
+// (`uabi/termios.h` `struct termios`/`struct winsize`), every field.
+// Values captured from the pre-nativization bindgen output via the
+// temporary in-tree `offset_of!` gate and cross-checked by the target
+// gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<Termios>() == 40, "termios size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<Termios>() == 4, "termios alignment");
+    assert!(core::mem::offset_of!(Termios, c_iflag) == 0, "termios.c_iflag offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Termios, c_oflag) == 4, "termios.c_oflag offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Termios, c_cflag) == 8, "termios.c_cflag offset (USERSPACE ABI)");
+    assert!(
+        core::mem::offset_of!(Termios, c_lflag) == 12,
+        "termios.c_lflag offset (USERSPACE ABI)"
+    );
+    assert!(core::mem::offset_of!(Termios, c_cc) == 16, "termios.c_cc offset (USERSPACE ABI)");
+    assert!(
+        core::mem::offset_of!(Termios, c_ispeed) == 32,
+        "termios.c_ispeed offset (USERSPACE ABI)"
+    );
+    assert!(
+        core::mem::offset_of!(Termios, c_ospeed) == 36,
+        "termios.c_ospeed offset (USERSPACE ABI)"
+    );
+    assert!(core::mem::size_of::<Winsize>() == 8, "winsize size (USERSPACE ABI)");
+    assert!(core::mem::align_of::<Winsize>() == 2, "winsize alignment");
+    assert!(core::mem::offset_of!(Winsize, ws_row) == 0, "winsize.ws_row offset (USERSPACE ABI)");
+    assert!(core::mem::offset_of!(Winsize, ws_col) == 2, "winsize.ws_col offset (USERSPACE ABI)");
+    assert!(
+        core::mem::offset_of!(Winsize, ws_xpixel) == 4,
+        "winsize.ws_xpixel offset (USERSPACE ABI)"
+    );
+    assert!(
+        core::mem::offset_of!(Winsize, ws_ypixel) == 6,
+        "winsize.ws_ypixel offset (USERSPACE ABI)"
+    );
+};
+
+// ===========================================================================
 // Native tty types — P3-N8 nativization (user directive: remove the
 // C-compatible interfaces). `Tty`/`TtyOps` are the canonical native
 // definitions of `kernel/inc/tty/tty_types.h`'s `struct tty`/`struct
@@ -69,12 +173,10 @@ use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_read, pipe_write};
 // pattern). The C header stays unchanged (no C consumers remain — the
 // kernel tree has zero `.c` files).
 //
-// `termios`/`winsize` stay bindgen-emitted ON PURPOSE: both are defined
-// in `kernel/inc/uabi/termios.h` (the kernel-side `tty/termios.h` is a
-// bare re-include of the uabi header), i.e. they are userspace-ABI
-// layout contracts shared with user programs via TCGETS/TIOCGWINSZ —
-// the P3-4 scrutiny class this nativization arc deliberately leaves
-// alone (same disposition as `stat`/`statfs`).
+// `termios`/`winsize` stayed bindgen-emitted through N8..P3-4a
+// (userspace-ABI layout contracts, the P3-4 scrutiny class) and are
+// native since P3-4b — [`Termios`]/[`Winsize`] above; `Tty`'s embedded
+// fields re-pointed transparently via their `crate::bindings` paths.
 //
 // Layout evidence: temporary in-tree `offset_of!` gate on the live
 // bindgen forms + cross-compiler value probe (toolchain gcc,

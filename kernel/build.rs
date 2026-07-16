@@ -232,7 +232,8 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // Copy/Clone in the pre-nativization bindgen output (the
             // embedded `spinlock_t`/`tq_t` are typedef-spelled and
             // already answered Yes via the P3-N2 entries;
-            // `termios`/`winsize` stay bindgen-emitted uabi types).
+            // `termios`/`winsize` were bindgen-emitted uabi types then,
+            // native since P3-4b — own entries below).
             // Nothing in the remaining bindgen output embeds either by
             // value (verified). Tag-prefixed forms included (no
             // typedefs).
@@ -268,8 +269,8 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // `spinlock_t`/`list_node_t`/`hlist_entry_t`/`rcu_head_t`/
             // `sigpending_t` are typedef-spelled natives that already
             // answered Yes via their own entries; `thread_signal`'s
-            // `sig_stack` embeds the still-bindgen uabi `stack_t`, which
-            // bindgen derives Copy for natively). Nothing in the
+            // `sig_stack` embedded the then-bindgen uabi `stack_t`,
+            // native since P3-4b with its own Yes entry). Nothing in the
             // remaining bindgen output embeds either by value (verified:
             // the only by-value embedder of `thread_signal` was `thread`
             // itself, native in the same wave; all remaining `thread`
@@ -313,6 +314,50 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "struct dinode",
             "dirent",
             "struct dirent",
+            // kernel/vfs/file.rs (`Stat`) + kernel/vfs/fs.rs (`Statfs`)
+            // (P3-4b, uabi stat pair from kernel/inc/uabi/{stat,statfs}.h
+            // — USERSPACE-ABI records copied out by value). Both derived
+            // Copy/Clone in the pre-nativization bindgen output (plain
+            // scalar PODs); the natives keep both. Nothing still-bindgen
+            // embeds either by value (verified: only fn-pointer/param
+            // mentions remained in the emission). Tag-prefixed forms
+            // included (no typedefs).
+            "stat",
+            "struct stat",
+            "statfs",
+            "struct statfs",
+            // kernel/tty/tty.rs (P3-4b, uabi terminal pair from
+            // kernel/inc/uabi/termios.h — USERSPACE-ABI records copied
+            // by value through the TCGETS*/TIOCGWINSZ ioctls). Both
+            // derived Copy/Clone in the pre-nativization bindgen output
+            // (plain scalar/array PODs); the natives keep both. The
+            // native `Tty` embeds both BY VALUE and derives Copy itself,
+            // which requires accurate Yes answers here. Tag-prefixed
+            // forms included (no typedefs).
+            "termios",
+            "struct termios",
+            "winsize",
+            "struct winsize",
+            // kernel/proc/signal.rs (P3-4b, uabi signal trio from
+            // kernel/inc/uabi/signal.h — USERSPACE-ABI records; siginfo
+            // is copied by value onto the user stack for SA_SIGINFO
+            // delivery, stack_t both ways via sigaltstack(2)). All three
+            // derived Copy/Clone in the pre-nativization bindgen output
+            // (sigval as a real Rust union); the natives keep both. The
+            // native `KsigInfo` embeds `siginfo_t` and the native
+            // `ThreadSignal` embeds `stack` BY VALUE, and both derive
+            // Copy themselves, which requires accurate Yes answers
+            // here. Tag/union-prefixed + typedef forms included
+            // (`siginfo_t`/`stack_t` stay bindgen-emitted typedefs; no
+            // `sigval_t` ever appeared in the emission).
+            "sigval",
+            "union sigval",
+            "siginfo",
+            "struct siginfo",
+            "siginfo_t",
+            "stack",
+            "struct stack",
+            "stack_t",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -862,11 +907,12 @@ fn main() {
         // and re-exported under both names; no `sigaction_t`/
         // `ksiginfo_t`/`tg_shared_pending` typedefs ever appeared in the
         // bindgen output (consumers alias in their `use` items). NOTE:
-        // `siginfo`/`sigval`/`stack` deliberately stay bindgen-emitted
-        // (uabi class, kernel/inc/uabi/signal.h — P3-4 scrutiny; the
-        // P3-N9 determination); the native `KsigInfo` embeds `siginfo_t`
-        // *by value* via its `crate::bindings` path — the sanctioned
-        // mixed-tier pattern. `thread_signal` stayed bindgen through
+        // `siginfo`/`sigval`/`stack` stayed bindgen-emitted through
+        // N4..P3-4a (uabi class, kernel/inc/uabi/signal.h — P3-4
+        // scrutiny; the P3-N9 determination) and are native since
+        // P3-4b (`SigVal`/`SigInfo`/`SigStack`, same file, own entry
+        // below); `KsigInfo::info`'s `crate::bindings` path re-pointed
+        // transparently. `thread_signal` stayed bindgen through
         // N4..N8 and nativized with its embedder in P3-N9 below.
         .blocklist_type("sigaction|sigaction__bindgen_ty_1|sigacts|sigacts_t|sigpending|sigpending_t|ksiginfo|tg_shared_pending")
         .raw_line("pub use crate::proc::signal::SigAction as sigaction;")
@@ -976,9 +1022,10 @@ fn main() {
         // `vfs_superblock__bindgen_ty_1` is the anonymous inode-hash
         // struct shell (native: flattened into direct
         // `inodes`/`inodes_buckets` fields at identical offsets).
-        // `statfs` (kernel/inc/uabi/statfs.h — uabi) deliberately stays
-        // bindgen-emitted; the native ops table references it by
-        // `crate::bindings` path.
+        // `statfs` (kernel/inc/uabi/statfs.h — uabi) stayed
+        // bindgen-emitted through N5..P3-4a and is native (`Statfs`,
+        // same file) since P3-4b — the ops table's `crate::bindings`
+        // path re-pointed transparently.
         .blocklist_type("vfs_fs_type|vfs_fs_type_ops|vfs_fs_type__bindgen_ty_1")
         .raw_line("pub use crate::vfs::fs::VfsFsType as vfs_fs_type;")
         .raw_line("pub use crate::vfs::fs::VfsFsTypeOps as vfs_fs_type_ops;")
@@ -991,9 +1038,10 @@ fn main() {
         // + `vfs_inode__bindgen_ty_2__bindgen_ty_1` are the anonymous
         // device/mount union + its nested-struct shell (natives: the
         // real Rust union `VfsInodeDevMnt` + `VfsInodeMnt`). `pcache`
-        // (embedded BY VALUE as `i_data`), `stat` (uabi — P3-4 scrutiny
-        // class) and `thread` stay bindgen-emitted, referenced by
-        // `crate::bindings` paths — the sanctioned mixed-tier pattern.
+        // (embedded BY VALUE as `i_data`) stays bindgen-emitted,
+        // referenced by `crate::bindings` path — the sanctioned
+        // mixed-tier pattern (`stat` is native since P3-4b; `thread`
+        // since P3-N9 — the paths re-pointed transparently).
         .blocklist_type("vfs_inode|vfs_inode_ops|vfs_inode__bindgen_ty_1|vfs_inode__bindgen_ty_2|vfs_inode__bindgen_ty_2__bindgen_ty_1")
         .raw_line("pub use crate::vfs::inode::VfsInode as vfs_inode;")
         .raw_line("pub use crate::vfs::inode::VfsInodeOps as vfs_inode_ops;");
@@ -1122,8 +1170,9 @@ fn main() {
     // rv64gc/lp64d — scratchpad p3n8_probe_values.c); the two AGREE on
     // every size/align/offset (no pipe-style divergence, P3-N5
     // precedent checked). `termios`/`winsize` (kernel/inc/uabi/
-    // termios.h) stay bindgen-emitted: userspace-ABI layout contracts
-    // (P3-4 scrutiny class), out of nativization scope. `mbuf`
+    // termios.h) stayed bindgen-emitted then — userspace-ABI layout
+    // contracts (P3-4 scrutiny class) — and are native since P3-4b
+    // (`Termios`/`Winsize`, kernel/tty/tty.rs, own entry). `mbuf`
     // (kernel/inc/dev/net.h) stays bindgen-emitted: its `buf[]` backing
     // store is DMA-written by the x1_emac rx/tx descriptor rings —
     // DMA-adjacent, P3-4 scrutiny class.
@@ -1198,6 +1247,61 @@ fn main() {
         .raw_line("pub use crate::vfs::xv6fs::superblock::OndiskSuperblock as superblock;")
         .raw_line("pub use crate::vfs::xv6fs::inode::Dinode as dinode;")
         .raw_line("pub use crate::vfs::xv6fs::inode::Dirent as dirent;")
+        // P3-4b (userspace-ABI scrutiny class): kernel/inc/uabi/stat.h
+        // `struct stat` -> kernel/vfs/file.rs (`Stat`);
+        // kernel/inc/uabi/statfs.h `struct statfs` -> kernel/vfs/fs.rs
+        // (`Statfs`). These records cross the user/kernel boundary BY
+        // VALUE (`either_copyout` in vfs_syscall.rs) and user/ programs
+        // compile against the SAME headers (which therefore stay,
+        // untouched); the natives' byte-exact asserts + the target-only
+        // gcc probe pin native == header == userspace. (HOST
+        // determination: no host tool consumes any uabi header —
+        // mkfs.c includes only types.h/ondisk.h/param.h, grep-verified
+        // — so no two-arch gate is needed, unlike P3-4a's ondisk trio.)
+        // Anchored regexes: bare `stat` must swallow NEITHER `statfs`
+        // (its own entry) NOR `stat`-prefixed/`_stat`-suffixed names
+        // (`thread_state`, `phy_state`, `memstat`, `slab_state_t`, …);
+        // `statfs` must not swallow `xv6fs_statfs`-style fn names
+        // (blocklist_type only matches types, but keep it anchored
+        // anyway, matching P3-4a's spelling).
+        .blocklist_type("^stat$|^statfs$")
+        .raw_line("pub use crate::vfs::file::Stat as stat;")
+        .raw_line("pub use crate::vfs::fs::Statfs as statfs;")
+        // P3-4b (userspace-ABI scrutiny class): kernel/inc/uabi/
+        // termios.h `struct termios`/`struct winsize` ->
+        // kernel/tty/tty.rs (`Termios`/`Winsize`), with the N8 tty
+        // family that embeds both by value. Same by-value user/kernel
+        // boundary + untouched-header story as `stat`/`statfs` above;
+        // the `tcflag_t`/`cc_t`/`speed_t` typedefs stay bindgen-emitted
+        // (plain scalar aliases the natives reference). Anchored
+        // regexes: `termios` must not swallow the `termios2`-style or
+        // prefixed names a future header might add, and `winsize` must
+        // stay distinct from `Tty`'s FIELD of the same name (fields are
+        // unaffected by blocklist_type; anchored anyway, P3-4a
+        // spelling).
+        .blocklist_type("^termios$|^winsize$")
+        .raw_line("pub use crate::tty::tty::Termios as termios;")
+        .raw_line("pub use crate::tty::tty::Winsize as winsize;")
+        // P3-4b (userspace-ABI scrutiny class): kernel/inc/uabi/signal.h
+        // `union sigval`/`struct siginfo`/`struct stack` (sigaltstack)
+        // -> kernel/proc/signal.rs (`SigVal`/`SigInfo`/`SigStack`), with
+        // the N4/N9 signal family that embeds them by value
+        // (`KsigInfo::info`, `ThreadSignal::sig_stack` — both re-point
+        // transparently through these facades). Same by-value
+        // user/kernel boundary + untouched-header story as the pairs
+        // above (siginfo rides the signal frame trap.rs copyouts;
+        // testsig 21/21 is the behavioral gate). The
+        // `siginfo_t`/`stack_t` typedefs stay bindgen-emitted and
+        // resolve through the facades (no `sigval_t` ever appeared in
+        // the emission). Anchored regexes: bare `stack` must swallow
+        // NEITHER `stack_t` (typedef, stays) NOR any *stack*-containing
+        // name (`sigaltstack` fns, kstack fields are not types but keep
+        // it anchored anyway); `siginfo` must not swallow `ksiginfo`
+        // (native, own N4 entry) or `siginfo_t`.
+        .blocklist_type("^sigval$|^siginfo$|^stack$")
+        .raw_line("pub use crate::proc::signal::SigVal as sigval;")
+        .raw_line("pub use crate::proc::signal::SigInfo as siginfo;")
+        .raw_line("pub use crate::proc::signal::SigStack as stack;")
         // `__IncompleteArrayField` used to be bindgen-emitted because
         // (only) the `tmpfs_dentry` emission spelled its C flexible
         // array member with it; with `tmpfs_dentry` blocklisted, bindgen
@@ -1259,9 +1363,11 @@ fn main() {
     //
     // uabi determination: `siginfo`/`sigval`/`stack` (stack_t) are
     // defined in kernel/inc/uabi/signal.h — userspace-ABI layout
-    // contracts (P3-4 scrutiny class), they stay bindgen-emitted; the
-    // native `ThreadSignal` embeds `stack_t` by value via its
-    // `crate::bindings` path (mixed-tier, cf. `KsigInfo::info`).
+    // contracts (P3-4 scrutiny class); they stayed bindgen-emitted
+    // through N9..P3-4a and are native since P3-4b
+    // (`SigVal`/`SigInfo`/`SigStack`, kernel/proc/signal.rs, own
+    // entry); `ThreadSignal::sig_stack`'s `crate::bindings` path
+    // re-pointed transparently (mixed-tier, cf. `KsigInfo::info`).
     //
     // `context`/`trapframe`/`utrapframe`/`cpu_local` are untouched
     // (P3-5 asm-offset set); `thread` holds only POINTERS to them.
