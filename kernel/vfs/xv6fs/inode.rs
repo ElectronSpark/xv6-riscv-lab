@@ -71,9 +71,10 @@ use super::{xv6fs_mode_to_type, DIRSIZ};
 //
 // `addrs[13]` is the IN-MEMORY copy of the on-disk `dinode.addrs`
 // (`XV6FS_NDIRECT + 2` == `NDIRECT + 2` == 13: direct + indirect +
-// double-indirect) — the on-disk `dinode` record itself stays
-// bindgen-emitted (P3-4 scrutiny class); `xv6fs_iupdate`/inode-load
-// copy element-by-element between the two.
+// double-indirect) — the on-disk `dinode` record itself is the native
+// [`Dinode`] below since P3-4a (it was still bindgen-emitted when this
+// struct nativized in N8); `xv6fs_iupdate`/inode-load copy
+// element-by-element between the two.
 //
 // DERIVE DECISION (P3-N8): no derives — the bindgen emission derived
 // neither Copy nor Clone (it embeds the NONCOPY `vfs_inode` by value);
@@ -111,6 +112,104 @@ const _: () = {
     assert!(core::mem::offset_of!(Xv6fsInode, addrs) == 1092, "xi.addrs offset");
     assert!(core::mem::offset_of!(Xv6fsInode, major) == 1144, "xi.major offset");
     assert!(core::mem::offset_of!(Xv6fsInode, minor) == 1146, "xi.minor offset");
+};
+
+// ===========================================================================
+// Native on-disk `dinode` + `dirent` — P3-4a nativization (user
+// directive: remove the C-compatible interfaces; on-disk format
+// scrutiny class). `Dinode`/`Dirent` are the canonical KERNEL-SIDE
+// definitions of `kernel/inc/vfs/xv6fs/ondisk.h`'s `struct dinode`/
+// `struct dirent`: `build.rs` blocklists the bindgen emissions and
+// re-exports these types as `crate::bindings::dinode`/`dirent`
+// (facade `pub use`, N2 pattern).
+//
+// *** ON-DISK LAYOUT — HANDLE WITH P3-4 SCRUTINY *** The C header
+// STAYS: `mkfs/mkfs.c` includes `ondisk.h` and writes every inode
+// block and root-directory entry of fs.img on the HOST from it, so
+// these natives and that header are two independent spellings of one
+// persistent format. The kernel casts buffer-cache block bytes
+// straight to `*mut dinode` (`xv6fs_iupdate`/`xv6fs_alloc_inode`/
+// `xv6fs_get_inode`/`__xv6fs_free_disk_inode`, at `ino % IPB` element
+// strides — `size_of::<dinode>()` IS the stride, so the size assert is
+// load-bearing for every inode past the first) and `memmove`s
+// directory blocks through `dirent` (`read_dirent`/`__xv6fs_dirlink`/
+// `xv6fs_unlink`/`xv6fs_readdir`); any drift between the two
+// spellings is silent on-disk corruption. The byte-exact asserts
+// below pin the natives to the header layout; the cross-compiler
+// probe (see "Layout evidence") additionally proved the header lays
+// out IDENTICALLY on the rv64gc target and the x86_64 host — the
+// mkfs-vs-kernel half of the contract.
+//
+// `type_` reproduces bindgen's rename of the C field `type` (reserved
+// word) — every consumer already spells it that way. The array
+// lengths reproduce bindgen's emission verbatim: `addrs[13]` ==
+// `NDIRECT + 2` (`super::NDIRECT` is the same `ondisk.h` value,
+// asserted below so the const and the layout can never drift apart)
+// and `name[14]` == `DIRSIZ` (`super::DIRSIZ`, used directly).
+//
+// DERIVE DECISIONS (P3-4a): Copy + Clone on both, exactly as the
+// pre-nativization bindgen output derived (plain-int PODs;
+// `read_dirent` returns `dirent` by value).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler value probe (toolchain gcc
+// rv64gc/lp64d AND host x86_64 gcc — scratchpad p3_4a_ondisk_probe.c);
+// all three agree on every value asserted below.
+// ===========================================================================
+
+/// Native on-disk `struct dinode` (`kernel/inc/vfs/xv6fs/ondisk.h`) —
+/// one on-disk inode record, `IPB` (16) per inode block.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Dinode {
+    /// File type (`XV6_T_DIR`/`XV6_T_FILE`/... — C field `type`).
+    pub type_: core::ffi::c_short,
+    /// Major device number (device inodes only).
+    pub major: core::ffi::c_short,
+    /// Minor device number (device inodes only).
+    pub minor: core::ffi::c_short,
+    /// Number of links to this inode in the file system.
+    pub nlink: core::ffi::c_short,
+    /// Size of file (bytes).
+    pub size: crate::bindings::uint,
+    /// Data block addresses (`NDIRECT` direct + indirect +
+    /// double-indirect).
+    pub addrs: [crate::bindings::uint; 13],
+}
+
+/// Native on-disk `struct dirent` (`kernel/inc/vfs/xv6fs/ondisk.h`) —
+/// one directory entry; a directory's data blocks are a flat array of
+/// these.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Dirent {
+    /// Inode number (0 = free entry).
+    pub inum: crate::bindings::ushort,
+    /// Entry name, NUL-padded (no terminator if all `DIRSIZ` bytes are
+    /// used).
+    pub name: [c_char; DIRSIZ],
+}
+
+// P3-4a hardcoded layout proof — the ON-DISK byte contract (`ondisk.h`
+// `struct dinode`/`struct dirent`), every field. Values captured from
+// the pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the two-arch gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<Dinode>() == 64, "dinode size (ON-DISK, the IPB stride)");
+    assert!(core::mem::align_of::<Dinode>() == 4, "dinode alignment");
+    assert!(core::mem::offset_of!(Dinode, type_) == 0, "di.type offset (ON-DISK)");
+    assert!(core::mem::offset_of!(Dinode, major) == 2, "di.major offset (ON-DISK)");
+    assert!(core::mem::offset_of!(Dinode, minor) == 4, "di.minor offset (ON-DISK)");
+    assert!(core::mem::offset_of!(Dinode, nlink) == 6, "di.nlink offset (ON-DISK)");
+    assert!(core::mem::offset_of!(Dinode, size) == 8, "di.size offset (ON-DISK)");
+    assert!(core::mem::offset_of!(Dinode, addrs) == 12, "di.addrs offset (ON-DISK)");
+    assert!(super::NDIRECT as usize + 2 == 13, "dinode.addrs length == NDIRECT + 2 (ON-DISK)");
+
+    assert!(core::mem::size_of::<Dirent>() == 16, "dirent size (ON-DISK)");
+    assert!(core::mem::align_of::<Dirent>() == 2, "dirent alignment");
+    assert!(core::mem::offset_of!(Dirent, inum) == 0, "de.inum offset (ON-DISK)");
+    assert!(core::mem::offset_of!(Dirent, name) == 2, "de.name offset (ON-DISK)");
+    assert!(DIRSIZ == 14, "dirent.name length == DIRSIZ (ON-DISK)");
 };
 
 // Sub-wave B landed: xv6fs/{truncate,log,file}.rs are Rust siblings in

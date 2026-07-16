@@ -51,6 +51,82 @@ use super::truncate::xv6fs_bmap_read;
 use super::{xv6fs_iblock, xv6fs_type_to_mode, FSMAGIC, IPB, ROOTINO};
 
 // ===========================================================================
+// Native on-disk `superblock` — P3-4a nativization (user directive:
+// remove the C-compatible interfaces; on-disk format scrutiny class).
+// `OndiskSuperblock` is the canonical KERNEL-SIDE definition of
+// `kernel/inc/vfs/xv6fs/ondisk.h`'s `struct superblock`: `build.rs`
+// blocklists the bindgen emission and re-exports this type as
+// `crate::bindings::superblock` (facade `pub use`, N2 pattern).
+//
+// *** ON-DISK LAYOUT — HANDLE WITH P3-4 SCRUTINY *** The C header
+// STAYS: `mkfs/mkfs.c` includes `ondisk.h` and writes fs.img on the
+// HOST from it, so this native and that header are two independent
+// spellings of one persistent format. `__xv6fs_read_superblock` below
+// `memmove`s disk block 1's bytes straight into this struct (and
+// `__xv6fs_write_superblock` writes them back), so any drift between
+// the two spellings is silent on-disk corruption. The byte-exact
+// asserts below pin the native to the header layout; the
+// cross-compiler probe (see "Layout evidence") additionally proved the
+// header lays out IDENTICALLY on the rv64gc target and the x86_64
+// host — the mkfs-vs-kernel half of the contract.
+//
+// DERIVE DECISION (P3-4a): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (8 plain `uint`s).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + cross-compiler value probe (toolchain gcc
+// rv64gc/lp64d AND host x86_64 gcc — scratchpad p3_4a_ondisk_probe.c);
+// all three agree on every value asserted below.
+// ===========================================================================
+
+/// Native on-disk `struct superblock` (`kernel/inc/vfs/xv6fs/ondisk.h`)
+/// — block 1 of every xv6fs image, written by host-side `mkfs` and
+/// describing the disk layout (log, inode blocks, free bitmap, data).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct OndiskSuperblock {
+    /// Must be `FSMAGIC`.
+    pub magic: crate::bindings::uint,
+    /// Size of file system image (blocks).
+    pub size: crate::bindings::uint,
+    /// Number of data blocks.
+    pub nblocks: crate::bindings::uint,
+    /// Number of inodes.
+    pub ninodes: crate::bindings::uint,
+    /// Number of log blocks.
+    pub nlog: crate::bindings::uint,
+    /// Block number of first log block.
+    pub logstart: crate::bindings::uint,
+    /// Block number of first inode block.
+    pub inodestart: crate::bindings::uint,
+    /// Block number of first free map block.
+    pub bmapstart: crate::bindings::uint,
+}
+
+// P3-4a hardcoded layout proof — the ON-DISK byte contract
+// (`ondisk.h` `struct superblock`), every field. Values captured from
+// the pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the two-arch gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<OndiskSuperblock>() == 32, "superblock size (ON-DISK)");
+    assert!(core::mem::align_of::<OndiskSuperblock>() == 4, "superblock alignment");
+    assert!(core::mem::offset_of!(OndiskSuperblock, magic) == 0, "sb.magic offset (ON-DISK)");
+    assert!(core::mem::offset_of!(OndiskSuperblock, size) == 4, "sb.size offset (ON-DISK)");
+    assert!(core::mem::offset_of!(OndiskSuperblock, nblocks) == 8, "sb.nblocks offset (ON-DISK)");
+    assert!(core::mem::offset_of!(OndiskSuperblock, ninodes) == 12, "sb.ninodes offset (ON-DISK)");
+    assert!(core::mem::offset_of!(OndiskSuperblock, nlog) == 16, "sb.nlog offset (ON-DISK)");
+    assert!(core::mem::offset_of!(OndiskSuperblock, logstart) == 20, "sb.logstart offset (ON-DISK)");
+    assert!(
+        core::mem::offset_of!(OndiskSuperblock, inodestart) == 24,
+        "sb.inodestart offset (ON-DISK)"
+    );
+    assert!(
+        core::mem::offset_of!(OndiskSuperblock, bmapstart) == 28,
+        "sb.bmapstart offset (ON-DISK)"
+    );
+};
+
+// ===========================================================================
 // Native `xv6fs_superblock` — P3-N8 nativization (user directive:
 // remove the C-compatible interfaces). `Xv6fsSuperblock` is the
 // canonical native definition of `kernel/vfs/xv6fs/xv6fs_private.h`'s
@@ -59,11 +135,10 @@ use super::{xv6fs_iblock, xv6fs_type_to_mode, FSMAGIC, IPB, ROOTINO};
 // `crate::bindings::xv6fs_superblock` (facade `pub use`, N2 pattern).
 //
 // `disk_sb` (`struct superblock`, `kernel/inc/vfs/xv6fs/ondisk.h`) is
-// the ON-DISK superblock record and stays bindgen-emitted (P3-4
-// scrutiny class, same disposition as `dinode`/`dirent`) — referenced
-// here by its `crate::bindings` path, the sanctioned mixed-tier
-// pattern. `log`/`block_cache` are this wave's own natives (via their
-// facades).
+// the ON-DISK superblock record — native `OndiskSuperblock` above
+// since P3-4a (it was still bindgen-emitted when this struct
+// nativized in N8). `log`/`block_cache` are N8's own natives (via
+// their facades).
 //
 // DERIVE DECISION (P3-N8): no derives — the bindgen emission derived
 // neither Copy nor Clone (it embeds the NONCOPY `vfs_superblock` and
@@ -84,9 +159,9 @@ use super::{xv6fs_iblock, xv6fs_type_to_mode, FSMAGIC, IPB, ROOTINO};
 #[repr(C, align(64))]
 pub struct Xv6fsSuperblock {
     pub vfs_sb: vfs_superblock,
-    /// Copy of the on-disk superblock (`struct superblock` stays
-    /// bindgen-emitted — ON-DISK record, P3-4 scrutiny class).
-    pub disk_sb: crate::bindings::superblock,
+    /// Copy of the on-disk superblock (native [`OndiskSuperblock`]
+    /// since P3-4a — ON-DISK record, P3-4 scrutiny class).
+    pub disk_sb: OndiskSuperblock,
     pub blkdev: *mut blkdev_t,
     pub dirty: core::ffi::c_int,
     pub(crate) _pad0: [u64; 2],
@@ -494,7 +569,7 @@ pub(crate) extern "C" fn xv6fs_shrink_caches() {
 // Superblock read/write helpers
 // ===========================================================================
 
-fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut crate::bindings::superblock) -> c_int {
+fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> c_int {
     let bp = bread(dev, 1);
     if bp.is_null() {
         return neg(EIO);
@@ -502,7 +577,7 @@ fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut crate::bindings::superblock) 
     // SAFETY: `bp` is a live, just-read buffer; `disk_sb` is a valid
     // exclusively-owned out-param.
     unsafe {
-        memmove(disk_sb as *mut c_void, (*bp).data as *const c_void, core::mem::size_of::<crate::bindings::superblock>());
+        memmove(disk_sb as *mut c_void, (*bp).data as *const c_void, core::mem::size_of::<OndiskSuperblock>());
         brelse(bp);
         if (*disk_sb).magic != FSMAGIC {
             return neg(EINVAL);
@@ -511,14 +586,14 @@ fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut crate::bindings::superblock) 
     0
 }
 
-fn __xv6fs_write_superblock(dev: u32, disk_sb: *mut crate::bindings::superblock) -> c_int {
+fn __xv6fs_write_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> c_int {
     let bp = bread(dev, 1);
     if bp.is_null() {
         return neg(EIO);
     }
     // SAFETY: `bp` is a live, just-read buffer; `disk_sb` is live.
     unsafe {
-        memmove((*bp).data as *mut c_void, disk_sb as *const c_void, core::mem::size_of::<crate::bindings::superblock>());
+        memmove((*bp).data as *mut c_void, disk_sb as *const c_void, core::mem::size_of::<OndiskSuperblock>());
         bwrite(bp);
         brelse(bp);
     }

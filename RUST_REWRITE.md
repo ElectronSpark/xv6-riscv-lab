@@ -2271,6 +2271,68 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   vs post for both phases (only SMP interleaving order varies).
   10 files, ~+560/−660 (the generator was 574 lines of Python).
 
+### Iteration 67 — 2026-07-16 — Wave P3-4a: the on-disk format trio nativized (the silent-corruption class)
+
+- **The persistent fs.img records go native.** `struct superblock` /
+  `struct dinode` / `struct dirent` (kernel/inc/vfs/xv6fs/ondisk.h) →
+  native `OndiskSuperblock` in kernel/vfs/xv6fs/superblock.rs and
+  `Dinode`/`Dirent` in kernel/vfs/xv6fs/inode.rs. THE two-compiler
+  contract type class: the SAME header also compiles into HOST-side
+  mkfs/mkfs.c (which writes fs.img on x86_64), so the header STAYS
+  untouched (as does all of mkfs/) and the natives are the kernel-side
+  spelling only, pinned to it byte-exactly. Layouts: superblock 32/4
+  (8×u32, offsets 0..28); dinode 64/4 (`type_`@0 — bindgen's
+  reserved-word rename kept — major@2 minor@4 nlink@6 size@8,
+  `addrs[13]`@12 == NDIRECT+2, and 64 IS the `ino % IPB` inode-block
+  stride, so the size assert is load-bearing for every inode past the
+  first); dirent 16/2 (inum@0 ushort, `name[DIRSIZ==14]`@2). EVERY
+  field offset + size + align hardcode-asserted with `(ON-DISK)`
+  markers + header citations; `addrs` length tied to `super::NDIRECT`
+  and `name` length spelled `[c_char; DIRSIZ]` so the mod.rs consts and
+  the layout can never drift apart. No other on-disk PODs remained
+  bindgen-side (xv6fs_logheader native since N8; `stat` is uabi, P3-4
+  proper; elfhdr/proghdr are exec-input, not fs-persistent).
+- **Layout evidence — the arch-independence gate (both probes PASS).**
+  Cross-compiler `_Static_assert` probe (scratchpad
+  p3_4a_ondisk_probe.c, all 24 facts above + IPB==16 + uint/ushort/
+  short widths) compiled BOTH with toolchain riscv64-unknown-elf-gcc
+  `-march=rv64gc -mabi=lp64d` (TARGET PROBE PASS) AND host x86_64 gcc
+  mkfs-style (`ON_HOST_OS` + types.h; HOST PROBE PASS) — the two arches
+  agree on every value, so no latent mkfs-vs-kernel divergence exists.
+  Third leg: temporary in-tree `offset_of!` gate on the live
+  pre-nativization bindgen forms compiled clean in the rv64gc target
+  build itself, then removed. bindgen emission for the trio → 0
+  (remaining bindgen structs 34 → 31); build.rs blocklists with
+  ANCHORED regexes (`^superblock$|^dinode$|^dirent$` — bare names must
+  not swallow `xv6fs_superblock`/`vfs_superblock`) + facade `pub use`
+  re-exports under the C names, so every consumer (inode.rs's dirent
+  scan/`read_dirent`-by-value, superblock.rs's inode-block casts +
+  `__xv6fs_{read,write}_superblock` memmoves, mod.rs's
+  size_of-computed `IPB`) compiles unchanged. Derive-fidelity gate:
+  all three answered Copy=Yes in `NativeTypeCallbacks` (plain-int
+  PODs, exactly as bindgen derived; zero still-bindgen by-value
+  embedders — `xv6fs_superblock.disk_sb`, the only one, is native
+  since N8 and now embeds `OndiskSuperblock` directly).
+- Verified (worker; cache-checked before/after, BUILD_TYPE empty +
+  toolchain gcc, no reconfigure needed): 0-warning clean build; 3
+  boots, EACH on fresh `--target fs_img` mkfs images (boot itself =
+  the kernel parsing the host-written superblock/root dinode/dirents
+  through the natives), each exactly one `init: starting sh`. MAXIMUM
+  fs corruption battery: root `ls` listing correct ×2 (incl. after
+  stressfs population); `mkdir dd` + repeat → EEXIST; `ln /README.md
+  rr` + `wc rr` → **714 3365 26018** (hard-link byte identity);
+  symlinktest both ok; usertests **createdelete OK, bigdir OK,
+  linktest OK, unlinkread OK, dirtest OK** (single-test "lost some
+  free pages" trailers = documented pre-existing artifact); **bigfile
+  wrote 65803 blocks, done; ok** (direct + indirect + double-indirect
+  through `dinode.addrs`); **stressfs ×2** to completion (all
+  stressfs* files 10240 bytes); `cat /nonexistent` → ENOENT; grep
+  sweep over all three boot logs: ZERO corruption markers (`freeing
+  free block`/`incorrect blockno`/`balloc: out`/`bad inode`/panic);
+  **testsig 21/21** standing regression check. mkfs/ and all C headers
+  untouched (`git status`: only build.rs + the three xv6fs .rs files +
+  this file). 5 files, ~+240/−27.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

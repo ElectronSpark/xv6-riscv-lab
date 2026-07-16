@@ -69,18 +69,23 @@
 //! `kernel/inc/vfs/xv6fs/ondisk.h` (`struct superblock`/`dinode`/
 //! `dirent`, `BSIZE`/`FSMAGIC`/`NDIRECT`/`ROOTINO`/`DIRSIZ`/...) is
 //! shared with `mkfs` (the host tool that builds `fs.img`) and is **not
-//! touched** by this wave. Every on-disk struct this port reads/writes is
-//! the real bindgen layout of that exact header (via
+//! touched** by this wave. Every on-disk struct this port reads/writes
+//! was originally the real bindgen layout of that exact header (via
 //! `kernel/vfs/xv6fs/xv6fs_private.h`'s `#include`, itself pulled into
-//! `wrapper.h`) — no hand-rolled byte offsets, no opaque stand-ins. Small
+//! `wrapper.h`); since P3-4a the trio is NATIVE (`superblock.rs`'s
+//! `OndiskSuperblock`, `inode.rs`'s `Dinode`/`Dirent` — see their loud
+//! P3-4-scrutiny notes), pinned byte-exact to the header by hardcoded
+//! asserts + a two-arch gcc probe — still no hand-rolled byte offsets,
+//! no opaque stand-ins. Small
 //! integer `#define`s (`BSIZE`, `ROOTINO`, `DIRSIZ`, the on-disk type
 //! tags) are hand-copied as local `const`s below rather than plumbed
 //! through bindgen's `allowlist_var` macro-constant-folding, matching
 //! this crate's established per-file convention (`tmpfs`'s own
 //! `NAME_MAX`/`TMPFS_HASH_BUCKETS`) — `IPB` (inodes-per-block) is the one
 //! exception: it depends on `sizeof(struct dinode)`, so it is a `const`
-//! computed from the real bindgen type via `core::mem::size_of`, not a
-//! hand-copied number, so it tracks the struct layout automatically.
+//! computed from the real `dinode` type (native since P3-4a, reached via
+//! its unchanged `crate::bindings` facade path) via `core::mem::size_of`,
+//! not a hand-copied number, so it tracks the struct layout automatically.
 pub mod block_cache;
 pub mod file;
 pub mod inode;
@@ -104,9 +109,10 @@ pub(crate) const ROOTINO: u64 = 1;
 /// terminator stored on disk if the name fills the whole field).
 pub(crate) const DIRSIZ: usize = 14;
 /// `IPB` (`ondisk.h`, `BSIZE / sizeof(struct dinode)`) — inodes per disk
-/// block. Computed from the real bindgen `dinode` layout (not hand-copied)
-/// so it tracks the struct automatically; matches classic xv6's value of
-/// 16 for the unchanged on-disk format.
+/// block. Computed from the real `dinode` layout (native since P3-4a,
+/// unchanged facade path; not hand-copied) so it tracks the struct
+/// automatically; matches classic xv6's value of 16 for the unchanged
+/// on-disk format.
 pub(crate) const IPB: u64 = BSIZE as u64 / core::mem::size_of::<crate::bindings::dinode>() as u64;
 /// `FSMAGIC` (`ondisk.h`) — required value of `struct superblock.magic`.
 pub(crate) const FSMAGIC: u32 = 0x1020_3040;
@@ -222,7 +228,7 @@ pub(crate) fn xv6fs_mode_to_type(mode: u32) -> i16 {
 /// `XV6FS_IBLOCK(ino, sb)` (`xv6fs_private.h`) — the disk block number
 /// containing inode `ino`'s `struct dinode`.
 ///
-/// `inodestart` is `uint` (`u32`) on the real bindgen `superblock` type;
+/// `inodestart` is `uint` (`u32`) on the real `superblock` type;
 /// widened to `u64` before the divide/add to match the C macro's
 /// (unsigned, but effectively infinite-precision for realistic disk
 /// sizes) arithmetic without a wraparound hazard.

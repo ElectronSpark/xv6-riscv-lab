@@ -296,6 +296,23 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "struct context",
             "cpu_local",
             "struct cpu_local",
+            // kernel/vfs/xv6fs/{superblock,inode}.rs (P3-4a, the
+            // on-disk trio from vfs/xv6fs/ondisk.h — the persistent
+            // fs.img records shared with HOST-side mkfs). All three
+            // derived Copy/Clone in the pre-nativization bindgen output
+            // (plain-int PODs); the natives keep both, exactly as
+            // emitted (`read_dirent` returns `dirent` by value).
+            // Nothing still-bindgen embeds any of them by value
+            // (verified: zero field/pointer mentions remain in the
+            // emission — their only by-value embedder,
+            // `xv6fs_superblock.disk_sb`, has been native since N8).
+            // Tag-prefixed forms included (no typedefs).
+            "superblock",
+            "struct superblock",
+            "dinode",
+            "struct dinode",
+            "dirent",
+            "struct dirent",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -606,6 +623,8 @@ fn main() {
         // driver wave.
         .allowlist_type("xv6fs_superblock|xv6fs_inode|xv6fs_log|xv6fs_logheader")
         .allowlist_type("xv6fs_block_cache|free_extent")
+        // (native since P3-4a — blocklisted + facade-redirected below;
+        // kept here for the paper trail, blocklist wins in bindgen)
         .allowlist_type("^superblock$|^dinode$|^dirent$")
         // dev/buf.h's classic xv6 buffer-cache `struct buf` (kernel/bio.c,
         // unchanged C) -- xv6fs reads/writes `bp->data`/`bp->blockno`
@@ -1155,15 +1174,30 @@ fn main() {
         // `struct xv6fs_superblock` -> kernel/vfs/xv6fs/superblock.rs;
         // `struct xv6fs_inode` -> kernel/vfs/xv6fs/inode.rs;
         // kernel/vfs/xv6fs/block_cache.h `struct xv6fs_block_cache` ->
-        // kernel/vfs/xv6fs/block_cache.rs. The on-disk
-        // `superblock`/`dinode`/`dirent` records (vfs/xv6fs/ondisk.h)
-        // stay bindgen-emitted (P3-4 scrutiny class).
+        // kernel/vfs/xv6fs/block_cache.rs. (The on-disk
+        // `superblock`/`dinode`/`dirent` records nativized later, in
+        // P3-4a — next entry below.)
         .blocklist_type("xv6fs_logheader|xv6fs_log|xv6fs_block_cache|xv6fs_superblock|xv6fs_inode")
         .raw_line("pub use crate::vfs::xv6fs::log::Xv6fsLogHeader as xv6fs_logheader;")
         .raw_line("pub use crate::vfs::xv6fs::log::Xv6fsLog as xv6fs_log;")
         .raw_line("pub use crate::vfs::xv6fs::block_cache::Xv6fsBlockCache as xv6fs_block_cache;")
         .raw_line("pub use crate::vfs::xv6fs::superblock::Xv6fsSuperblock as xv6fs_superblock;")
         .raw_line("pub use crate::vfs::xv6fs::inode::Xv6fsInode as xv6fs_inode;")
+        // P3-4a (on-disk format scrutiny class): kernel/inc/vfs/xv6fs/
+        // ondisk.h `struct superblock` -> kernel/vfs/xv6fs/superblock.rs
+        // (`OndiskSuperblock`); `struct dinode`/`struct dirent` ->
+        // kernel/vfs/xv6fs/inode.rs (`Dinode`/`Dirent`). These are the
+        // PERSISTENT fs.img records also compiled into HOST-side
+        // mkfs/mkfs.c from the SAME header (which therefore stays,
+        // untouched); the natives' byte-exact asserts + the two-arch
+        // (rv64gc + x86_64) gcc probe pin native == header == mkfs.
+        // Anchored regexes: bare `superblock`/`dinode`/`dirent` must not
+        // swallow `xv6fs_superblock`/`vfs_superblock`/etc. (matches the
+        // allowlist's own anchored spelling for this trio).
+        .blocklist_type("^superblock$|^dinode$|^dirent$")
+        .raw_line("pub use crate::vfs::xv6fs::superblock::OndiskSuperblock as superblock;")
+        .raw_line("pub use crate::vfs::xv6fs::inode::Dinode as dinode;")
+        .raw_line("pub use crate::vfs::xv6fs::inode::Dirent as dirent;")
         // `__IncompleteArrayField` used to be bindgen-emitted because
         // (only) the `tmpfs_dentry` emission spelled its C flexible
         // array member with it; with `tmpfs_dentry` blocklisted, bindgen
