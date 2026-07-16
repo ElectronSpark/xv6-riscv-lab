@@ -1901,7 +1901,9 @@ const TYPE_TREE_U32: u32 = 2;
 
 #[inline]
 pub fn tnode_entry_offset() -> usize {
-    core::mem::offset_of!(tnode_t, __bindgen_anon_1)
+    // P3-N2: `tnode_t` IS `thread_queue::Tnode` now; the anonymous
+    // union field bindgen used to call `__bindgen_anon_1` is `u`.
+    core::mem::offset_of!(tnode_t, u)
 }
 
 #[derive(Clone, Copy)]

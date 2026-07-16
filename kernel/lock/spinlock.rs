@@ -34,50 +34,50 @@ use crate::machine::{
 use crate::printf::panic_state;
 
 // ---------------------------------------------------------------------------
-// Native layout — Wave P3-3A.
+// Native layout — Wave P3-3A, nativized in Wave P3-N2.
 //
-// `crate::bindings::spinlock_t` is bindgen-generated from
-// `kernel/inc/lock/spinlock.h`'s `struct spinlock`. That type is
-// referenced by essentially every lock-protected struct in the kernel
-// (~290 non-`lock/` referents at last count) via the C-ABI
-// `spin_init`/`spin_lock`/`spin_unlock`/... entry points below, so
-// those entry points keep their `*mut spinlock_t` signatures unchanged
-// — retyping them would ripple into hundreds of out-of-scope call
-// sites across mm/proc/vfs/tty/dev (explicitly out of this wave's
-// scope; see `docs/rustify/phase3_plan.md` Wave P3-3).
-//
-// `RawSpinlock` is this module's own native, layout-identical
-// counterpart, used internally by the private field-accessor helpers
-// below (and available to sibling `lock/*.rs` files that embed a
-// spinlock by value — `mutex.rs`/`rwsem.rs`/`semaphore.rs`/
-// `completion.rs`). The layout-equivalence is a compile-time-checked
-// fact (see the `const _` assertions), not an assumption: every public
-// function still hands back/receives `*mut spinlock_t` at its boundary
-// and casts to `*mut RawSpinlock` exactly once per call.
+// `RawSpinlock` IS the kernel-wide Rust definition of
+// `kernel/inc/lock/spinlock.h`'s `struct spinlock` now: `build.rs`
+// blocklists the bindgen-generated `spinlock`/`spinlock_t` and injects
+// `pub use crate::lock::spinlock::RawSpinlock as spinlock_t;` raw-line
+// re-exports, so every remaining bindgen struct that embeds a spinlock
+// by value (and every `crate::bindings::spinlock_t` path across the
+// crate) resolves here. Field names/types stay exactly as bindgen had
+// them so the static-initializer literals in `uart.rs`/`console.rs`/
+// `sync/sync.rs` keep compiling unchanged.
 //
 // Note the C typedef's `__ALIGNED_CACHELINE` (`__attribute__((aligned(64)))`)
 // is attached to the *typedef name* `spinlock_t`, not to `struct
-// spinlock` itself — clang/bindgen does not propagate that to the bare
-// record type, so `crate::bindings::spinlock_t` (and this native
-// mirror) is naturally aligned (align 8, size 24), not cacheline
-// aligned. Confirmed by the pre-existing assertion in
-// `kernel/mm/slab.rs` (`size_of::<spinlock_t>() == 24`) and re-proven
-// below.
+// spinlock` itself — GCC gives the typedef alignment 64 but leaves
+// sizeof at 24 (verified by cross-compiler probe: `_Alignof(spinlock_t)
+// == 64`, `sizeof(spinlock_t) == 24`, `_Alignof(struct spinlock) == 8`).
+// Rust cannot express size 24 / align 64 (size must be a multiple of
+// alignment), and bindgen resolved this the only layout-sound way:
+// the record type stays 24/8 and each *embedding* struct picks up its
+// own `#[repr(align(64))]` from clang's real C layout (member offsets
+// are unaffected because a `spinlock_t` member is only ever placed at
+// offset 0 or an already-8-aligned offset with sizeof 24). This native
+// mirror therefore reproduces the 24/8 record layout, NOT align(64).
 #[repr(C)]
-pub(crate) struct RawSpinlock {
+#[derive(Copy, Clone)]
+pub struct RawSpinlock {
     pub(crate) locked: u32,
     pub(crate) name: *mut c_char,
     pub(crate) cpu: *mut cpu_local,
 }
 
+// P3-N2 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
+// spinlock { locked: uint, name: *mut c_char, cpu: *mut cpu_local }`,
+// no align attribute) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe against
+// `kernel/inc/lock/spinlock.h` (size 24, align 8, offsets 0/8/16).
 const _: () = {
-    assert!(core::mem::size_of::<RawSpinlock>() == core::mem::size_of::<spinlock_t>());
-    assert!(core::mem::align_of::<RawSpinlock>() == core::mem::align_of::<spinlock_t>());
-    assert!(
-        core::mem::offset_of!(RawSpinlock, locked) == core::mem::offset_of!(spinlock_t, locked)
-    );
-    assert!(core::mem::offset_of!(RawSpinlock, name) == core::mem::offset_of!(spinlock_t, name));
-    assert!(core::mem::offset_of!(RawSpinlock, cpu) == core::mem::offset_of!(spinlock_t, cpu));
+    assert!(core::mem::size_of::<RawSpinlock>() == 24, "struct spinlock: u32 + pad + 2 pointers");
+    assert!(core::mem::align_of::<RawSpinlock>() == 8, "struct spinlock: natural alignment (the aligned(64) rides the typedef only)");
+    assert!(core::mem::offset_of!(RawSpinlock, locked) == 0, "spinlock.locked offset");
+    assert!(core::mem::offset_of!(RawSpinlock, name) == 8, "spinlock.name offset");
+    assert!(core::mem::offset_of!(RawSpinlock, cpu) == 16, "spinlock.cpu offset");
 };
 
 // ---------------------------------------------------------------------------

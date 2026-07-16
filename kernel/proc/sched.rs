@@ -622,7 +622,11 @@ pub(crate) unsafe fn scheduler_dump_chan_queue() {
     crate::kprintln!("Channel Queue Dump:");
     unsafe {
         let root = &raw mut (*chan_queue_ptr()).root;
-        let tree_entry_off = offset_of!(tnode, __bindgen_anon_1) + offset_of!(crate::bindings::tnode__bindgen_ty_1__bindgen_ty_2, entry);
+        // P3-N2: `tnode` IS `thread_queue::Tnode` now; the anonymous
+        // union field is `u`, and the tree arm is the native
+        // `TnodeTreeArm` (its `entry` sits at arm offset 0).
+        let tree_entry_off = offset_of!(tnode, u)
+            + offset_of!(crate::proc::thread_queue::TnodeTreeArm, entry);
         let mut node = rb_first_node(root);
         while !node.is_null() {
             let next = rb_next_node(node);

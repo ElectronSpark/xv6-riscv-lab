@@ -74,24 +74,34 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 // file's own native, layout-identical working type; `lk` reuses
 // `spinlock::RawSpinlock`, `wait_queue` stays the bindgen `tq_t`
 // (proc-owned, out of this wave's scope).
+// P3-N2: `RawSemaphore` IS the kernel-wide Rust definition of `struct
+// semaphore` now (`build.rs` blocklists the bindgen `semaphore` and
+// re-exports this type under that name; the C `sem_t` typedef never
+// made it into the bindgen output — this file's `sem_t` is a local
+// `use ... semaphore as sem_t` rename, which keeps resolving here).
 #[repr(C, align(64))]
-pub(crate) struct RawSemaphore {
+#[derive(Copy, Clone)]
+pub struct RawSemaphore {
     pub(crate) lk: crate::lock::spinlock::RawSpinlock,
     pub(crate) wait_queue: tq_t,
     pub(crate) value: c_int,
     pub(crate) name: *const c_char,
 }
 
+// P3-N2 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (`#[repr(C)] #[repr(align(64))]
+// pub struct semaphore { lk: spinlock_t, wait_queue: tq_t, value:
+// c_int, name: *const c_char }`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe against
+// `kernel/inc/lock/semaphore_types.h` (size 128, align 64,
+// offsets 0/24/72/80).
 const _: () = {
-    assert!(core::mem::size_of::<RawSemaphore>() == core::mem::size_of::<sem_t>());
-    assert!(core::mem::align_of::<RawSemaphore>() == core::mem::align_of::<sem_t>());
-    assert!(core::mem::offset_of!(RawSemaphore, lk) == core::mem::offset_of!(sem_t, lk));
-    assert!(
-        core::mem::offset_of!(RawSemaphore, wait_queue)
-            == core::mem::offset_of!(sem_t, wait_queue)
-    );
-    assert!(core::mem::offset_of!(RawSemaphore, value) == core::mem::offset_of!(sem_t, value));
-    assert!(core::mem::offset_of!(RawSemaphore, name) == core::mem::offset_of!(sem_t, name));
+    assert!(core::mem::size_of::<RawSemaphore>() == 128, "sem_t size (88 payload bytes padded to 2 cachelines)");
+    assert!(core::mem::align_of::<RawSemaphore>() == 64, "sem_t alignment (from embedded spinlock_t)");
+    assert!(core::mem::offset_of!(RawSemaphore, lk) == 0, "semaphore.lk offset");
+    assert!(core::mem::offset_of!(RawSemaphore, wait_queue) == 24, "semaphore.wait_queue offset");
+    assert!(core::mem::offset_of!(RawSemaphore, value) == 72, "semaphore.value offset");
+    assert!(core::mem::offset_of!(RawSemaphore, name) == 80, "semaphore.name offset");
 };
 
 /// Reinterpret the bindgen `*mut sem_t` as the native mirror.

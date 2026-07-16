@@ -67,23 +67,37 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 // other lock-owned type); `wait_queue` stays the bindgen `tq_t` because
 // thread-queues are proc-owned (`kernel/inc/proc/tq_type.h`), out of
 // this wave's scope.
+// P3-N2: `RawMutex` IS the kernel-wide Rust definition of `mutex_t`
+// now (`build.rs` blocklists the bindgen `mutex`/`mutex_t` and
+// re-exports this type under both names), so bindgen structs embedding
+// a mutex by value (`tty.mutex`, `vfs_fdtable.lock`, ...) resolve here
+// and require the same `Copy`/`Clone` derives the bindgen struct had.
+// The `align(64)` reproduces what clang derived for the C struct from
+// its `spinlock_t lk` member (the typedef carries aligned(64); see
+// spinlock.rs's layout note).
 #[repr(C, align(64))]
-pub(crate) struct RawMutex {
+#[derive(Copy, Clone)]
+pub struct RawMutex {
     pub(crate) lk: crate::lock::spinlock::RawSpinlock,
     pub(crate) wait_queue: tq_t,
     pub(crate) name: *mut c_char,
     pub(crate) holder: c_int,
 }
 
+// P3-N2 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (`#[repr(C)] #[repr(align(64))]
+// pub struct mutex { lk: spinlock_t, wait_queue: tq_t, name: *mut
+// c_char, holder: pid_t }`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe against
+// `kernel/inc/lock/mutex_types.h` (size 128, align 64,
+// offsets 0/24/72/80).
 const _: () = {
-    assert!(core::mem::size_of::<RawMutex>() == core::mem::size_of::<mutex_t>());
-    assert!(core::mem::align_of::<RawMutex>() == core::mem::align_of::<mutex_t>());
-    assert!(core::mem::offset_of!(RawMutex, lk) == core::mem::offset_of!(mutex_t, lk));
-    assert!(
-        core::mem::offset_of!(RawMutex, wait_queue) == core::mem::offset_of!(mutex_t, wait_queue)
-    );
-    assert!(core::mem::offset_of!(RawMutex, name) == core::mem::offset_of!(mutex_t, name));
-    assert!(core::mem::offset_of!(RawMutex, holder) == core::mem::offset_of!(mutex_t, holder));
+    assert!(core::mem::size_of::<RawMutex>() == 128, "mutex_t size (84 payload bytes padded to 2 cachelines)");
+    assert!(core::mem::align_of::<RawMutex>() == 64, "mutex_t alignment (from embedded spinlock_t)");
+    assert!(core::mem::offset_of!(RawMutex, lk) == 0, "mutex.lk offset");
+    assert!(core::mem::offset_of!(RawMutex, wait_queue) == 24, "mutex.wait_queue offset");
+    assert!(core::mem::offset_of!(RawMutex, name) == 72, "mutex.name offset");
+    assert!(core::mem::offset_of!(RawMutex, holder) == 80, "mutex.holder offset");
 };
 
 /// Reinterpret the bindgen `*mut mutex_t` as the native mirror.

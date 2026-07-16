@@ -81,26 +81,33 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 // own native, layout-identical working type; `lock` reuses
 // `spinlock::RawSpinlock`, `wait_queue` stays the bindgen `tq_t`
 // (proc-owned, out of this wave's scope).
+// P3-N2: `RawCompletion` IS the kernel-wide Rust definition of
+// `completion_t` now (`build.rs` blocklists the bindgen `completion_t`
+// — the C type is an anonymous struct typedef, so that is its only
+// name — and re-exports this type under it), so bindgen structs
+// embedding a completion by value (`pcache.flush_completion`,
+// `tty.completion`, `bio.io_completion`, ...) resolve here and require
+// the same `Copy`/`Clone` derives the bindgen struct had.
 #[repr(C, align(64))]
-pub(crate) struct RawCompletion {
+#[derive(Copy, Clone)]
+pub struct RawCompletion {
     pub(crate) lock: crate::lock::spinlock::RawSpinlock,
     pub(crate) done: c_int,
     pub(crate) wait_queue: tq_t,
 }
 
+// P3-N2 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (`#[repr(C)] #[repr(align(64))]
+// pub struct completion_t { lock: spinlock_t, done: c_int, wait_queue:
+// tq_t }`) and independently confirmed by a riscv64-unknown-elf-gcc
+// `_Static_assert` probe against `kernel/inc/lock/completion_types.h`
+// (size 128, align 64, offsets 0/24/32).
 const _: () = {
-    assert!(core::mem::size_of::<RawCompletion>() == core::mem::size_of::<completion_t>());
-    assert!(core::mem::align_of::<RawCompletion>() == core::mem::align_of::<completion_t>());
-    assert!(
-        core::mem::offset_of!(RawCompletion, lock) == core::mem::offset_of!(completion_t, lock)
-    );
-    assert!(
-        core::mem::offset_of!(RawCompletion, done) == core::mem::offset_of!(completion_t, done)
-    );
-    assert!(
-        core::mem::offset_of!(RawCompletion, wait_queue)
-            == core::mem::offset_of!(completion_t, wait_queue)
-    );
+    assert!(core::mem::size_of::<RawCompletion>() == 128, "completion_t size (80 payload bytes padded to 2 cachelines)");
+    assert!(core::mem::align_of::<RawCompletion>() == 64, "completion_t alignment (from embedded spinlock_t)");
+    assert!(core::mem::offset_of!(RawCompletion, lock) == 0, "completion.lock offset");
+    assert!(core::mem::offset_of!(RawCompletion, done) == 24, "completion.done offset");
+    assert!(core::mem::offset_of!(RawCompletion, wait_queue) == 32, "completion.wait_queue offset");
 };
 
 /// Reinterpret the bindgen `*mut completion_t` as the native mirror.

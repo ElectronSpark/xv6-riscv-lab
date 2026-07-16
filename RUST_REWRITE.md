@@ -1729,6 +1729,39 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   panics. (Worker had independently reached mmaptest 16/16 before
   being stopped.)
 
+### Iteration 58 — 2026-07-16 — Wave P3-N2: lock + thread-queue type family nativized (10 types, 3 tiers)
+
+- Second nativization wave via the 41f268e technique: `spinlock_t`,
+  `rwlock` (tier 1) → `tnode_t`/`tq_t`/`ttree_t`/`tq_type_t` (tier 2,
+  embed the N1 natives) → `mutex_t`/`rwsem_t`/`semaphore_t`/
+  `completion_t` (tier 3, embed tq). bindgen emits ZERO struct defs for
+  the family; the natives in lock/*.rs + proc/thread_queue.rs are the
+  single source of truth (many pre-existed from P3-3A/3D with
+  *relative* asserts — this wave promoted them to THE definitions with
+  hardcoded proofs).
+- **Layout evidence upgraded**: a cross-compiler `_Static_assert` probe
+  (compiled with the real riscv64 toolchain, rv64gc/lp64d) proved every
+  size/align/offset for all 10 types including both `tnode` anonymous-
+  union arms — stronger than trusting bindgen output.
+- **Brief error caught by the worker**: `__ALIGNED_CACHELINE` rides the
+  *typedef* `spinlock_t`, not `struct spinlock` — C sizeof stays 24
+  while typedef alignof is 64 (inexpressible in one Rust type). The
+  suggested `#[repr(C, align(64))]` would have padded size to 64 and
+  shifted every embedder's fields (e.g. `mutex.wait_queue` 24→64) — a
+  layout break. Kept 24/8 with embedders carrying their own align, as
+  bindgen did. rwlock's `_Atomic` fields: alias target is a plain-POD
+  twin `Rwlock` (proc_shims constructs by field literal; pcache embeds);
+  the atomic-view `RawRwlock` and all access code untouched.
+- Copy-semantics fidelity: NATIVE_TYPES callback split into Copy-yes vs
+  non-Copy (tnode) lists; embedder derive lines verified byte-identical
+  to pre-change snapshot. Orphan `tnode__bindgen_ty_1` shells swept.
+- Verified (orchestrator): 0-warning clean rebuild; cache clean; bindgen
+  emission grep = 0 structs + redirect `pub use` lines confirmed; boot
+  gate; **testsig 21/21**; **mmaptest all passed**; forkfork OK;
+  **forkforkfork identical pre-existing panic** (message + region match
+  the worker's pre-change-baseline A/B). (Worker: 6/6 boots, stressfs,
+  createdelete, ENOENT, C probe.) 11 files, +380/−200.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

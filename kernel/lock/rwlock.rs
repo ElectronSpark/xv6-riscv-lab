@@ -29,7 +29,44 @@ use crate::machine;
 // `completion.rs`, which have a clean public/private split — every
 // function here keeps its `*mut rwlock_t` parameter unchanged.
 //
-// `RawRwlock` is still genuinely useful: unlike the bindgen struct
+// P3-N2 nativization split: `Rwlock` below IS the kernel-wide Rust
+// definition of `kernel/inc/lock/rwlock_types.h`'s `struct rwlock` now
+// (`build.rs` blocklists the bindgen `rwlock` and re-exports
+// `pub use crate::lock::rwlock::Rwlock as rwlock;`). It reproduces the
+// bindgen record byte-for-byte, INCLUDING the plain (non-atomic)
+// `u64`/`c_int` field types the C11 `_Atomic uint64`/`_Atomic int`
+// members lowered to — `proc_shims.rs`'s `PROC_TABLE` static constructs
+// it with a plain field literal (`rwlock { state: 0, .. }`), and the
+// `pcache` bindgen struct embeds it by value, both of which require the
+// plain-POD (Copy) shape. All atomic access keeps going through the
+// separate `RawRwlock` view below, unchanged.
+//
+// `struct rwlock` carries `__ALIGNED_CACHELINE` on the *struct* itself
+// (unlike `spinlock`, where it rides the typedef), so here the record
+// type genuinely is size 64 / align 64.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Rwlock {
+    pub state: u64,
+    pub w_holder: c_int,
+    pub name: *const c_char,
+}
+
+// P3-N2 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (kernel_bindings.rs: `#[repr(C)]
+// #[repr(align(64))] pub struct rwlock { state: uint64, w_holder:
+// c_int, name: *const c_char }`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe against
+// `kernel/inc/lock/rwlock_types.h` (size 64, align 64, offsets 0/8/16).
+const _: () = {
+    assert!(core::mem::size_of::<Rwlock>() == 64, "struct rwlock: 24 payload bytes padded to one cacheline");
+    assert!(core::mem::align_of::<Rwlock>() == 64, "struct rwlock: __ALIGNED_CACHELINE on the struct");
+    assert!(core::mem::offset_of!(Rwlock, state) == 0, "rwlock.state offset");
+    assert!(core::mem::offset_of!(Rwlock, w_holder) == 8, "rwlock.w_holder offset");
+    assert!(core::mem::offset_of!(Rwlock, name) == 16, "rwlock.name offset");
+};
+
+// `RawRwlock` is still genuinely useful: unlike the C record type
 // (whose `state`/`w_holder` fields are plain `uint64`/`c_int`, forcing
 // every access through a pointer-cast-to-atomic reinterpretation), the
 // native mirror declares those fields as real `AtomicU64`/`AtomicI32`.

@@ -46,12 +46,55 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "rb_node",
             "rb_root",
             "rb_root_opts",
+            // kernel/lock/spinlock.rs (P3-N2)
+            "spinlock",
+            "spinlock_t",
+            // kernel/lock/rwlock.rs (P3-N2)
+            "rwlock",
+            // kernel/proc/thread_queue.rs (P3-N2). `ttree` derived
+            // no Copy in the old bindgen output (derive-analysis quirk
+            // around its blocklisted `rb_root` member), but the native
+            // `Ttree` genuinely is Copy and nothing in the remaining
+            // bindgen output embeds it by value (verified), so Yes is
+            // the accurate answer. `tq_type_t` is a plain c_uint alias.
+            "tq",
+            "tq_t",
+            "ttree",
+            "ttree_t",
+            "tq_type_t",
+            // kernel/lock/{mutex,rwsem,semaphore,completion}.rs (P3-N2)
+            "mutex",
+            "mutex_t",
+            "rwsem",
+            "rwsem_t",
+            "semaphore",
+            "sem_t",
+            "completion_t",
         ];
-        if !NATIVE_TYPES.contains(&name) {
+        // P3-N2: natives whose hand-written definitions deliberately do
+        // NOT derive Copy/Clone (matching the pre-nativization bindgen
+        // output, where `tnode` derived neither). Kept separate so the
+        // trait answers stay per-type accurate: nothing left in the
+        // bindgen output embeds these by value (verified), but a wrong
+        // Yes here could silently re-derive Copy on a future embedder.
+        const NONCOPY_NATIVE_TYPES: &[&str] = &[
+            // kernel/proc/thread_queue.rs (P3-N2)
+            "tnode",
+            "tnode_t",
+        ];
+        let is_copy = if NATIVE_TYPES.contains(&name) {
+            true
+        } else if NONCOPY_NATIVE_TYPES.contains(&name) {
+            false
+        } else {
             return None;
-        }
+        };
         match derive_trait {
-            DeriveTrait::Copy => Some(ImplementsTrait::Yes),
+            DeriveTrait::Copy => Some(if is_copy {
+                ImplementsTrait::Yes
+            } else {
+                ImplementsTrait::No
+            }),
             DeriveTrait::Debug
             | DeriveTrait::Default
             | DeriveTrait::Hash
@@ -298,6 +341,68 @@ fn main() {
         .raw_line("pub type rb_node = crate::bintree::RawRbNode;")
         .raw_line("pub type rb_root = crate::bintree::RawRbRoot;")
         .raw_line("pub type rb_root_opts = crate::bintree::RawRbRootOpts;");
+
+    // ------------------------------------------------------------------
+    // P3-N2 nativization: the lock + thread-queue type family. Same
+    // blocklist+redirect technique as P3-N1 above, with one twist: these
+    // natives live in *private* top-level modules (`mod lock`, `mod
+    // proc`), so a plain `pub type` alias would leave their effective
+    // visibility crate-capped and trip the `private_interfaces` lint on
+    // every generated `pub fn` signature that mentions them. `pub use`
+    // re-exports (the standard facade pattern) lift the items to public
+    // effective visibility instead, which is also exactly what a
+    // bindgen-generated definition would have had.
+    builder = builder
+        // kernel/inc/lock/spinlock.h `struct spinlock` ->
+        // kernel/lock/spinlock.rs. NOTE: the C `__ALIGNED_CACHELINE`
+        // rides the *typedef*, not the struct; the record type is 24/8
+        // (see spinlock.rs's layout proof) and embedding structs carry
+        // their own repr(align(64)), exactly as bindgen emitted them.
+        .blocklist_type("spinlock|spinlock_t")
+        .raw_line("pub use crate::lock::spinlock::RawSpinlock as spinlock;")
+        .raw_line("pub use crate::lock::spinlock::RawSpinlock as spinlock_t;")
+        // kernel/inc/lock/rwlock_types.h `struct rwlock` (no typedef) ->
+        // kernel/lock/rwlock.rs. Plain-field twin (`Rwlock`), NOT the
+        // atomic-view `RawRwlock`: the C `_Atomic` members lowered to
+        // plain u64/c_int in bindgen and `proc_shims.rs` constructs the
+        // type with a plain field literal.
+        .blocklist_type("rwlock")
+        .raw_line("pub use crate::lock::rwlock::Rwlock as rwlock;")
+        // kernel/inc/proc/tq_type.h thread-queue family ->
+        // kernel/proc/thread_queue.rs. `tnode`'s anonymous union was
+        // emitted in the degraded `__BindgenUnionField` blob form since
+        // P3-N1 (its arms directly embed the blocklisted
+        // `list_node_t`/`rb_node`); the native `Tnode` carries the real
+        // Rust union, proven blob-identical (40/8) by thread_queue.rs's
+        // layout gate + the cross-compiler probe. `tq_type_t` is the
+        // constified-enum typedef; nothing on the Rust side reads its
+        // variants, so a bare c_uint alias (bindgen's own lowering)
+        // fully replaces it.
+        // (`tnode__bindgen_ty_1.*` covers the anonymous union + arm
+        // shells bindgen would otherwise still emit as orphans after
+        // `tnode` itself is blocklisted.)
+        .blocklist_type("tq|tq_t|ttree|ttree_t|tnode|tnode_t|tnode__bindgen_ty_1.*|tq_type_t")
+        .raw_line("pub use crate::proc::thread_queue::Tq as tq;")
+        .raw_line("pub use crate::proc::thread_queue::Tq as tq_t;")
+        .raw_line("pub use crate::proc::thread_queue::Ttree as ttree;")
+        .raw_line("pub use crate::proc::thread_queue::Ttree as ttree_t;")
+        .raw_line("pub use crate::proc::thread_queue::Tnode as tnode;")
+        .raw_line("pub use crate::proc::thread_queue::Tnode as tnode_t;")
+        .raw_line("pub type tq_type_t = ::core::ffi::c_uint;")
+        // The tq_t-embedding sleeping locks ->
+        // kernel/lock/{mutex,rwsem,semaphore,completion}.rs. NOTE: the
+        // C `sem_t` typedef (semaphore_types.h) never appeared in the
+        // bindgen output (unreferenced by any allowlisted item), so
+        // only `semaphore` is redirected — surface kept identical.
+        // `completion_t` is an anonymous-struct typedef; that is the
+        // type's only name.
+        .blocklist_type("mutex|mutex_t|rwsem|rwsem_t|semaphore|sem_t|completion_t")
+        .raw_line("pub use crate::lock::mutex::RawMutex as mutex;")
+        .raw_line("pub use crate::lock::mutex::RawMutex as mutex_t;")
+        .raw_line("pub use crate::lock::rwsem::RawRwsem as rwsem;")
+        .raw_line("pub use crate::lock::rwsem::RawRwsem as rwsem_t;")
+        .raw_line("pub use crate::lock::semaphore::RawSemaphore as semaphore;")
+        .raw_line("pub use crate::lock::completion::RawCompletion as completion_t;");
 
     let bindings = builder
         .generate()

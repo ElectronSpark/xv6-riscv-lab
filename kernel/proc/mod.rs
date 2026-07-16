@@ -35,7 +35,7 @@ mod workqueue;
 mod workqueue_test;
 mod rq_test;
 mod thread_group;
-mod thread_queue;
+pub(crate) mod thread_queue;
 mod thread;
 mod sched;
 mod rq;

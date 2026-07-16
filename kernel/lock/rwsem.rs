@@ -64,8 +64,14 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 // working type: every private helper operates on it directly. `lock`
 // reuses `spinlock::RawSpinlock`; `read_queue`/`write_queue` stay the
 // bindgen `tq_t` (proc-owned, out of this wave's scope).
+// P3-N2: `RawRwsem` IS the kernel-wide Rust definition of `rwsem_t`
+// now (`build.rs` blocklists the bindgen `rwsem`/`rwsem_t` and
+// re-exports this type under both names), so bindgen structs embedding
+// an rwsem by value (`vm.lock`, `vfs_inode.rw_lock`, ...) resolve here
+// and require the same `Copy`/`Clone` derives the bindgen struct had.
 #[repr(C, align(64))]
-pub(crate) struct RawRwsem {
+#[derive(Copy, Clone)]
+pub struct RawRwsem {
     pub(crate) lock: crate::lock::spinlock::RawSpinlock,
     pub(crate) readers: c_int,
     pub(crate) holder_pid: c_int,
@@ -75,25 +81,24 @@ pub(crate) struct RawRwsem {
     pub(crate) flags: u64,
 }
 
+// P3-N2 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (`#[repr(C)] #[repr(align(64))]
+// pub struct rwsem { lock: spinlock_t, readers: c_int, holder_pid:
+// pid_t, read_queue: tq_t, write_queue: tq_t, name: *const c_char,
+// flags: uint64 }`) and independently confirmed by a
+// riscv64-unknown-elf-gcc `_Static_assert` probe against
+// `kernel/inc/lock/rwsem_types.h` (size 192, align 64,
+// offsets 0/24/28/32/80/128/136).
 const _: () = {
-    assert!(core::mem::size_of::<RawRwsem>() == core::mem::size_of::<rwsem_t>());
-    assert!(core::mem::align_of::<RawRwsem>() == core::mem::align_of::<rwsem_t>());
-    assert!(core::mem::offset_of!(RawRwsem, lock) == core::mem::offset_of!(rwsem_t, lock));
-    assert!(
-        core::mem::offset_of!(RawRwsem, readers) == core::mem::offset_of!(rwsem_t, readers)
-    );
-    assert!(
-        core::mem::offset_of!(RawRwsem, holder_pid) == core::mem::offset_of!(rwsem_t, holder_pid)
-    );
-    assert!(
-        core::mem::offset_of!(RawRwsem, read_queue) == core::mem::offset_of!(rwsem_t, read_queue)
-    );
-    assert!(
-        core::mem::offset_of!(RawRwsem, write_queue)
-            == core::mem::offset_of!(rwsem_t, write_queue)
-    );
-    assert!(core::mem::offset_of!(RawRwsem, name) == core::mem::offset_of!(rwsem_t, name));
-    assert!(core::mem::offset_of!(RawRwsem, flags) == core::mem::offset_of!(rwsem_t, flags));
+    assert!(core::mem::size_of::<RawRwsem>() == 192, "rwsem_t size (144 payload bytes padded to 3 cachelines)");
+    assert!(core::mem::align_of::<RawRwsem>() == 64, "rwsem_t alignment (from embedded spinlock_t)");
+    assert!(core::mem::offset_of!(RawRwsem, lock) == 0, "rwsem.lock offset");
+    assert!(core::mem::offset_of!(RawRwsem, readers) == 24, "rwsem.readers offset");
+    assert!(core::mem::offset_of!(RawRwsem, holder_pid) == 28, "rwsem.holder_pid offset");
+    assert!(core::mem::offset_of!(RawRwsem, read_queue) == 32, "rwsem.read_queue offset");
+    assert!(core::mem::offset_of!(RawRwsem, write_queue) == 80, "rwsem.write_queue offset");
+    assert!(core::mem::offset_of!(RawRwsem, name) == 128, "rwsem.name offset");
+    assert!(core::mem::offset_of!(RawRwsem, flags) == 136, "rwsem.flags offset");
 };
 
 /// Reinterpret the bindgen `*mut rwsem_t` as the native mirror.
