@@ -12,7 +12,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::mem::{offset_of, MaybeUninit};
 
 use crate::bindings::{
-    context, rb_node, rb_root, rq, sched_entity, spinlock_t, thread,
+    context, cpumask_t, rb_node, rb_root, rq, sched_entity, spinlock_t, thread,
     thread_state, tnode_t, ttree_t,
 };
 use crate::machine::{
@@ -48,6 +48,91 @@ use crate::proc::{
 };
 use crate::timer::sched_timer::__do_timer_tick;
 use crate::ipi::ipi_send_single;
+
+// ===========================================================================
+// Native scheduler-policy types — P3-N7 nativization (user directive:
+// remove the C-compatible interfaces). `SchedClass`/`SchedAttr` are the
+// canonical native definitions of `kernel/inc/proc/rq_types.h`'s
+// `struct sched_class`/`struct sched_attr`: `build.rs` blocklists the
+// bindgen emissions and re-exports them as
+// `crate::bindings::sched_class`/`sched_attr` (facade `pub use`, N2
+// pattern); `kernel/proc/cffi.rs`'s layout-pinned mirror `SchedClass`
+// is promoted to a re-export of this definition. The C header stays
+// unchanged (no C consumers remain — the kernel tree has zero `.c`
+// files).
+//
+// `SchedClass` reproduces bindgen's `Option<unsafe extern "C" fn ...>`
+// forms verbatim — trait-ification of the ops table is P3-10's job,
+// not this wave's.
+//
+// DERIVE DECISION (P3-N7): Copy + Clone on both, faithfully
+// reproducing the pre-nativization bindgen emissions (plain fn-pointer
+// table / plain-integer POD; neither ever embedded a blocklisted type,
+// so both kept their derives through every previous wave).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both
+// agree on every value asserted below.
+// ===========================================================================
+
+/// Native `struct sched_class` (`kernel/inc/proc/rq_types.h`) — the
+/// scheduling-policy ops table.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SchedClass {
+    pub enqueue_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub dequeue_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub select_task_rq: Option<
+        unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity, cpumask: cpumask_t) -> *mut rq,
+    >,
+    pub pick_next_task: Option<unsafe extern "C" fn(rq: *mut rq) -> *mut sched_entity>,
+    pub put_prev_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub set_next_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub task_tick: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub task_fork: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub task_dead: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
+    pub yield_task: Option<unsafe extern "C" fn(rq: *mut rq)>,
+}
+
+/// Native `struct sched_attr` (`kernel/inc/proc/rq_types.h`) — task
+/// scheduling parameters for `sched_getattr()`/`sched_setattr()`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SchedAttr {
+    pub size: u32,
+    pub affinity_mask: cpumask_t,
+    pub time_slice: u32,
+    pub priority: c_int,
+    pub flags: u32,
+}
+
+// P3-N7 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc `_Static_assert`
+// probe (see the module note above).
+const _: () = {
+    assert!(core::mem::size_of::<SchedClass>() == 80, "sched_class size");
+    assert!(core::mem::align_of::<SchedClass>() == 8, "sched_class alignment");
+    assert!(core::mem::offset_of!(SchedClass, enqueue_task) == 0, "sched_class.enqueue_task offset");
+    assert!(core::mem::offset_of!(SchedClass, dequeue_task) == 8, "sched_class.dequeue_task offset");
+    assert!(core::mem::offset_of!(SchedClass, select_task_rq) == 16, "sched_class.select_task_rq offset");
+    assert!(core::mem::offset_of!(SchedClass, pick_next_task) == 24, "sched_class.pick_next_task offset");
+    assert!(core::mem::offset_of!(SchedClass, put_prev_task) == 32, "sched_class.put_prev_task offset");
+    assert!(core::mem::offset_of!(SchedClass, set_next_task) == 40, "sched_class.set_next_task offset");
+    assert!(core::mem::offset_of!(SchedClass, task_tick) == 48, "sched_class.task_tick offset");
+    assert!(core::mem::offset_of!(SchedClass, task_fork) == 56, "sched_class.task_fork offset");
+    assert!(core::mem::offset_of!(SchedClass, task_dead) == 64, "sched_class.task_dead offset");
+    assert!(core::mem::offset_of!(SchedClass, yield_task) == 72, "sched_class.yield_task offset");
+
+    assert!(core::mem::size_of::<SchedAttr>() == 32, "sched_attr size");
+    assert!(core::mem::align_of::<SchedAttr>() == 8, "sched_attr alignment");
+    assert!(core::mem::offset_of!(SchedAttr, size) == 0, "sched_attr.size offset");
+    assert!(core::mem::offset_of!(SchedAttr, affinity_mask) == 8, "sched_attr.affinity_mask offset");
+    assert!(core::mem::offset_of!(SchedAttr, time_slice) == 16, "sched_attr.time_slice offset");
+    assert!(core::mem::offset_of!(SchedAttr, priority) == 20, "sched_attr.priority offset");
+    assert!(core::mem::offset_of!(SchedAttr, flags) == 24, "sched_attr.flags offset");
+};
 
 // ---------------- thread_state constants --------------------------------
 const THREAD_UNUSED: thread_state = 0;

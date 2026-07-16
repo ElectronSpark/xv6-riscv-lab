@@ -196,32 +196,43 @@ const RCU_UINT64_MAX: u64 = u64::MAX;
 const KERNEL_STACK_ORDER: c_int = 2;
 
 // ---------------------------------------------------------------------------
-// Native layout — Wave P3-3A.
+// Native layout — Wave P3-3A, promoted to THE `struct rcu_head` in P3-N7.
 //
-// `crate::bindings::rcu_head_t` (`kernel/inc/lock/rcu_type.h`'s `struct
-// rcu_head`) is embedded *by value* in bindgen structs crate-wide
-// (`struct thread`'s own `rcu_head` field, plus `dev/dev.rs`,
-// `irq/irq_core.rs`, `vfs/vfs_syscall.rs`; ~44 non-`lock/` referents),
-// so the two C-ABI-adjacent boundaries that hand a `*mut rcu_head_t`
-// into this module (`call_rcu` and `api::call`) keep that bindgen
-// type unchanged. Every *internal* pending-callback-list helper below
-// (all private, zero external referents — `head_*`, `CbList`,
-// `cblist_enqueue`/`drain_pending`/`requeue_notready`/
-// `partition_pending`/`invoke_ready`/`call_impl`, and `RcuCpuData`'s
-// own `pending_head`/`pending_tail`) is fully migrated to the native
-// `RawRcuHead`, with exactly one cast at each of the two boundaries.
+// `RawRcuHead` is the canonical native definition of
+// `kernel/inc/lock/rcu_type.h`'s `struct rcu_head`: `build.rs`
+// blocklists the bindgen emission and re-exports this type as
+// `crate::bindings::rcu_head` / `rcu_head_t` (facade `pub use`, N2
+// pattern). It is embedded *by value* crate-wide (the still-bindgen
+// `struct thread`'s own `rcu_head` field — which derives Copy/Clone
+// and therefore needs this type to answer Copy=Yes in `build.rs`'s
+// `NativeTypeCallbacks` — plus the native `DeviceMajor`/`IrqDesc`).
 //
-// The bindgen struct's trailing field is an anonymous bitfield wrapper
-// (`rcu_head__bindgen_ty_1`: 1 bit `embedded_head` + 7 bytes padding,
-// `repr(align(8))`, 8 bytes total) — mirrored here as a plain `u64`
-// (bit 0 = `embedded_head`) with matching accessor semantics.
+// The C struct's trailing member is an anonymous struct with a 1-bit
+// `embedded_head` bitfield (bindgen emitted it as the 8-byte,
+// `repr(align(8))` shell `rcu_head__bindgen_ty_1`) — represented here
+// as a plain `u64` `flags` word (bit 0 = `embedded_head`) with
+// matching accessor semantics, the N5/N6 "single-member anon flags"
+// flattening precedent.
+//
+// DERIVE DECISION (P3-N7): Copy + Clone, faithfully reproducing the
+// pre-nativization bindgen emission (`#[derive(Copy, Clone)]` — all
+// fields are pointers/integers; `rcu_head` never embedded any
+// blocklisted type, so it kept its derives through every previous
+// wave).
+//
+// Layout evidence (P3-N7): temporary in-tree `offset_of!` gate on the
+// live bindgen type + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both
+// agree on every value asserted below (no pipe-style divergence).
 #[repr(C)]
-pub(crate) struct RawRcuHead {
-    pub(crate) next: *mut RawRcuHead,
-    pub(crate) func: rcu_callback_t,
-    pub(crate) data: *mut c_void,
-    pub(crate) timestamp: u64,
-    pub(crate) flags: u64,
+#[derive(Copy, Clone)]
+pub struct RawRcuHead {
+    pub next: *mut RawRcuHead,
+    pub func: rcu_callback_t,
+    pub data: *mut c_void,
+    pub timestamp: u64,
+    /// Anonymous C bitfield struct `{ uint64 embedded_head : 1; }`.
+    pub flags: u64,
 }
 
 impl RawRcuHead {
@@ -235,20 +246,18 @@ impl RawRcuHead {
     }
 }
 
+// P3-N7 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc `_Static_assert`
+// probe (see the representation note above).
 const _: () = {
-    assert!(core::mem::size_of::<RawRcuHead>() == core::mem::size_of::<rcu_head_t>());
-    assert!(core::mem::align_of::<RawRcuHead>() == core::mem::align_of::<rcu_head_t>());
-    assert!(core::mem::offset_of!(RawRcuHead, next) == core::mem::offset_of!(rcu_head_t, next));
-    assert!(core::mem::offset_of!(RawRcuHead, func) == core::mem::offset_of!(rcu_head_t, func));
-    assert!(core::mem::offset_of!(RawRcuHead, data) == core::mem::offset_of!(rcu_head_t, data));
-    assert!(
-        core::mem::offset_of!(RawRcuHead, timestamp)
-            == core::mem::offset_of!(rcu_head_t, timestamp)
-    );
-    assert!(
-        core::mem::offset_of!(RawRcuHead, flags)
-            == core::mem::offset_of!(rcu_head_t, __bindgen_anon_1)
-    );
+    assert!(core::mem::size_of::<RawRcuHead>() == 40, "rcu_head size");
+    assert!(core::mem::align_of::<RawRcuHead>() == 8, "rcu_head alignment");
+    assert!(core::mem::offset_of!(RawRcuHead, next) == 0, "rcu_head.next offset");
+    assert!(core::mem::offset_of!(RawRcuHead, func) == 8, "rcu_head.func offset");
+    assert!(core::mem::offset_of!(RawRcuHead, data) == 16, "rcu_head.data offset");
+    assert!(core::mem::offset_of!(RawRcuHead, timestamp) == 24, "rcu_head.timestamp offset");
+    assert!(core::mem::offset_of!(RawRcuHead, flags) == 32, "rcu_head anonymous-bitfield offset");
 };
 
 // ---------------------------------------------------------------------------

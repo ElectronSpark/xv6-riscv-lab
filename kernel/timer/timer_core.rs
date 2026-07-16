@@ -43,10 +43,121 @@ use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::bindings::{list_node_t, rb_node, rb_root_opts, timer_node, timer_root};
+use crate::bindings::{list_node_t, rb_node, rb_root, rb_root_opts, spinlock_t, timer_node, timer_root};
 use crate::irq::irq_core::{register_irq_handler, IrqDesc};
 use crate::machine;
 use crate::sync::KSpinlock;
+
+// ===========================================================================
+// Native timer types — P3-N7 nativization (user directive: remove the
+// C-compatible interfaces). `TimerRoot`/`TimerNode` are the canonical
+// native definitions of `kernel/inc/timer/timer_types.h`'s
+// `struct timer_root`/`struct timer_node`: `build.rs` blocklists the
+// bindgen emissions and re-exports these types as
+// `crate::bindings::timer_root`/`timer_node` (facade `pub use`, N2
+// pattern). The C header stays unchanged (no C consumers remain — the
+// kernel tree has zero `.c` files).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler `_Static_assert` probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both agree on
+// every value asserted below (no pipe-style divergence; gcc places the
+// cacheline-aligned `spinlock_t lock` at 64 exactly as bindgen did).
+//
+// DERIVE DECISION (P3-N7): no derives on either type. The bindgen
+// emissions had already (silently, via the P3-N2 struct-X quirk) lost
+// Copy/Clone — flagged by N6 for a deliberate decision here. First
+// principles agree with the established emission: both types are
+// intrusive structures (`timer_node` embeds live rb-tree + list links;
+// `timer_root` owns a spinlock and the tree/list heads) whose bitwise
+// duplication would corrupt tree/list invariants (the N1/N2 `tnode`
+// NONCOPY precedent), and no consumer `=`-copies or literal-constructs
+// either type (grep-verified: the by-value uses — `lock/{mutex,rwsem,
+// semaphore,completion}.rs` wait-context embeds, `sched_timer.rs`'s
+// `SchedTimerWork.tn` / `MaybeUninit<timer_root>` static / stack
+// `mem::zeroed()` nodes — need no Copy). So: no derives, matching the
+// boot-verified emission bit for bit.
+// ===========================================================================
+
+/// Native form of the anonymous C bitfield struct
+/// `struct { uint64 valid : 1; }` inside `struct timer_root` (bindgen
+/// shell: `timer_root__bindgen_ty_1`, 8 bytes, `repr(align(8))`,
+/// derived Copy/Clone — reproduced faithfully; accessor semantics match
+/// bindgen's `valid()`/`set_valid()`).
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct TimerRootFlagBits {
+    bits: u64,
+}
+
+impl TimerRootFlagBits {
+    #[inline(always)]
+    pub fn valid(&self) -> u64 {
+        self.bits & 1
+    }
+    #[inline(always)]
+    pub fn set_valid(&mut self, v: u64) {
+        self.bits = (self.bits & !1) | (v & 1);
+    }
+}
+
+/// Native `struct timer_root` (`kernel/inc/timer/timer_types.h`).
+#[repr(C, align(64))]
+pub struct TimerRoot {
+    pub root: rb_root,
+    pub list_head: list_node_t,
+    pub current_tick: u64,
+    pub next_tick: u64,
+    /// The anonymous `{ uint64 valid : 1; }` bitfield struct (bindgen:
+    /// `__bindgen_anon_1`).
+    pub flags: TimerRootFlagBits,
+    // Explicit padding reproduction: the cacheline-aligned `spinlock_t`
+    // typedef places `lock` at 64 (bindgen emitted `__bindgen_padding_0:
+    // u64` here because its emitted spinlock facade is align-8).
+    _pad0: u64,
+    pub lock: spinlock_t,
+}
+
+/// Native `struct timer_node` (`kernel/inc/timer/timer_types.h`).
+#[repr(C)]
+pub struct TimerNode {
+    pub rb: rb_node,
+    pub list_entry: list_node_t,
+    pub expires: u64,
+    pub retry: c_int,
+    pub retry_limit: c_int,
+    pub timer: *mut TimerRoot,
+    pub callback: Option<unsafe extern "C" fn(*mut TimerNode)>,
+    pub data: *mut c_void,
+}
+
+// P3-N7 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc `_Static_assert`
+// probe (see the module note above).
+const _: () = {
+    assert!(core::mem::size_of::<TimerRoot>() == 128, "timer_root size");
+    assert!(core::mem::align_of::<TimerRoot>() == 64, "timer_root alignment");
+    assert!(core::mem::offset_of!(TimerRoot, root) == 0, "timer_root.root offset");
+    assert!(core::mem::offset_of!(TimerRoot, list_head) == 16, "timer_root.list_head offset");
+    assert!(core::mem::offset_of!(TimerRoot, current_tick) == 32, "timer_root.current_tick offset");
+    assert!(core::mem::offset_of!(TimerRoot, next_tick) == 40, "timer_root.next_tick offset");
+    assert!(core::mem::offset_of!(TimerRoot, flags) == 48, "timer_root anonymous-bitfield offset");
+    assert!(core::mem::offset_of!(TimerRoot, lock) == 64, "timer_root.lock offset");
+    assert!(core::mem::size_of::<TimerRootFlagBits>() == 8, "timer_root flags-shell size");
+    assert!(core::mem::align_of::<TimerRootFlagBits>() == 8, "timer_root flags-shell alignment");
+
+    assert!(core::mem::size_of::<TimerNode>() == 80, "timer_node size");
+    assert!(core::mem::align_of::<TimerNode>() == 8, "timer_node alignment");
+    assert!(core::mem::offset_of!(TimerNode, rb) == 0, "timer_node.rb offset");
+    assert!(core::mem::offset_of!(TimerNode, list_entry) == 24, "timer_node.list_entry offset");
+    assert!(core::mem::offset_of!(TimerNode, expires) == 40, "timer_node.expires offset");
+    assert!(core::mem::offset_of!(TimerNode, retry) == 48, "timer_node.retry offset");
+    assert!(core::mem::offset_of!(TimerNode, retry_limit) == 52, "timer_node.retry_limit offset");
+    assert!(core::mem::offset_of!(TimerNode, timer) == 56, "timer_node.timer offset");
+    assert!(core::mem::offset_of!(TimerNode, callback) == 64, "timer_node.callback offset");
+    assert!(core::mem::offset_of!(TimerNode, data) == 72, "timer_node.data offset");
+};
 
 // ===========================================================================
 // FDT/boot-configured globals, exact C names/types preserved. P3-D3c: the
@@ -316,7 +427,7 @@ pub(crate) unsafe fn timer_init(timer: *mut timer_root) {
         machine::list_entry_init(&raw mut (*timer).list_head);
         (*timer).next_tick = 0;
         (*timer).current_tick = 0;
-        (*timer).__bindgen_anon_1.set_valid(1);
+        (*timer).flags.set_valid(1);
     }
     TICKS.store(0, Ordering::SeqCst);
     // SAFETY: `timer` is exclusively owned here, before any other hart can
@@ -407,7 +518,7 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
     let _g = KSpinlock::from_bindings(unsafe { &raw mut (*timer).lock }).lock();
     // SAFETY: see above.
     unsafe {
-        if (*timer).__bindgen_anon_1.valid() == 0 {
+        if (*timer).flags.valid() == 0 {
             return neg(crate::bindings::EINVAL);
         }
         if (*timer).current_tick >= (*node).expires {
@@ -501,7 +612,7 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
         return;
     }
     // SAFETY: `timer` is non-null per the check above.
-    if unsafe { (*timer).__bindgen_anon_1.valid() } == 0 {
+    if unsafe { (*timer).flags.valid() } == 0 {
         return;
     }
 

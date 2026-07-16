@@ -6,7 +6,7 @@
 #![allow(non_upper_case_globals)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_int, c_void};
+use core::ffi::c_int;
 use core::ptr::null_mut;
 
 use super::cffi::{
@@ -82,16 +82,12 @@ static IDLE_SCHED_CLASS: SyncCell<SchedClass> = SyncCell::new(SchedClass {
 // ---------------------------------------------------------------------------
 // Helper exported from `proc/proc_shims.rs`: returns `thread->sched_entity`.
 // P3-1B: only caller anywhere in the tree is this file -- demoted from
-// `#[no_mangle]`; referenced via a typed thin wrapper since
-// `proc_shims::thread_sched_entity` uses `crate::bindings::{thread,
-// sched_entity}` while this file's `cffi::Thread`/`SchedEntity` are
-// independently-written, layout-identical mirrors (same precedent as
-// `sysproc.rs`'s `thread_clone` wrapper).
+// `#[no_mangle]`. P3-N7: the pointer-cast shims are gone -- `cffi::
+// Thread`/`SchedEntity` ARE `crate::bindings::{thread, sched_entity}`
+// now (the mirrors were promoted to the native definitions), so this is
+// a plain re-export.
 // ---------------------------------------------------------------------------
-#[inline(always)]
-unsafe fn thread_sched_entity(t: *mut super::cffi::Thread) -> *mut SchedEntity {
-    crate::proc::proc_shims::thread_sched_entity(t as *mut c_void as *mut _) as *mut c_void as *mut SchedEntity
-}
+use crate::proc::proc_shims::thread_sched_entity;
 
 // ---------------------------------------------------------------------------
 // Boot path

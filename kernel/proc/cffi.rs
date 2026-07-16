@@ -42,90 +42,33 @@ pub const fn minor_priority(prio: i32) -> i32 {
 }
 
 // ===========================================================================
-// Opaque forward decls (we never deref these from Rust)
-// ===========================================================================
-#[repr(C)] pub struct Thread       { _opaque: [u8; 0] }
-#[repr(C)] pub struct Context      { _opaque: [u8; 0] }
-// Wave P3-3C: the opaque `RbNode { _opaque: [u8; 24] }` placeholder that
-// used to live here was dead code -- grepped crate-wide, it had zero
-// referents (not even within this file beyond its own declaration;
-// `SchedEntity::_link` below models the `rb_entry`/`list_entry` union as
-// a raw `[u8; 24]` blob, never as `RbNode`). Dropped outright rather than
-// migrated. The crate's one canonical native rb_node mirror is now
-// `crate::bintree::RawRbNode` (`kernel/bintree.rs`, layout-asserted
-// directly against `bindings::rb_node`); a future wave that wants
-// `SchedEntity`'s union recovered as typed fields instead of a byte blob
-// should build on that, not reintroduce a second opaque stand-in here.
-
-// ===========================================================================
-// Mirror types — `#[repr(C)]`, pinned to the C layout.
+// Canonical scheduler types — P3-N7 promotion.
 //
-// CACHELINE alignment (64) is preserved with `#[repr(C, align(64))]`.
-// Compile-time asserts at the bottom of this file fail the build if a
-// future C header drift breaks layout.
+// The independently-written, layout-pinned mirror structs (`SchedClass`/
+// `Rq`/`SchedEntity`) that used to live here are gone: the canonical
+// native definitions now live in `kernel/proc/sched.rs` /
+// `kernel/proc/rq.rs` (they ARE `crate::bindings::sched_class`/`rq`/
+// `sched_entity` via `build.rs` facade re-exports), and this file simply
+// re-exports them under the established local names. The old mirror was
+// subtly WRONG past `SchedEntity.sched_class` (it modelled `pi_lock` as
+// 24 bytes at offset 56, where the real — bindgen-verified — layout has
+// 8 bytes of cacheline padding first, `pi_lock` @64); it "worked" only
+// because its own comment restricted use to the `priority`/`rq`/`thread`
+// offsets, all before the divergence. The promotion removes that trap;
+// `SchedEntity::list_entry_ptr` lives on the native now.
+//
+// `Thread` used to be a private opaque `[u8; 0]` stand-in; it is the
+// real `crate::bindings::thread` now, which lets the `*mut Thread`
+// fields below unify with the native `SchedEntity.thread`. (The unused
+// opaque `Context` stand-in is dropped outright — the native
+// `SchedEntity.context` is the real `crate::bindings::context`.)
 // ===========================================================================
+pub type Thread = crate::bindings::thread;
 
 pub type cpumask_t = u64;
 
-#[repr(C)]
-pub struct SchedClass {
-    pub enqueue_task:    Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub dequeue_task:    Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub select_task_rq:  Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity, cpumask_t) -> *mut Rq>,
-    pub pick_next_task:  Option<unsafe extern "C" fn(*mut Rq) -> *mut SchedEntity>,
-    pub put_prev_task:   Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub set_next_task:   Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub task_tick:       Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub task_fork:       Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub task_dead:       Option<unsafe extern "C" fn(*mut Rq, *mut SchedEntity)>,
-    pub yield_task:      Option<unsafe extern "C" fn(*mut Rq)>,
-}
-
-#[repr(C, align(64))]
-pub struct Rq {
-    pub sched_class: *mut SchedClass,
-    pub class_id:    c_int,
-    pub task_count:  c_int,
-    pub cpu_id:      c_int,
-    // padding to 64-byte alignment is provided by `align(64)`.
-    _pad: [u8; 64 - 8 - 4 - 4 - 4],
-}
-
-/// Mirror of `struct sched_entity` from `inc/proc/rq_types.h`.
-///
-/// First field is a `union { rb_entry; list_entry; }`; we model that
-/// as a 24-byte `_link` blob (sizeof(rb_node) == 24, sizeof(list_node_t) == 16).
-/// The list_entry view is recovered via `list_entry_ptr()`.
-#[repr(C)]
-pub struct SchedEntity {
-    _link:              [u8; 24],          // union { rb_node rb_entry; list_node_t list_entry; }
-    pub rq:             *mut Rq,
-    pub priority:       c_int,
-    pub thread:         *mut Thread,
-    pub sched_class:    *mut SchedClass,
-    pub pi_lock:        [u8; SPINLOCK_BYTES],
-    pub on_rq:          c_int,
-    pub on_cpu:         c_int,
-    pub cpu_id:         c_int,
-    _pad1:              u32,
-    pub wake_next:      *mut SchedEntity,
-    pub affinity_mask:  cpumask_t,
-    pub start_time:     u64,
-    pub exec_start:     u64,
-    pub exec_end:       u64,
-    // context is opaque/embedded; we never touch it from Rust here.
-    pub context:        [u8; CONTEXT_BYTES],
-}
-
-impl SchedEntity {
-    /// Pointer to the embedded `list_entry` view of the head union.
-    #[inline]
-    pub fn list_entry_ptr(se: *mut SchedEntity) -> *mut ListNode {
-        // list_entry is the second variant of the union, alias of the rb_entry
-        // storage starting at offset 0.
-        se as *mut ListNode
-    }
-}
+pub use crate::proc::rq::{Rq, SchedEntity};
+pub use crate::proc::sched::SchedClass;
 
 // ===========================================================================
 // idle_rq / fifo_rq mirrors
@@ -148,17 +91,6 @@ pub struct FifoRq {
     pub subqueues:   [FifoSubqueue; FIFO_RQ_SUBLEVELS],
     pub ready_mask:  u8,
 }
-
-// ===========================================================================
-// Layout constants pinned by C kernel
-// ===========================================================================
-// spinlock_t is `[u8; 24]` opaque storage (see kernel/lock/spinlock.h /
-// kernel/mm/slab.rs); we mirror the same byte count here so the offsets
-// in SchedEntity line up.
-const SPINLOCK_BYTES: usize = 24;
-// struct context (riscv kernel save area): 14 saved callee-regs * 8 = 112 bytes.
-// Defined in kernel/inc/proc/thread_types.h / swtch.S. Pinned below.
-const CONTEXT_BYTES: usize = 112;
 
 // ===========================================================================
 // Raw extern declarations (kept in a private module).
@@ -248,36 +180,20 @@ pub fn panic_proc(msg: &[u8]) -> ! {
 
 // ===========================================================================
 // Compile-time layout pins.
+//
+// (P3-N7: the `SchedClass`/`Rq`/`SchedEntity` pins moved with the
+// canonical definitions to `kernel/proc/sched.rs`/`kernel/proc/rq.rs`,
+// where the full hardcoded offset set is asserted. Only the structs
+// still defined in this file are pinned here.)
 // ===========================================================================
 const _: () = {
-    // SchedClass: 10 function pointers, no padding.
-    assert!(size_of::<SchedClass>() == 10 * size_of::<*const ()>());
-
-    // Rq mirrors C; 64-byte aligned.
-    assert!(align_of::<Rq>() == 64);
-    assert!(size_of::<Rq>() == 64);
-
-    // IdleRq / FifoRq are also 64-byte aligned.
+    // IdleRq / FifoRq are 64-byte aligned (embedded leading `Rq`).
     assert!(align_of::<IdleRq>() == 64);
     assert!(align_of::<FifoRq>() == 64);
 
     // FifoSubqueue = list_node_t (16) + int (4) + padding (4) = 24 on 8-byte
     // alignment.
     assert!(size_of::<FifoSubqueue>() == 24);
-
-    // SchedEntity: hand-counted = 24 (link union) + 8 (rq) + 4 (prio) + 8 (thread)
-    //   + 8 (sched_class) + 24 (pi_lock) + 4 + 4 + 4 + 4(pad)
-    //   + 8 (wake_next) + 8 (affinity) + 8 + 8 + 8 (times) + 112 (context)
-    //   = 246 ... let layout assert below catch drift.
-    // We only pin the offset of fields used by sched_idle/sched_fifo:
-    //   priority — used by sched_fifo to read minor priority
-    //   rq       — used by sched_idle::__idle_enqueue_task
-    //   thread   — used by sched_idle::__idle_pick_next_task
-    // The mirror is wrong in details only if these offsets drift; the rest
-    // of the struct is opaque to the schedulers.
-    // (Soft check: offset_of! isn't const-stable on stable Rust 1.95 in
-    // const ctx for these complex paths; we trust the field-by-field
-    // mirror plus the C-side _Static_asserts in proc_private.h.)
 };
 
 // Suppress unused-warning fallout.

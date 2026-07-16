@@ -63,6 +63,226 @@ macro_rules! kpanic { ($m:expr) => {{ xv6_panic(concat!($m, "\0").as_ptr() as *c
 macro_rules! kassert { ($c:expr, $m:expr) => {{ if !($c) { kpanic!($m); } }}; }
 macro_rules! rq_unsafe_call { ($e:expr) => {{ unsafe { $e } }}; }
 
+// ===========================================================================
+// Native run-queue types — P3-N7 nativization (user directive: remove
+// the C-compatible interfaces). `LoadWeight` is the canonical native
+// definition of `kernel/inc/proc/rq_types.h`'s `struct load_weight`:
+// `build.rs` blocklists the bindgen emission and re-exports it as
+// `crate::bindings::load_weight` (facade `pub use`, N2 pattern). It has
+// zero field consumers anywhere in the crate (grep-verified — it was
+// emitted only because the allowlist names it); nativized for family
+// completeness.
+//
+// DERIVE DECISION (P3-N7): Copy + Clone, faithfully reproducing the
+// pre-nativization bindgen emission (two plain u32s).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + cross-compiler `_Static_assert` probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both agree.
+// ===========================================================================
+
+/// Native `struct load_weight` (`kernel/inc/proc/rq_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct LoadWeight {
+    pub weight: u32,
+    pub inv_weight: u32,
+}
+
+const _: () = {
+    assert!(size_of::<LoadWeight>() == 8, "load_weight size");
+    assert!(core::mem::align_of::<LoadWeight>() == 4, "load_weight alignment");
+    assert!(core::mem::offset_of!(LoadWeight, weight) == 0, "load_weight.weight offset");
+    assert!(core::mem::offset_of!(LoadWeight, inv_weight) == 4, "load_weight.inv_weight offset");
+};
+
+// ===========================================================================
+// `Rq`/`RqPercpu`/`SchedEntity` — the scheduler hot core, nativized in
+// the same P3-N7 wave (canonical definitions of `kernel/inc/proc/
+// rq_types.h`'s `struct rq`/`struct rq_percpu`/`struct sched_entity`;
+// `build.rs` blocklists the bindgen emissions and re-exports these
+// under the C names, facade `pub use`, N2 pattern).
+// `kernel/proc/cffi.rs`'s layout-pinned mirrors (`Rq`/`SchedEntity`)
+// are promoted to re-exports of these definitions.
+//
+// DERIVE DECISIONS (P3-N7):
+//  * `Rq`, `RqPercpu`: Copy + Clone, faithfully reproducing the
+//    pre-nativization bindgen emissions. (`rq_percpu` kept its derives
+//    through P3-N2 because its `rq_lock` member is *typedef*-spelled
+//    `spinlock_t` in the header, which matched the `NativeTypeCallbacks`
+//    entry; plain pointers/integers otherwise.)
+//  * `SchedEntity` (and its bindgen union shell): no derives — the
+//    bindgen emission had (silently, via the P3-N2 struct-X quirk on
+//    its tag-spelled `struct spinlock`... members' Copy queries) lost
+//    Copy/Clone; N6 flagged it for a deliberate decision here. First
+//    principles agree with the established emission: a `sched_entity`
+//    is a per-thread intrusive object (live rb/list links, an owned
+//    `pi_lock`, the thread's `context` switch frame) whose bitwise
+//    duplication would corrupt run-queue invariants (N1/N2 `tnode`
+//    NONCOPY precedent), and no consumer `=`-copies or
+//    literal-constructs one (grep-verified: it lives embedded in the
+//    thread's kernel-stack head, zeroed + `sched_entity_init`ed in
+//    place).
+//
+// The leading anonymous C union `{ struct rb_node rb_entry;
+// list_node_t list_entry; }` — which bindgen has emitted as the
+// degraded `__BindgenUnionField` blob shell `sched_entity__bindgen_
+// ty_1` (24/8) since P3-N1 blocklisted its arm types — is a real Rust
+// union here (`SchedEntityLink`, N2's `tnode` precedent), proven
+// blob-identical by the asserts below.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler `_Static_assert` probe (toolchain
+// gcc, rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both
+// agree on every value asserted below — including the two
+// cacheline-typedef `spinlock_t` placements (`pi_lock` @64, `rq_lock`
+// @576), where gcc's layout matches the offsets bindgen emitted via
+// its explicit `__bindgen_padding_*` fields (reproduced here as the
+// `_pad*` members). No pipe-style divergence.
+// ===========================================================================
+
+use crate::bindings::{context, list_node_t, rb_node, spinlock_t};
+
+/// Native `struct rq` (`kernel/inc/proc/rq_types.h`) — one run queue
+/// (per scheduling class, per CPU).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Rq {
+    pub sched_class: *mut sched_class,
+    pub class_id: c_int,
+    pub task_count: c_int,
+    pub cpu_id: c_int,
+}
+
+/// Native `struct rq_percpu` (`kernel/inc/proc/rq_types.h`) — per-CPU
+/// run-queue state, cacheline-aligned against false sharing.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct RqPercpu {
+    pub rqs: [*mut Rq; PRIORITY_MAINLEVELS],
+    pub ready_mask: u64,
+    pub ready_mask_secondary: u64,
+    // Explicit padding reproduction: the cacheline-aligned `spinlock_t`
+    // typedef places `rq_lock` at 576 (bindgen emitted
+    // `__bindgen_padding_0: [u64; 6]` because its emitted spinlock
+    // facade is align-8).
+    _pad0: [u64; 6],
+    pub rq_lock: spinlock_t,
+    pub wake_list_head: *mut SchedEntity,
+    pub current_se: *mut SchedEntity,
+}
+
+/// Real Rust union for `struct sched_entity`'s leading anonymous
+/// union `{ struct rb_node rb_entry; list_node_t list_entry; }`
+/// (bindgen shell: `sched_entity__bindgen_ty_1`, a 24/8
+/// `__BindgenUnionField` blob).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union SchedEntityLink {
+    pub rb_entry: rb_node,
+    pub list_entry: list_node_t,
+}
+
+/// Native `struct sched_entity` (`kernel/inc/proc/rq_types.h`) — a
+/// thread's scheduling identity, embedded at the head of its kernel
+/// stack.
+#[repr(C, align(64))]
+pub struct SchedEntity {
+    /// The leading anonymous union (bindgen: `__bindgen_anon_1`).
+    pub link: SchedEntityLink,
+    pub rq: *mut Rq,
+    pub priority: c_int,
+    pub thread: *mut thread,
+    pub sched_class: *mut sched_class,
+    // Explicit padding reproduction (bindgen `__bindgen_padding_0`):
+    // the cacheline-aligned `spinlock_t` typedef places `pi_lock` at 64.
+    _pad0: u64,
+    pub pi_lock: spinlock_t,
+    pub on_rq: c_int,
+    pub on_cpu: c_int,
+    pub cpu_id: c_int,
+    pub wake_next: *mut SchedEntity,
+    pub affinity_mask: cpumask_t,
+    pub start_time: u64,
+    pub exec_start: u64,
+    pub exec_end: u64,
+    // Explicit padding reproduction (bindgen `__bindgen_padding_1`);
+    // `context`'s own align(64) lands it at 192 either way.
+    _pad1: u64,
+    pub context: context,
+}
+
+impl SchedEntity {
+    /// Pointer to the embedded `list_entry` view of the head union
+    /// (kept for `sched_fifo.rs`'s LIST_FIRST_NODE-style casts; the
+    /// union is the struct's first member, so this is offset 0).
+    #[inline]
+    pub fn list_entry_ptr(se: *mut SchedEntity) -> *mut list_node_t {
+        se.cast::<list_node_t>()
+    }
+}
+
+// P3-N7 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc `_Static_assert`
+// probe (see the block note above).
+const _: () = {
+    assert!(size_of::<Rq>() == 64, "rq size");
+    assert!(core::mem::align_of::<Rq>() == 64, "rq alignment");
+    assert!(core::mem::offset_of!(Rq, sched_class) == 0, "rq.sched_class offset");
+    assert!(core::mem::offset_of!(Rq, class_id) == 8, "rq.class_id offset");
+    assert!(core::mem::offset_of!(Rq, task_count) == 12, "rq.task_count offset");
+    assert!(core::mem::offset_of!(Rq, cpu_id) == 16, "rq.cpu_id offset");
+
+    assert!(size_of::<RqPercpu>() == 640, "rq_percpu size");
+    assert!(core::mem::align_of::<RqPercpu>() == 64, "rq_percpu alignment");
+    assert!(core::mem::offset_of!(RqPercpu, rqs) == 0, "rq_percpu.rqs offset");
+    assert!(core::mem::offset_of!(RqPercpu, ready_mask) == 512, "rq_percpu.ready_mask offset");
+    assert!(
+        core::mem::offset_of!(RqPercpu, ready_mask_secondary) == 520,
+        "rq_percpu.ready_mask_secondary offset"
+    );
+    assert!(core::mem::offset_of!(RqPercpu, rq_lock) == 576, "rq_percpu.rq_lock offset");
+    assert!(
+        core::mem::offset_of!(RqPercpu, wake_list_head) == 600,
+        "rq_percpu.wake_list_head offset"
+    );
+    assert!(core::mem::offset_of!(RqPercpu, current_se) == 608, "rq_percpu.current_se offset");
+
+    assert!(size_of::<SchedEntityLink>() == 24, "sched_entity link-union size");
+    assert!(core::mem::align_of::<SchedEntityLink>() == 8, "sched_entity link-union alignment");
+
+    assert!(size_of::<SchedEntity>() == 320, "sched_entity size");
+    assert!(core::mem::align_of::<SchedEntity>() == 64, "sched_entity alignment");
+    assert!(core::mem::offset_of!(SchedEntity, link) == 0, "sched_entity anonymous-union offset");
+    assert!(core::mem::offset_of!(SchedEntity, rq) == 24, "sched_entity.rq offset");
+    assert!(core::mem::offset_of!(SchedEntity, priority) == 32, "sched_entity.priority offset");
+    assert!(core::mem::offset_of!(SchedEntity, thread) == 40, "sched_entity.thread offset");
+    assert!(
+        core::mem::offset_of!(SchedEntity, sched_class) == 48,
+        "sched_entity.sched_class offset"
+    );
+    assert!(core::mem::offset_of!(SchedEntity, pi_lock) == 64, "sched_entity.pi_lock offset");
+    assert!(core::mem::offset_of!(SchedEntity, on_rq) == 88, "sched_entity.on_rq offset");
+    assert!(core::mem::offset_of!(SchedEntity, on_cpu) == 92, "sched_entity.on_cpu offset");
+    assert!(core::mem::offset_of!(SchedEntity, cpu_id) == 96, "sched_entity.cpu_id offset");
+    assert!(core::mem::offset_of!(SchedEntity, wake_next) == 104, "sched_entity.wake_next offset");
+    assert!(
+        core::mem::offset_of!(SchedEntity, affinity_mask) == 112,
+        "sched_entity.affinity_mask offset"
+    );
+    assert!(
+        core::mem::offset_of!(SchedEntity, start_time) == 120,
+        "sched_entity.start_time offset"
+    );
+    assert!(
+        core::mem::offset_of!(SchedEntity, exec_start) == 128,
+        "sched_entity.exec_start offset"
+    );
+    assert!(core::mem::offset_of!(SchedEntity, exec_end) == 136, "sched_entity.exec_end offset");
+    assert!(core::mem::offset_of!(SchedEntity, context) == 192, "sched_entity.context offset");
+};
+
 // bits_ctz8: trailing zero count of low 8 bits, -1 if zero
 #[inline] fn bits_ctz8(x: u64) -> c_int {
     let b = (x & 0xff) as u8;

@@ -45,8 +45,13 @@ mod rq_test;
 pub(crate) mod thread_group;
 pub(crate) mod thread_queue;
 mod thread;
-mod sched;
-mod rq;
+// pub(crate) (P3-N7): `build.rs` injects `pub use crate::proc::sched::
+// SchedClass as sched_class;` (+ sched_attr) and `pub use crate::proc::
+// rq::Rq as rq;` (+ rq_percpu/sched_entity/load_weight) facade
+// re-exports into `crate::bindings`, which needs the module paths to be
+// visible from the crate root (same pattern as thread_queue/signal).
+pub(crate) mod sched;
+pub(crate) mod rq;
 // pub(crate) (P3-N4): `build.rs` injects `pub use crate::proc::signal::
 // SigAction as sigaction;` (+ sigacts/sigpending/ksiginfo/
 // tg_shared_pending) facade re-exports into `crate::bindings`, which

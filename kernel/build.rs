@@ -190,6 +190,36 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "page_struct",
             "struct page_struct",
             "page_t",
+            // kernel/lock/rcu.rs (P3-N7, rcu sub-family). Derived
+            // Copy/Clone in the pre-nativization bindgen output; the
+            // still-bindgen `thread` embeds `rcu_head_t` BY VALUE
+            // (`rcu_head`, its last field) and derives Copy/Clone
+            // itself — the accurate Yes here is what keeps *its* derive
+            // line unchanged. Listed in bare, `_t`, and tag-prefixed
+            // forms (the P3-N6 FINDING: bindgen queries non-typedef'd
+            // field spellings as `"struct X"`).
+            "rcu_head",
+            "rcu_head_t",
+            "struct rcu_head",
+            // kernel/proc/rq.rs + kernel/proc/sched.rs (P3-N7, sched
+            // sub-family PODs/ops tables). All derived Copy/Clone in
+            // the pre-nativization bindgen output (plain integers,
+            // pointers, and fn-pointer tables; `rq_percpu`'s embedded
+            // `spinlock_t rq_lock` is typedef-spelled, so its Copy
+            // query already matched the P3-N2 `spinlock_t` entry).
+            // Nothing in the remaining bindgen output embeds any of
+            // them by value (verified). Tag-prefixed forms included
+            // (none has a typedef).
+            "load_weight",
+            "struct load_weight",
+            "sched_attr",
+            "struct sched_attr",
+            "sched_class",
+            "struct sched_class",
+            "rq",
+            "struct rq",
+            "rq_percpu",
+            "struct rq_percpu",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -269,6 +299,30 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "struct pcache",
             "pcache_node",
             "struct pcache_node",
+            // kernel/timer/timer_core.rs + kernel/proc/rq.rs (P3-N7):
+            // `timer_node`/`timer_root`/`sched_entity` derived neither
+            // Copy nor Clone in the pre-nativization bindgen output.
+            // P3-N6 flagged these three as "silently lost Copy/Clone to
+            // the struct-X quirk when P3-N2 nativized spinlock"; the
+            // P3-N7 first-principles decision is that no-derive is also
+            // the *correct* form, not just the boot-verified one: all
+            // three are intrusive structures (embedded rb_node/
+            // list_node links, an owned spinlock, `sched_entity`'s
+            // per-thread `context` save area) whose bitwise duplication
+            // would corrupt list/tree invariants — the N1/N2 `tnode`
+            // NONCOPY precedent — and no consumer `=`-copies or
+            // literal-constructs any of them (grep-verified; the only
+            // by-value uses are embeds in native structs plus
+            // `mem::zeroed()` init, neither of which needs Copy). The
+            // natives faithfully have no derives. Nothing in the
+            // remaining bindgen output embeds them by value (verified).
+            // Tag-prefixed forms included (none has a typedef).
+            "sched_entity",
+            "struct sched_entity",
+            "timer_node",
+            "struct timer_node",
+            "timer_root",
+            "struct timer_root",
         ];
         // P3-N6 FINDING — bindgen asks this callback about typedef'd
         // types by their bare typedef name (`slab_cache_t`) but about
@@ -856,6 +910,66 @@ fn main() {
         .blocklist_type("page_struct|page_t|page_struct__bindgen_ty_1|page_struct__bindgen_ty_2|page_struct__bindgen_ty_2__bindgen_ty_1|page_struct__bindgen_ty_2__bindgen_ty_2|page_struct__bindgen_ty_2__bindgen_ty_3|page_struct__bindgen_ty_2__bindgen_ty_4|page_struct__bindgen_ty_2__bindgen_ty_5")
         .raw_line("pub use crate::mm::page::PageStruct as page_struct;")
         .raw_line("pub use crate::mm::page::PageStruct as page_t;");
+
+    // ------------------------------------------------------------------
+    // P3-N7 nativization: the scheduler + timer + rcu type families.
+    // Same blocklist + `pub use` re-export technique as P3-N2..N6 above.
+    // Layout evidence for the whole family: temporary in-tree
+    // `offset_of!` gate on the live bindgen forms + cross-compiler
+    // `_Static_assert` probe (toolchain gcc, rv64gc/lp64d — scratchpad
+    // p3n7_static_assert_probe.c); the two AGREE on every size/align/
+    // offset (no pipe-style divergence, P3-N5 precedent checked —
+    // notably gcc places the cacheline-aligned `spinlock_t` members of
+    // `sched_entity`/`rq_percpu`/`timer_root` at exactly the offsets
+    // bindgen emitted).
+    builder = builder
+        // kernel/inc/lock/rcu_type.h `struct rcu_head` (typedef
+        // `rcu_head_t`) -> kernel/lock/rcu.rs (the module's P3-3A
+        // internal mirror `RawRcuHead`, promoted to the canonical
+        // definition). `rcu_head__bindgen_ty_1` is the anonymous
+        // 1-bit-`embedded_head` bitfield shell bindgen would otherwise
+        // still emit as an orphan (native: flattened `flags: u64`,
+        // N5/N6 single-member-flags precedent). The `rcu_callback_t`
+        // fn-pointer typedef stays bindgen-emitted.
+        .blocklist_type("rcu_head|rcu_head_t|rcu_head__bindgen_ty_1")
+        .raw_line("pub use crate::lock::rcu::RawRcuHead as rcu_head;")
+        .raw_line("pub use crate::lock::rcu::RawRcuHead as rcu_head_t;")
+        // kernel/inc/timer/timer_types.h `struct timer_root`/`struct
+        // timer_node` (no typedefs) -> kernel/timer/timer_core.rs.
+        // `timer_root__bindgen_ty_1` is the anonymous 1-bit-`valid`
+        // bitfield shell bindgen would otherwise still emit as an
+        // orphan (native: `TimerRootFlagBits`, N3 flag-bits precedent).
+        .blocklist_type("timer_root|timer_node|timer_root__bindgen_ty_1")
+        .raw_line("pub use crate::timer::timer_core::TimerRoot as timer_root;")
+        .raw_line("pub use crate::timer::timer_core::TimerNode as timer_node;")
+        // kernel/inc/proc/rq_types.h `struct sched_class`/`struct
+        // sched_attr` (no typedefs) -> kernel/proc/sched.rs.
+        // `SchedClass` keeps bindgen's `Option<unsafe extern "C" fn>`
+        // ops-table form verbatim (trait-ification is P3-10);
+        // kernel/proc/cffi.rs's layout-pinned mirror is promoted to a
+        // re-export of the native.
+        .blocklist_type("sched_class|sched_attr")
+        .raw_line("pub use crate::proc::sched::SchedClass as sched_class;")
+        .raw_line("pub use crate::proc::sched::SchedAttr as sched_attr;")
+        // kernel/inc/proc/rq_types.h `struct load_weight` (no typedef)
+        // -> kernel/proc/rq.rs. Zero field consumers (emitted by
+        // allowlist only); nativized for family completeness.
+        .blocklist_type("load_weight")
+        .raw_line("pub use crate::proc::rq::LoadWeight as load_weight;")
+        // kernel/inc/proc/rq_types.h `struct rq`/`struct rq_percpu`/
+        // `struct sched_entity` (no typedefs) -> kernel/proc/rq.rs (the
+        // scheduler hot core). `sched_entity__bindgen_ty_1` is the
+        // degraded `__BindgenUnionField` blob shell of the leading
+        // anonymous rb/list union (emitted that way since P3-N1
+        // blocklisted its arm types) that bindgen would otherwise still
+        // emit as an orphan; the native carries the real Rust union
+        // `SchedEntityLink` (N2 `tnode` precedent). The blocklist
+        // regexes are anchored, so `rq` matches neither `rq_percpu` nor
+        // the `rq_*` functions.
+        .blocklist_type("rq|rq_percpu|sched_entity|sched_entity__bindgen_ty_1")
+        .raw_line("pub use crate::proc::rq::Rq as rq;")
+        .raw_line("pub use crate::proc::rq::RqPercpu as rq_percpu;")
+        .raw_line("pub use crate::proc::rq::SchedEntity as sched_entity;");
 
     let bindings = builder
         .generate()
