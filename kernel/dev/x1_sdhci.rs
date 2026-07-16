@@ -97,7 +97,14 @@ use crate::machine;
 use crate::sync::KMutex;
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, wakeup};
+// P3-D3b: `kthread_create` (proc/thread.rs) is reached via the
+// `crate::proc` glob re-export like its neighbors here.
+use crate::proc::{kthread_create, scheduler_yield, wakeup};
+// P3-D3b: lock/mutex.rs's `mutex_init` and lock/completion.rs's entry
+// points are plain safe Rust fns now that their `#[no_mangle]` exports
+// are gone; reached by crate path.
+use crate::lock::completion::{complete_all, completion_reinit};
+use crate::lock::mutex::mutex_init;
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -107,21 +114,8 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
-    // proc/thread.rs.
-    safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut crate::bindings::thread;
-    // lock/mutex.rs.
-    safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-    // lock/completion.rs.
-    safe fn completion_reinit(c: *mut crate::bindings::completion_t);
-    safe fn complete_all(c: *mut crate::bindings::completion_t);
     // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
     // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
     // anchor, see that file's own comment) -- this extern stays valid.

@@ -51,7 +51,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::bindings::{
-    cdev_ops_t, cdev_t, device_ops_t, device_t, mode_t, pipe, session, spinlock_t, thread, tty,
+    cdev_ops_t, cdev_t, device_ops_t, device_t, mode_t, pipe, session, spinlock_t, tty,
     tty_ops,
 };
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
@@ -73,15 +73,12 @@ unsafe extern "C" {
 
     pub safe fn sleep_ms(ms: u64);
 
-    pub safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut thread;
-
 }
+
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached via the `crate::proc`
+// glob re-export.
+use crate::proc::kthread_create;
 
 // P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
 // Rust fns now that their `#[no_mangle]` exports are gone; reached as

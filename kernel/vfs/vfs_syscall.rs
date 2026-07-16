@@ -80,7 +80,7 @@ use core::ptr;
 
 use crate::bindings::{
     cdev_t, fs_struct, mode_t, stat, statfs, termios, thread, vfs_dentry, vfs_dir_iter, vfs_fdtable,
-    vfs_file, vfs_inode, vfs_inode_ref, vfs_superblock, winsize, work_struct, workqueue,
+    vfs_file, vfs_inode, vfs_inode_ref, vfs_superblock, winsize, work_struct,
     EACCES, EBADF, EEXIST, EFAULT, EINTR, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENODEV,
     ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
 };
@@ -108,21 +108,15 @@ unsafe extern "C" {
 
     // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
     safe fn sleep_ms(ms: u64);
+}
 
-    // proc/workqueue.rs — deferred vfs_fput after an RCU grace period.
-    safe fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool;
-    safe fn create_work_struct(
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
-        data: u64,
-    ) -> *mut work_struct;
-    safe fn free_work_struct(work: *mut work_struct);
+// P3-D3b: proc/workqueue.rs's entry points (deferred vfs_fput after an
+// RCU grace period) are plain safe Rust fns now that their
+// `#[no_mangle]` exports are gone; reached via the `crate::proc` glob
+// re-export.
+use crate::proc::{create_work_struct, free_work_struct, queue_work};
 
-    // lock/rcu.rs.
-    safe fn call_rcu(
-        head: *mut crate::bindings::rcu_head,
-        func: crate::bindings::rcu_callback_t,
-        data: *mut c_void,
-    );
+unsafe extern "C" {
 
     // irq/syscall.rs — arg-fetch helpers.
     safe fn argint(n: c_int, ip: *mut c_int);
@@ -426,7 +420,12 @@ unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
 /// Defer `vfs_fput()` until the current RCU grace period completes, so
 /// no concurrent `vfs_fdtable_get_file()` can still be observing `file`.
 fn vfs_fput_call_rcu(file: *mut vfs_file) {
-    call_rcu(ptr::null_mut(), Some(vfs_fd_rcucb), file as *mut c_void);
+    // SAFETY: `head` is null (the callee slab-allocates and owns the
+    // head); `vfs_fd_rcucb` is a valid `rcu_callback_t` whose `data`
+    // contract is exactly the `vfs_file*` passed here. (P3-D3b: this
+    // file's old extern redeclaration asserted `safe fn`; the real
+    // `crate::lock::rcu::call_rcu` is `unsafe fn`.)
+    unsafe { crate::lock::rcu::call_rcu(ptr::null_mut(), Some(vfs_fd_rcucb), file as *mut c_void) };
 }
 
 /// Look up `fd` in the current thread's fdtable with a `+1` refcount.

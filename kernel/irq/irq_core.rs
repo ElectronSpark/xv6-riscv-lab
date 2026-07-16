@@ -74,14 +74,17 @@ pub struct IrqDesc {
 use crate::irq::plic::{plic_claim, plic_complete, plic_enable_irq};
 
 unsafe extern "C" {
-    pub safe fn rcu_read_lock();
-    pub safe fn rcu_read_unlock();
-    pub safe fn call_rcu(head: *mut rcu_head, func: crate::bindings::rcu_callback_t, data: *mut c_void);
-
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
 }
+
+// P3-D3b: lock/rcu.rs's entry points are plain crate-path items now that
+// their `#[no_mangle]` exports are gone. `rcu_read_lock`/`_unlock` are
+// safe fns (as the old `safe fn` redeclarations asserted); `call_rcu` is
+// genuinely `unsafe fn` and its single call site below already sits in an
+// `unsafe` block.
+use crate::lock::rcu::{call_rcu, rcu_read_lock, rcu_read_unlock};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this

@@ -166,13 +166,14 @@ unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void;
 
-    // tcb_lock
-    safe fn tcb_lock(p: *mut thread);
-    safe fn tcb_unlock(p: *mut thread);
-
     // exit
     safe fn exit(code: c_int) -> !;
 }
+
+// P3-D3b: `tcb_lock`/`tcb_unlock` (kernel/proc/thread.rs) are plain safe
+// Rust fns now that their `#[no_mangle]` exports are gone; reached by
+// crate path.
+use crate::proc::thread::{tcb_lock, tcb_unlock};
 
 // P3-D2b: the pid lookups (proc/pid.rs), `thread_tgid`
 // (proc/thread_group.rs) and `pgroup_kill` (proc/pgroup.rs) are plain

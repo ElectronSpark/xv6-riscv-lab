@@ -82,15 +82,12 @@ const THREAD_RUNNING: thread_state = 8;
 // ===========================================================================
 use crate::proc::{scheduler_yield, wakeup};
 
-unsafe extern "C" {
-    pub safe fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue;
-    pub safe fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool;
-    pub safe fn init_work_struct(
-        work: *mut work_struct,
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
-        data: u64,
-    );
+// P3-D3b: proc/workqueue.rs's entry points are plain safe Rust fns now
+// that their `#[no_mangle]` exports are gone; reached via the
+// `crate::proc` glob re-export like `scheduler_yield`/`wakeup` above.
+use crate::proc::{init_work_struct, queue_work, workqueue_create};
 
+unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.

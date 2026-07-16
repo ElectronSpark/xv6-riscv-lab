@@ -91,7 +91,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
-    dev_t, fs_struct, hlist_entry_t, list_node_t, loff_t, mode_t, mutex_t, thread, vfs_dentry,
+    dev_t, fs_struct, hlist_entry_t, list_node_t, loff_t, mode_t, thread, vfs_dentry,
     vfs_dir_iter, vfs_inode, vfs_inode_ref, vfs_superblock, EAGAIN, EBUSY, EINVAL, ENAMETOOLONG,
     ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTEMPTY, EPERM, EXDEV,
 };
@@ -117,15 +117,13 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::scheduler_yield;
 
+// P3-D3b: lock/mutex.rs's entry points (for `inode->mutex`) are plain
+// safe Rust fns now that their `#[no_mangle]` exports are gone; reached
+// by crate path.
+use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_trylock, mutex_unlock};
+
 unsafe extern "C" {
     // printf.rs — C-variadic.
-
-    // lock/mutex.rs — `inode->mutex`.
-    safe fn mutex_lock(m: *mut mutex_t);
-    safe fn mutex_unlock(m: *mut mutex_t);
-    safe fn mutex_trylock(m: *mut mutex_t) -> c_int;
-    safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
-    safe fn holding_mutex(m: *mut mutex_t) -> c_int;
 
     // string.rs
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;

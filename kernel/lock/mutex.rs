@@ -226,8 +226,7 @@ extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 // Public API
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
+pub(crate) fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
     let m = as_native(m);
     spin_init(lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
     tq_init(wq_ptr(m),
@@ -237,8 +236,7 @@ pub extern "C" fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
     set_holder(m, -1);
 }}
 
-#[no_mangle]
-pub extern "C" fn mutex_lock(m: *mut mutex_t) { u! {
+pub(crate) fn mutex_lock(m: *mut mutex_t) { u! {
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -254,15 +252,13 @@ pub extern "C" fn mutex_lock(m: *mut mutex_t) { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn mutex_unlock(m: *mut mutex_t) { u! {
+pub(crate) fn mutex_unlock(m: *mut mutex_t) { u! {
     let m = as_native(m);
     let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
     do_wakeup(m);
 }}
 
-#[no_mangle]
-pub extern "C" fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
+pub(crate) fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
     if cur.is_null() { return 0; }
@@ -271,8 +267,7 @@ pub extern "C" fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
     if h == machine::thread_pid(cur) { 1 } else { 0 }
 }}
 
-#[no_mangle]
-pub extern "C" fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
+pub(crate) fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);

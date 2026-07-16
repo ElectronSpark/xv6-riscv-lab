@@ -103,24 +103,23 @@ unsafe extern "C" {
     pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     pub safe fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
 
-    // Not `pub`: every fn below shares a bare name with a real definition
-    // glob-reexported from `thread.rs`/`sched.rs`/`thread_queue.rs`/
-    // `signal.rs` at `crate::proc`. Making these crate-visible would
-    // trigger E0659 ambiguous-glob-reexport the moment any other proc
-    // submodule imports the real one by its bare name (P3-1B2 sweep,
-    // same finding as `clone.rs`/`sys_signal.rs`). Only ever called from
-    // within this file, so file-private is both sufficient and correct.
-    safe fn tcb_lock(t: *mut thread);
-    safe fn tcb_unlock(t: *mut thread);
-
     pub safe fn exit(code: c_int) -> !;
 
     pub safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-
-    safe fn kthread_create(
-        name: *const c_char, entry: *mut c_void, arg: u64, prio: c_int, order: c_int,
-    ) -> *mut thread;
 }
+
+// P3-D3b: `tcb_lock`/`tcb_unlock`/`kthread_create`
+// (kernel/proc/thread.rs) are plain safe Rust fns now that their
+// `#[no_mangle]` exports are gone; the old file-private `extern "C"`
+// redeclarations (kept non-`pub` to dodge E0659 with the glob reexport
+// at `crate::proc`) are replaced by direct crate-path imports of the
+// real definitions. NOTE: the old `kthread_create` redeclaration had
+// drifted to `(.., arg: u64, prio: c_int, order: c_int)`; the real
+// signature is `(.., arg1: u64, arg2: u64, stack_order: c_int)`. Both
+// call sites below pass a literal `0` for the 4th argument and
+// `KERNEL_STACK_ORDER` for the 5th, so the generated calls are
+// value-identical — the divergent decl was latent, not live.
+use crate::proc::thread::{kthread_create, tcb_lock, tcb_unlock};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -670,20 +669,17 @@ pub(crate) extern "C" fn xv6_wq_pub_workqueue_runtime_smoke_test() {}
 // ============== canonical ABI names ====================
 pub(crate) extern "C" fn workqueue_init() { workqueue_init_impl() }
 pub(crate) extern "C" fn workqueue_runtime_smoke_test() {}
-#[no_mangle]
-pub extern "C" fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue {
+pub(crate) fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue {
     workqueue_create_with_callbacks_impl(name, max_active, ptr::null())
 }
 pub(crate) extern "C" fn workqueue_create_with_callbacks(
     name: *const c_char, max_active: c_int, callbacks: *const workqueue_callbacks,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, callbacks) }
 pub(crate) extern "C" fn workqueue_kill(wq: *mut workqueue) -> c_int { workqueue_kill_impl(wq) }
-#[no_mangle]
-pub extern "C" fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool {
+pub(crate) fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool {
     queue_work_impl(wq, work)
 }
-#[no_mangle]
-pub extern "C" fn init_work_struct(
+pub(crate) fn init_work_struct(
     work: *mut work_struct, func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64,
 ) { init_work_struct_ex_impl(work, func, None, data, WORK_STRUCT_DEFAULT_FLAGS) }
 pub(crate) extern "C" fn init_work_struct_flags(
@@ -695,8 +691,7 @@ pub(crate) extern "C" fn init_work_struct_ex(
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64, flags: u32,
 ) { init_work_struct_ex_impl(work, func, fault, data, flags) }
-#[no_mangle]
-pub extern "C" fn create_work_struct(
+pub(crate) fn create_work_struct(
     func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64,
 ) -> *mut work_struct {
     create_work_struct_ex_impl(func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
@@ -709,8 +704,7 @@ pub(crate) extern "C" fn create_work_struct_ex(
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64, flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, fault, data, flags) }
-#[no_mangle]
-pub extern "C" fn free_work_struct(work: *mut work_struct) { free_work_struct_impl(work) }
+pub(crate) fn free_work_struct(work: *mut work_struct) { free_work_struct_impl(work) }
 
 // Suppress unused-ref-helper warning (kept for future consumers).
 #[allow(dead_code)] fn _silence_helpers() { let _ = lnr as fn(_) -> _; }

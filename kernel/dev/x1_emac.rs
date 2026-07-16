@@ -76,7 +76,7 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{fence, AtomicI32, Ordering};
 
-use crate::bindings::{mbuf, netdev, netdev_ops, phy_state, platform_info, spinlock_t, thread, x1_rx_desc, x1_tx_desc};
+use crate::bindings::{mbuf, netdev, netdev_ops, phy_state, platform_info, spinlock_t, x1_rx_desc, x1_tx_desc};
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 use crate::sync::KSpinlock;
 
@@ -88,8 +88,6 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
-    // proc/thread.rs.
-    safe fn kthread_create(name: *const c_char, entry: *mut c_void, arg1: u64, arg2: u64, stack_order: c_int) -> *mut thread;
     // lock/spinlock.rs.
     safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
     // string.rs.
@@ -112,7 +110,10 @@ use crate::mm::kalloc;
 use crate::net::{mbufalloc, mbuffree, net_rx};
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, wakeup};
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached via the `crate::proc`
+// glob re-export like its neighbors here.
+use crate::proc::{kthread_create, scheduler_yield, wakeup};
 use super::netdev::{netdev_register, netdev_set_link};
 
 // ===========================================================================

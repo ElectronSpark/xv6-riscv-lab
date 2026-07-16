@@ -45,11 +45,6 @@ unsafe extern "C" {
     // string.rs.
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-
-    // lock/completion.rs.
-    safe fn completion_reinit(c: *mut crate::bindings::completion_t);
-    safe fn complete_all(c: *mut crate::bindings::completion_t);
-
     // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
     // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
     // anchor, see that file's own comment) -- this extern stays valid.
@@ -71,6 +66,9 @@ fn __page_to_pa(page: *mut page_t) -> u64 {
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
 use crate::dev::blkdev::blkdev_register;
+// P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
+// that their `#[no_mangle]` exports are gone; reached by crate path.
+use crate::lock::completion::{complete_all, completion_reinit};
 
 /// `kernel/inc/uabi/stat.h` `S_IFBLK`, same local copy as other `dev/*.rs`.
 const S_IFBLK: u32 = 0o060_000;

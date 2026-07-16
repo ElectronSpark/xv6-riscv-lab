@@ -52,10 +52,11 @@ use crate::proc::proc_shims::{
     xv6_pid_wunlock, xv6_tg_send_signo,
 };
 
-unsafe extern "C" {
-    pub safe fn rcu_read_lock();
-    pub safe fn rcu_read_unlock();
-}
+// P3-D3b: the `pub safe fn rcu_read_lock/_unlock` extern redeclarations
+// that sat here were dead — this file's RCU read-side sections go through
+// the `xv6_rcu_read_lock`/`xv6_rcu_read_unlock` shims (see the comment
+// below) — so they are simply deleted now that lock/rcu.rs's
+// `#[no_mangle]` exports are gone.
 
 // P3-D2b: `get_pid_thread` (proc/pid.rs) and `thread_tgid`
 // (proc/thread_group.rs) are plain (file-private, so no E0659

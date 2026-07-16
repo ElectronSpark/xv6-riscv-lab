@@ -8,8 +8,10 @@
 //!
 //! Two parallel APIs:
 //!
-//! * **C ABI** — `#[no_mangle] pub unsafe extern "C" fn rcu_*` thin
-//!   wrappers preserving the original 15 symbols for C callers.
+//! * **Historical names** — `pub(crate) fn rcu_*` thin wrappers
+//!   preserving the original 15 names for their in-crate consumers
+//!   (formerly `#[no_mangle] extern "C"` exports; the C-ABI surface
+//!   is dismantled).
 //! * **Rust API** — [`KRcuRead`] RAII guard at the module root
 //!   (parallel to [`crate::sync::KSpinlock`] /
 //!   [`crate::machine::PreemptGuard`]) plus free functions under
@@ -73,15 +75,12 @@ use crate::proc::{scheduler_yield, tq_init, tq_wakeup_all, wakeup, wakeup_interr
 
 unsafe extern "C" {
     pub safe fn sleep_ms(ms: u64);
-
-    pub safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut thread;
 }
+
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached via the `crate::proc`
+// glob re-export like its neighbors above.
+use crate::proc::kthread_create;
 /// `crate::mm::slab::slab_free` is genuinely `unsafe fn`; this file's
 /// original extern declaration asserted `pub safe fn` (usual FFI facade).
 #[inline]
@@ -565,7 +564,7 @@ fn wakeup_all_kthreads() {
 // ---------------------------------------------------------------------------
 // Internal safe `_impl` functions
 //
-// All cross-module logic lives here. The exported `#[no_mangle]`
+// All cross-module logic lives here. The historical-name `rcu_*`
 // wrappers (further down) are trivial dispatchers.
 // ---------------------------------------------------------------------------
 
@@ -1230,8 +1229,8 @@ unsafe impl<T: Send + Sync> Send for RcuPtr<T> {}
 unsafe impl<T: Send + Sync> Sync for RcuPtr<T> {}
 
 /// Idiomatic Rust API. Each function is a thin safe wrapper around
-/// the private `_impl` form; the corresponding C ABI symbol lives at
-/// the module root via `#[no_mangle]`.
+/// the private `_impl` form; the corresponding historical `rcu_*`
+/// name lives at the module root as a `pub(crate)` dispatcher.
 pub mod api {
     use super::*;
 
@@ -1320,22 +1319,26 @@ pub mod api {
 }
 
 // ---------------------------------------------------------------------------
-// C ABI wrappers — preserve the 15 original symbols. Each body is a
-// single-line dispatch into the matching `_impl`. No `unsafe` blocks
-// in the bodies: the `unsafe extern "C"` is required only by ABI.
+// Historical-name wrappers — preserve the 15 original `rcu_*` names for
+// their cross-module Rust consumers (the `#[no_mangle] extern "C"`
+// exports are gone; everything reaches these by crate path). Each body
+// is a single-line dispatch into the matching `_impl`. Functions whose
+// contract is genuinely safe (`rcu_read_lock`/`_unlock`/
+// `rcu_check_callbacks` — pure dispatch into safe `_impl`s, mirrored by
+// the safe `api::*` forms above) are plain safe fns, matching the `safe
+// fn` declarations their consumers already relied on; the rest keep
+// `unsafe fn`.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_init() { init_impl() }
+pub(crate) unsafe fn rcu_init() { init_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_cpu_init(cpu: c_int) { cpu_init_impl(cpu) }
+pub(crate) unsafe fn rcu_cpu_init(cpu: c_int) { cpu_init_impl(cpu) }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_read_lock() { read_lock_impl() }
+#[inline]
+pub(crate) fn rcu_read_lock() { read_lock_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_read_unlock() { read_unlock_impl() }
+#[inline]
+pub(crate) fn rcu_read_unlock() { read_unlock_impl() }
 
 pub(crate) unsafe fn rcu_is_watching() -> c_int {
     if is_watching_impl() { 1 } else { 0 }
@@ -1343,11 +1346,12 @@ pub(crate) unsafe fn rcu_is_watching() -> c_int {
 
 pub(crate) unsafe fn rcu_note_context_switch() { note_context_switch_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_check_callbacks() { note_context_switch_impl() }
+#[inline]
+pub(crate) fn rcu_check_callbacks() { note_context_switch_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn call_rcu(
+/// # Safety
+/// Same contract as [`api::call`].
+pub(crate) unsafe fn call_rcu(
     head: *mut rcu_head_t,
     func: rcu_callback_t,
     data: *mut c_void,
@@ -1366,8 +1370,7 @@ pub(crate) unsafe fn synchronize_rcu_expedited() { synchronize_expedited_impl() 
 
 pub(crate) unsafe fn rcu_kthread_wakeup() { kthread_wakeup_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_kthread_start_cpu(cpu: c_int) { kthread_start_cpu_impl(cpu) }
+pub(crate) unsafe fn rcu_kthread_start_cpu(cpu: c_int) { kthread_start_cpu_impl(cpu) }
 
 pub(crate) unsafe fn rcu_kthread_start() {
     // Kept for ABI compatibility; per-CPU init is done by

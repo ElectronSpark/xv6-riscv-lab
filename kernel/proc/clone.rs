@@ -97,22 +97,18 @@ use crate::proc::proc_shims::{
     xv6_tcb_lock, xv6_tcb_unlock, xv6_thread_from_context, xv6_thread_state_set,
 };
 
-unsafe extern "C" {
-    // Existing kernel C symbols
-    // Not `pub`: `thread_create`/`attach_child`/`thread_destroy` below
-    // collide (same bare name, different opaque-marker signature) with
-    // the real definitions glob-reexported from `thread.rs` at
-    // `crate::proc` -- making these crate-visible triggered (or risked
-    // triggering) E0659 ambiguous-glob-reexport the moment any other
-    // proc submodule imports the real one by its bare name (P3-1B2
-    // sweep). They're only ever called from within this file, so
-    // file-private is both sufficient and correct.
-    safe fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> *mut Thread;
-    safe fn thread_destroy(t: *mut Thread);
-    safe fn attach_child(parent: *mut Thread, child: *mut Thread);
+// P3-D3b: `thread_create`/`thread_destroy`/`attach_child`
+// (kernel/proc/thread.rs) are plain safe Rust fns now that their
+// `#[no_mangle]` exports are gone; the old file-private `extern "C"`
+// redeclarations (kept non-`pub` to dodge E0659 with the glob reexport
+// at `crate::proc`) are replaced by direct crate-path imports of the
+// real definitions. This file's `Thread` alias *is*
+// `crate::bindings::thread`, so the signatures are identical.
+use crate::proc::thread::{attach_child, thread_create, thread_destroy};
 
-    pub safe fn rcu_check_callbacks();
-}
+// P3-D3b: lock/rcu.rs's `rcu_check_callbacks` is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached by crate path.
+use crate::lock::rcu::rcu_check_callbacks;
 
 // P3-D3a: `vm_dup`/`vm_copy` (mm/vm.rs) are ordinary (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone. This file's `Vm` is an

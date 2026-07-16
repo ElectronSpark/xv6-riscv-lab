@@ -357,7 +357,9 @@ fn scheduler_yield_inner() {
 
     // SAFETY: see the matching call above.
     unsafe { rq_flush_wake_list(cpuid_rs()); }
-    unsafe { rcu_check_callbacks(); }
+    // Plain safe fn as of P3-D3b (its `#[no_mangle] extern "C"` export
+    // is gone).
+    rcu_check_callbacks();
 }
 
 pub(crate) fn scheduler_yield() { scheduler_yield_inner() }

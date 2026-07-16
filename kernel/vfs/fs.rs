@@ -81,7 +81,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
     fs_struct, hlist_bucket_t, hlist_entry_t, hlist_func_t, hlist_t, kobject, list_node_t,
-    mutex_t, rwsem_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
+    mutex_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
     vfs_fs_type_ops, vfs_inode, vfs_inode_ref, vfs_superblock, vfs_superblock_ops, work_struct,
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
@@ -100,22 +100,18 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::scheduler_yield;
+// P3-D3b: lock/rwsem.rs's entry points (used for `vfs_superblock.lock`)
+// are plain safe Rust fns now that their `#[no_mangle]` exports are gone;
+// reached by crate path.
+use crate::lock::rwsem::{
+    rwsem_acquire_read, rwsem_acquire_write, rwsem_init, rwsem_is_write_holding, rwsem_release,
+};
+// P3-D3b: same for lock/mutex.rs's entry points (inode mutexes and
+// `__MOUNT_MUTEX`).
+use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};
 
 unsafe extern "C" {
     // printf.rs — C-variadic.
-
-    // lock/mutex.rs.
-    safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
-    safe fn mutex_lock(m: *mut mutex_t);
-    safe fn mutex_unlock(m: *mut mutex_t);
-    safe fn holding_mutex(m: *mut mutex_t) -> c_int;
-
-    // lock/rwsem.rs — `vfs_superblock.lock`.
-    safe fn rwsem_init(lk: *mut rwsem_t, flags: u64, name: *const c_char) -> c_int;
-    safe fn rwsem_acquire_read(lk: *mut rwsem_t) -> c_int;
-    safe fn rwsem_acquire_write(lk: *mut rwsem_t) -> c_int;
-    safe fn rwsem_release(lk: *mut rwsem_t);
-    safe fn rwsem_is_write_holding(lk: *mut rwsem_t) -> bool;
 
     // lock/spinlock.rs — `vfs_superblock.spinlock`, `fs_struct.lock`.
     safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
@@ -143,16 +139,12 @@ unsafe extern "C" {
     safe fn kobject_get(obj: *mut kobject);
     safe fn kobject_put(obj: *mut kobject);
 
-    // proc/workqueue.rs — the deferred-iput workqueue.
-    safe fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue;
-    safe fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool;
-    safe fn create_work_struct(
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
-        data: u64,
-    ) -> *mut work_struct;
-    safe fn free_work_struct(work: *mut work_struct);
-
 }
+
+// P3-D3b: proc/workqueue.rs's entry points (the deferred-iput workqueue)
+// are plain safe Rust fns now that their `#[no_mangle]` exports are
+// gone; reached via the `crate::proc` glob re-export.
+use crate::proc::{create_work_struct, free_work_struct, queue_work, workqueue_create};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this

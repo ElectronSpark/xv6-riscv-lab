@@ -79,7 +79,7 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{work_struct, workqueue, workqueue_callbacks};
@@ -401,15 +401,11 @@ extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::wakeup;
 
-unsafe extern "C" {
-    safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut crate::bindings::thread;
-}
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; the file-private extern
+// redeclaration is replaced by a direct crate-path import of the real
+// definition (no E0659 risk: the name now has exactly one provider).
+use crate::proc::thread::kthread_create;
 
 // `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
 // centralization).

@@ -154,12 +154,11 @@ unsafe extern "C" {
     // `crate::sync::KSpinlock` RAII or the caller-holds-it contract, see
     // the module doc's Lock map).
     safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-
-    // lock/rcu.rs (Rust-native; see `kernel/lock/rcu.rs`'s C-ABI shims).
-    safe fn rcu_read_lock();
-    safe fn rcu_read_unlock();
-
 }
+
+// P3-D3b: lock/rcu.rs's read-side entry points are plain safe Rust fns
+// now that their `#[no_mangle]` exports are gone; reached by crate path.
+use crate::lock::rcu::{rcu_read_lock, rcu_read_unlock};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this

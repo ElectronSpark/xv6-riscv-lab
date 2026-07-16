@@ -94,22 +94,6 @@ mod ffi {
         pub safe fn get_jiffs() -> u64;
         pub safe fn sleep_ms(ms: u64);
 
-        // Thread creation (kernel/proc/thread.rs).
-        pub safe fn kthread_create(
-            name: *const c_char,
-            entry: *mut c_void,
-            a1: u64,
-            a2: u64,
-            stack_order: c_int,
-        ) -> *mut thread;
-        pub safe fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue;
-        pub safe fn queue_work(wq: *mut workqueue, w: *mut work_struct) -> bool;
-        pub safe fn init_work_struct(
-            w: *mut work_struct,
-            func: Option<unsafe extern "C" fn(*mut work_struct)>,
-            data: u64,
-        );
-
         // Page-level primitives (kernel/mm/page.rs; redeclared with the
         // bindgen `page_t` view rather than page.rs's own `Page`).
 
@@ -119,6 +103,11 @@ mod ffi {
     }
 pub(crate) use crate::lock::completion::{complete_all, completion_init, completion_reinit, wait_for_completion};
 pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
+// P3-D3b: `kthread_create` (proc/thread.rs) and the proc/workqueue.rs
+// entry points are plain safe Rust fns now that their `#[no_mangle]`
+// exports are gone; re-exported here so the module-wide `use ffi::*`
+// keeps resolving them (the extern redeclarations above are deleted).
+pub(crate) use crate::proc::{init_work_struct, kthread_create, queue_work, workqueue_create};
 // P3-D2a: proc/sched.rs wake/sleep entry points and proc/thread_queue.rs
 // primitives, reached as plain crate-path items instead of the `extern
 // "C"` redeclarations that used to sit in the block above.

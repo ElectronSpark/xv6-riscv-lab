@@ -54,7 +54,10 @@ pub use workqueue_test::*;
 pub use rq_test::*;
 pub use thread_group::*;
 pub use thread_queue::*;
-pub use thread::*;
+// P3-D3b: thread.rs's last `pub` items were demoted to `pub(crate)`
+// with its `#[no_mangle]` exports gone, so the glob re-export is
+// `pub(crate)` too (same set of names visible crate-wide as before).
+pub(crate) use thread::*;
 pub use sched::*;
 pub use rq::*;
 pub use signal::*;

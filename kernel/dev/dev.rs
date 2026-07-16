@@ -94,7 +94,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::bindings::{
     device_major_t, device_ops_t, device_t, dev_type_e, dev_type_e_DEV_TYPE_BLOCK,
-    dev_type_e_DEV_TYPE_CHAR, kobject, rcu_callback_t, rcu_head_t, slab_cache_t,
+    dev_type_e_DEV_TYPE_CHAR, kobject, slab_cache_t,
     spinlock_t, EALREADY, EBUSY, EINVAL, ENODEV, ENOMEM, ENOSPC, ENOTTY, SLAB_FLAG_DEBUG_BITMAP,
     SLAB_FLAG_EMBEDDED,
 };
@@ -115,11 +115,13 @@ unsafe extern "C" {
     fn kobject_try_get(obj: *mut kobject) -> bool;
     fn kobject_put(obj: *mut kobject);
 
-    // kernel/lock/rcu.rs.
-    fn call_rcu(head: *mut rcu_head_t, func: rcu_callback_t, data: *mut c_void);
-
     // printf.rs -- variadic, cannot be marked `safe`.
 }
+
+// P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
+// that its `#[no_mangle]` export is gone; reached by crate path (the call
+// site below already sits in an `unsafe` block).
+use crate::lock::rcu::call_rcu;
 
 // P3-D3a: the mm page/slab entry points are genuinely `unsafe fn` in
 // `crate::mm::{page,slab}` now that their `#[no_mangle]` exports are

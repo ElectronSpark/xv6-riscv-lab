@@ -189,15 +189,6 @@ unsafe extern "C" {
     fn kvminit();
     fn kvminithart();
 
-    // lock/rcu.rs
-    fn rcu_init();
-    fn rcu_cpu_init(cpu: c_int);
-    fn rcu_kthread_start_cpu(cpu: c_int);
-
-    // proc/thread.rs. `idle_thread_init` stays `extern`: not demoted (it
-    // still has an out-of-scope caller elsewhere -- `vfs/fs.rs`).
-    fn idle_thread_init();
-
     // kernel/bufcache.rs (Wave 22)
     fn binit();
 
@@ -225,6 +216,15 @@ unsafe extern "C" {
 // `unsafe` context) are reached as crate-path items instead of the
 // `extern "C"` redeclarations that used to sit in the block above.
 use crate::mm::{kinit, pcache_global_init};
+// P3-D3b: lock/rcu.rs's boot entry points are plain `pub(crate) unsafe
+// fn`s now that their `#[no_mangle]` exports are gone; reached by crate
+// path (call sites below already sit in `unsafe` blocks).
+use crate::lock::rcu::{rcu_cpu_init, rcu_init, rcu_kthread_start_cpu};
+// P3-D3b: `idle_thread_init` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone. (The old note claiming an
+// out-of-scope caller in `vfs/fs.rs` was stale: fs.rs only mentions the
+// name inside a kassert message string — this file has the only calls.)
+use crate::proc::idle_thread_init;
 // P3-1D mesh sweep: dev/{fdt,dev,netdev,x1_emac,x1_sdhci,nullrand}.rs,
 // sbi.rs, backtrace.rs, pci.rs, virtio_disk.rs, ramdisk.rs, sysnet.rs are
 // all in scope for this wave; these become plain crate-path imports

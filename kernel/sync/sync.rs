@@ -389,11 +389,12 @@ impl<'a, T> Drop for SpinLockGuard<'a, T> {
 // Sleep-lock RAII facade
 // ===========================================================================
 //
-// The C kernel exposes its sleep-style locks (mutex / rwsem /
-// completion / semaphore / rwlock) through the symbols defined in the
-// `kernel/lock/*.rs` files. Those symbols keep the historical C ABI
-// (`#[no_mangle] pub unsafe extern "C" fn …`) for the rest of the
-// kernel C tree.
+// The kernel exposes its sleep-style locks (mutex / rwsem /
+// completion / semaphore / rwlock) through the functions defined in the
+// `kernel/lock/*.rs` files. As of P3-D3b those keep only their
+// historical *names* (`pub(crate) fn mutex_lock`, …) — the
+// `#[no_mangle] extern "C"` export surface is dismantled and every
+// consumer reaches them by crate path.
 //
 // The handles below give Rust callers an idiomatic façade — typed
 // `*mut` wrappers whose `lock` / `read` / `write` / `acquire` methods

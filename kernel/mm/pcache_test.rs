@@ -97,7 +97,7 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::mem::{size_of, MaybeUninit};
 use core::sync::atomic::{AtomicI32, Ordering};
 
@@ -114,7 +114,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // `size_of::<Page>() == 128` / `align_of::<Page>() == 64` compile-time
 // checks, so the cast is layout-safe.
 use crate::bindings::page_t as Page;
-use crate::bindings::{pcache_ops, thread, EAGAIN, EBUSY, EINVAL, EIO};
+use crate::bindings::{pcache_ops, EAGAIN, EBUSY, EINVAL, EIO};
 pub(crate) use crate::mm::{
     __page_alloc, __page_free, page_lock_acquire, page_lock_release, pcache_flush,
     pcache_get_page, pcache_init, pcache_invalidate_page, pcache_mark_page_dirty,
@@ -128,14 +128,12 @@ use crate::proc::{scheduler_yield, wakeup};
 
 unsafe extern "C" {
     pub safe fn sleep_ms(ms: u64);
-    pub safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut thread;
 }
+
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached via the `crate::proc`
+// glob re-export.
+use crate::proc::kthread_create;
 
 
 const KERNEL_STACK_ORDER: c_int = 2;

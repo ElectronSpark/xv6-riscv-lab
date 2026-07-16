@@ -14,12 +14,12 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_void, CStr};
+use core::ffi::{c_int, c_void, CStr};
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use crate::bindings::{mutex_t, rwsem_t, spinlock_t, thread, tq_t};
+use crate::bindings::{mutex_t, rwsem_t, spinlock_t, tq_t};
 use crate::lock::mutex::KMutex;
 use crate::lock::rwsem::KRwSem;
 
@@ -27,15 +27,10 @@ use crate::lock::rwsem::KRwSem;
 // plain crate-path items instead of `extern "C"` redeclarations.
 use crate::proc::{scheduler_yield, tq_size, wakeup};
 
-unsafe extern "C" {
-    pub safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut thread;
-}
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached via the `crate::proc`
+// glob re-export.
+use crate::proc::kthread_create;
 
 
 const KERNEL_STACK_ORDER: c_int = 2;

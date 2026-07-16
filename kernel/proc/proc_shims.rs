@@ -299,15 +299,15 @@ pub(crate) fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
 // ===========================================================================
 
 pub(crate) fn xv6_rcu_read_lock() {
-    // SAFETY: rcu_read_lock just bumps a per-thread depth counter and
-    // disables preemption; no preconditions beyond "in kernel context".
-    u! { rcu_read_lock() }
+    // `rcu_read_lock` is a plain safe fn (P3-D3b): it just bumps a
+    // per-thread depth counter and disables preemption.
+    rcu_read_lock()
 }
 
 pub(crate) fn xv6_rcu_read_unlock() {
-    // SAFETY: must be balanced with a prior xv6_rcu_read_lock; caller's
+    // Must be balanced with a prior xv6_rcu_read_lock; caller's
     // responsibility, same as the C wrapper this replaces.
-    u! { rcu_read_unlock() }
+    rcu_read_unlock()
 }
 
 pub(crate) fn xv6_tcb_lock(p: *mut crate::bindings::thread) {
@@ -1285,9 +1285,8 @@ pub(crate) fn xv6_exit_reap_zombie(
 //
 // Kernel primitives consumed:
 //   * `hlist_init/get/get_rcu/put_rcu/pop_rcu`     — extern C (kernel/hlist.c)
-//   * `rwlock_init/wlock/wunlock/rlock/runlock`    — extern Rust (kernel/lock/rwlock.rs)
-//   * `rwlock_try_update`                          — extern Rust
-//   * `__rwl_w_holding`                            — extern C (rwlock_shim.c)
+//   * `rwlock_init/wlock/wunlock/rlock/runlock`,
+//     `__rwl_try_update`, `__rwl_w_holding`        — crate::lock::rwlock (plain Rust fns)
 //   * `hlist_hash_int`, `rcu_assign_pointer`,
 //     `rcu_dereference`, `list_entry_add_tail_rcu`,
 //     `list_entry_del_init_rcu`, `atomic_inc_unless`,
@@ -1314,15 +1313,15 @@ unsafe extern "C" {
     fn hlist_get_rcu(h: *mut hlist_t, node: *mut c_void) -> *mut c_void;
     fn hlist_put_rcu(h: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void;
     fn hlist_pop_rcu(h: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-
-    fn rwlock_init(rw: *mut rwlock, name: *const c_char);
-    fn rwlock_wlock(rw: *mut rwlock);
-    fn rwlock_wunlock(rw: *mut rwlock);
-    fn rwlock_rlock(rw: *mut rwlock);
-    fn rwlock_runlock(rw: *mut rwlock);
-    fn __rwl_try_update(rw: *mut rwlock) -> bool;
-    fn __rwl_w_holding(rw: *mut rwlock) -> bool;
 }
+
+// Direct crate-path imports (kernel/lock/rwlock.rs) — these used to be
+// C-ABI symbol redeclarations; the `#[no_mangle]` exports are gone. All
+// stay `unsafe fn`, so the `u! { ... }` call sites below are unchanged.
+use crate::lock::rwlock::{
+    __rwl_try_update, __rwl_w_holding, rwlock_init, rwlock_rlock, rwlock_runlock, rwlock_wlock,
+    rwlock_wunlock,
+};
 
 // --- Rust replacements for the C macros / static inlines -------------------
 

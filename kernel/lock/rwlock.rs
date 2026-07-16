@@ -246,9 +246,9 @@ fn store_holder_none(rw: *mut rwlock_t) {
 }
 
 // ---------------------------------------------------------------------------
-// Safe inner helpers — spin policy and IRQ wrappers. The `#[no_mangle] pub
-// unsafe extern "C" fn` wrappers below are thin trampolines that exist only
-// to hand back the C-ABI symbol; they delegate to these functions so that
+// Safe inner helpers — spin policy and IRQ wrappers. The `pub(crate)
+// unsafe fn` wrappers below are thin trampolines that hand back the
+// historical `rwlock_*` names; they delegate to these functions so that
 // intra-module recursion does not need `unsafe { ... }` blocks.
 // ---------------------------------------------------------------------------
 
@@ -327,11 +327,13 @@ fn wunlock_inner(rw: *mut rwlock_t) {
 }
 
 // ===========================================================================
-// Public C-ABI surface — thin trampolines around the safe inner fns.
+// Cross-module surface — thin trampolines around the safe inner fns.
+// Formerly `#[no_mangle] pub unsafe extern "C" fn` C-ABI exports; all
+// consumers are Rust (sync/sync.rs, mm/pcache.rs, proc/proc_shims.rs)
+// and reach these by crate path now, so they are plain Rust fns.
 // ===========================================================================
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_init(rw: *mut rwlock_t, name: *const c_char) {
+pub(crate) unsafe fn rwlock_init(rw: *mut rwlock_t, name: *const c_char) {
     init_inner(rw, name);
 }
 
@@ -353,14 +355,11 @@ pub(crate) unsafe fn rwlock_writer_release(rw: *mut rwlock_t) {
     writer_release_inner(rw);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_rlock(rw: *mut rwlock_t) { rlock_inner(rw); }
+pub(crate) unsafe fn rwlock_rlock(rw: *mut rwlock_t) { rlock_inner(rw); }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_runlock(rw: *mut rwlock_t) { runlock_inner(rw); }
+pub(crate) unsafe fn rwlock_runlock(rw: *mut rwlock_t) { runlock_inner(rw); }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wlock(rw: *mut rwlock_t) { wlock_inner(rw); }
+pub(crate) unsafe fn rwlock_wlock(rw: *mut rwlock_t) { wlock_inner(rw); }
 
 pub(crate) unsafe fn rwlock_wlock_expedited(rw: *mut rwlock_t) {
     machine::push_off();
@@ -372,8 +371,7 @@ pub(crate) unsafe fn rwlock_graceful_wlock(rw: *mut rwlock_t) {
     graceful_wacquire_inner(rw);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wunlock(rw: *mut rwlock_t) { wunlock_inner(rw); }
+pub(crate) unsafe fn rwlock_wunlock(rw: *mut rwlock_t) { wunlock_inner(rw); }
 
 // ---------------------------------------------------------------------------
 // irqsave / irqrestore wrappers
@@ -468,21 +466,16 @@ pub(crate) unsafe fn rwlock_w_wake_cb(data: *mut c_void, status: c_int) {
 }
 
 // ---------------------------------------------------------------------------
-// Extra C-ABI symbols kept for non-C callers.
-//
-// `kernel/proc/proc_shims.rs` declares its own `unsafe extern "C" { fn
-// __rwl_try_update(...); fn __rwl_w_holding(...); }` block and calls these
-// two symbols directly on `pid_lock` (a plain `struct rwlock`) rather than
+// Raw state-word dispatchers for `kernel/proc/proc_shims.rs`, which calls
+// these two directly on `pid_lock` (a plain `struct rwlock`) rather than
 // going through the higher-level `rwlock_*` API. They used to be defined in
-// `kernel/lock/rwlock_shim.c`; now they are thin dispatchers onto the native
-// primitives above so that call site keeps working unmodified.
+// `kernel/lock/rwlock_shim.c` and were later re-exported as C-ABI symbols;
+// proc_shims.rs now imports them by crate path, so they are plain Rust fns.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn __rwl_try_update(rw: *mut rwlock_t) -> bool { try_update(rw) }
+pub(crate) unsafe fn __rwl_try_update(rw: *mut rwlock_t) -> bool { try_update(rw) }
 
-#[no_mangle]
-pub unsafe extern "C" fn __rwl_w_holding(rw: *mut rwlock_t) -> bool { w_holding(rw) }
+pub(crate) unsafe fn __rwl_w_holding(rw: *mut rwlock_t) -> bool { w_holding(rw) }
 
 // ===========================================================================
 // Rust-native typed handle

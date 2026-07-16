@@ -39,15 +39,12 @@ unsafe extern "C" {
 
     pub safe fn sleep_ms(ms: u64);
     pub safe fn get_jiffs() -> u64;
-    pub safe fn kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        stack_order: c_int,
-    ) -> *mut thread;
-
 }
+
+// P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
+// that its `#[no_mangle]` export is gone; reached via the `crate::proc`
+// glob re-export.
+use crate::proc::kthread_create;
 /// `crate::kmm_alloc`/`kmm_free` are genuinely `unsafe fn`; this file's
 /// original extern declaration asserted `pub safe fn` (usual FFI facade).
 #[inline]

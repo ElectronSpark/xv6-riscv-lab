@@ -1626,6 +1626,33 @@ guards are already done (8a–8d).
   **cowtest ALL PASSED**; no panics. (Worker: 4 boots, mmaptest ×2,
   createdelete OK, stressfs completion, ENOENT.)
 
+### Iteration 55 — 2026-07-15 — Wave P3-D3b: lock cluster + thread/workqueue C-ABI surface dismantled (43 `no_mangle` → 0)
+
+- Owner-driven mesh sweep: rwlock 7→0, rcu 7→0, rwsem 5→0, mutex 5→0,
+  completion 5→0, thread.rs 9→0, workqueue 5→0. Crate-wide 139→**96**.
+  All 43 live (0 dead); zero kept-`extern "C"` exceptions (address-taken
+  scan clean; `thread_sched_entity` + rwlock's sleep/wake callbacks were
+  already no_mangle-free). Zero bindings-import consumers this cluster.
+- **Latent ABI drift caught** (2nd of the arc): workqueue.rs's own
+  `kthread_create` redeclaration had drifted to `(.., arg, prio, order)`
+  vs the real `(.., arg1, arg2, stack_order)` — value-identical at
+  runtime only because both call sites pass literal 0s; unified.
+- **False safety contract fixed**: vfs_syscall.rs's old `safe fn call_rcu`
+  decl asserted safety the real fn doesn't have — its call site now has an
+  explicit `unsafe {}` + SAFETY comment; `call_rcu` gained a `# Safety`
+  section. Conversely `rcu_read_lock/_unlock/rcu_check_callbacks` became
+  genuinely safe `pub(crate) fn` (pure dispatch to safe `_impl`s) and 4
+  redundant `u!{}` wrappers dropped. Dead `rcu_read_lock` externs in
+  pgroup.rs deleted (never called).
+- **Warning A/B under lifted `-A warnings`**: stash-baseline vs final =
+  zero new warnings (716→713, 3 pre-existing removed); 14 orphaned
+  imports cleaned across 13 files.
+- nm: all 43 names absent; keep-set present. 36 files, +298/−375.
+- Verified (orchestrator): 0-warning clean rebuild; cache clean; boot
+  gate; **testsig 21/21**; forkfork OK; stressfs; **forkforkfork panics
+  at the identical pre-existing site** (0x80c3c000 region, same message).
+  (Worker: boot ×3, forktest/createdelete OK, ENOENT, nm sweep.)
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

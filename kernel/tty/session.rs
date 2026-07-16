@@ -88,11 +88,11 @@ use crate::tty::tty::{tty_ref, tty_unref};
 // `crate::proc::...` module paths.
 // ===========================================================================
 
-unsafe extern "C" {
+// P3-D3b: lock/rcu.rs's read-side entry points are plain safe Rust fns
+// now that their `#[no_mangle]` exports are gone; reached by crate path.
+use crate::lock::rcu::{rcu_read_lock, rcu_read_unlock};
 
-    // lock/rcu.rs.
-    pub safe fn rcu_read_lock();
-    pub safe fn rcu_read_unlock();
+unsafe extern "C" {
 
     // printf/panic (matches `kernel/tty/tty.rs`'s own local
     // `tty_assert_errno` extern block exactly).

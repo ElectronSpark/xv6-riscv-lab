@@ -233,8 +233,7 @@ extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
 // Public API
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn completion_init(c: *mut completion_t) { u! {
+pub(crate) fn completion_init(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let c = as_native(c);
     done_set(c, 0);
@@ -244,8 +243,7 @@ pub extern "C" fn completion_init(c: *mut completion_t) { u! {
             lock_ptr(c));
 }}
 
-#[no_mangle]
-pub extern "C" fn completion_reinit(c: *mut completion_t) { u! {
+pub(crate) fn completion_reinit(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let c = as_native(c);
     done_set(c, 0);
@@ -258,8 +256,7 @@ pub(crate) fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
     try_wait_for_completion_locked(c)
 }}
 
-#[no_mangle]
-pub extern "C" fn wait_for_completion(c: *mut completion_t) { u! {
+pub(crate) fn wait_for_completion(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let c = as_native(c);
     let cur = machine::current_thread_ptr();
@@ -273,8 +270,7 @@ pub extern "C" fn wait_for_completion(c: *mut completion_t) { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn wait_for_completion_interruptible(c: *mut completion_t)-> c_int  { u! {
+pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t)-> c_int  { u! {
     if c.is_null() { return -(EINVAL as c_int); }
     let c = as_native(c);
     let cur = machine::current_thread_ptr();
@@ -373,8 +369,7 @@ pub(crate) fn complete(c: *mut completion_t) { u! {
     completion_do_wake(c);
 }}
 
-#[no_mangle]
-pub extern "C" fn complete_all(c: *mut completion_t) { u! {
+pub(crate) fn complete_all(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let c = as_native(c);
 

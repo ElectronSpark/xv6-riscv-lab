@@ -95,7 +95,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // `EAGAIN` survives as a real import, for `vfs_fput`'s untouched
 // (infallible-return) `fflush`-result comparison.
 use crate::bindings::{
-    blkdev_t, bool_, cdev_t, device_t, list_node_t, loff_t, mutex_t, pipe, slab_cache_t,
+    blkdev_t, bool_, cdev_t, device_t, list_node_t, loff_t, pipe, slab_cache_t,
     spinlock_t, stat, thread, vfs_fdtable, vfs_file, vfs_file_ops, vfs_inode, vfs_inode_ref,
     EAGAIN, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
@@ -114,9 +114,6 @@ use crate::sync::{KMutex, KSpinlock};
 unsafe extern "C" {
     // printf.rs — C-variadic.
 
-    // lock/mutex.rs — `file->lock`.
-    safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
-
     // lock/spinlock.rs — `__vfs_ftable_lock` init only (lock/unlock go
     // through `crate::sync::KSpinlock` RAII, see the module doc).
     safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
@@ -126,6 +123,10 @@ unsafe extern "C" {
     // `vfs/inode.rs`'s `ln_init`/`ln_detach`). Nothing extern here.
 
 }
+
+// P3-D3b: lock/mutex.rs's `mutex_init` (for `file->lock`) is a plain safe
+// Rust fn now that its `#[no_mangle]` export is gone; reached by crate path.
+use crate::lock::mutex::mutex_init;
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this

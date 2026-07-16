@@ -18,7 +18,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::bindings::{
-    context, fs_struct, list_node_t, hlist_entry_t, page_t, pgroup, rcu_head_t,
+    context, fs_struct, list_node_t, hlist_entry_t, page_t, pgroup,
     rq, sched_attr, sched_entity, session, sigacts as sigacts_t, spinlock_t, thread,
     thread_group, thread_state, utrapframe, vfs_fdtable, vfs_inode, vfs_inode_ref,
 };
@@ -149,10 +149,13 @@ unsafe extern "C" {
     fn spin_lock(lock: *mut spinlock_t);
     fn spin_unlock(lock: *mut spinlock_t);
     fn spin_holding(lock: *mut spinlock_t) -> c_int;
-
-    // RCU
-    fn call_rcu(head: *mut rcu_head_t, func: Option<unsafe extern "C" fn(*mut c_void)>, data: *mut c_void);
 }
+
+// P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
+// that its `#[no_mangle]` export is gone; reached by crate path (the call
+// site in `thread_destroy` already sits inside `thread_raw_layout!`'s
+// `unsafe` block).
+use crate::lock::rcu::call_rcu;
 
 // P3-D3a: `vm_init`/`vm_put` (mm/vm.rs, ordinary safe Rust fns now that
 // their `#[no_mangle]` exports are gone) and `page_alloc` (genuinely
@@ -447,19 +450,15 @@ fn proc_assert_holding_impl(p: *mut thread) {
     );
 }
 
-#[no_mangle]
-pub extern "C" fn tcb_lock(p: *mut thread) { tcb_lock_impl(p) }
-#[no_mangle]
-pub extern "C" fn tcb_unlock(p: *mut thread) { tcb_unlock_impl(p) }
-#[no_mangle]
-pub extern "C" fn proc_assert_holding(p: *mut thread) { proc_assert_holding_impl(p) }
+pub(crate) fn tcb_lock(p: *mut thread) { tcb_lock_impl(p) }
+pub(crate) fn tcb_unlock(p: *mut thread) { tcb_unlock_impl(p) }
+pub(crate) fn proc_assert_holding(p: *mut thread) { proc_assert_holding_impl(p) }
 
 // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
 pub(crate) extern "C" fn thread_init() { __proctab_init(); }
 
-#[no_mangle]
-pub extern "C" fn attach_child(parent: *mut thread, child: *mut thread) {
+pub(crate) fn attach_child(parent: *mut thread, child: *mut thread) {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
@@ -479,8 +478,7 @@ pub extern "C" fn attach_child(parent: *mut thread, child: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn detach_child(parent: *mut thread, child: *mut thread) {
+pub(crate) fn detach_child(parent: *mut thread, child: *mut thread) {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
@@ -543,8 +541,7 @@ fn thread_create_inner(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c
     }
 }
 
-#[no_mangle]
-pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
+pub(crate) fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
     result_to_errptr(thread_create_inner(entry, arg1, arg2, kstack_order))
 }
 
@@ -558,13 +555,13 @@ extern "C" fn kthread_entry(prev: *mut context) {
         context_switch_finish(thread_from_context(prev), cur, 0);
         CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
         intr_on();
-        // SAFETY: `rcu_check_callbacks` is `pub unsafe extern "C" fn`
-        // (kernel/lock/rcu.rs); it's sound to call here because we're on
-        // the boot path of a freshly-scheduled kernel thread right after
-        // `context_switch_finish`, with interrupts just
-        // turned on above and no RCU read-side critical section held —
-        // matching every other call site of this function.
-        u! { rcu_check_callbacks(); }
+        // `rcu_check_callbacks` (kernel/lock/rcu.rs) is a plain safe fn
+        // as of P3-D3b; sound to call here because we're on the boot
+        // path of a freshly-scheduled kernel thread right after
+        // `context_switch_finish`, with interrupts just turned on above
+        // and no RCU read-side critical section held — matching every
+        // other call site of this function.
+        rcu_check_callbacks();
 
         let cur = current_thread();
         let cur_ref = ThreadAccess::assume(cur);
@@ -624,14 +621,12 @@ fn kthread_create_inner(name: *const c_char, entry: *mut c_void,
     }
 }
 
-#[no_mangle]
-pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
+pub(crate) fn kthread_create(name: *const c_char, entry: *mut c_void,
                                          arg1: u64, arg2: u64, stack_order: c_int)-> *mut thread  {
     result_to_errptr(kthread_create_inner(name, entry, arg1, arg2, stack_order))
 }
 
-#[no_mangle]
-pub extern "C" fn idle_thread_init() {
+pub(crate) fn idle_thread_init() {
     // The guard check and stack-pointer arithmetic below are plain safe
     // calls/bit ops (`read_sp`/`cpuid`/etc. are all safe `pub fn`s); the
     // rest of the body is a `thread_raw_layout! { ... }` invocation,
@@ -686,8 +681,7 @@ extern "C" fn thread_destroy_rcu_callback(data: *mut c_void) {
     page_free(t.kstack_addr() as *mut c_void, t.kstack_order());
 }
 
-#[no_mangle]
-pub extern "C" fn thread_destroy(p: *mut thread) {
+pub(crate) fn thread_destroy(p: *mut thread) {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.

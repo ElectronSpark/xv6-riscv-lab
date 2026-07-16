@@ -113,6 +113,9 @@ use crate::bindings::{
     thread, tq_t, virtio_blk_req, virtq_avail, virtq_desc, virtq_used, EIO, PGSIZE,
 };
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
+// P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
+// that their `#[no_mangle]` exports are gone; reached by crate path.
+use crate::lock::completion::{complete_all, completion_reinit};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
@@ -140,10 +143,6 @@ unsafe extern "C" {
 
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-
-    // lock/completion.rs.
-    safe fn completion_reinit(c: *mut crate::bindings::completion_t);
-    safe fn complete_all(c: *mut crate::bindings::completion_t);
 
     // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
     // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data

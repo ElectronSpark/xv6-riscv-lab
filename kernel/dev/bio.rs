@@ -52,7 +52,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use crate::bindings::{bio, bio_vec, blkdev_t, bool_, completion_t, kobject, page_t, PGSIZE};
+use crate::bindings::{bio, bio_vec, blkdev_t, bool_, kobject, page_t, PGSIZE};
 use crate::kobject::{HasKobject, Kobject};
 
 // ---------------------------------------------------------------------------
@@ -72,10 +72,13 @@ unsafe extern "C" {
 
     // kernel/string.rs.
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-
-    // kernel/lock/completion.rs.
-    fn completion_init(c: *mut completion_t);
 }
+
+// P3-D3b: lock/completion.rs's `completion_init` is a plain safe Rust fn
+// now that its `#[no_mangle]` export is gone; reached by crate path (the
+// call site sits in an `unsafe` block that stays required for its raw
+// field projections).
+use crate::lock::completion::completion_init;
 
 // P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
 // `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;

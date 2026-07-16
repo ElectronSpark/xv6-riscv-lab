@@ -265,8 +265,7 @@ extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 // Public API
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)-> c_int  { u! {
+pub(crate) fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)-> c_int  { u! {
     if l.is_null() || name.is_null() { return -1; }
     let l = as_native(l);
     spin_init(lk_ptr(l), b"rwsem spinlock\0".as_ptr() as *const c_char);
@@ -278,8 +277,7 @@ pub extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)->
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -1; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -359,8 +357,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -1; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -448,8 +445,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_in
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_release(l: *mut rwsem_t) { u! {
+pub(crate) fn rwsem_release(l: *mut rwsem_t) { u! {
     if l.is_null() { return; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -469,8 +465,7 @@ pub extern "C" fn rwsem_release(l: *mut rwsem_t) { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_is_write_holding(l: *mut rwsem_t)-> bool  { u! {
+pub(crate) fn rwsem_is_write_holding(l: *mut rwsem_t)-> bool  { u! {
     if l.is_null() { return false; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();

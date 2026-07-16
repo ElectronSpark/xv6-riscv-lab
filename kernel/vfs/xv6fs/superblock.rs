@@ -37,7 +37,7 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::bindings::{
-    bio, blkdev_t, buf, completion_t, dinode, page_t, pcache, pcache_ops, slab_cache_t, statfs,
+    bio, blkdev_t, buf, dinode, page_t, pcache, pcache_ops, slab_cache_t, statfs,
     vfs_fs_type, vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops, xv6fs_inode,
     xv6fs_superblock, EINVAL, EIO, ENOMEM, ENOSPC, PGSIZE,
 };
@@ -60,10 +60,6 @@ unsafe extern "C" {
     // string.rs.
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
-
-    // lock module (100% Rust).
-    safe fn wait_for_completion(c: *mut completion_t);
-    safe fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int;
 
     // kernel/bio.c (classic xv6 buffer cache, unchanged C).
     safe fn bread(dev: u32, blockno: u32) -> *mut buf;
@@ -118,6 +114,9 @@ fn slab_free(obj: *mut c_void) {
 // become plain crate-path imports instead of `extern "C"` redeclarations.
 use crate::dev::bio::{bio_add_seg, bio_alloc};
 use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
+// P3-D3b: lock/completion.rs's wait entry points are plain safe Rust fns
+// now that their `#[no_mangle]` exports are gone; reached by crate path.
+use crate::lock::completion::{wait_for_completion, wait_for_completion_interruptible};
 // P3-9b: `KArc<bio>` replaces the manual `bio_alloc`/`bio_release` pairing
 // in `xv6fs_pcache_read_page`/`xv6fs_pcache_write_page` below -- see
 // `kernel/kobject.rs`'s `KArc` doc and `kernel/dev/bio.rs`'s `HasKobject`
