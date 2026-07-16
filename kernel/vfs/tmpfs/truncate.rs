@@ -141,7 +141,7 @@ pub(crate) extern "C" fn __tmpfs_migrate_to_allocated_blocks(ti: *mut tmpfs_inod
         core::ptr::write_bytes(
             super::inode::embedded_data(ti),
             0,
-            core::mem::size_of::<tmpfs_inode>() - core::mem::offset_of!(tmpfs_inode, __bindgen_anon_1),
+            core::mem::size_of::<tmpfs_inode>() - core::mem::offset_of!(tmpfs_inode, u),
         );
         (*ti).embedded = 0;
     }

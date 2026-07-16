@@ -51,6 +51,65 @@ use super::truncate::xv6fs_bmap_read;
 use super::{xv6fs_iblock, xv6fs_type_to_mode, FSMAGIC, IPB, ROOTINO};
 
 // ===========================================================================
+// Native `xv6fs_superblock` — P3-N8 nativization (user directive:
+// remove the C-compatible interfaces). `Xv6fsSuperblock` is the
+// canonical native definition of `kernel/vfs/xv6fs/xv6fs_private.h`'s
+// `struct xv6fs_superblock`: `build.rs` blocklists the bindgen
+// emission and re-exports this type as
+// `crate::bindings::xv6fs_superblock` (facade `pub use`, N2 pattern).
+//
+// `disk_sb` (`struct superblock`, `kernel/inc/vfs/xv6fs/ondisk.h`) is
+// the ON-DISK superblock record and stays bindgen-emitted (P3-4
+// scrutiny class, same disposition as `dinode`/`dirent`) — referenced
+// here by its `crate::bindings` path, the sanctioned mixed-tier
+// pattern. `log`/`block_cache` are this wave's own natives (via their
+// facades).
+//
+// DERIVE DECISION (P3-N8): no derives — the bindgen emission derived
+// neither Copy nor Clone (it embeds the NONCOPY `vfs_superblock` and
+// `xv6fs_block_cache` by value); the native faithfully has no derives.
+// `_pad0` reproduces bindgen's `__bindgen_padding_0` verbatim (places
+// the cacheline-aligned `log` at 1536).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence).
+// ===========================================================================
+
+/// Native `struct xv6fs_superblock` (`kernel/vfs/xv6fs/xv6fs_private.h`)
+/// — one mounted xv6fs instance: the generic VFS superblock, the cached
+/// copy of the on-disk superblock, the backing block device, the
+/// per-mount log, and the free-block extent cache.
+#[repr(C, align(64))]
+pub struct Xv6fsSuperblock {
+    pub vfs_sb: vfs_superblock,
+    /// Copy of the on-disk superblock (`struct superblock` stays
+    /// bindgen-emitted — ON-DISK record, P3-4 scrutiny class).
+    pub disk_sb: crate::bindings::superblock,
+    pub blkdev: *mut blkdev_t,
+    pub dirty: core::ffi::c_int,
+    pub(crate) _pad0: [u64; 2],
+    pub log: crate::bindings::xv6fs_log,
+    pub block_cache: crate::bindings::xv6fs_block_cache,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above).
+const _: () = {
+    assert!(core::mem::size_of::<Xv6fsSuperblock>() == 4096, "xv6fs_superblock size");
+    assert!(core::mem::align_of::<Xv6fsSuperblock>() == 64, "xv6fs_superblock alignment");
+    assert!(core::mem::offset_of!(Xv6fsSuperblock, vfs_sb) == 0, "xsb.vfs_sb offset");
+    assert!(core::mem::offset_of!(Xv6fsSuperblock, disk_sb) == 1472, "xsb.disk_sb offset");
+    assert!(core::mem::offset_of!(Xv6fsSuperblock, blkdev) == 1504, "xsb.blkdev offset");
+    assert!(core::mem::offset_of!(Xv6fsSuperblock, dirty) == 1512, "xsb.dirty offset");
+    assert!(core::mem::offset_of!(Xv6fsSuperblock, log) == 1536, "xsb.log offset");
+    assert!(core::mem::offset_of!(Xv6fsSuperblock, block_cache) == 2624, "xsb.block_cache offset");
+};
+
+// ===========================================================================
 // Externs — see the module doc above for the convention.
 // ===========================================================================
 

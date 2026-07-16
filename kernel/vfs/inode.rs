@@ -482,6 +482,38 @@ const _: () = {
     assert!(core::mem::offset_of!(VfsInodeOps, open) == 144, "vfs_inode_ops.open offset");
 };
 
+/// Native `struct vfs_inode_ref` (`kernel/inc/types.h`) — a paired
+/// (superblock, inode) reference, embedded by value by the (native)
+/// `vfs_file` (its `inode` field) and `fs_struct` (`rooti`/`cwd`).
+///
+/// P3-N8 nativization (user directive: remove the C-compatible
+/// interfaces; N5 skipped this one). `build.rs` blocklists the bindgen
+/// emission and re-exports this type as `crate::bindings::vfs_inode_ref`
+/// (facade `pub use`, N2 pattern). Derives Copy/Clone exactly as the
+/// pre-nativization bindgen emission did (two raw pointers — the
+/// by-value embedders' derive lines depend on it).
+///
+/// Layout evidence: temporary in-tree `offset_of!` gate on the live
+/// bindgen form + cross-compiler `_Static_assert`/value probe
+/// (toolchain gcc, rv64gc/lp64d — scratchpad p3n8_probe_values.c);
+/// both agree on every value asserted below (no pipe-style divergence).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsInodeRef {
+    pub sb: *mut vfs_superblock,
+    pub inode: *mut vfs_inode,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<VfsInodeRef>() == 16, "vfs_inode_ref size");
+    assert!(core::mem::align_of::<VfsInodeRef>() == 8, "vfs_inode_ref alignment");
+    assert!(core::mem::offset_of!(VfsInodeRef, sb) == 0, "vfs_inode_ref.sb offset");
+    assert!(core::mem::offset_of!(VfsInodeRef, inode) == 8, "vfs_inode_ref.inode offset");
+};
+
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
 // locally rather than imported by Rust path (matches the established

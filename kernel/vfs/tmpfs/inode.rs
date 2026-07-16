@@ -27,9 +27,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
-    dev_t, hlist_entry_t, hlist_func_struct, hlist_t, ht_hash_t, list_node_t, loff_t, mode_t,
-    stat, tmpfs_dentry, tmpfs_inode, vfs_dentry, vfs_dir_iter, vfs_inode, vfs_inode_ops, EBUSY,
-    EEXIST, EINVAL, ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP,
+    bool_, dev_t, hlist_bucket_t, hlist_entry_t, hlist_func_struct, hlist_t, ht_hash_t,
+    list_node_t, loff_t, mode_t, stat, tmpfs_dentry, tmpfs_inode, vfs_dentry, vfs_dir_iter,
+    vfs_inode, vfs_inode_ops, vfs_superblock, __IncompleteArrayField, EBUSY, EEXIST, EINVAL,
+    ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP,
 };
 
 use super::{
@@ -107,30 +108,163 @@ const fn neg(e: u32) -> c_int {
 }
 
 // ===========================================================================
+// Native tmpfs inode-side types — P3-N8 nativization (user directive:
+// remove the C-compatible interfaces). `TmpfsInode` (+ its per-type data
+// union) and `TmpfsDentry` are the canonical native definitions of
+// `kernel/vfs/tmpfs/tmpfs_private.h`'s `struct tmpfs_inode`/`struct
+// tmpfs_dentry`: `build.rs` blocklists the bindgen emissions and
+// re-exports these types as `crate::bindings::tmpfs_inode`/
+// `tmpfs_dentry` (facade `pub use`, N2 pattern). The C header stays
+// unchanged (no C consumers remain — the kernel tree has zero `.c`
+// files).
+//
+// The anonymous `{ dir; sym; file; }` union became the real Rust union
+// [`TmpfsInodeData`] (field `u`; N6 `PageTypeData` precedent) with the
+// named arms `TmpfsDirData` (struct) / `TmpfsSymData` / `TmpfsFileData`
+// — bindgen had degraded the whole nest to `__BindgenUnionField` blob
+// shells (`tmpfs_inode__bindgen_ty_1` + 3, all swept by the blocklist)
+// because the `sym`/`file` arms embed zero-length arrays.
+//
+// DERIVE DECISIONS (P3-N8): `tmpfs_inode`/`tmpfs_dentry` and the outer
+// union shell derived neither Copy nor Clone in the pre-nativization
+// bindgen output — the natives faithfully have no derives (both are
+// intrusive records: the embedded NONCOPY `vfs_inode`, live hash-list
+// links). The `dir` arm derived Copy/Clone (POD hash-list storage) —
+// kept. The `sym`/`file` arms' degraded shells had NO derives, but the
+// native unions DO derive Copy/Clone — a deliberate, documented
+// deviation: Rust union fields must be `Copy` (or `ManuallyDrop`-
+// wrapped, which would poison every consumer expression), and both arms
+// are plain POD (`*mut c_char` / zero-length arrays) for which bitwise
+// copy is trivially sound; nothing ever `=`-copies them standalone
+// (grep-verified — they exist only inside `TmpfsInodeData`).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence).
+// ===========================================================================
+
+/// Native form of the `dir` arm (directory inodes): the child-dentry
+/// hash list plus its inline bucket storage (`hlist_t`'s own trailing
+/// zero-length `buckets[]` overlays `children_buckets` — see
+/// `superblock.rs`'s `hlist_bucket_at` doc for that trick).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TmpfsDirData {
+    pub children: hlist_t,
+    pub children_buckets: [hlist_bucket_t; 15],
+}
+
+/// Native form of the `sym` arm (symlink inodes): the target path,
+/// either heap-allocated (`symlink_target`) or embedded in place
+/// (`data`, overlaying the rest of the union — see
+/// [`TMPFS_INODE_EMBEDDED_DATA_LEN`]).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union TmpfsSymData {
+    pub symlink_target: *mut c_char,
+    pub data: [c_char; 0],
+}
+
+/// Native form of the `file` arm (regular files): the embedded-data
+/// overlay used while `embedded == true` (non-embedded file data lives
+/// in the per-inode pcache `vfs_inode.i_data`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union TmpfsFileData {
+    pub data: [u8; 0],
+}
+
+/// Native form of `struct tmpfs_inode`'s anonymous per-type data union
+/// (bindgen shell: `tmpfs_inode__bindgen_ty_1`, 288/8).
+#[repr(C)]
+pub union TmpfsInodeData {
+    pub dir: TmpfsDirData,
+    pub sym: TmpfsSymData,
+    pub file: TmpfsFileData,
+}
+
+/// Native `struct tmpfs_inode` (`kernel/vfs/tmpfs/tmpfs_private.h`).
+/// The anonymous union became the named `u` field (consumers re-pointed
+/// from bindgen's `__bindgen_anon_1`; `proc/access.rs` naming
+/// precedent).
+#[repr(C, align(64))]
+pub struct TmpfsInode {
+    pub vfs_inode: vfs_inode,
+    pub embedded: bool_,
+    pub u: TmpfsInodeData,
+}
+
+/// Native `struct tmpfs_dentry` (`kernel/vfs/tmpfs/tmpfs_private.h`) —
+/// one directory entry: intrusive hash-list linkage plus the
+/// inline-allocated name (`__name_start` is C's trailing flexible array
+/// member, kept as bindgen's `__IncompleteArrayField` so the
+/// `.as_mut_ptr()` consumer idiom is unchanged).
+#[repr(C)]
+pub struct TmpfsDentry {
+    pub hash_entry: hlist_entry_t,
+    pub parent: *mut TmpfsInode,
+    pub sb: *mut vfs_superblock,
+    pub inode: *mut TmpfsInode,
+    pub name_len: usize,
+    pub name: *mut c_char,
+    pub __name_start: __IncompleteArrayField<c_char>,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above).
+const _: () = {
+    assert!(core::mem::size_of::<TmpfsDirData>() == 288, "tmpfs dir arm size");
+    assert!(core::mem::align_of::<TmpfsDirData>() == 8, "tmpfs dir arm alignment");
+    assert!(core::mem::offset_of!(TmpfsDirData, children) == 0, "dir.children offset");
+    assert!(core::mem::offset_of!(TmpfsDirData, children_buckets) == 48, "dir.children_buckets offset");
+    assert!(core::mem::size_of::<TmpfsSymData>() == 8, "tmpfs sym arm size");
+    assert!(core::mem::align_of::<TmpfsSymData>() == 8, "tmpfs sym arm alignment");
+    assert!(core::mem::size_of::<TmpfsFileData>() == 0, "tmpfs file arm size");
+    assert!(core::mem::align_of::<TmpfsFileData>() == 1, "tmpfs file arm alignment");
+    assert!(core::mem::size_of::<TmpfsInodeData>() == 288, "tmpfs inode union size");
+    assert!(core::mem::align_of::<TmpfsInodeData>() == 8, "tmpfs inode union alignment");
+
+    assert!(core::mem::size_of::<TmpfsInode>() == 1408, "tmpfs_inode size");
+    assert!(core::mem::align_of::<TmpfsInode>() == 64, "tmpfs_inode alignment");
+    assert!(core::mem::offset_of!(TmpfsInode, vfs_inode) == 0, "tmpfs_inode.vfs_inode offset");
+    assert!(core::mem::offset_of!(TmpfsInode, embedded) == 1088, "tmpfs_inode.embedded offset");
+    assert!(core::mem::offset_of!(TmpfsInode, u) == 1096, "tmpfs_inode anon union offset");
+
+    assert!(core::mem::size_of::<TmpfsDentry>() == 64, "tmpfs_dentry size");
+    assert!(core::mem::align_of::<TmpfsDentry>() == 8, "tmpfs_dentry alignment");
+    assert!(core::mem::offset_of!(TmpfsDentry, hash_entry) == 0, "tmpfs_dentry.hash_entry offset");
+    assert!(core::mem::offset_of!(TmpfsDentry, parent) == 24, "tmpfs_dentry.parent offset");
+    assert!(core::mem::offset_of!(TmpfsDentry, sb) == 32, "tmpfs_dentry.sb offset");
+    assert!(core::mem::offset_of!(TmpfsDentry, inode) == 40, "tmpfs_dentry.inode offset");
+    assert!(core::mem::offset_of!(TmpfsDentry, name_len) == 48, "tmpfs_dentry.name_len offset");
+    assert!(core::mem::offset_of!(TmpfsDentry, name) == 56, "tmpfs_dentry.name offset");
+    assert!(core::mem::offset_of!(TmpfsDentry, __name_start) == 64, "tmpfs_dentry.__name_start offset");
+};
+
+// ===========================================================================
 // `TMPFS_INODE_EMBEDDED_DATA_LEN` -- mirrors the C macro
 // `sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, sym.data)`.
 // `sym.data` sits at the very start of the anonymous `dir`/`sym`/`file`
-// union (`__bindgen_anon_1`), i.e. the same offset as the union field
-// itself -- computed here from the real bindgen type via
-// `core::mem::offset_of!`, not hand-copied, so it tracks the struct
-// layout automatically if it ever changes.
+// union (field `u`), i.e. the same offset as the union field itself --
+// computed here from the real native type via `core::mem::offset_of!`,
+// not hand-copied, so it tracks the struct layout automatically if it
+// ever changes.
 // ===========================================================================
 pub(crate) const TMPFS_INODE_EMBEDDED_DATA_LEN: usize =
-    core::mem::size_of::<tmpfs_inode>() - core::mem::offset_of!(tmpfs_inode, __bindgen_anon_1);
+    core::mem::size_of::<tmpfs_inode>() - core::mem::offset_of!(tmpfs_inode, u);
 
 // ===========================================================================
-// Raw access into `tmpfs_inode`'s anonymous `{ dir; sym; file; }` union.
-//
-// Bindgen could not derive a native Rust `union` for this type (every
-// variant embeds a zero-length/incomplete array: `dir.children`'s
-// `hlist_t` has its own trailing `buckets[0]`, `sym.data`/`file.data`
-// are themselves `[T; 0]`), so it fell back to the `__BindgenUnionField`
-// emulation (`.as_ref()`/`.as_mut()` transmutes). Since every variant
-// starts at the union's own offset 0 (that's what a union *is*), this
-// file instead reinterprets the whole `__bindgen_anon_1` field directly
-// as whichever concrete type the call site needs -- the same "offset-0
-// reinterpretation, not `container_of` arithmetic" pattern `hlist.rs`'s
-// module doc already documents and blesses for this crate.
+// Raw access into `tmpfs_inode`'s `{ dir; sym; file; }` union (field
+// `u`). Since every variant starts at the union's own offset 0 (that's
+// what a union *is*), this file reinterprets the whole `u` field
+// directly as whichever concrete type the call site needs -- the same
+// "offset-0 reinterpretation, not `container_of` arithmetic" pattern
+// `hlist.rs`'s module doc already documents and blesses for this crate
+// (pre-N8, the same casts targeted bindgen's degraded
+// `__bindgen_anon_1` blob).
 // ===========================================================================
 
 /// `&mut tmpfs_inode->dir.children` (a full `hlist_t`, sharing memory
@@ -142,7 +276,7 @@ pub(crate) const TMPFS_INODE_EMBEDDED_DATA_LEN: usize =
 /// `ti` must point to a live `tmpfs_inode` that is a directory.
 #[inline(always)]
 unsafe fn dir_hlist(ti: *mut tmpfs_inode) -> *mut hlist_t {
-    unsafe { ptr::addr_of_mut!((*ti).__bindgen_anon_1) as *mut hlist_t }
+    unsafe { ptr::addr_of_mut!((*ti).u) as *mut hlist_t }
 }
 
 /// Base pointer of the embedded-data byte region (`sym.data`/`file.data`
@@ -152,7 +286,7 @@ unsafe fn dir_hlist(ti: *mut tmpfs_inode) -> *mut hlist_t {
 /// `ti` must point to a live `tmpfs_inode`.
 #[inline(always)]
 pub(crate) unsafe fn embedded_data(ti: *mut tmpfs_inode) -> *mut u8 {
-    unsafe { ptr::addr_of_mut!((*ti).__bindgen_anon_1) as *mut u8 }
+    unsafe { ptr::addr_of_mut!((*ti).u) as *mut u8 }
 }
 
 /// `&mut tmpfs_inode->sym.symlink_target`.
@@ -162,7 +296,7 @@ pub(crate) unsafe fn embedded_data(ti: *mut tmpfs_inode) -> *mut u8 {
 /// target is allocated (not embedded).
 #[inline(always)]
 unsafe fn symlink_target_slot(ti: *mut tmpfs_inode) -> *mut *mut c_char {
-    unsafe { ptr::addr_of_mut!((*ti).__bindgen_anon_1) as *mut *mut c_char }
+    unsafe { ptr::addr_of_mut!((*ti).u) as *mut *mut c_char }
 }
 
 // ===========================================================================

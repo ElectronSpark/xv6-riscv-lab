@@ -40,6 +40,60 @@ use super::inode::TMPFS_INODE_OPS;
 use super::{NAME_MAX, TMPFS_MAX_FILE_SIZE};
 
 // ===========================================================================
+// Native tmpfs superblock-side types — P3-N8 nativization (user
+// directive: remove the C-compatible interfaces). `TmpfsSuperblock`/
+// `TmpfsSbPrivate` are the canonical native definitions of
+// `kernel/vfs/tmpfs/tmpfs_private.h`'s `struct tmpfs_superblock`/
+// `struct tmpfs_sb_private`: `build.rs` blocklists the bindgen
+// emissions and re-exports these types as
+// `crate::bindings::tmpfs_superblock`/`tmpfs_sb_private` (facade
+// `pub use`, N2 pattern). The C header stays unchanged (no C consumers
+// remain — the kernel tree has zero `.c` files).
+//
+// DERIVE DECISIONS (P3-N8): `tmpfs_sb_private` derived Copy/Clone in
+// the pre-nativization bindgen output (a single `uint64`) — kept.
+// `tmpfs_superblock` derived neither (it embeds the NONCOPY
+// `vfs_superblock` by value) — the native faithfully has no derives.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence).
+// ===========================================================================
+
+/// Native `struct tmpfs_sb_private` (`kernel/vfs/tmpfs/tmpfs_private.h`)
+/// — tmpfs-specific superblock state: the next inode number to allocate.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TmpfsSbPrivate {
+    pub next_ino: crate::bindings::uint64,
+}
+
+/// Native `struct tmpfs_superblock` (`kernel/vfs/tmpfs/tmpfs_private.h`).
+#[repr(C, align(64))]
+pub struct TmpfsSuperblock {
+    pub vfs_sb: vfs_superblock,
+    pub private_data: TmpfsSbPrivate,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above).
+const _: () = {
+    assert!(core::mem::size_of::<TmpfsSbPrivate>() == 8, "tmpfs_sb_private size");
+    assert!(core::mem::align_of::<TmpfsSbPrivate>() == 8, "tmpfs_sb_private alignment");
+    assert!(core::mem::offset_of!(TmpfsSbPrivate, next_ino) == 0, "tmpfs_sb_private.next_ino offset");
+    assert!(core::mem::size_of::<TmpfsSuperblock>() == 1536, "tmpfs_superblock size");
+    assert!(core::mem::align_of::<TmpfsSuperblock>() == 64, "tmpfs_superblock alignment");
+    assert!(core::mem::offset_of!(TmpfsSuperblock, vfs_sb) == 0, "tmpfs_superblock.vfs_sb offset");
+    assert!(
+        core::mem::offset_of!(TmpfsSuperblock, private_data) == 1472,
+        "tmpfs_superblock.private_data offset"
+    );
+};
+
+// ===========================================================================
 // Externs — see the module doc above for the convention.
 // ===========================================================================
 

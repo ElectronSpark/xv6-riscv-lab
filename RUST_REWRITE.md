@@ -2117,6 +2117,29 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   signature as the recorded baseline). NOT committed (orchestrator
   gate).
 
+### Iteration 64 — 2026-07-16 — Wave P3-N8: fs-driver privates + tty + sock nativized
+
+- Eighth nativization wave: tmpfs privates (`tmpfs_inode` + its 3-arm
+  anon union, `tmpfs_dentry`, `tmpfs_superblock`, `tmpfs_sb_private`),
+  xv6fs privates (`xv6fs_inode`, `xv6fs_superblock`, `xv6fs_log`,
+  `xv6fs_logheader`, `xv6fs_block_cache` — carrying its deliberate
+  derive decision per N6's quirk flag), `vfs_inode_ref`, and the tty
+  pair (`tty`, `tty_ops`). `sock` needed only the build.rs
+  blocklist+redirect (a native already existed in sysnet.rs). bindgen
+  emission for all → 0; remaining bindgen structs 62→**44**.
+- Dispositions: `termios`/`winsize` stay bindgen (uabi class, P3-4);
+  `mbuf` stays bindgen (DMA-adjacent, P3-4).
+- Wave interrupted THREE times by server-side 529 overloads; resumed
+  twice via agent-context continuation; final verification completed by
+  the orchestrator (worker's own "Battery A" had passed pre-death).
+- Verified (orchestrator, cache-first): 0-warning clean rebuild; boot
+  gate; full fs corruption battery on fresh images — mkdir+EEXIST,
+  hard-link `wc` byte-identity, tmpfs `/tmp` mkdir+ls, symlinktest both
+  ok, usertests linktest/unlinkread OK, stressfs, ENOENT, zero
+  corruption markers; **testsig 21/21** (tty retyped — console
+  interactivity throughout the battery is itself the tty gate).
+  10 files, +836/−24.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

@@ -83,6 +83,78 @@ const _: () = {
 };
 
 // ===========================================================================
+// Native `xv6fs_block_cache` — P3-N8 nativization (user directive:
+// remove the C-compatible interfaces). `Xv6fsBlockCache` is the
+// canonical native definition of `kernel/vfs/xv6fs/block_cache.h`'s
+// `struct xv6fs_block_cache`: `build.rs` blocklists the bindgen
+// emission and re-exports this type as
+// `crate::bindings::xv6fs_block_cache` (facade `pub use`, N2 pattern).
+//
+// DERIVE DECISION (P3-N8): no derives. The bindgen emission had
+// already (silently, via the P3-N2 struct-X quirk) lost Copy/Clone —
+// flagged by N6 for a deliberate decision in this type's own wave.
+// First principles agree with the established emission: it owns a live
+// rb-tree of `free_extent`s, an embedded slab cache (`extent_cache`),
+// and a spinlock, so bitwise duplication would corrupt the extent tree
+// and double-own the allocator (the N1/N2 `tnode` NONCOPY precedent);
+// no consumer `=`-copies or literal-constructs it (grep-verified — the
+// only by-value use is the embed in the native `Xv6fsSuperblock`,
+// zero-initialized in place). So: no derives, matching the
+// boot-verified emission bit for bit.
+//
+// `_pad0`/`_pad1` reproduce bindgen's `__bindgen_padding_0/1` verbatim
+// (the C `__ALIGNED_CACHELINE` rides the `slab_cache_t`/`spinlock_t`
+// typedefs; the native `slab_cache_t` carries its own align(64), so
+// `extent_cache` would self-align at 64 regardless — the explicit pad
+// keeps the field list byte-for-byte identical to the emission).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence).
+// ===========================================================================
+
+/// Native `struct xv6fs_block_cache` (`kernel/vfs/xv6fs/block_cache.h`)
+/// — the per-mount free-block extent cache: an rb-tree of
+/// [`FreeExtent`]s keyed by start block, backed by its own slab cache.
+#[repr(C, align(64))]
+pub struct Xv6fsBlockCache {
+    pub extent_tree: rb_root,
+    pub tree_opts: crate::bindings::rb_root_opts,
+    pub(crate) _pad0: [u64; 4],
+    pub extent_cache: slab_cache_t,
+    pub nblocks: crate::bindings::uint32,
+    pub data_start: crate::bindings::uint32,
+    pub alloc_cursor: crate::bindings::uint32,
+    pub free_count: crate::bindings::uint32,
+    pub extent_count: crate::bindings::uint32,
+    pub(crate) _pad1: [u64; 5],
+    pub lock: spinlock_t,
+    pub initialized: core::ffi::c_int,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above).
+const _: () = {
+    assert!(core::mem::size_of::<Xv6fsBlockCache>() == 1472, "xv6fs_block_cache size");
+    assert!(core::mem::align_of::<Xv6fsBlockCache>() == 64, "xv6fs_block_cache alignment");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, extent_tree) == 0, "bc.extent_tree offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, tree_opts) == 16, "bc.tree_opts offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, _pad0) == 32, "bc._pad0 offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, extent_cache) == 64, "bc.extent_cache offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, nblocks) == 1344, "bc.nblocks offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, data_start) == 1348, "bc.data_start offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, alloc_cursor) == 1352, "bc.alloc_cursor offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, free_count) == 1356, "bc.free_count offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, extent_count) == 1360, "bc.extent_count offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, _pad1) == 1368, "bc._pad1 offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, lock) == 1408, "bc.lock offset");
+    assert!(core::mem::offset_of!(Xv6fsBlockCache, initialized) == 1432, "bc.initialized offset");
+};
+
+// ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
 

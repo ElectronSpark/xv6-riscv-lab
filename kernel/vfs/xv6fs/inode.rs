@@ -61,6 +61,58 @@ use crate::bindings::{
 
 use super::{xv6fs_mode_to_type, DIRSIZ};
 
+// ===========================================================================
+// Native `xv6fs_inode` — P3-N8 nativization (user directive: remove the
+// C-compatible interfaces). `Xv6fsInode` is the canonical native
+// definition of `kernel/vfs/xv6fs/xv6fs_private.h`'s `struct
+// xv6fs_inode`: `build.rs` blocklists the bindgen emission and
+// re-exports this type as `crate::bindings::xv6fs_inode` (facade
+// `pub use`, N2 pattern).
+//
+// `addrs[13]` is the IN-MEMORY copy of the on-disk `dinode.addrs`
+// (`XV6FS_NDIRECT + 2` == `NDIRECT + 2` == 13: direct + indirect +
+// double-indirect) — the on-disk `dinode` record itself stays
+// bindgen-emitted (P3-4 scrutiny class); `xv6fs_iupdate`/inode-load
+// copy element-by-element between the two.
+//
+// DERIVE DECISION (P3-N8): no derives — the bindgen emission derived
+// neither Copy nor Clone (it embeds the NONCOPY `vfs_inode` by value);
+// the native faithfully has no derives.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence).
+// ===========================================================================
+
+/// Native `struct xv6fs_inode` (`kernel/vfs/xv6fs/xv6fs_private.h`).
+#[repr(C, align(64))]
+pub struct Xv6fsInode {
+    pub vfs_inode: vfs_inode,
+    /// Device number (for lookup).
+    pub dev: crate::bindings::uint,
+    /// Block addresses (direct + indirect + double indirect).
+    pub addrs: [crate::bindings::uint; 13],
+    /// Major device number (for device files).
+    pub major: core::ffi::c_short,
+    /// Minor device number (for device files).
+    pub minor: core::ffi::c_short,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above).
+const _: () = {
+    assert!(core::mem::size_of::<Xv6fsInode>() == 1152, "xv6fs_inode size");
+    assert!(core::mem::align_of::<Xv6fsInode>() == 64, "xv6fs_inode alignment");
+    assert!(core::mem::offset_of!(Xv6fsInode, vfs_inode) == 0, "xi.vfs_inode offset");
+    assert!(core::mem::offset_of!(Xv6fsInode, dev) == 1088, "xi.dev offset");
+    assert!(core::mem::offset_of!(Xv6fsInode, addrs) == 1092, "xi.addrs offset");
+    assert!(core::mem::offset_of!(Xv6fsInode, major) == 1144, "xi.major offset");
+    assert!(core::mem::offset_of!(Xv6fsInode, minor) == 1146, "xi.minor offset");
+};
+
 // Sub-wave B landed: xv6fs/{truncate,log,file}.rs are Rust siblings in
 // this same driver now, so these are plain Rust-path imports (not
 // `extern "C"`), matching this crate's established filesystem-driver

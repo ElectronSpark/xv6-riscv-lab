@@ -61,6 +61,128 @@ use super::termios::termios_init_default;
 use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_read, pipe_write};
 
 // ===========================================================================
+// Native tty types — P3-N8 nativization (user directive: remove the
+// C-compatible interfaces). `Tty`/`TtyOps` are the canonical native
+// definitions of `kernel/inc/tty/tty_types.h`'s `struct tty`/`struct
+// tty_ops`: `build.rs` blocklists the bindgen emissions and re-exports
+// these types as `crate::bindings::tty`/`tty_ops` (facade `pub use`, N2
+// pattern). The C header stays unchanged (no C consumers remain — the
+// kernel tree has zero `.c` files).
+//
+// `termios`/`winsize` stay bindgen-emitted ON PURPOSE: both are defined
+// in `kernel/inc/uabi/termios.h` (the kernel-side `tty/termios.h` is a
+// bare re-include of the uabi header), i.e. they are userspace-ABI
+// layout contracts shared with user programs via TCGETS/TIOCGWINSZ —
+// the P3-4 scrutiny class this nativization arc deliberately leaves
+// alone (same disposition as `stat`/`statfs`).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence). Note `lock`
+// occupies [0,24) and `termios` starts at 24: the C
+// `__ALIGNED_CACHELINE` rides the `spinlock_t` typedef and affects only
+// the field's START alignment (here offset 0), not its size — both
+// compilers agree, and the struct-level align(64) carries the C
+// record's own 64-byte alignment, exactly as bindgen emitted.
+//
+// DERIVE DECISION (P3-N8): both types derive Copy/Clone exactly as the
+// pre-nativization bindgen emissions did (`tty`'s embedded
+// `spinlock_t`/`tq_t`/`termios`/`winsize` are all Copy). Nothing in the
+// remaining bindgen output embeds either type by value (verified — all
+// uses are pointers).
+// ===========================================================================
+
+/// Native `struct tty_ops` (`kernel/inc/tty/tty_types.h`) — the
+/// per-terminal line-discipline/driver operations table (fn-pointer
+/// `Option` forms reproduced verbatim; trait-ification is P3-10).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TtyOps {
+    pub open: Option<unsafe extern "C" fn(tty: *mut Tty) -> c_int>,
+    pub close: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub hangup: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub throttle: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub unthrottle: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub stop: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub start: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub discard_input: Option<unsafe extern "C" fn(tty: *mut Tty)>,
+    pub read: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *mut c_char, nr: usize) -> isize>,
+    pub write: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *const c_char, nr: usize) -> isize>,
+    pub rx: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *const c_char, nr: usize) -> isize>,
+    pub tx: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *mut c_char, nr: usize) -> isize>,
+    pub set_termios: Option<unsafe extern "C" fn(tty: *mut Tty, new_termios: *mut termios)>,
+    pub set_winsize:
+        Option<unsafe extern "C" fn(tty: *mut Tty, new_winsize: *mut crate::bindings::winsize)>,
+    pub ioctl: Option<
+        unsafe extern "C" fn(tty: *mut Tty, cmd: crate::bindings::uint64, arg: *mut c_void) -> c_int,
+    >,
+}
+
+/// Native `struct tty` (`kernel/inc/tty/tty_types.h`) — one terminal:
+/// termios/winsize state, the canonical-mode pipes, the raw-mode ring
+/// buffer, and the owning session.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Tty {
+    pub lock: spinlock_t,
+    pub termios: termios,
+    pub winsize: crate::bindings::winsize,
+    pub ops: *mut TtyOps,
+    pub ref_count: c_int,
+    pub input_pipe: *mut pipe,
+    pub output_pipe: *mut pipe,
+    pub raw_buf: [c_char; 256],
+    pub raw_r: crate::bindings::uint,
+    pub raw_w: crate::bindings::uint,
+    pub raw_wait: crate::bindings::tq_t,
+    pub driver_data: *mut c_void,
+    pub session: *mut session,
+    pub name: [c_char; 64],
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above).
+const _: () = {
+    assert!(core::mem::size_of::<TtyOps>() == 120, "tty_ops size");
+    assert!(core::mem::align_of::<TtyOps>() == 8, "tty_ops alignment");
+    assert!(core::mem::offset_of!(TtyOps, open) == 0, "tty_ops.open offset");
+    assert!(core::mem::offset_of!(TtyOps, close) == 8, "tty_ops.close offset");
+    assert!(core::mem::offset_of!(TtyOps, hangup) == 16, "tty_ops.hangup offset");
+    assert!(core::mem::offset_of!(TtyOps, throttle) == 24, "tty_ops.throttle offset");
+    assert!(core::mem::offset_of!(TtyOps, unthrottle) == 32, "tty_ops.unthrottle offset");
+    assert!(core::mem::offset_of!(TtyOps, stop) == 40, "tty_ops.stop offset");
+    assert!(core::mem::offset_of!(TtyOps, start) == 48, "tty_ops.start offset");
+    assert!(core::mem::offset_of!(TtyOps, discard_input) == 56, "tty_ops.discard_input offset");
+    assert!(core::mem::offset_of!(TtyOps, read) == 64, "tty_ops.read offset");
+    assert!(core::mem::offset_of!(TtyOps, write) == 72, "tty_ops.write offset");
+    assert!(core::mem::offset_of!(TtyOps, rx) == 80, "tty_ops.rx offset");
+    assert!(core::mem::offset_of!(TtyOps, tx) == 88, "tty_ops.tx offset");
+    assert!(core::mem::offset_of!(TtyOps, set_termios) == 96, "tty_ops.set_termios offset");
+    assert!(core::mem::offset_of!(TtyOps, set_winsize) == 104, "tty_ops.set_winsize offset");
+    assert!(core::mem::offset_of!(TtyOps, ioctl) == 112, "tty_ops.ioctl offset");
+
+    assert!(core::mem::size_of::<Tty>() == 512, "tty size");
+    assert!(core::mem::align_of::<Tty>() == 64, "tty alignment");
+    assert!(core::mem::offset_of!(Tty, lock) == 0, "tty.lock offset");
+    assert!(core::mem::offset_of!(Tty, termios) == 24, "tty.termios offset");
+    assert!(core::mem::offset_of!(Tty, winsize) == 64, "tty.winsize offset");
+    assert!(core::mem::offset_of!(Tty, ops) == 72, "tty.ops offset");
+    assert!(core::mem::offset_of!(Tty, ref_count) == 80, "tty.ref_count offset");
+    assert!(core::mem::offset_of!(Tty, input_pipe) == 88, "tty.input_pipe offset");
+    assert!(core::mem::offset_of!(Tty, output_pipe) == 96, "tty.output_pipe offset");
+    assert!(core::mem::offset_of!(Tty, raw_buf) == 104, "tty.raw_buf offset");
+    assert!(core::mem::offset_of!(Tty, raw_r) == 360, "tty.raw_r offset");
+    assert!(core::mem::offset_of!(Tty, raw_w) == 364, "tty.raw_w offset");
+    assert!(core::mem::offset_of!(Tty, raw_wait) == 368, "tty.raw_wait offset");
+    assert!(core::mem::offset_of!(Tty, driver_data) == 416, "tty.driver_data offset");
+    assert!(core::mem::offset_of!(Tty, session) == 424, "tty.session offset");
+    assert!(core::mem::offset_of!(Tty, name) == 432, "tty.name offset");
+};
+
+// ===========================================================================
 // Externs.
 // ===========================================================================
 

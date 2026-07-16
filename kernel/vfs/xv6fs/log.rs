@@ -47,6 +47,96 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_se
 use crate::proc::{tq_bulk_move, tq_init, tq_wait, tq_wakeup_all};
 
 // ===========================================================================
+// Native xv6fs log types — P3-N8 nativization (user directive: remove
+// the C-compatible interfaces). `Xv6fsLogHeader`/`Xv6fsLog` are the
+// canonical native definitions of `kernel/vfs/xv6fs/xv6fs_private.h`'s
+// `struct xv6fs_logheader`/`struct xv6fs_log`: `build.rs` blocklists
+// the bindgen emissions and re-exports these types as
+// `crate::bindings::xv6fs_logheader`/`xv6fs_log` (facade `pub use`, N2
+// pattern). The C header stays unchanged (no C consumers remain — the
+// kernel tree has zero `.c` files).
+//
+// *** ON-DISK LAYOUT — HANDLE WITH P3-4 SCRUTINY *** `xv6fs_logheader`
+// is BOTH the in-memory and the ON-DISK log-header record: this file's
+// `__xv6fs_write_head` casts the log-start buffer-cache block's `data`
+// directly to `*mut xv6fs_logheader` and `bwrite`s it (and
+// `__xv6fs_read_head` reads it back the same way), so the struct IS
+// the persistent crash-recovery format: `n` (i32 LE) at byte 0,
+// `block[240]` (i32 LE each) at byte 4, 964 bytes total, no padding.
+// The byte-exact asserts below pin every one of those facts; the array
+// length 240 reproduces bindgen's emission verbatim (`XV6FS_LOGSIZE`
+// == param.h's `LOGSIZE` == 240; changing LOGSIZE would already be an
+// on-disk format break in C, and would now also trip the size assert).
+// The full fs corruption battery (commit/recovery paths, stressfs ×2)
+// is the behavioral gate for this type.
+//
+// DERIVE DECISIONS (P3-N8): both derived Copy/Clone in the
+// pre-nativization bindgen output (`xv6fs_logheader` is a plain-int
+// POD; `xv6fs_log`'s embedded `spinlock_t`/`tq_t` natives are Copy) —
+// kept, exactly as emitted.
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + cross-compiler value probe (toolchain gcc,
+// rv64gc/lp64d — scratchpad p3n8_probe_values.c); both agree on every
+// value asserted below (no pipe-style divergence).
+// ===========================================================================
+
+/// Native `struct xv6fs_logheader` (`kernel/vfs/xv6fs/xv6fs_private.h`)
+/// — the log header, used **both on-disk and in-memory** to track
+/// logged blocks (see the ON-DISK note in the section comment above).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Xv6fsLogHeader {
+    pub n: c_int,
+    pub block: [c_int; 240],
+}
+
+/// Native `struct xv6fs_log` (`kernel/vfs/xv6fs/xv6fs_private.h`) —
+/// per-superblock logging state for crash recovery (in-memory only;
+/// only its `lh` member's *contents* reach disk, via
+/// `__xv6fs_write_head`).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Xv6fsLog {
+    pub lock: spinlock_t,
+    /// Per-log wait queue for `begin_op` waiters.
+    pub wait_queue: tq_t,
+    pub start: c_int,
+    pub size: c_int,
+    pub outstanding: c_int,
+    pub committing: c_int,
+    pub dev: c_int,
+    pub lh: Xv6fsLogHeader,
+}
+
+// P3-N8 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the gcc probe (see the module
+// note above). The `Xv6fsLogHeader` asserts are the ON-DISK byte
+// contract.
+const _: () = {
+    assert!(core::mem::size_of::<Xv6fsLogHeader>() == 964, "xv6fs_logheader size (ON-DISK)");
+    assert!(core::mem::align_of::<Xv6fsLogHeader>() == 4, "xv6fs_logheader alignment");
+    assert!(core::mem::offset_of!(Xv6fsLogHeader, n) == 0, "xv6fs_logheader.n offset (ON-DISK)");
+    assert!(
+        core::mem::offset_of!(Xv6fsLogHeader, block) == 4,
+        "xv6fs_logheader.block offset (ON-DISK)"
+    );
+    assert!(core::mem::size_of::<c_int>() == 4, "xv6fs_logheader element width (ON-DISK)");
+
+    assert!(core::mem::size_of::<Xv6fsLog>() == 1088, "xv6fs_log size");
+    assert!(core::mem::align_of::<Xv6fsLog>() == 64, "xv6fs_log alignment");
+    assert!(core::mem::offset_of!(Xv6fsLog, lock) == 0, "xv6fs_log.lock offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, wait_queue) == 24, "xv6fs_log.wait_queue offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, start) == 72, "xv6fs_log.start offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, size) == 76, "xv6fs_log.size offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, outstanding) == 80, "xv6fs_log.outstanding offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, committing) == 84, "xv6fs_log.committing offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, dev) == 88, "xv6fs_log.dev offset");
+    assert!(core::mem::offset_of!(Xv6fsLog, lh) == 92, "xv6fs_log.lh offset");
+};
+
+// ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
 

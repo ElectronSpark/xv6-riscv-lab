@@ -220,6 +220,48 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "struct rq",
             "rq_percpu",
             "struct rq_percpu",
+            // kernel/vfs/inode.rs (P3-N8, vfs_inode_ref). Derived
+            // Copy/Clone in the pre-nativization bindgen output (two
+            // raw pointers); the NATIVE `vfs_file`/`fs_struct` embed it
+            // by value and derive Copy themselves, which requires the
+            // real impl on `VfsInodeRef` (nothing still-bindgen embeds
+            // it — verified). Tag-prefixed form included (no typedef).
+            "vfs_inode_ref",
+            "struct vfs_inode_ref",
+            // kernel/tty/tty.rs (P3-N8, tty pair). Both derived
+            // Copy/Clone in the pre-nativization bindgen output (the
+            // embedded `spinlock_t`/`tq_t` are typedef-spelled and
+            // already answered Yes via the P3-N2 entries;
+            // `termios`/`winsize` stay bindgen-emitted uabi types).
+            // Nothing in the remaining bindgen output embeds either by
+            // value (verified). Tag-prefixed forms included (no
+            // typedefs).
+            "tty",
+            "struct tty",
+            "tty_ops",
+            "struct tty_ops",
+            // kernel/vfs/tmpfs/{superblock,inode}.rs (P3-N8, tmpfs
+            // POD slices). `tmpfs_sb_private` and the dir arm of
+            // `tmpfs_inode`'s anonymous union derived Copy/Clone in the
+            // pre-nativization bindgen output. Nothing in the remaining
+            // bindgen output embeds them by value (verified — the only
+            // by-value embedders, `tmpfs_superblock`/`tmpfs_inode`, are
+            // native in the same wave). Tag-prefixed forms included (no
+            // typedefs).
+            "tmpfs_sb_private",
+            "struct tmpfs_sb_private",
+            // kernel/vfs/xv6fs/log.rs (P3-N8). Both derived Copy/Clone
+            // in the pre-nativization bindgen output (`xv6fs_logheader`
+            // is the ON-DISK log-header record, memcpy'd into buffer
+            // cache blocks; `xv6fs_log`'s embedded `spinlock_t`/`tq_t`
+            // answered Yes via the P3-N2 entries). Nothing still-bindgen
+            // embeds them by value (their only embedder,
+            // `xv6fs_superblock`, is native in the same wave).
+            // Tag-prefixed forms included (no typedefs).
+            "xv6fs_logheader",
+            "struct xv6fs_logheader",
+            "xv6fs_log",
+            "struct xv6fs_log",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -323,6 +365,51 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "struct timer_node",
             "timer_root",
             "struct timer_root",
+            // kernel/sysnet.rs (P3-N8): `struct sock` was only ever
+            // forward-declared to C (bindgen emitted an opaque
+            // `_unused: [u8; 0]` shell that happened to carry
+            // Copy/Clone); the canonical definition has always been the
+            // native `sysnet::sock`, which is an intrusive list node
+            // owning an mbuf queue — NOT Copy. The accurate No keeps
+            // any future embedder honest (nothing embeds it by value —
+            // all uses are pointers, verified).
+            "sock",
+            "struct sock",
+            // kernel/vfs/tmpfs/{superblock,inode}.rs (P3-N8): none of
+            // the three derived Copy/Clone in the pre-nativization
+            // bindgen output (each embeds the NONCOPY `vfs_superblock`/
+            // `vfs_inode`/`hlist_entry_t`-headed record by value, and
+            // `tmpfs_inode`'s union shell degraded to
+            // `__BindgenUnionField` form). The natives faithfully have
+            // no derives. Nothing still-bindgen embeds them by value
+            // (verified). Tag-prefixed forms included (no typedefs).
+            "tmpfs_superblock",
+            "struct tmpfs_superblock",
+            "tmpfs_inode",
+            "struct tmpfs_inode",
+            "tmpfs_dentry",
+            "struct tmpfs_dentry",
+            // kernel/vfs/xv6fs/{superblock,inode,block_cache}.rs
+            // (P3-N8): none derived Copy/Clone in the pre-nativization
+            // bindgen output. `xv6fs_block_cache` is one of the N6
+            // flagged "silently lost Copy/Clone to the struct-X quirk"
+            // survivors; the P3-N8 first-principles decision is that
+            // no-derive is also the *correct* form, not just the
+            // boot-verified one: it owns a live rb-tree of free
+            // extents, an embedded slab cache, and a spinlock — bitwise
+            // duplication would corrupt the extent tree and double-own
+            // the allocator (the N1/N2 `tnode` NONCOPY precedent) — and
+            // no consumer `=`-copies or literal-constructs it
+            // (grep-verified; the only by-value use is the embed in the
+            // native `xv6fs_superblock` plus zeroed init). The natives
+            // faithfully have no derives. Tag-prefixed forms included
+            // (no typedefs).
+            "xv6fs_superblock",
+            "struct xv6fs_superblock",
+            "xv6fs_inode",
+            "struct xv6fs_inode",
+            "xv6fs_block_cache",
+            "struct xv6fs_block_cache",
         ];
         // P3-N6 FINDING — bindgen asks this callback about typedef'd
         // types by their bare typedef name (`slab_cache_t`) but about
@@ -970,6 +1057,116 @@ fn main() {
         .raw_line("pub use crate::proc::rq::Rq as rq;")
         .raw_line("pub use crate::proc::rq::RqPercpu as rq_percpu;")
         .raw_line("pub use crate::proc::rq::SchedEntity as sched_entity;");
+
+    // ------------------------------------------------------------------
+    // P3-N8 nativization: the fs-driver private (tmpfs + xv6fs) + tty +
+    // vfs_inode_ref + sock type families. Same blocklist + `pub use`
+    // re-export technique as P3-N2..N7 above. Layout evidence for the
+    // whole family: temporary in-tree `offset_of!` gate on the live
+    // bindgen forms + cross-compiler value probe (toolchain gcc,
+    // rv64gc/lp64d — scratchpad p3n8_probe_values.c); the two AGREE on
+    // every size/align/offset (no pipe-style divergence, P3-N5
+    // precedent checked). `termios`/`winsize` (kernel/inc/uabi/
+    // termios.h) stay bindgen-emitted: userspace-ABI layout contracts
+    // (P3-4 scrutiny class), out of nativization scope. `mbuf`
+    // (kernel/inc/dev/net.h) stays bindgen-emitted: its `buf[]` backing
+    // store is DMA-written by the x1_emac rx/tx descriptor rings —
+    // DMA-adjacent, P3-4 scrutiny class.
+    builder = builder
+        // kernel/inc/types.h `struct vfs_inode_ref` (no typedef) ->
+        // kernel/vfs/inode.rs (with the rest of the vfs family, N5).
+        .blocklist_type("vfs_inode_ref")
+        .raw_line("pub use crate::vfs::inode::VfsInodeRef as vfs_inode_ref;")
+        // kernel/inc/tty/tty_types.h `struct tty`/`struct tty_ops` (no
+        // typedefs) -> kernel/tty/tty.rs. `TtyOps` keeps bindgen's
+        // `Option<unsafe extern "C" fn>` ops-table form verbatim
+        // (trait-ification is P3-10). The blocklist regexes are
+        // anchored, so `tty` matches neither `tty_ops` nor the `tty_*`
+        // functions.
+        .blocklist_type("tty|tty_ops")
+        .raw_line("pub use crate::tty::tty::Tty as tty;")
+        .raw_line("pub use crate::tty::tty::TtyOps as tty_ops;")
+        // `struct sock` (kernel/inc/defs.h forward declaration only —
+        // the C tree never had a header definition) -> kernel/sysnet.rs,
+        // which has been the canonical native definition since its
+        // Phase 2 port. bindgen only ever emitted an opaque
+        // `_unused: [u8; 0]` shell for the forward declaration; the
+        // facade re-export unifies the type identity so `vfs_file`'s
+        // `sock` pointer field points at the real native type. No
+        // layout gate needed (there is no C layout to agree with —
+        // pointers only cross the boundary).
+        .blocklist_type("sock")
+        .raw_line("pub use crate::sysnet::sock;")
+        // kernel/vfs/tmpfs/tmpfs_private.h `struct tmpfs_superblock`/
+        // `struct tmpfs_sb_private` -> kernel/vfs/tmpfs/superblock.rs;
+        // `struct tmpfs_inode`/`struct tmpfs_dentry` ->
+        // kernel/vfs/tmpfs/inode.rs. The three
+        // `tmpfs_inode__bindgen_ty_*` shells are the degraded
+        // `__BindgenUnionField` blob forms of the anonymous
+        // `{ dir; sym; file; }` union nest bindgen would otherwise
+        // still emit as orphans; the native carries the real Rust union
+        // `TmpfsInodeData` + arms (N6 `PageTypeData` precedent).
+        .blocklist_type("tmpfs_sb_private|tmpfs_superblock|tmpfs_dentry")
+        .blocklist_type("tmpfs_inode(__bindgen_ty_1(__bindgen_ty_[123])?)?")
+        .raw_line("pub use crate::vfs::tmpfs::superblock::TmpfsSbPrivate as tmpfs_sb_private;")
+        .raw_line("pub use crate::vfs::tmpfs::superblock::TmpfsSuperblock as tmpfs_superblock;")
+        .raw_line("pub use crate::vfs::tmpfs::inode::TmpfsInode as tmpfs_inode;")
+        .raw_line("pub use crate::vfs::tmpfs::inode::TmpfsDentry as tmpfs_dentry;")
+        // kernel/vfs/xv6fs/xv6fs_private.h `struct xv6fs_logheader`/
+        // `struct xv6fs_log` -> kernel/vfs/xv6fs/log.rs (NOTE:
+        // `xv6fs_logheader` is the ON-DISK log-header record — see
+        // log.rs's loud P3-4-scrutiny note and byte-exact asserts);
+        // `struct xv6fs_superblock` -> kernel/vfs/xv6fs/superblock.rs;
+        // `struct xv6fs_inode` -> kernel/vfs/xv6fs/inode.rs;
+        // kernel/vfs/xv6fs/block_cache.h `struct xv6fs_block_cache` ->
+        // kernel/vfs/xv6fs/block_cache.rs. The on-disk
+        // `superblock`/`dinode`/`dirent` records (vfs/xv6fs/ondisk.h)
+        // stay bindgen-emitted (P3-4 scrutiny class).
+        .blocklist_type("xv6fs_logheader|xv6fs_log|xv6fs_block_cache|xv6fs_superblock|xv6fs_inode")
+        .raw_line("pub use crate::vfs::xv6fs::log::Xv6fsLogHeader as xv6fs_logheader;")
+        .raw_line("pub use crate::vfs::xv6fs::log::Xv6fsLog as xv6fs_log;")
+        .raw_line("pub use crate::vfs::xv6fs::block_cache::Xv6fsBlockCache as xv6fs_block_cache;")
+        .raw_line("pub use crate::vfs::xv6fs::superblock::Xv6fsSuperblock as xv6fs_superblock;")
+        .raw_line("pub use crate::vfs::xv6fs::inode::Xv6fsInode as xv6fs_inode;")
+        // `__IncompleteArrayField` used to be bindgen-emitted because
+        // (only) the `tmpfs_dentry` emission spelled its C flexible
+        // array member with it; with `tmpfs_dentry` blocklisted, bindgen
+        // no longer emits the helper, but the native `Bio` (P3-N4) and
+        // `TmpfsDentry` (P3-N8) still use it. Injected verbatim —
+        // byte-identical to bindgen's own definition (same repr, same
+        // API), so every consumer keeps compiling unchanged.
+        .raw_line(concat!(
+            "#[repr(C)]\n",
+            "#[derive(Default)]\n",
+            "pub struct __IncompleteArrayField<T>(::core::marker::PhantomData<T>, [T; 0]);\n",
+            "impl<T> __IncompleteArrayField<T> {\n",
+            "    #[inline]\n",
+            "    pub const fn new() -> Self {\n",
+            "        __IncompleteArrayField(::core::marker::PhantomData, [])\n",
+            "    }\n",
+            "    #[inline]\n",
+            "    pub fn as_ptr(&self) -> *const T {\n",
+            "        self as *const _ as *const T\n",
+            "    }\n",
+            "    #[inline]\n",
+            "    pub fn as_mut_ptr(&mut self) -> *mut T {\n",
+            "        self as *mut _ as *mut T\n",
+            "    }\n",
+            "    #[inline]\n",
+            "    pub unsafe fn as_slice(&self, len: usize) -> &[T] {\n",
+            "        ::core::slice::from_raw_parts(self.as_ptr(), len)\n",
+            "    }\n",
+            "    #[inline]\n",
+            "    pub unsafe fn as_mut_slice(&mut self, len: usize) -> &mut [T] {\n",
+            "        ::core::slice::from_raw_parts_mut(self.as_mut_ptr(), len)\n",
+            "    }\n",
+            "}\n",
+            "impl<T> ::core::fmt::Debug for __IncompleteArrayField<T> {\n",
+            "    fn fmt(&self, fmt: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {\n",
+            "        fmt.write_str(\"__IncompleteArrayField\")\n",
+            "    }\n",
+            "}"
+        ));
 
     let bindings = builder
         .generate()
