@@ -403,7 +403,7 @@ fn tmpfs_make_cdev(ti: *mut tmpfs_inode, cdev: dev_t) {
     unsafe {
         (*ti).vfs_inode.mode = S_IFCHR | 0o644;
         (*ti).vfs_inode.size = 0;
-        (*ti).vfs_inode.__bindgen_anon_2.cdev = cdev;
+        (*ti).vfs_inode.dev_mnt.cdev = cdev;
     }
 }
 
@@ -412,7 +412,7 @@ fn tmpfs_make_bdev(ti: *mut tmpfs_inode, bdev: dev_t) {
     unsafe {
         (*ti).vfs_inode.mode = S_IFBLK | 0o644;
         (*ti).vfs_inode.size = 0;
-        (*ti).vfs_inode.__bindgen_anon_2.bdev = bdev;
+        (*ti).vfs_inode.dev_mnt.bdev = bdev;
     }
 }
 

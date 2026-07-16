@@ -140,6 +140,59 @@ use crate::bindings::{
 };
 use crate::sync::KSpinlock;
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N5 (VFS type family, fdtable slice).
+//
+// This IS the kernel-wide Rust definition of `kernel/inc/vfs/
+// vfs_types.h`'s `struct vfs_fdtable` now: `build.rs` blocklists the
+// bindgen-generated form and injects a `pub use
+// crate::vfs::fdtable::VfsFdtable as vfs_fdtable;` facade re-export (no
+// `_t` typedef exists). Field names/types reproduce bindgen's exactly
+// (`files: [*mut vfs_file; NOFILE]` — bindgen hardcoded `64usize` from
+// the macro-expanded header; this file's pre-existing [`NOFILE`] const
+// documents the same value). Derived Copy/Clone exactly as the
+// pre-nativization bindgen output did. The C `__ALIGNED_CACHELINE` on
+// the embedded `spinlock_t` typedef gives the record align 64, carried
+// here as an explicit `repr(align(64))` exactly as bindgen emitted it.
+// ---------------------------------------------------------------------------
+
+/// `struct vfs_fdtable` (`kernel/inc/vfs/vfs_types.h`): the per-thread
+/// integer-fd -> `vfs_file*` table.
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct VfsFdtable {
+    pub lock: spinlock_t,
+    pub fd_count: c_int,
+    pub files: [*mut vfs_file; NOFILE],
+    pub files_bitmap: [crate::bindings::uint64; 1],
+    pub cloexec_bitmap: [crate::bindings::uint64; 1],
+    pub ref_count: c_int,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on `crate::bindings::vfs_fdtable` before the
+// switch) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain riscv64-unknown-elf-gcc,
+// rv64gc/lp64d, gcc & clang-18 agree; scratchpad
+// p3n5_static_assert_probe.c): 576/64, offsets 0/24/32/544/552/560.
+const _: () = {
+    assert!(core::mem::size_of::<VfsFdtable>() == 576, "vfs_fdtable size");
+    assert!(core::mem::align_of::<VfsFdtable>() == 64, "vfs_fdtable alignment");
+    assert!(core::mem::offset_of!(VfsFdtable, lock) == 0, "vfs_fdtable.lock offset");
+    assert!(core::mem::offset_of!(VfsFdtable, fd_count) == 24, "vfs_fdtable.fd_count offset");
+    assert!(core::mem::offset_of!(VfsFdtable, files) == 32, "vfs_fdtable.files offset");
+    assert!(
+        core::mem::offset_of!(VfsFdtable, files_bitmap) == 544,
+        "vfs_fdtable.files_bitmap offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsFdtable, cloexec_bitmap) == 552,
+        "vfs_fdtable.cloexec_bitmap offset"
+    );
+    assert!(core::mem::offset_of!(VfsFdtable, ref_count) == 560, "vfs_fdtable.ref_count offset");
+};
+
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
 // locally per this crate's established convention (see `vfs/inode.rs`'s /

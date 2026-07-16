@@ -123,6 +123,37 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // kernel/dev/netdev.rs (P3-N4). Derived Copy/Clone in the
             // pre-nativization bindgen output.
             "netdev",
+            // kernel/vfs/{inode,pipe,fdtable,fs}.rs (P3-N5, small
+            // sub-family). All derived Copy/Clone in the
+            // pre-nativization bindgen output; `vfs_dir_iter` is still
+            // embedded by value by the (for now) bindgen `vfs_file`'s
+            // position union, so an accurate Yes is what keeps *its*
+            // derive line unchanged.
+            "vfs_dentry",
+            "vfs_dir_iter",
+            "pipe",
+            "vfs_fdtable",
+            "fs_struct",
+            // kernel/vfs/file.rs (P3-N5, file sub-family — nativized in
+            // the same step as the small sub-family above because
+            // `vfs_file`'s anonymous position union directly embeds the
+            // now-blocklisted `vfs_dir_iter`/`pipe`, which would
+            // otherwise degrade it to `__BindgenUnionField` blobs, N1's
+            // documented bindgen limitation / N2's `tnode` precedent).
+            // Both derived Copy/Clone in the pre-nativization bindgen
+            // output.
+            "vfs_file",
+            "vfs_file_ops",
+            // kernel/vfs/fs.rs (P3-N5, fs_type + superblock
+            // sub-family). The two ops tables derived Copy/Clone in the
+            // pre-nativization bindgen output; `vfs_fs_type` and
+            // `vfs_superblock` derived neither — see NONCOPY below.
+            "vfs_fs_type_ops",
+            "vfs_superblock_ops",
+            // kernel/vfs/inode.rs (P3-N5, inode hub sub-family).
+            // Derived Copy/Clone in the pre-nativization bindgen
+            // output (`vfs_inode` itself did not — see NONCOPY below).
+            "vfs_inode_ops",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -150,6 +181,23 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             // kernel/dev/bio.rs (P3-N4): same kobject-embedder derive
             // pattern as `device_instance` above.
             "bio",
+            // kernel/vfs/fs.rs (P3-N5): `vfs_fs_type` (kobject-embedder
+            // class) and `vfs_superblock` derived neither Copy nor
+            // Clone in the pre-nativization bindgen output; the natives
+            // faithfully have no derives. The still-bindgen
+            // `tmpfs_superblock`/`xv6fs_superblock` embed
+            // `vfs_superblock` BY VALUE and derived neither themselves —
+            // the accurate No here is what keeps their derive lines
+            // unchanged.
+            "vfs_fs_type",
+            "vfs_superblock",
+            // kernel/vfs/inode.rs (P3-N5): `vfs_inode` derived neither
+            // Copy nor Clone in the pre-nativization bindgen output;
+            // the native faithfully has no derives. The still-bindgen
+            // `tmpfs_inode`/`xv6fs_inode` embed it BY VALUE (first
+            // field) and derived neither themselves — the accurate No
+            // here is what keeps their derive lines unchanged.
+            "vfs_inode",
         ];
         let is_copy = if NATIVE_TYPES.contains(&name) {
             true
@@ -590,6 +638,83 @@ fn main() {
         // anchored, so `netdev` does not match them).
         .blocklist_type("netdev")
         .raw_line("pub use crate::dev::netdev::Netdev as netdev;");
+
+    // ------------------------------------------------------------------
+    // P3-N5 nativization: the VFS type family. Same blocklist + `pub
+    // use` re-export technique as P3-N2/N3/N4 above. None of these
+    // structs has a `_t` typedef (kernel/inc/vfs/vfs_types.h declares
+    // `cdev_t`/`blkdev_t` forward typedefs only).
+    builder = builder
+        // kernel/inc/vfs/vfs_types.h `struct vfs_dentry`/`struct
+        // vfs_dir_iter` -> kernel/vfs/inode.rs (the inode/dentry
+        // family's owning module).
+        .blocklist_type("vfs_dentry|vfs_dir_iter")
+        .raw_line("pub use crate::vfs::inode::VfsDentry as vfs_dentry;")
+        .raw_line("pub use crate::vfs::inode::VfsDirIter as vfs_dir_iter;")
+        // kernel/inc/vfs/pipe_types.h `struct pipe` -> kernel/vfs/
+        // pipe.rs. NOTE: the native reproduces the BINDGEN-emitted
+        // runtime layout (192/64, writer_lock @88), which diverges from
+        // the C header's own layout (256/64, writer_lock @128) — see
+        // pipe.rs's layout note; `struct pipe` has no C consumers and
+        // both allocation and every access live in pipe.rs, so the
+        // bindgen layout is the working truth being preserved.
+        .blocklist_type("pipe")
+        .raw_line("pub use crate::vfs::pipe::Pipe as pipe;")
+        // kernel/inc/vfs/vfs_types.h `struct vfs_fdtable` ->
+        // kernel/vfs/fdtable.rs.
+        .blocklist_type("vfs_fdtable")
+        .raw_line("pub use crate::vfs::fdtable::VfsFdtable as vfs_fdtable;")
+        // kernel/inc/vfs/vfs_types.h `struct fs_struct` ->
+        // kernel/vfs/fs.rs (owner of the `vfs_struct_*` lifecycle).
+        // `vfs_inode_ref` (kernel/inc/types.h) deliberately stays
+        // bindgen-emitted (out of this wave's scope); the native
+        // `FsStruct` embeds it by value via its `crate::bindings` path —
+        // the sanctioned mixed-tier pattern.
+        .blocklist_type("fs_struct")
+        .raw_line("pub use crate::vfs::fs::FsStruct as fs_struct;")
+        // kernel/inc/vfs/vfs_types.h `struct vfs_file`/`struct
+        // vfs_file_ops` -> kernel/vfs/file.rs. Nativized in the same
+        // step as vfs_dir_iter/pipe: the anonymous position union
+        // directly embeds both, so leaving `vfs_file` bindgen would
+        // degrade it to the `__BindgenUnionField` blob form (N1's
+        // documented limitation); the native carries the real Rust
+        // union `VfsFilePos` instead (N2's `tnode` precedent).
+        // `vfs_file__bindgen_ty_1` is the anonymous-union shell bindgen
+        // would otherwise still emit as an orphan. `vfs_inode_ref`
+        // stays bindgen-emitted (embedded by value via the
+        // `crate::bindings` path — mixed-tier, same as `fs_struct`).
+        .blocklist_type("vfs_file|vfs_file_ops|vfs_file__bindgen_ty_1")
+        .raw_line("pub use crate::vfs::file::VfsFile as vfs_file;")
+        .raw_line("pub use crate::vfs::file::VfsFileOps as vfs_file_ops;")
+        // kernel/inc/vfs/vfs_types.h fs_type + superblock family ->
+        // kernel/vfs/fs.rs. `vfs_fs_type__bindgen_ty_1`/
+        // `vfs_superblock__bindgen_ty_2` are the anonymous-bitfield-
+        // struct shells bindgen would otherwise still emit as orphans
+        // (natives: `VfsFsTypeFlagBits`/`VfsSuperblockFlagBits`);
+        // `vfs_superblock__bindgen_ty_1` is the anonymous inode-hash
+        // struct shell (native: flattened into direct
+        // `inodes`/`inodes_buckets` fields at identical offsets).
+        // `statfs` (kernel/inc/uabi/statfs.h — uabi) deliberately stays
+        // bindgen-emitted; the native ops table references it by
+        // `crate::bindings` path.
+        .blocklist_type("vfs_fs_type|vfs_fs_type_ops|vfs_fs_type__bindgen_ty_1")
+        .raw_line("pub use crate::vfs::fs::VfsFsType as vfs_fs_type;")
+        .raw_line("pub use crate::vfs::fs::VfsFsTypeOps as vfs_fs_type_ops;")
+        .blocklist_type("vfs_superblock|vfs_superblock_ops|vfs_superblock__bindgen_ty_1|vfs_superblock__bindgen_ty_2")
+        .raw_line("pub use crate::vfs::fs::VfsSuperblock as vfs_superblock;")
+        .raw_line("pub use crate::vfs::fs::VfsSuperblockOps as vfs_superblock_ops;")
+        // kernel/inc/vfs/vfs_types.h inode hub -> kernel/vfs/inode.rs.
+        // `vfs_inode__bindgen_ty_1` is the anonymous-bitfield-struct
+        // shell (native: `VfsInodeFlagBits`); `vfs_inode__bindgen_ty_2`
+        // + `vfs_inode__bindgen_ty_2__bindgen_ty_1` are the anonymous
+        // device/mount union + its nested-struct shell (natives: the
+        // real Rust union `VfsInodeDevMnt` + `VfsInodeMnt`). `pcache`
+        // (embedded BY VALUE as `i_data`), `stat` (uabi — P3-4 scrutiny
+        // class) and `thread` stay bindgen-emitted, referenced by
+        // `crate::bindings` paths — the sanctioned mixed-tier pattern.
+        .blocklist_type("vfs_inode|vfs_inode_ops|vfs_inode__bindgen_ty_1|vfs_inode__bindgen_ty_2|vfs_inode__bindgen_ty_2__bindgen_ty_1")
+        .raw_line("pub use crate::vfs::inode::VfsInode as vfs_inode;")
+        .raw_line("pub use crate::vfs::inode::VfsInodeOps as vfs_inode_ops;");
 
     let bindings = builder
         .generate()

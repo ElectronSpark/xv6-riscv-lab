@@ -149,7 +149,7 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     vfs_ilock(inode);
 
     // SAFETY: `file`/`inode` are live and `inode` is locked.
-    let mut pos = unsafe { (*file).__bindgen_anon_1.f_pos };
+    let mut pos = unsafe { (*file).pos.f_pos };
     let size = unsafe { (*inode).size };
     if pos >= size {
         vfs_iunlock(inode);
@@ -251,7 +251,7 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
     }
 
     // SAFETY: `file` is live.
-    let mut pos = unsafe { (*file).__bindgen_anon_1.f_pos };
+    let mut pos = unsafe { (*file).pos.f_pos };
     let end_pos = pos + count as loff_t;
 
     // Check file size limit.
@@ -404,7 +404,7 @@ extern "C" fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c
 
     let new_pos = match whence {
         SEEK_SET => offset,
-        SEEK_CUR => unsafe { (*file).__bindgen_anon_1.f_pos + offset },
+        SEEK_CUR => unsafe { (*file).pos.f_pos + offset },
         SEEK_END => {
             // Need to lock the inode to safely read size.
             vfs_ilock(inode);

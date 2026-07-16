@@ -1882,6 +1882,77 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   pre-existing panic** ("Failed to remove interrupted waiter from
   queue", matches the documented tq-bug signature).
 
+### Iteration 61 — 2026-07-16 — Wave P3-N5: VFS type family nativized (13 structs + 3 anon bitfields + 2 anon unions + 1 anon struct — the biggest family)
+
+- **USER DIRECTIVE (remove C-compatible interfaces), fifth nativization
+  wave** (N3/N4 template). The entire `kernel/inc/vfs/vfs_types.h` +
+  `vfs/pipe_types.h` graph is hand-written native Rust now:
+  `vfs_dentry`/`vfs_dir_iter` + **`vfs_inode`/`vfs_inode_ops` (the hub —
+  17 consumer files)** → `vfs/inode.rs` (`VfsDentry`/`VfsDirIter`/
+  `VfsInode`/`VfsInodeOps` + `VfsInodeFlagBits` + real Rust union
+  `VfsInodeDevMnt`{cdev,bdev,`VfsInodeMnt`}); `vfs_file`/`vfs_file_ops`
+  → `vfs/file.rs` (+ real Rust union `VfsFilePos`); `vfs_fs_type(_ops)`/
+  `vfs_superblock(_ops)`/`fs_struct` → `vfs/fs.rs` (owner of the
+  `vfs_struct_*` lifecycle; + `VfsFsTypeFlagBits`/`VfsSuperblockFlagBits`;
+  the superblock's anonymous inode-hash struct is FLATTENED into direct
+  `inodes`/`inodes_buckets` fields at identical offsets); `vfs_fdtable`
+  → `vfs/fdtable.rs`; `pipe` → `vfs/pipe.rs`. No `_t` typedefs exist in
+  this family; bindgen emission for all 13 structs + every `__bindgen_ty`
+  shell = 0 (the only survivor is the out-of-scope `vfs_inode_ref`,
+  kernel/inc/types.h).
+- **Sequencing note**: `vfs_file` had to nativize in the same build step
+  as `vfs_dir_iter`/`pipe` — its anonymous position union embeds both
+  directly, and bindgen degrades such unions to `__BindgenUnionField`
+  blobs once the members are blocklisted (N1's documented limitation;
+  N2's `tnode` precedent).
+- **KNOWN DIVERGENCE preserved, `struct pipe` ONLY**: gcc AND clang both
+  lay the C header out as 256/64 with `writer_lock` @128 (the
+  `spinlock_t` typedef's `__ALIGNED_CACHELINE`), but bindgen has emitted
+  192/64 with `writer_lock` @88 ever since P3-N2 (it kept only a
+  `u64` pad and counted on the field type's C alignment — the native
+  `RawSpinlock` is align 8). The bindgen layout is the runtime truth
+  (zero C consumers; allocation + all accesses live in `pipe.rs`), so
+  the native `Pipe` reproduces the BINDGEN layout byte-for-byte;
+  reproducing the header would have been a silent runtime layout CHANGE.
+  Documented in pipe.rs's layout note + the probe header.
+- Copy fidelity: ops tables + dentry/dir_iter/file/fdtable/fs_struct/
+  pipe Copy=Yes; `vfs_fs_type` (kobject-embedder class) +
+  `vfs_superblock` + `vfs_inode` NONCOPY — the still-bindgen
+  `tmpfs_superblock`/`xv6fs_superblock`/`tmpfs_inode`/`xv6fs_inode`
+  embed them BY VALUE with no derives, kept bit-exact by the accurate
+  No. Mixed-tier by-value/by-path embeds: `vfs_inode_ref`, `pcache`
+  (`i_data`), `stat`/`statfs` (**uabi — confirmed
+  kernel/inc/uabi/statfs.h, stays bindgen, P3-4 scrutiny class**),
+  `thread`, `sock`.
+- Layout evidence: cross-compiler `_Static_assert` probe (toolchain
+  riscv64-unknown-elf-gcc, rv64gc/lp64d) + clang-18
+  `-fdump-record-layouts` cross-check + a TEMPORARY in-tree `offset_of!`
+  gate on the pre-change bindgen forms (built green, then removed) —
+  all three agree on every offset (pipe aside, see above); values
+  hardcoded into const asserts (~120 asserts). Notables: vfs_superblock
+  1472/64, vfs_inode 1088/64 (i_data pcache 576/64 @320), vfs_file
+  256/64, vfs_fdtable 576/64, pipe 192/64 (runtime).
+- ~95 consumer sites re-pointed across 10 vfs files (`.pos.*` for the
+  file union, `.flags.*` for the three bitfield holders, `.dev_mnt.*`
+  for the inode union, `.inodes`/`.inodes_buckets` flattened);
+  `SB_HASH_BUCKETS` now aliases the native array bound (one definition
+  of 61). mm/pcache.rs's look-alike `__bindgen_anon` sites (pcache's
+  own bitfields) verified untouched.
+- Verified (worker): 0-warning FULL CLEAN rebuild (`rm -rf` of the cargo
+  target dir); cache clean before+after every build step; tree GREEN
+  after each sub-family (boot gate at each); 5 final-binary boots each
+  with exactly ONE `init: starting sh`; **full fs corruption battery**:
+  mkdir×2 → EEXIST; `ln /README.md rr` → `wc rr` == `wc /README.md` ==
+  714/3365/26018; `cat /nonexistent` → ENOENT; symlinktest both ok;
+  usertests createdelete/bigdir/linktest/unlinkread ALL OK; stressfs ×2
+  completed (write+read phases, prompt back); `ls /dev` full 12-node
+  listing; `cat README.md | wc` pipe sane; **testsig 21/21 ALL
+  PASSED**; **mmaptest 16/16 all passed** (file-backed mmap paths); NO
+  `freeing free block`/`incorrect blockno`/`balloc: out`/panic anywhere;
+  forkforkfork identical pre-existing kerneltrap storm (Load page
+  fault, stval=0xfffffffffffffff1 — same signature as the recorded
+  baseline, sepc shifted only by relink).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

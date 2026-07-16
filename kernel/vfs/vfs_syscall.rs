@@ -1946,9 +1946,9 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
         // to revert it.
         // SAFETY: non-null `f`.
         let (saved_cookies, saved_index) =
-            unsafe { ((*f).__bindgen_anon_1.dir_iter.cookies, (*f).__bindgen_anon_1.dir_iter.index) };
+            unsafe { ((*f).pos.dir_iter.cookies, (*f).pos.dir_iter.index) };
 
-        let ret = vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).__bindgen_anon_1.dir_iter) }, &mut dentry);
+        let ret = vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).pos.dir_iter) }, &mut dentry);
         if ret != 0 {
             kmm_free(kbuf);
             vfs_fput(f);
@@ -1968,8 +1968,8 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
             // Not enough space; restore the iterator state for the next call.
             // SAFETY: non-null `f`.
             unsafe {
-                (*f).__bindgen_anon_1.dir_iter.cookies = saved_cookies;
-                (*f).__bindgen_anon_1.dir_iter.index = saved_index;
+                (*f).pos.dir_iter.cookies = saved_cookies;
+                (*f).pos.dir_iter.index = saved_index;
             }
             vfs_release_dentry(&mut dentry);
             break;
@@ -1989,7 +1989,7 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
         unsafe {
             let de = (kbuf as *mut u8).add(bytes_written) as *mut LinuxDirent64Header;
             (*de).d_ino = dentry.ino;
-            (*de).d_off = (*f).__bindgen_anon_1.dir_iter.index;
+            (*de).d_off = (*f).pos.dir_iter.index;
             (*de).d_reclen = reclen as u16;
             (*de).d_type = d_type;
             let name_dst = (de as *mut u8).add(LINUX_DIRENT64_NAME_OFFSET);
@@ -2202,7 +2202,7 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     // SAFETY: `child_sb` checked non-null above.
     let target_dir = unsafe { (*child_sb).mountpoint };
     // SAFETY: non-null `target_dir`.
-    if unsafe { (*target_dir).__bindgen_anon_1.mount() } == 0 {
+    if unsafe { (*target_dir).flags.mount() } == 0 {
         vfs_iput(mounted_root);
         return neg(EINVAL); // Mountpoint not marked as a mount.
     }
@@ -2627,7 +2627,7 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
                 // polling its rxq is not yet implemented (matches the C
                 // original's own commented-out `sockpoll()` call).
                 // SAFETY: non-null `f`.
-                let sock = unsafe { (*f).__bindgen_anon_1.sock };
+                let sock = unsafe { (*f).pos.sock };
                 if ops.is_null() && !sock.is_null() {
                     // pfd.revents = sockpoll(sock, pfd.events); // not implemented
                 } else {
@@ -2638,7 +2638,7 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
                 // Character device: delegate to its poll callback if one
                 // is registered, else "always ready".
                 // SAFETY: non-null `f`.
-                let cdev: *mut cdev_t = unsafe { (*f).__bindgen_anon_1.cdev };
+                let cdev: *mut cdev_t = unsafe { (*f).pos.cdev };
                 let cdev_poll = if !cdev.is_null() { unsafe { (*cdev).ops.poll } } else { None };
                 if let Some(cdev_poll_fn) = cdev_poll {
                     // SAFETY: `cdev` is live; `cdev_poll_fn` is a driver

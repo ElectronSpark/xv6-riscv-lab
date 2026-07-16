@@ -187,7 +187,7 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     vfs_ilock(inode);
 
     // SAFETY: `file`/`inode` are live and locked.
-    let mut pos = unsafe { (*file).__bindgen_anon_1.f_pos };
+    let mut pos = unsafe { (*file).pos.f_pos };
     let size = unsafe { (*inode).size };
     if pos >= size {
         vfs_iunlock(inode);
@@ -296,7 +296,7 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
     vfs_ilock(inode);
 
     // SAFETY: `file` is live and `inode` is locked.
-    let mut pos = unsafe { (*file).__bindgen_anon_1.f_pos };
+    let mut pos = unsafe { (*file).pos.f_pos };
     let end_pos = pos + count as loff_t;
 
     // Check for file size limits.
@@ -423,7 +423,7 @@ extern "C" fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c
         SEEK_SET => offset,
         SEEK_CUR => {
             // SAFETY: `file` is live.
-            unsafe { (*file).__bindgen_anon_1.f_pos + offset }
+            unsafe { (*file).pos.f_pos + offset }
         }
         SEEK_END => {
             // Need to lock inode to safely read size.

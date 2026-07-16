@@ -623,7 +623,7 @@ extern "C" fn devtmpfs_mount(
 
         (*sb).vfs_sb.block_size = PGSIZE as usize;
         (*sb).vfs_sb.root_inode = ptr::addr_of_mut!((*root_inode).vfs_inode);
-        (*sb).vfs_sb.__bindgen_anon_2.set_backendless(1);
+        (*sb).vfs_sb.flags.set_backendless(1);
         (*sb).vfs_sb.ops = ptr::addr_of!(DEVTMPFS_SUPERBLOCK_OPS) as *mut _;
 
         *ret_sb = ptr::addr_of_mut!((*sb).vfs_sb);

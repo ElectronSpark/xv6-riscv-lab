@@ -591,10 +591,10 @@ fn xv6fs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_
         // For device inodes, set the appropriate device number field.
         if (*dip).type_ == super::XV6FS_T_BLKDEVICE {
             let devno = mkdev((*xi).major as i32, (*xi).minor as i32);
-            (*xi).vfs_inode.__bindgen_anon_2.bdev = devno;
+            (*xi).vfs_inode.dev_mnt.bdev = devno;
         } else if (*dip).type_ == super::XV6FS_T_CDEVICE {
             let devno = mkdev((*xi).major as i32, (*xi).minor as i32);
-            (*xi).vfs_inode.__bindgen_anon_2.cdev = devno;
+            (*xi).vfs_inode.dev_mnt.cdev = devno;
         }
 
         brelse(bp);
@@ -621,7 +621,7 @@ pub(crate) extern "C" fn xv6fs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) ->
             }
             (*xv6_sb).dirty = 0;
         }
-        (*sb).__bindgen_anon_2.set_dirty(0);
+        (*sb).flags.set_dirty(0);
     }
     0
 }
@@ -688,7 +688,7 @@ extern "C" fn xv6fs_mount(
         if device.is_null() || !super::s_isblk((*device).mode) {
             return neg(EINVAL); // xv6fs does not support block device inode
         }
-        (*device).__bindgen_anon_2.bdev
+        (*device).dev_mnt.bdev
     };
 
     let blkdev = blkdev_get(major(dev_num), minor(dev_num));
@@ -735,7 +735,7 @@ extern "C" fn xv6fs_mount(
         // cache when refcount reaches 0 since they can be re-read from
         // disk. Root inodes and mountpoint inodes are protected in
         // vfs_iput.
-        (*xv6_sb).vfs_sb.__bindgen_anon_2.set_backendless(0);
+        (*xv6_sb).vfs_sb.flags.set_backendless(0);
         (*xv6_sb).vfs_sb.ops = ptr::addr_of!(XV6FS_SUPERBLOCK_OPS) as *mut _;
         (*xv6_sb).vfs_sb.fs_data = xv6_sb as *mut c_void;
 
@@ -854,7 +854,7 @@ pub(crate) extern "C" fn xv6fs_init() {
 pub(crate) extern "C" fn xv6fs_mount_root() {
     // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
     // (`vfs/fs.rs`), always live.
-    let tmpfs_root = unsafe { vfs_root_inode.__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
+    let tmpfs_root = unsafe { vfs_root_inode.dev_mnt.mnt.mnt_rooti };
     if tmpfs_root.is_null() {
         crate::kprintln!("xv6fs: no root filesystem to mount onto");
         return;
@@ -905,7 +905,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
 
         // Now chroot into the xv6fs root.
         // SAFETY: `root_dir` is live.
-        let xv6fs_root = unsafe { (*root_dir).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
+        let xv6fs_root = unsafe { (*root_dir).dev_mnt.mnt.mnt_rooti };
         if !xv6fs_root.is_null() {
             let ret = vfs_chroot(xv6fs_root);
             if ret == 0 {

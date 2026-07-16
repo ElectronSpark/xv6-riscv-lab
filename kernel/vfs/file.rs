@@ -102,6 +102,136 @@ use crate::bindings::{
 use crate::proc::proc_shims::xv6_current_thread;
 use crate::sync::{KMutex, KSpinlock};
 
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N5 (VFS type family, file slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/vfs/
+// vfs_types.h`'s `struct vfs_file`/`struct vfs_file_ops` now: `build.rs`
+// blocklists the bindgen-generated forms and injects `pub use
+// crate::vfs::file::... as ...;` facade re-exports (no `_t` typedefs
+// exist). The ops-table fn-pointer fields reproduce bindgen's
+// `Option<unsafe extern "C" fn ...>` forms exactly (trait-ification is
+// P3-10's job). The anonymous C position union became the named real
+// Rust union [`VfsFilePos`] (field `pos`; N2's `tnode` precedent —
+// bindgen would otherwise degrade it to `__BindgenUnionField` blobs the
+// moment its `vfs_dir_iter`/`pipe` members went native); consumers'
+// `__bindgen_anon_1` sites re-pointed to `.pos`. Copy fidelity: all
+// three derived Copy/Clone in the pre-nativization bindgen output.
+// `vfs_inode_ref` (kernel/inc/types.h) deliberately stays
+// bindgen-emitted — out of this wave's scope — embedded by value via its
+// `crate::bindings` path, the sanctioned mixed-tier pattern. The C
+// `__ALIGNED_CACHELINE` on the embedded `mutex_t` typedef gives the
+// record align 64, carried here as `repr(align(64))` + the explicit
+// `_pad0` bindgen emitted before `lock`.
+// ---------------------------------------------------------------------------
+
+/// Native replacement for the anonymous C union inside `struct vfs_file`
+/// (bindgen's `vfs_file__bindgen_ty_1`, 16/8): the file position for
+/// regular files, directory-iterator state for directories, or the
+/// backing object pointer for device/pipe/socket files.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union VfsFilePos {
+    pub f_pos: loff_t,
+    pub dir_iter: crate::bindings::vfs_dir_iter,
+    pub cdev: *mut cdev_t,
+    pub blkdev: *mut blkdev_t,
+    pub pipe: *mut pipe,
+    pub sock: *mut crate::bindings::sock,
+}
+
+/// `struct vfs_file` (`kernel/inc/vfs/vfs_types.h`). The anonymous
+/// union became the named `pos` field (consumers re-pointed from
+/// bindgen's `__bindgen_anon_1`).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct VfsFile {
+    pub list_entry: list_node_t,
+    pub inode: vfs_inode_ref,
+    pub f_flags: c_int,
+    pub ref_count: c_int,
+    pub ops: *mut VfsFileOps,
+    pub private_data: *mut c_void,
+    pub(crate) _pad0: u64,
+    pub lock: crate::bindings::mutex_t,
+    pub pos: VfsFilePos,
+}
+
+/// `struct vfs_file_ops` (`kernel/inc/vfs/vfs_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsFileOps {
+    pub read: Option<
+        unsafe extern "C" fn(
+            file: *mut VfsFile,
+            buf: *mut c_char,
+            count: usize,
+            user: bool_,
+        ) -> isize,
+    >,
+    pub write: Option<
+        unsafe extern "C" fn(
+            file: *mut VfsFile,
+            buf: *const c_char,
+            count: usize,
+            user: bool_,
+        ) -> isize,
+    >,
+    pub llseek:
+        Option<unsafe extern "C" fn(file: *mut VfsFile, offset: loff_t, whence: c_int) -> loff_t>,
+    pub release: Option<unsafe extern "C" fn(inode: *mut vfs_inode, file: *mut VfsFile) -> c_int>,
+    pub fsync:
+        Option<unsafe extern "C" fn(file: *mut VfsFile, start: loff_t, len: loff_t) -> c_int>,
+    pub fflush: Option<unsafe extern "C" fn(file: *mut VfsFile) -> c_int>,
+    pub poll: Option<unsafe extern "C" fn(file: *mut VfsFile, events: ::core::ffi::c_short) -> c_int>,
+    pub ioctl: Option<
+        unsafe extern "C" fn(file: *mut VfsFile, cmd: crate::bindings::uint64, arg: *mut c_void) -> c_int,
+    >,
+    pub fault: Option<
+        unsafe extern "C" fn(
+            file: *mut VfsFile,
+            vma: *mut crate::bindings::vma,
+            va: crate::bindings::uint64,
+        ) -> *mut c_void,
+    >,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on `crate::bindings::{vfs_file,vfs_file_ops}`
+// before the switch) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain riscv64-unknown-elf-gcc,
+// rv64gc/lp64d, gcc & clang-18 agree; scratchpad
+// p3n5_static_assert_probe.c): vfs_file 256/64 offsets
+// 0/16/32/36/40/48/[64]/192 (the anonymous union occupies [192,208),
+// struct padded to 256 by the record alignment), union 16/8,
+// vfs_file_ops 72/8 offsets 0/8/16/24/32/40/48/56/64.
+const _: () = {
+    assert!(core::mem::size_of::<VfsFilePos>() == 16, "vfs_file pos union size");
+    assert!(core::mem::align_of::<VfsFilePos>() == 8, "vfs_file pos union alignment");
+    assert!(core::mem::size_of::<VfsFile>() == 256, "vfs_file size");
+    assert!(core::mem::align_of::<VfsFile>() == 64, "vfs_file alignment");
+    assert!(core::mem::offset_of!(VfsFile, list_entry) == 0, "vfs_file.list_entry offset");
+    assert!(core::mem::offset_of!(VfsFile, inode) == 16, "vfs_file.inode offset");
+    assert!(core::mem::offset_of!(VfsFile, f_flags) == 32, "vfs_file.f_flags offset");
+    assert!(core::mem::offset_of!(VfsFile, ref_count) == 36, "vfs_file.ref_count offset");
+    assert!(core::mem::offset_of!(VfsFile, ops) == 40, "vfs_file.ops offset");
+    assert!(core::mem::offset_of!(VfsFile, private_data) == 48, "vfs_file.private_data offset");
+    assert!(core::mem::offset_of!(VfsFile, lock) == 64, "vfs_file.lock offset");
+    assert!(core::mem::offset_of!(VfsFile, pos) == 192, "vfs_file.pos offset");
+    assert!(core::mem::size_of::<VfsFileOps>() == 72, "vfs_file_ops size");
+    assert!(core::mem::align_of::<VfsFileOps>() == 8, "vfs_file_ops alignment");
+    assert!(core::mem::offset_of!(VfsFileOps, read) == 0, "vfs_file_ops.read offset");
+    assert!(core::mem::offset_of!(VfsFileOps, write) == 8, "vfs_file_ops.write offset");
+    assert!(core::mem::offset_of!(VfsFileOps, llseek) == 16, "vfs_file_ops.llseek offset");
+    assert!(core::mem::offset_of!(VfsFileOps, release) == 24, "vfs_file_ops.release offset");
+    assert!(core::mem::offset_of!(VfsFileOps, fsync) == 32, "vfs_file_ops.fsync offset");
+    assert!(core::mem::offset_of!(VfsFileOps, fflush) == 40, "vfs_file_ops.fflush offset");
+    assert!(core::mem::offset_of!(VfsFileOps, poll) == 48, "vfs_file_ops.poll offset");
+    assert!(core::mem::offset_of!(VfsFileOps, ioctl) == 56, "vfs_file_ops.ioctl offset");
+    assert!(core::mem::offset_of!(VfsFileOps, fault) == 64, "vfs_file_ops.fault offset");
+};
+
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
 // locally per this crate's established convention (see `vfs/inode.rs`'s
@@ -485,7 +615,7 @@ pub(crate) extern "C" fn __vfs_file_shrink_cache() {
 fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
     // SAFETY: non-null `inode` (every call site checks `S_ISCHR` first,
     // which already dereferenced `inode->mode`).
-    let raw_cdev = unsafe { (*inode).__bindgen_anon_2.cdev };
+    let raw_cdev = unsafe { (*inode).dev_mnt.cdev };
     let major = ((raw_cdev >> 20) & 0xFFF) as c_int;
     let minor = (raw_cdev & 0xFFFFF) as c_int;
     let cdev = cdev_get(major, minor);
@@ -523,7 +653,7 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
 
     // SAFETY: non-null `file`.
     unsafe {
-        (*file).__bindgen_anon_1.cdev = cdev;
+        (*file).pos.cdev = cdev;
         (*file).ops = ptr::null_mut(); // Device files use direct device I/O.
     }
     Ok(())
@@ -540,7 +670,7 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
 /// behavior-preserving simplification, not a semantic one.
 fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) {
     // SAFETY: non-null `inode`.
-    let raw_bdev = unsafe { (*inode).__bindgen_anon_2.bdev };
+    let raw_bdev = unsafe { (*inode).dev_mnt.bdev };
     let major = ((raw_bdev >> 20) & 0xFFF) as c_int;
     let minor = (raw_bdev & 0xFFFFF) as c_int;
     let blkdev = blkdev_get(major, minor);
@@ -548,11 +678,11 @@ fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) {
     unsafe {
         if is_err(blkdev) || blkdev.is_null() {
             // Device not found -- allow open for stat but not I/O.
-            (*file).__bindgen_anon_1.blkdev = ptr::null_mut();
+            (*file).pos.blkdev = ptr::null_mut();
             (*file).ops = ptr::null_mut();
             return;
         }
-        (*file).__bindgen_anon_1.blkdev = blkdev;
+        (*file).pos.blkdev = blkdev;
         (*file).ops = ptr::null_mut(); // Device files use direct device I/O.
     }
 }
@@ -654,7 +784,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     // SAFETY: non-null `file`.
     unsafe {
         (*file).f_flags = f_flags;
-        (*file).__bindgen_anon_1.f_pos = 0;
+        (*file).pos.f_pos = 0;
     }
     Ok(file)
 }
@@ -704,24 +834,24 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
         let mode = unsafe { (*inode).mode };
         if is_chr(mode) {
             // SAFETY: non-null `file`.
-            let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
+            let cdev = unsafe { (*file).pos.cdev };
             if !cdev.is_null() {
                 let ret = cdev_put(cdev);
-                unsafe { (*file).__bindgen_anon_1.cdev = ptr::null_mut() };
+                unsafe { (*file).pos.cdev = ptr::null_mut() };
                 if ret != 0 {
                     crate::kprintln!("vfs_fput: cdev_put failed: {}", ret);
                 }
             }
         } else if is_blk(mode) {
             // SAFETY: non-null `file`.
-            let ret = unsafe { blkdev_put((*file).__bindgen_anon_1.blkdev) };
-            unsafe { (*file).__bindgen_anon_1.blkdev = ptr::null_mut() };
+            let ret = unsafe { blkdev_put((*file).pos.blkdev) };
+            unsafe { (*file).pos.blkdev = ptr::null_mut() };
             if ret != 0 {
                 crate::kprintln!("vfs_fput: blkdev_put failed: {}", ret);
             }
         } else if is_fifo(mode) {
             // SAFETY: non-null `file`.
-            let pi = unsafe { (*file).__bindgen_anon_1.pipe };
+            let pi = unsafe { (*file).pos.pipe };
             if !pi.is_null() {
                 // SAFETY: non-null `file`.
                 let writable = (unsafe { (*file).f_flags } & O_ACCMODE) != O_RDONLY;
@@ -778,7 +908,7 @@ fn vfs_ioctl_inner(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> KResult<c
             // SAFETY: non-null `file`; the cdev pointer reinterprets as
             // `device_t*` because `device_t dev` is `cdev_t`'s first
             // field (repr(C), matches the C original's cast exactly).
-            let dev = unsafe { (*file).__bindgen_anon_1.cdev as *mut device_t };
+            let dev = unsafe { (*file).pos.cdev as *mut device_t };
             if !dev.is_null() {
                 return Ok(dev_ioctl(dev, cmd, arg));
             }
@@ -862,7 +992,7 @@ fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_i
             unsafe { read(file, buf as *mut c_char, n, user as bool_) }
         } else {
             // SAFETY: non-null `file`.
-            let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
+            let cdev = unsafe { (*file).pos.cdev };
             cdev_read(cdev, user as bool_, buf, n) as isize
         };
         return Ok(ret);
@@ -902,7 +1032,7 @@ fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_i
     let ret = unsafe { read(file, buf as *mut c_char, n, user as bool_) };
     if ret > 0 {
         // SAFETY: non-null `file`.
-        unsafe { (*file).__bindgen_anon_1.f_pos += ret as loff_t };
+        unsafe { (*file).pos.f_pos += ret as loff_t };
     }
     Ok(ret)
 }
@@ -1030,7 +1160,7 @@ fn vfs_filewrite_inner(
             unsafe { write(file, buf as *const c_char, n, user as bool_) }
         } else {
             // SAFETY: non-null `file`.
-            let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
+            let cdev = unsafe { (*file).pos.cdev };
             cdev_write(cdev, user as bool_, buf, n) as isize
         };
         return Ok(ret);
@@ -1070,7 +1200,7 @@ fn vfs_filewrite_inner(
     let ret = unsafe { write(file, buf as *const c_char, n, user as bool_) };
     if ret > 0 {
         // SAFETY: non-null `file`.
-        unsafe { (*file).__bindgen_anon_1.f_pos += ret as loff_t };
+        unsafe { (*file).pos.f_pos += ret as loff_t };
     }
     Ok(ret)
 }
@@ -1120,7 +1250,7 @@ fn vfs_filelseek_inner(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KR
     let ret = unsafe { llseek(file, offset, whence) };
     if ret >= 0 {
         // SAFETY: non-null `file`.
-        unsafe { (*file).__bindgen_anon_1.f_pos = ret };
+        unsafe { (*file).pos.f_pos = ret };
     }
     Ok(ret)
 }
@@ -1345,7 +1475,7 @@ fn vfs_sockalloc_inner(
     // SAFETY: non-null `f`.
     unsafe {
         (*f).f_flags = O_RDWR;
-        (*f).__bindgen_anon_1.sock = si as *mut crate::bindings::sock;
+        (*f).pos.sock = si as *mut crate::bindings::sock;
         (*f).ops = ptr::null_mut(); // Sockets use direct socket I/O.
     }
     ftable_attach(f);

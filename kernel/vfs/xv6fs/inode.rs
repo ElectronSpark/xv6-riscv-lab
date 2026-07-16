@@ -203,7 +203,7 @@ pub(crate) extern "C" fn xv6fs_sync_inode(inode: *mut vfs_inode) -> c_int {
     let ip = inode as *mut xv6fs_inode;
     xv6fs_iupdate(ip);
     // SAFETY: `inode` is live.
-    unsafe { (*inode).__bindgen_anon_1.set_dirty(0) };
+    unsafe { (*inode).flags.set_dirty(0) };
     0
 }
 
@@ -213,7 +213,7 @@ pub(crate) extern "C" fn xv6fs_dirty_inode(inode: *mut vfs_inode) -> c_int {
         return neg(EINVAL);
     }
     // SAFETY: `inode` is live.
-    unsafe { (*inode).__bindgen_anon_1.set_dirty(1) };
+    unsafe { (*inode).flags.set_dirty(1) };
     0
 }
 
@@ -928,9 +928,9 @@ fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
         (*ip).major = major(dev);
         (*ip).minor = minor(dev);
         if super::s_ischr(mode) {
-            (*new_inode).__bindgen_anon_2.cdev = dev;
+            (*new_inode).dev_mnt.cdev = dev;
         } else if super::s_isblk(mode) {
-            (*new_inode).__bindgen_anon_2.bdev = dev;
+            (*new_inode).dev_mnt.bdev = dev;
         }
     }
 

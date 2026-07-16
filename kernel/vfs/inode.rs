@@ -72,11 +72,12 @@
 //! from `vfs_private.h`/`fs.h`) have no external linkage and are
 //! reimplemented natively here, same precedent as `kernel/kobject.rs`
 //! (Wave 1). Bitfield flags (`valid`/`dirty`/`mount`/`orphan`/
-//! `destroying`/`delay_put`) are accessed through bindgen's generated
-//! `__bindgen_anon_1.field()`/`.set_field()` methods on a temporary
-//! place expression (`(*ptr).__bindgen_anon_1...`), the same pattern
-//! `kernel/mm/pcache.rs` uses — never by materializing a `&mut vfs_inode`
-//! for the whole struct. Deliberate deviations from a byte-for-byte C
+//! `destroying`/`delay_put`) are accessed through the native
+//! [`VfsInodeFlagBits`] holder's `.flags.field()`/`.set_field()`
+//! accessors (P3-N5; bit-identical to the bindgen `__bindgen_anon_1`
+//! methods they replaced) on a temporary place expression
+//! (`(*ptr).flags...`), the same pattern `kernel/mm/pcache.rs` uses —
+//! never by materializing a `&mut vfs_inode` for the whole struct. Deliberate deviations from a byte-for-byte C
 //! transliteration are called out inline (see `vfs_chroot`'s discarded
 //! `vfs_chdir` return value, and the `panic!`-free tail-call use of
 //! `xv6_panic`'s `-> !` return type replacing the C's dead
@@ -96,6 +97,390 @@ use crate::bindings::{
     ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTEMPTY, EPERM, EXDEV,
 };
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
+
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N5 (VFS type family, dentry/dir-iter slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/vfs/
+// vfs_types.h`'s `struct vfs_dentry`/`struct vfs_dir_iter` now:
+// `build.rs` blocklists the bindgen-generated forms and injects `pub use
+// crate::vfs::inode::... as ...;` facade re-exports (no `_t` typedefs
+// exist for either). Field names/types reproduce bindgen's exactly; both
+// derived Copy/Clone in the pre-nativization bindgen output (and
+// `vfs_dir_iter` is still embedded by value by `vfs_file`'s position
+// union, so an accurate Copy=Yes in build.rs's NativeTypeCallbacks is
+// what keeps *that* derive line unchanged until `vfs_file` itself goes
+// native).
+// ---------------------------------------------------------------------------
+
+/// `struct vfs_dentry` (`kernel/inc/vfs/vfs_types.h`). No dentry cache
+/// right now; `name` is managed by the slab allocator.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsDentry {
+    pub sb: *mut vfs_superblock,
+    pub parent: *mut vfs_inode,
+    pub ino: crate::bindings::uint64,
+    pub name: *mut c_char,
+    pub name_len: crate::bindings::uint16,
+    pub cookies: crate::bindings::int64,
+}
+
+/// `struct vfs_dir_iter` (`kernel/inc/vfs/vfs_types.h`): directory
+/// iteration state (`cookies` is filesystem-private and opaque).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsDirIter {
+    pub cookies: crate::bindings::int64,
+    pub index: crate::bindings::int64,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on `crate::bindings::{vfs_dentry,vfs_dir_iter}`
+// before the switch) and independently confirmed by a cross-compiler
+// `_Static_assert` probe (toolchain riscv64-unknown-elf-gcc,
+// rv64gc/lp64d, gcc & clang-18 agree) against `kernel/inc/vfs/
+// vfs_types.h` — see the P3-N5 wave record
+// (scratchpad p3n5_static_assert_probe.c): vfs_dentry 48/8 offsets
+// 0/8/16/24/32/40, vfs_dir_iter 16/8 offsets 0/8.
+const _: () = {
+    assert!(core::mem::size_of::<VfsDentry>() == 48, "vfs_dentry size");
+    assert!(core::mem::align_of::<VfsDentry>() == 8, "vfs_dentry alignment");
+    assert!(core::mem::offset_of!(VfsDentry, sb) == 0, "vfs_dentry.sb offset");
+    assert!(core::mem::offset_of!(VfsDentry, parent) == 8, "vfs_dentry.parent offset");
+    assert!(core::mem::offset_of!(VfsDentry, ino) == 16, "vfs_dentry.ino offset");
+    assert!(core::mem::offset_of!(VfsDentry, name) == 24, "vfs_dentry.name offset");
+    assert!(core::mem::offset_of!(VfsDentry, name_len) == 32, "vfs_dentry.name_len offset");
+    assert!(core::mem::offset_of!(VfsDentry, cookies) == 40, "vfs_dentry.cookies offset");
+    assert!(core::mem::size_of::<VfsDirIter>() == 16, "vfs_dir_iter size");
+    assert!(core::mem::align_of::<VfsDirIter>() == 8, "vfs_dir_iter alignment");
+    assert!(core::mem::offset_of!(VfsDirIter, cookies) == 0, "vfs_dir_iter.cookies offset");
+    assert!(core::mem::offset_of!(VfsDirIter, index) == 8, "vfs_dir_iter.index offset");
+};
+
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N5 (VFS type family, inode hub slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/vfs/
+// vfs_types.h`'s `struct vfs_inode`/`struct vfs_inode_ops` now:
+// `build.rs` blocklists the bindgen-generated forms and injects `pub use
+// crate::vfs::inode::... as ...;` facade re-exports (no `_t` typedefs
+// exist). The ops-table fn-pointer fields reproduce bindgen's
+// `Option<unsafe extern "C" fn>` forms exactly, including the `move` ->
+// `move_` keyword rename (trait-ification is P3-10's job). The anonymous
+// C bitfield struct became the named 8/8 `{bits,_pad}` holder
+// [`VfsInodeFlagBits`] (field `flags`) with safe masking accessors
+// bit-identical to bindgen's little-endian unit; the anonymous
+// device/mount union became the named real Rust union
+// [`VfsInodeDevMnt`] (field `dev_mnt`, inner named struct
+// [`VfsInodeMnt`] for bindgen's nested `__bindgen_anon_1`); consumers
+// re-pointed from `__bindgen_anon_1`/`__bindgen_anon_2`. Copy fidelity:
+// `vfs_inode_ops` derived Copy/Clone in the pre-nativization bindgen
+// output; `vfs_inode` derived NEITHER, so the native deliberately has
+// no derives — the still-bindgen `tmpfs_inode`/`xv6fs_inode` embed
+// `vfs_inode` BY VALUE (as their first field) and had no derives
+// either; the accurate NONCOPY answer in build.rs keeps their derive
+// lines unchanged. `pcache` (mm/pcache_types.h), `completion_t`-carried
+// `mutex_t` lock types (already native), `stat` (uabi/stat.h — P3-4
+// scrutiny class), `thread` and `vfs_inode_ref` stay referenced by
+// their `crate::bindings` paths — the sanctioned mixed-tier pattern.
+// `_pad0`/`_pad1`/`_pad2` reproduce bindgen's
+// `__bindgen_padding_0/1/2` verbatim (the C `__ALIGNED_CACHELINE`
+// rides the `mutex_t`/`completion_t` typedefs and the `struct pcache`
+// record; the natives are align 8 in Rust, so the explicit pads carry
+// the 64-byte placements, exactly as bindgen emitted them —
+// `i_data`'s 64-alignment comes from the still-bindgen `pcache`'s own
+// `repr(align(64))`).
+// ---------------------------------------------------------------------------
+
+/// Native replacement for the anonymous C bitfield struct inside
+/// `struct vfs_inode` (bindgen's `vfs_inode__bindgen_ty_1`, 8/8): the
+/// inode state flags. Bit order (LE unit byte 0): valid=0, dirty=1,
+/// mount=2, orphan=3, destroying=4, delay_put=5 — identical to
+/// bindgen's `get(N,1)`/`set(N,1)` accessors. See the C header's long
+/// comment on the valid/dirty lifecycle (`kernel/inc/vfs/vfs_types.h`).
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct VfsInodeFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+macro_rules! inode_flag_bit {
+    ($(#[$attr:meta])* $get:ident, $set:ident, $bit:expr) => {
+        $(#[$attr])*
+        #[inline]
+        pub(crate) fn $get(&self) -> u64 {
+            ((self.bits >> $bit) & 0b1) as u64
+        }
+        $(#[$attr])*
+        #[inline]
+        pub(crate) fn $set(&mut self, val: u64) {
+            self.bits = (self.bits & !(1u8 << $bit)) | (((val as u8) & 0b1) << $bit);
+        }
+    };
+}
+
+impl VfsInodeFlagBits {
+    inode_flag_bit!(valid, set_valid, 0);
+    inode_flag_bit!(dirty, set_dirty, 1);
+    inode_flag_bit!(mount, set_mount, 2);
+    inode_flag_bit!(orphan, set_orphan, 3);
+    inode_flag_bit!(destroying, set_destroying, 4);
+    inode_flag_bit!(
+        /// No Rust consumer today (the C original's tmpfs delay-put
+        /// path never made it into a Rust call site) — kept for header
+        /// fidelity, same `#[allow(dead_code)]`-documents-the-gap
+        /// precedent as `dev/cdev.rs`'s `cdev_dup`.
+        #[allow(dead_code)]
+        delay_put, set_delay_put, 5
+    );
+}
+
+/// Native replacement for the nested anonymous struct inside `struct
+/// vfs_inode`'s device/mount union (bindgen's
+/// `vfs_inode__bindgen_ty_2__bindgen_ty_1`, 16/8): the mounted
+/// superblock + its root inode when this inode is a mountpoint.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsInodeMnt {
+    pub mnt_sb: *mut vfs_superblock,
+    pub mnt_rooti: *mut VfsInode,
+}
+
+/// Native replacement for the anonymous C union inside `struct
+/// vfs_inode` (bindgen's `vfs_inode__bindgen_ty_2`, 16/8): the
+/// character/block device number for device inodes, or the mount
+/// linkage ([`VfsInodeMnt`]) for mountpoint inodes.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union VfsInodeDevMnt {
+    pub cdev: crate::bindings::uint32,
+    pub bdev: crate::bindings::uint32,
+    pub mnt: VfsInodeMnt,
+}
+
+/// `struct vfs_inode` (`kernel/inc/vfs/vfs_types.h`) — the VFS hub
+/// type. The anonymous bitfield struct became the named `flags` field;
+/// the anonymous device/mount union became the named `dev_mnt` field
+/// (consumers re-pointed from bindgen's
+/// `__bindgen_anon_1`/`__bindgen_anon_2`).
+#[repr(C, align(64))]
+pub struct VfsInode {
+    pub hash_entry: hlist_entry_t,
+    pub ino: crate::bindings::uint64,
+    pub n_links: crate::bindings::uint32,
+    pub n_blocks: crate::bindings::uint64,
+    pub size: loff_t,
+    pub mode: crate::bindings::uint32,
+    pub uid: crate::bindings::uint32,
+    pub gid: crate::bindings::uint32,
+    pub atime: crate::bindings::uint64,
+    pub mtime: crate::bindings::uint64,
+    pub ctime: crate::bindings::uint64,
+    pub(crate) _pad0: [u64; 4],
+    pub mutex: crate::bindings::mutex_t,
+    pub flags: VfsInodeFlagBits,
+    pub orphan_entry: list_node_t,
+    pub owner: *mut thread,
+    pub sb: *mut vfs_superblock,
+    pub i_mapping: *mut crate::bindings::pcache,
+    pub(crate) _pad1: [u64; 2],
+    pub i_data: crate::bindings::pcache,
+    pub ops: *mut VfsInodeOps,
+    pub ref_count: c_int,
+    pub fs_data: *mut c_void,
+    pub parent: *mut VfsInode,
+    pub name: *mut c_char,
+    pub dev_mnt: VfsInodeDevMnt,
+    pub(crate) _pad2: u64,
+    pub completion: crate::bindings::completion_t,
+}
+
+/// `struct vfs_inode_ops` (`kernel/inc/vfs/vfs_types.h`) — metadata
+/// operations; the VFS core acquires the inode mutex before invoking
+/// any callback. `move_` keeps bindgen's rename of the C `move` field
+/// (a Rust keyword).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsInodeOps {
+    pub lookup: Option<
+        unsafe extern "C" fn(
+            dir: *mut VfsInode,
+            dentry: *mut VfsDentry,
+            name: *const c_char,
+            name_len: usize,
+        ) -> c_int,
+    >,
+    pub dir_iter: Option<
+        unsafe extern "C" fn(
+            dir: *mut VfsInode,
+            iter: *mut VfsDirIter,
+            ret_dentry: *mut VfsDentry,
+        ) -> c_int,
+    >,
+    pub readlink:
+        Option<unsafe extern "C" fn(inode: *mut VfsInode, buf: *mut c_char, buflen: usize) -> isize>,
+    pub create: Option<
+        unsafe extern "C" fn(
+            dir: *mut VfsInode,
+            mode: mode_t,
+            name: *const c_char,
+            name_len: usize,
+        ) -> *mut VfsInode,
+    >,
+    pub getattr: Option<
+        unsafe extern "C" fn(inode: *mut VfsInode, stat: *mut crate::bindings::stat) -> c_int,
+    >,
+    pub setattr: Option<
+        unsafe extern "C" fn(inode: *mut VfsInode, stat: *const crate::bindings::stat) -> c_int,
+    >,
+    pub link: Option<
+        unsafe extern "C" fn(
+            old: *mut VfsInode,
+            dir: *mut VfsInode,
+            name: *const c_char,
+            name_len: usize,
+        ) -> c_int,
+    >,
+    pub unlink:
+        Option<unsafe extern "C" fn(dentry: *mut VfsDentry, target: *mut VfsInode) -> c_int>,
+    pub mkdir: Option<
+        unsafe extern "C" fn(
+            dir: *mut VfsInode,
+            mode: mode_t,
+            name: *const c_char,
+            name_len: usize,
+        ) -> *mut VfsInode,
+    >,
+    pub rmdir:
+        Option<unsafe extern "C" fn(dentry: *mut VfsDentry, target: *mut VfsInode) -> c_int>,
+    pub mknod: Option<
+        unsafe extern "C" fn(
+            dir: *mut VfsInode,
+            mode: mode_t,
+            dev: dev_t,
+            name: *const c_char,
+            name_len: usize,
+        ) -> *mut VfsInode,
+    >,
+    pub move_: Option<
+        unsafe extern "C" fn(
+            old_dir: *mut VfsInode,
+            old_dentry: *mut VfsDentry,
+            new_dir: *mut VfsInode,
+            name: *const c_char,
+            name_len: usize,
+        ) -> c_int,
+    >,
+    pub symlink: Option<
+        unsafe extern "C" fn(
+            dir: *mut VfsInode,
+            mode: mode_t,
+            name: *const c_char,
+            name_len: usize,
+            target: *const c_char,
+            target_len: usize,
+        ) -> *mut VfsInode,
+    >,
+    pub truncate:
+        Option<unsafe extern "C" fn(inode: *mut VfsInode, new_size: loff_t) -> c_int>,
+    pub destroy_inode: Option<unsafe extern "C" fn(inode: *mut VfsInode)>,
+    pub free_inode: Option<unsafe extern "C" fn(inode: *mut VfsInode)>,
+    pub dirty_inode: Option<unsafe extern "C" fn(inode: *mut VfsInode) -> c_int>,
+    pub sync_inode: Option<unsafe extern "C" fn(inode: *mut VfsInode) -> c_int>,
+    pub open: Option<
+        unsafe extern "C" fn(
+            inode: *mut VfsInode,
+            file: *mut crate::bindings::vfs_file,
+            f_flags: c_int,
+        ) -> c_int,
+    >,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on `crate::bindings::{vfs_inode,vfs_inode_ops}`
+// before the switch) and independently confirmed by the cross-compiler
+// `_Static_assert` probe (toolchain riscv64-unknown-elf-gcc,
+// rv64gc/lp64d, gcc & clang-18 agree; scratchpad
+// p3n5_static_assert_probe.c): vfs_inode 1088/64 offsets
+// 0/24/32/40/48/56/60/64/72/80/88/128/[256]/264/280/288/296/320/896/
+// 904/912/920/928/[936]/960 (the anonymous bitfield struct occupies
+// [256,264) and the anonymous union [936,952), both pinned in the
+// probe by their neighbors + direct `offsetof` on the anonymous
+// members); union 16/8 with `mnt_sb` @0 / `mnt_rooti` @8;
+// vfs_inode_ops 152/8 offsets 0..144 by 8.
+const _: () = {
+    assert!(core::mem::size_of::<VfsInodeFlagBits>() == 8, "vfs_inode anon bitfield size");
+    assert!(core::mem::align_of::<VfsInodeFlagBits>() == 8, "vfs_inode anon bitfield align");
+    assert!(core::mem::size_of::<VfsInodeMnt>() == 16, "vfs_inode mnt struct size");
+    assert!(core::mem::offset_of!(VfsInodeMnt, mnt_sb) == 0, "vfs_inode.mnt_sb offset in union");
+    assert!(core::mem::offset_of!(VfsInodeMnt, mnt_rooti) == 8, "vfs_inode.mnt_rooti offset in union");
+    assert!(core::mem::size_of::<VfsInodeDevMnt>() == 16, "vfs_inode dev/mnt union size");
+    assert!(core::mem::align_of::<VfsInodeDevMnt>() == 8, "vfs_inode dev/mnt union alignment");
+    assert!(core::mem::size_of::<VfsInode>() == 1088, "vfs_inode size");
+    assert!(core::mem::align_of::<VfsInode>() == 64, "vfs_inode alignment");
+    assert!(core::mem::offset_of!(VfsInode, hash_entry) == 0, "vfs_inode.hash_entry offset");
+    assert!(core::mem::offset_of!(VfsInode, ino) == 24, "vfs_inode.ino offset");
+    assert!(core::mem::offset_of!(VfsInode, n_links) == 32, "vfs_inode.n_links offset");
+    assert!(core::mem::offset_of!(VfsInode, n_blocks) == 40, "vfs_inode.n_blocks offset");
+    assert!(core::mem::offset_of!(VfsInode, size) == 48, "vfs_inode.size offset");
+    assert!(core::mem::offset_of!(VfsInode, mode) == 56, "vfs_inode.mode offset");
+    assert!(core::mem::offset_of!(VfsInode, uid) == 60, "vfs_inode.uid offset");
+    assert!(core::mem::offset_of!(VfsInode, gid) == 64, "vfs_inode.gid offset");
+    assert!(core::mem::offset_of!(VfsInode, atime) == 72, "vfs_inode.atime offset");
+    assert!(core::mem::offset_of!(VfsInode, mtime) == 80, "vfs_inode.mtime offset");
+    assert!(core::mem::offset_of!(VfsInode, ctime) == 88, "vfs_inode.ctime offset");
+    assert!(core::mem::offset_of!(VfsInode, mutex) == 128, "vfs_inode.mutex offset");
+    assert!(core::mem::offset_of!(VfsInode, flags) == 256, "vfs_inode anon bitfield offset");
+    assert!(core::mem::offset_of!(VfsInode, orphan_entry) == 264, "vfs_inode.orphan_entry offset");
+    assert!(core::mem::offset_of!(VfsInode, owner) == 280, "vfs_inode.owner offset");
+    assert!(core::mem::offset_of!(VfsInode, sb) == 288, "vfs_inode.sb offset");
+    assert!(core::mem::offset_of!(VfsInode, i_mapping) == 296, "vfs_inode.i_mapping offset");
+    assert!(core::mem::offset_of!(VfsInode, i_data) == 320, "vfs_inode.i_data offset");
+    assert!(core::mem::offset_of!(VfsInode, ops) == 896, "vfs_inode.ops offset");
+    assert!(core::mem::offset_of!(VfsInode, ref_count) == 904, "vfs_inode.ref_count offset");
+    assert!(core::mem::offset_of!(VfsInode, fs_data) == 912, "vfs_inode.fs_data offset");
+    assert!(core::mem::offset_of!(VfsInode, parent) == 920, "vfs_inode.parent offset");
+    assert!(core::mem::offset_of!(VfsInode, name) == 928, "vfs_inode.name offset");
+    assert!(core::mem::offset_of!(VfsInode, dev_mnt) == 936, "vfs_inode anon union offset");
+    assert!(core::mem::offset_of!(VfsInode, completion) == 960, "vfs_inode.completion offset");
+    assert!(core::mem::size_of::<VfsInodeOps>() == 152, "vfs_inode_ops size");
+    assert!(core::mem::align_of::<VfsInodeOps>() == 8, "vfs_inode_ops alignment");
+    assert!(core::mem::offset_of!(VfsInodeOps, lookup) == 0, "vfs_inode_ops.lookup offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, dir_iter) == 8, "vfs_inode_ops.dir_iter offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, readlink) == 16, "vfs_inode_ops.readlink offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, create) == 24, "vfs_inode_ops.create offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, getattr) == 32, "vfs_inode_ops.getattr offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, setattr) == 40, "vfs_inode_ops.setattr offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, link) == 48, "vfs_inode_ops.link offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, unlink) == 56, "vfs_inode_ops.unlink offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, mkdir) == 64, "vfs_inode_ops.mkdir offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, rmdir) == 72, "vfs_inode_ops.rmdir offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, mknod) == 80, "vfs_inode_ops.mknod offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, move_) == 88, "vfs_inode_ops.move_ offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, symlink) == 96, "vfs_inode_ops.symlink offset");
+    assert!(core::mem::offset_of!(VfsInodeOps, truncate) == 104, "vfs_inode_ops.truncate offset");
+    assert!(
+        core::mem::offset_of!(VfsInodeOps, destroy_inode) == 112,
+        "vfs_inode_ops.destroy_inode offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsInodeOps, free_inode) == 120,
+        "vfs_inode_ops.free_inode offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsInodeOps, dirty_inode) == 128,
+        "vfs_inode_ops.dirty_inode offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsInodeOps, sync_inode) == 136,
+        "vfs_inode_ops.sync_inode offset"
+    );
+    assert!(core::mem::offset_of!(VfsInodeOps, open) == 144, "vfs_inode_ops.open offset");
+};
 
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
@@ -372,12 +757,12 @@ fn vfs_inode_valid_locked(inode: *mut vfs_inode) -> c_int {
         if holding_mutex(ptr::addr_of_mut!((*inode).mutex)) == 0 {
             return neg(EPERM);
         }
-        if (*inode).__bindgen_anon_1.valid() == 0 {
+        if (*inode).flags.valid() == 0 {
             return neg(EINVAL);
         }
         if !core::ptr::eq(inode, root_inode_ptr()) {
             let sb = (*inode).sb;
-            if sb.is_null() || (*sb).__bindgen_anon_2.valid() == 0 {
+            if sb.is_null() || (*sb).flags.valid() == 0 {
                 crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
                 return neg(EINVAL);
             }
@@ -403,7 +788,7 @@ pub(crate) extern "C" fn __vfs_inode_init(inode: *mut vfs_inode) {
         );
         hli_init(ptr::addr_of_mut!((*inode).hash_entry));
         ln_init(ptr::addr_of_mut!((*inode).orphan_entry));
-        (*inode).__bindgen_anon_1.set_orphan(0);
+        (*inode).flags.set_orphan(0);
         (*inode).ref_count = 1;
     }
 }
@@ -506,12 +891,12 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
         // SAFETY: non-null `sb`/`inode`; bitfield/plain-field reads only.
         let (attached, backendless) = unsafe {
             (
-                (*sb).__bindgen_anon_2.attached() != 0,
-                (*sb).__bindgen_anon_2.backendless() != 0,
+                (*sb).flags.attached() != 0,
+                (*sb).flags.backendless() != 0,
             )
         };
         let n_links = unsafe { (*inode).n_links };
-        let is_mount = unsafe { (*inode).__bindgen_anon_1.mount() != 0 };
+        let is_mount = unsafe { (*inode).flags.mount() != 0 };
         let is_root_inode = unsafe { core::ptr::eq(inode, (*sb).root_inode) };
 
         if attached && (n_links > 0 || is_mount) && (backendless || is_root_inode || is_mount) {
@@ -527,14 +912,14 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
 
         // Orphan cleanup: remove from the in-memory orphan list and, for
         // backend filesystems, the on-disk orphan journal.
-        let is_orphan = unsafe { (*inode).__bindgen_anon_1.orphan() != 0 };
+        let is_orphan = unsafe { (*inode).flags.orphan() != 0 };
         if is_orphan {
             // SAFETY: `inode` is on `sb->orphan_list` (orphan flag set);
             // `orphan_entry` is a live linked `list_node_t`.
             unsafe {
                 ln_detach(ptr::addr_of_mut!((*inode).orphan_entry));
                 (*sb).orphan_count -= 1;
-                (*inode).__bindgen_anon_1.set_orphan(0);
+                (*inode).flags.set_orphan(0);
                 if let Some(remove_orphan) = (*(*sb).ops).remove_orphan {
                     let ret = remove_orphan(sb, inode);
                     if ret != 0 {
@@ -550,8 +935,8 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
         // If dirty and no cleanup has failed yet, try to sync before
         // freeing; retry from the top afterwards (someone else may have
         // grabbed a reference while locks were dropped for the sync).
-        let dirty = unsafe { (*inode).__bindgen_anon_1.dirty() != 0 };
-        let valid = unsafe { (*inode).__bindgen_anon_1.valid() != 0 };
+        let dirty = unsafe { (*inode).flags.dirty() != 0 };
+        let valid = unsafe { (*inode).flags.valid() != 0 };
         if dirty && valid && !failed_clean && attached {
             // SAFETY: non-null `inode`.
             mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
@@ -577,7 +962,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                 // Mark the inode as being destroyed so lookups don't try
                 // to use it while destroy_inode is in progress; the
                 // inode stays in the cache meanwhile.
-                unsafe { (*inode).__bindgen_anon_1.set_destroying(1) };
+                unsafe { (*inode).flags.set_destroying(1) };
 
                 // Release locks before acquiring the transaction:
                 // destroy_inode may do begin/end_op cycles internally
@@ -592,7 +977,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                         // Transaction failed — on-disk data remains,
                         // will be cleaned on next mount via orphan
                         // recovery. Still need to remove from cache.
-                        unsafe { (*inode).__bindgen_anon_1.set_destroying(0) };
+                        unsafe { (*inode).flags.set_destroying(0) };
                         vfs_superblock_wlock(sb);
                         unsafe { mutex_lock(ptr::addr_of_mut!((*inode).mutex)) };
                         skip_destroy = true;
@@ -617,9 +1002,9 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                         mutex_lock(ptr::addr_of_mut!((*inode).mutex));
                         // After destroy, on-disk data is freed: mark
                         // invalid/not-dirty so we never try to sync it.
-                        (*inode).__bindgen_anon_1.set_valid(0);
-                        (*inode).__bindgen_anon_1.set_dirty(0);
-                        (*inode).__bindgen_anon_1.set_destroying(0);
+                        (*inode).flags.set_valid(0);
+                        (*inode).flags.set_dirty(0);
+                        (*inode).flags.set_destroying(0);
                     }
                 }
             }
@@ -1605,7 +1990,7 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     // concurrent atomic writer can race this specific read/decision.
     let n_links = unsafe { (*target).n_links };
     let refcount = unsafe { (*target).ref_count };
-    let is_orphan = unsafe { (*target).__bindgen_anon_1.orphan() != 0 };
+    let is_orphan = unsafe { (*target).flags.orphan() != 0 };
     if n_links == 0 && refcount > 1 && !is_orphan {
         vfs_make_orphan(target);
     }
@@ -2128,10 +2513,10 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inod
         return Err(Errno::Raw(ptr_err(rooti)));
     }
 
-    if unsafe { (*rooti).__bindgen_anon_1.mount() != 0 } {
+    if unsafe { (*rooti).flags.mount() != 0 } {
         // SAFETY: `rooti` is a mountpoint inode; the mount union arm is
         // the live one.
-        let mnt_rooti = unsafe { (*rooti).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
+        let mnt_rooti = unsafe { (*rooti).dev_mnt.mnt.mnt_rooti };
         if mnt_rooti.is_null() {
             vfs_iput(rooti);
             kmm_free(pathbuf as *mut c_void);
@@ -2208,8 +2593,8 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inod
 
         let mut mount_race = false;
         loop {
-            let is_mount = unsafe { (*pos).__bindgen_anon_1.mount() != 0 };
-            let mnt_rooti = unsafe { (*pos).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
+            let is_mount = unsafe { (*pos).flags.mount() != 0 };
+            let mnt_rooti = unsafe { (*pos).dev_mnt.mnt.mnt_rooti };
             if !(is_mount && !mnt_rooti.is_null()) {
                 break;
             }

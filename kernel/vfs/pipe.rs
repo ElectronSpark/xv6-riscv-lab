@@ -28,9 +28,10 @@
 //! `kernel/tty/pty.rs` already peek `(*pi).nread`/`(*pi).nwrite`
 //! lock-free from outside this module (added in Wave 11, before this
 //! module existed in Rust), relying on exactly this
-//! Release/Acquire-paired visibility. This port preserves the C
-//! original's field layout (`pipe` is a real bindgen type, not
-//! redefined here) and the exact ordering discipline at every
+//! Release/Acquire-paired visibility. This port preserves the
+//! established runtime field layout (`pipe` is the hand-written native
+//! [`Pipe`] below since P3-N5, byte-identical to the bindgen layout it
+//! replaced) and the exact ordering discipline at every
 //! `nread`/`nwrite` access site, so those pre-existing external readers
 //! keep working unmodified. The one *within-lock* plain (non-atomic)
 //! read at each side (`pipe_read` reads `pi->nread` directly while
@@ -115,6 +116,74 @@ use crate::proc::proc_shims::xv6_current_thread;
 // items instead of `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
 use crate::sync::KSpinlock;
+
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N5 (VFS type family, pipe slice).
+//
+// This IS the kernel-wide Rust definition of `kernel/inc/vfs/
+// pipe_types.h`'s `struct pipe` now: `build.rs` blocklists the
+// bindgen-generated form and injects a `pub use crate::vfs::pipe::Pipe
+// as pipe;` facade re-export (no `_t` typedef exists). Derived
+// Copy/Clone exactly as the pre-nativization bindgen output did.
+//
+// IMPORTANT LAYOUT NOTE — this native reproduces the BINDGEN-EMITTED
+// layout (the runtime truth since P3-N2), which does NOT match the C
+// header's own layout. In C, `writer_lock` is declared `spinlock_t`,
+// whose typedef carries `__ALIGNED_CACHELINE`; gcc and clang both place
+// it at offset 128 and size the struct at 256. bindgen, however,
+// emitted only a single `__bindgen_padding_0: u64` after `nread_queue`
+// and relied on the field *type's* C alignment (64) to finish the
+// placement — but the blocklisted-native `RawSpinlock` is align 8 in
+// Rust, so the real Rust layout has been `writer_lock @88, nwrite @112,
+// nwrite_queue @120, flags @168, data @176, size 192` ever since the
+// P3-N2 spinlock nativization. This is self-consistent and harmless:
+// `struct pipe` has zero C consumers (no `.c` files remain in kernel/;
+// `tty_types.h` holds only `struct pipe *` pointers), and allocation
+// (`PIPE_CACHE` slab below, sized by Rust `size_of`) plus every field
+// access live in Rust. Reproducing the C-header layout instead would
+// be a gratuitous runtime layout *change* — exactly what a
+// nativization wave must not do. The divergence is recorded in the
+// P3-N5 wave record and in the cross-compiler probe's header comment.
+// ---------------------------------------------------------------------------
+
+/// `struct pipe` (`kernel/inc/vfs/pipe_types.h`) — bindgen-emitted
+/// runtime layout (see the layout note above; `_pad0` is bindgen's
+/// `__bindgen_padding_0` reproduced verbatim).
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct Pipe {
+    pub reader_lock: crate::bindings::spinlock_t,
+    pub nread: crate::bindings::uint,
+    pub nread_queue: tq_t,
+    pub(crate) _pad0: u64,
+    pub writer_lock: crate::bindings::spinlock_t,
+    pub nwrite: crate::bindings::uint,
+    pub nwrite_queue: tq_t,
+    pub flags: c_int,
+    pub data: *mut c_char,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on `crate::bindings::pipe` before the switch:
+// 192/64, reader_lock 0, nread 24, nread_queue 32, writer_lock 88,
+// nwrite 112, nwrite_queue 120, flags 168, data 176). The
+// cross-compiler `_Static_assert` probe (scratchpad
+// p3n5_static_assert_probe.c) documents the C-header layout these
+// deliberately do NOT match (256/64, writer_lock @128) — see the
+// layout note above.
+const _: () = {
+    assert!(core::mem::size_of::<Pipe>() == 192, "pipe size (bindgen runtime layout)");
+    assert!(core::mem::align_of::<Pipe>() == 64, "pipe alignment");
+    assert!(core::mem::offset_of!(Pipe, reader_lock) == 0, "pipe.reader_lock offset");
+    assert!(core::mem::offset_of!(Pipe, nread) == 24, "pipe.nread offset");
+    assert!(core::mem::offset_of!(Pipe, nread_queue) == 32, "pipe.nread_queue offset");
+    assert!(core::mem::offset_of!(Pipe, writer_lock) == 88, "pipe.writer_lock offset");
+    assert!(core::mem::offset_of!(Pipe, nwrite) == 112, "pipe.nwrite offset");
+    assert!(core::mem::offset_of!(Pipe, nwrite_queue) == 120, "pipe.nwrite_queue offset");
+    assert!(core::mem::offset_of!(Pipe, flags) == 168, "pipe.flags offset");
+    assert!(core::mem::offset_of!(Pipe, data) == 176, "pipe.data offset");
+};
 
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
@@ -775,7 +844,7 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
 extern "C" fn pipe_file_read(file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool_) -> isize {
     // SAFETY: non-null `file` (only reachable via `PIPE_FILE_OPS`
     // dispatch from `vfs/file.rs`, which already validated `file`).
-    let pi = unsafe { (*file).__bindgen_anon_1.pipe };
+    let pi = unsafe { (*file).pos.pipe };
     pipe_read(pi, buf, count as u64, user as c_int) as isize
 }
 
@@ -786,20 +855,20 @@ extern "C" fn pipe_file_write(
     user: bool_,
 ) -> isize {
     // SAFETY: see `pipe_file_read`.
-    let pi = unsafe { (*file).__bindgen_anon_1.pipe };
+    let pi = unsafe { (*file).pos.pipe };
     pipe_write(pi, buf, count as u64, user as c_int) as isize
 }
 
 extern "C" fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
     // Pipes have no inode.
     // SAFETY: non-null `file`.
-    let pi = unsafe { (*file).__bindgen_anon_1.pipe };
+    let pi = unsafe { (*file).pos.pipe };
     if !pi.is_null() {
         // SAFETY: non-null `file`.
         let writable = (unsafe { (*file).f_flags } & O_ACCMODE) != O_RDONLY;
         pipe_close(pi, writable as c_int);
         // SAFETY: non-null `file`.
-        unsafe { (*file).__bindgen_anon_1.pipe = ptr::null_mut() };
+        unsafe { (*file).pos.pipe = ptr::null_mut() };
     }
     0
 }
@@ -808,7 +877,7 @@ extern "C" fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> 
 /// blocking. Returns the subset of `events` that are ready.
 extern "C" fn pipe_file_poll(file: *mut vfs_file, events: c_short) -> c_int {
     // SAFETY: non-null `file`.
-    let pi = unsafe { (*file).__bindgen_anon_1.pipe };
+    let pi = unsafe { (*file).pos.pipe };
     if pi.is_null() {
         return POLLNVAL as c_int;
     }
@@ -852,7 +921,7 @@ pub(crate) extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: 
     // precondition, e.g. `vfs_pipealloc` in `vfs/file.rs`).
     unsafe {
         (*file).f_flags = f_flags;
-        (*file).__bindgen_anon_1.pipe = pi;
+        (*file).pos.pipe = pi;
         (*file).ops = ptr::addr_of!(PIPE_FILE_OPS) as *mut vfs_file_ops;
     }
 }

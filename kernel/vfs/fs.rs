@@ -49,10 +49,11 @@
 //! `list_node_detach`, `hlist_first_entry`/`hlist_next_entry` and
 //! friends) are reimplemented natively here rather than borrowed from
 //! `kernel/list.rs`/`kernel/hlist.rs`, matching `inode.rs`/`file.rs`/
-//! `pipe.rs`/`fdtable.rs`. Bitfield flags go through bindgen's
-//! `__bindgen_anon_N.field()`/`.set_field()` accessors on a temporary
-//! place expression, never via a materialized `&mut` of the whole
-//! struct. `unsafe` is scope-minimized with `SAFETY:` comments at each
+//! `pipe.rs`/`fdtable.rs`. Bitfield flags go through the native flag
+//! holders' `.flags.field()`/`.set_field()` accessors (P3-N5; bindgen's
+//! `__bindgen_anon_N` forms for the still-bindgen `vfs_inode`) on a
+//! temporary place expression, never via a materialized `&mut` of the
+//! whole struct. `unsafe` is scope-minimized with `SAFETY:` comments at each
 //! non-obvious site. One **deliberate fidelity deviation**, already
 //! established by `inode.rs`/`file.rs`/`pipe.rs`/`fdtable.rs`: the C
 //! `assert(expr, fmt, ...)` macro's `printf`-style format arguments
@@ -85,6 +86,361 @@ use crate::bindings::{
     vfs_fs_type_ops, vfs_inode, vfs_inode_ref, vfs_superblock, vfs_superblock_ops, work_struct,
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
+};
+
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-N5 (VFS type family, fs_struct slice).
+//
+// This IS the kernel-wide Rust definition of `kernel/inc/vfs/
+// vfs_types.h`'s `struct fs_struct` now: `build.rs` blocklists the
+// bindgen-generated form and injects a `pub use crate::vfs::fs::FsStruct
+// as fs_struct;` facade re-export (no `_t` typedef exists). This file
+// owns the concept (`VFS_STRUCT_CACHE`, `vfs_struct_init`/`_clone`/
+// `_dup`/`_put` lifecycle). Field names/types reproduce bindgen's
+// exactly; derived Copy/Clone exactly as the pre-nativization bindgen
+// output did. `vfs_inode_ref` (kernel/inc/types.h) deliberately stays
+// bindgen-emitted — out of this wave's scope — and is embedded by value
+// via its `crate::bindings` path, the sanctioned mixed-tier pattern.
+// The C `__ALIGNED_CACHELINE` on the embedded `spinlock_t` typedef
+// gives the record align 64, carried here as an explicit
+// `repr(align(64))` exactly as bindgen emitted it.
+// ---------------------------------------------------------------------------
+
+/// `struct fs_struct` (`kernel/inc/vfs/vfs_types.h`): per-process
+/// filesystem state (root inode + cwd), allocated on the kernel stack
+/// below `utrapframe` or from [`VFS_STRUCT_CACHE`].
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct FsStruct {
+    pub lock: spinlock_t,
+    pub rooti: vfs_inode_ref,
+    pub cwd: vfs_inode_ref,
+    pub ref_count: c_int,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on `crate::bindings::fs_struct` before the switch)
+// and independently confirmed by the cross-compiler `_Static_assert`
+// probe (toolchain riscv64-unknown-elf-gcc, rv64gc/lp64d, gcc &
+// clang-18 agree; scratchpad p3n5_static_assert_probe.c): 64/64,
+// offsets 0/24/40/56.
+const _: () = {
+    assert!(core::mem::size_of::<FsStruct>() == 64, "fs_struct size");
+    assert!(core::mem::align_of::<FsStruct>() == 64, "fs_struct alignment");
+    assert!(core::mem::offset_of!(FsStruct, lock) == 0, "fs_struct.lock offset");
+    assert!(core::mem::offset_of!(FsStruct, rooti) == 24, "fs_struct.rooti offset");
+    assert!(core::mem::offset_of!(FsStruct, cwd) == 40, "fs_struct.cwd offset");
+    assert!(core::mem::offset_of!(FsStruct, ref_count) == 56, "fs_struct.ref_count offset");
+};
+
+// ---------------------------------------------------------------------------
+// Native layouts — Wave P3-N5 (VFS type family, fs_type + superblock
+// slice).
+//
+// These ARE the kernel-wide Rust definitions of `kernel/inc/vfs/
+// vfs_types.h`'s `struct vfs_fs_type`/`struct vfs_fs_type_ops`/`struct
+// vfs_superblock`/`struct vfs_superblock_ops` now: `build.rs` blocklists
+// the bindgen-generated forms and injects `pub use crate::vfs::fs::...
+// as ...;` facade re-exports (no `_t` typedefs exist). The ops-table
+// fn-pointer fields reproduce bindgen's `Option<unsafe extern "C" fn>`
+// forms exactly (trait-ification is P3-10's job). The two anonymous C
+// bitfield structs became named 8/8 `{bits,_pad}` holders
+// ([`VfsFsTypeFlagBits`]/[`VfsSuperblockFlagBits`], field `flags`) with
+// safe masking accessors bit-identical to bindgen's little-endian units
+// (N3/N4 precedent); `vfs_superblock`'s anonymous inode-hash struct
+// (bindgen's `vfs_superblock__bindgen_ty_1`) is flattened into direct
+// `inodes`/`inodes_buckets` fields at identical offsets — C anonymous
+// struct members are accessed directly in C anyway, so the flattened
+// form is the faithful one. Copy fidelity: the ops tables derived
+// Copy/Clone in the pre-nativization bindgen output; `vfs_fs_type`
+// (kobject-embedder class, N4 precedent) and `vfs_superblock` derived
+// NEITHER, so the natives deliberately have no derives — the
+// still-bindgen `tmpfs_superblock`/`xv6fs_superblock` embed
+// `vfs_superblock` by value and had no derives either, and the accurate
+// NONCOPY answer in build.rs keeps their derive lines unchanged.
+// `statfs` (kernel/inc/uabi/statfs.h — uabi, P3-4's scrutiny class) and
+// `pcache` stay bindgen-emitted, referenced by `crate::bindings` path.
+// ---------------------------------------------------------------------------
+
+/// `struct vfs_fs_type_ops` (`kernel/inc/vfs/vfs_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsFsTypeOps {
+    pub mount: Option<
+        unsafe extern "C" fn(
+            mountpoint: *mut vfs_inode,
+            device: *mut vfs_inode,
+            flags: c_int,
+            data: *const c_char,
+            ret_sb: *mut *mut VfsSuperblock,
+        ) -> c_int,
+    >,
+    pub free: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock)>,
+}
+
+/// Native replacement for the anonymous C bitfield struct
+/// `struct { uint64 registered : 1; }` inside `struct vfs_fs_type`
+/// (bindgen's `vfs_fs_type__bindgen_ty_1`: a 1-byte
+/// `__BindgenBitfieldUnit` + 7 pad bytes, `repr(C, align(8))`, 8/8).
+/// riscv64 is little-endian, so C allocates `registered` at bit 0 of
+/// the unit's byte 0 — identical to bindgen's `get(0,1)` accessor.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct VfsFsTypeFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+impl VfsFsTypeFlagBits {
+    #[inline]
+    pub(crate) fn registered(&self) -> u64 {
+        (self.bits & 0b1) as u64
+    }
+    #[inline]
+    pub(crate) fn set_registered(&mut self, val: u64) {
+        self.bits = (self.bits & !0b1) | ((val as u8) & 0b1);
+    }
+}
+
+/// `struct vfs_fs_type` (`kernel/inc/vfs/vfs_types.h`): a registered
+/// filesystem type, protected by the global `vfs_fs_types_lock`. The
+/// anonymous bitfield struct became the named `flags` field (consumers
+/// re-pointed from bindgen's `__bindgen_anon_1`).
+#[repr(C)]
+pub struct VfsFsType {
+    pub list_entry: list_node_t,
+    pub superblocks: list_node_t,
+    pub kobj: kobject,
+    pub flags: VfsFsTypeFlagBits,
+    pub sb_count: c_int,
+    pub name: *const c_char,
+    pub ops: *mut VfsFsTypeOps,
+}
+
+/// Native replacement for the anonymous C bitfield struct inside
+/// `struct vfs_superblock` (bindgen's `vfs_superblock__bindgen_ty_2`,
+/// 8/8): the superblock state flags. Bit order (LE unit byte 0):
+/// valid=0, dirty=1, backendless=2, initialized=3, registered=4,
+/// syncing=5, unmounting=6, attached=7 — identical to bindgen's
+/// `get(N,1)`/`set(N,1)` accessors.
+#[repr(C, align(8))]
+#[derive(Copy, Clone)]
+pub struct VfsSuperblockFlagBits {
+    bits: u8,
+    _pad: [u8; 7],
+}
+
+macro_rules! sb_flag_bit {
+    ($get:ident, $set:ident, $bit:expr) => {
+        #[inline]
+        pub(crate) fn $get(&self) -> u64 {
+            ((self.bits >> $bit) & 0b1) as u64
+        }
+        #[inline]
+        pub(crate) fn $set(&mut self, val: u64) {
+            self.bits = (self.bits & !(1u8 << $bit)) | (((val as u8) & 0b1) << $bit);
+        }
+    };
+}
+
+impl VfsSuperblockFlagBits {
+    sb_flag_bit!(valid, set_valid, 0);
+    sb_flag_bit!(dirty, set_dirty, 1);
+    sb_flag_bit!(backendless, set_backendless, 2);
+    sb_flag_bit!(initialized, set_initialized, 3);
+    sb_flag_bit!(registered, set_registered, 4);
+    sb_flag_bit!(syncing, set_syncing, 5);
+    sb_flag_bit!(unmounting, set_unmounting, 6);
+    sb_flag_bit!(attached, set_attached, 7);
+}
+
+/// `struct vfs_superblock` (`kernel/inc/vfs/vfs_types.h`). The
+/// anonymous inode-hash struct is flattened into direct
+/// `inodes`/`inodes_buckets` fields (bindgen's `__bindgen_anon_1`, same
+/// offsets); the anonymous bitfield struct became the named `flags`
+/// field (bindgen's `__bindgen_anon_2`). `_pad0`/`_pad1` reproduce
+/// bindgen's `__bindgen_padding_0`/`_1` verbatim (the C
+/// `__ALIGNED_CACHELINE` rides the `struct rwsem` record and the
+/// `spinlock_t` typedef; the native `RawRwsem`/`RawSpinlock` are align
+/// 8, so the explicit pads carry the 64-byte placement, exactly as
+/// bindgen emitted them).
+#[repr(C, align(64))]
+pub struct VfsSuperblock {
+    pub siblings: list_node_t,
+    pub fs_type: *mut VfsFsType,
+    pub inodes: hlist_t,
+    pub inodes_buckets: [hlist_bucket_t; VFS_SUPERBLOCK_HASH_BUCKETS],
+    pub flags: VfsSuperblockFlagBits,
+    pub parent_sb: *mut VfsSuperblock,
+    pub mountpoint: *mut vfs_inode,
+    pub device: *mut vfs_inode,
+    pub root_inode: *mut vfs_inode,
+    pub ops: *mut VfsSuperblockOps,
+    pub(crate) _pad0: [u64; 7],
+    pub lock: crate::bindings::rwsem,
+    pub fs_data: *mut c_void,
+    pub mount_count: c_int,
+    pub refcount: c_int,
+    pub orphan_count: c_int,
+    pub orphan_list: list_node_t,
+    pub(crate) _pad1: [u64; 3],
+    pub spinlock: spinlock_t,
+    pub block_size: usize,
+    pub total_blocks: crate::bindings::uint64,
+    pub used_blocks: crate::bindings::uint64,
+}
+
+/// `kernel/inc/vfs/vfs_types.h`: `#define VFS_SUPERBLOCK_HASH_BUCKETS 61`
+/// (bindgen hardcoded `61usize` from the macro-expanded header).
+pub(crate) const VFS_SUPERBLOCK_HASH_BUCKETS: usize = 61;
+
+/// `struct vfs_superblock_ops` (`kernel/inc/vfs/vfs_types.h`).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VfsSuperblockOps {
+    pub alloc_inode: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> *mut vfs_inode>,
+    pub get_inode: Option<
+        unsafe extern "C" fn(sb: *mut VfsSuperblock, ino: crate::bindings::uint64) -> *mut vfs_inode,
+    >,
+    pub sync_fs: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock, wait: c_int) -> c_int>,
+    pub unmount_begin: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock)>,
+    pub add_orphan:
+        Option<unsafe extern "C" fn(sb: *mut VfsSuperblock, inode: *mut vfs_inode) -> c_int>,
+    pub remove_orphan:
+        Option<unsafe extern "C" fn(sb: *mut VfsSuperblock, inode: *mut vfs_inode) -> c_int>,
+    pub recover_orphans: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> c_int>,
+    pub statfs: Option<
+        unsafe extern "C" fn(sb: *mut VfsSuperblock, buf: *mut crate::bindings::statfs) -> c_int,
+    >,
+    pub begin_transaction: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> c_int>,
+    pub end_transaction: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> c_int>,
+}
+
+// P3-N5 hardcoded layout proof — values captured from the
+// pre-nativization bindgen output (verified in-tree by a temporary
+// `offset_of!` gate on the `crate::bindings` forms before the switch)
+// and independently confirmed by the cross-compiler `_Static_assert`
+// probe (toolchain riscv64-unknown-elf-gcc, rv64gc/lp64d, gcc &
+// clang-18 agree; scratchpad p3n5_static_assert_probe.c):
+// vfs_fs_type_ops 16/8 offsets 0/8; vfs_fs_type 104/8 offsets
+// 0/16/32/[72]/80/88/96 (the anonymous bitfield struct occupies
+// [72,80), pinned in the probe by its neighbors); vfs_superblock
+// 1472/64 offsets 0/16/24/72/[1048]/1056/1064/1072/1080/1088/1152/
+// 1344/1352/1356/1360/1368/1408/1432/1440/1448; vfs_superblock_ops
+// 80/8 offsets 0..72 by 8.
+const _: () = {
+    assert!(core::mem::size_of::<VfsFsTypeOps>() == 16, "vfs_fs_type_ops size");
+    assert!(core::mem::align_of::<VfsFsTypeOps>() == 8, "vfs_fs_type_ops alignment");
+    assert!(core::mem::offset_of!(VfsFsTypeOps, mount) == 0, "vfs_fs_type_ops.mount offset");
+    assert!(core::mem::offset_of!(VfsFsTypeOps, free) == 8, "vfs_fs_type_ops.free offset");
+    assert!(core::mem::size_of::<VfsFsTypeFlagBits>() == 8, "vfs_fs_type anon bitfield size");
+    assert!(core::mem::align_of::<VfsFsTypeFlagBits>() == 8, "vfs_fs_type anon bitfield align");
+    assert!(core::mem::size_of::<VfsFsType>() == 104, "vfs_fs_type size");
+    assert!(core::mem::align_of::<VfsFsType>() == 8, "vfs_fs_type alignment");
+    assert!(core::mem::offset_of!(VfsFsType, list_entry) == 0, "vfs_fs_type.list_entry offset");
+    assert!(core::mem::offset_of!(VfsFsType, superblocks) == 16, "vfs_fs_type.superblocks offset");
+    assert!(core::mem::offset_of!(VfsFsType, kobj) == 32, "vfs_fs_type.kobj offset");
+    assert!(core::mem::offset_of!(VfsFsType, flags) == 72, "vfs_fs_type anon bitfield offset");
+    assert!(core::mem::offset_of!(VfsFsType, sb_count) == 80, "vfs_fs_type.sb_count offset");
+    assert!(core::mem::offset_of!(VfsFsType, name) == 88, "vfs_fs_type.name offset");
+    assert!(core::mem::offset_of!(VfsFsType, ops) == 96, "vfs_fs_type.ops offset");
+    assert!(core::mem::size_of::<VfsSuperblockFlagBits>() == 8, "vfs_superblock anon bitfield size");
+    assert!(
+        core::mem::align_of::<VfsSuperblockFlagBits>() == 8,
+        "vfs_superblock anon bitfield align"
+    );
+    assert!(core::mem::size_of::<VfsSuperblock>() == 1472, "vfs_superblock size");
+    assert!(core::mem::align_of::<VfsSuperblock>() == 64, "vfs_superblock alignment");
+    assert!(core::mem::offset_of!(VfsSuperblock, siblings) == 0, "vfs_superblock.siblings offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, fs_type) == 16, "vfs_superblock.fs_type offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, inodes) == 24, "vfs_superblock.inodes offset");
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, inodes_buckets) == 72,
+        "vfs_superblock.inodes_buckets offset"
+    );
+    assert!(core::mem::offset_of!(VfsSuperblock, flags) == 1048, "vfs_superblock anon bitfield offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, parent_sb) == 1056, "vfs_superblock.parent_sb offset");
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, mountpoint) == 1064,
+        "vfs_superblock.mountpoint offset"
+    );
+    assert!(core::mem::offset_of!(VfsSuperblock, device) == 1072, "vfs_superblock.device offset");
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, root_inode) == 1080,
+        "vfs_superblock.root_inode offset"
+    );
+    assert!(core::mem::offset_of!(VfsSuperblock, ops) == 1088, "vfs_superblock.ops offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, lock) == 1152, "vfs_superblock.lock offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, fs_data) == 1344, "vfs_superblock.fs_data offset");
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, mount_count) == 1352,
+        "vfs_superblock.mount_count offset"
+    );
+    assert!(core::mem::offset_of!(VfsSuperblock, refcount) == 1356, "vfs_superblock.refcount offset");
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, orphan_count) == 1360,
+        "vfs_superblock.orphan_count offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, orphan_list) == 1368,
+        "vfs_superblock.orphan_list offset"
+    );
+    assert!(core::mem::offset_of!(VfsSuperblock, spinlock) == 1408, "vfs_superblock.spinlock offset");
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, block_size) == 1432,
+        "vfs_superblock.block_size offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, total_blocks) == 1440,
+        "vfs_superblock.total_blocks offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblock, used_blocks) == 1448,
+        "vfs_superblock.used_blocks offset"
+    );
+    assert!(core::mem::size_of::<VfsSuperblockOps>() == 80, "vfs_superblock_ops size");
+    assert!(core::mem::align_of::<VfsSuperblockOps>() == 8, "vfs_superblock_ops alignment");
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, alloc_inode) == 0,
+        "vfs_superblock_ops.alloc_inode offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, get_inode) == 8,
+        "vfs_superblock_ops.get_inode offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, sync_fs) == 16,
+        "vfs_superblock_ops.sync_fs offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, unmount_begin) == 24,
+        "vfs_superblock_ops.unmount_begin offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, add_orphan) == 32,
+        "vfs_superblock_ops.add_orphan offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, remove_orphan) == 40,
+        "vfs_superblock_ops.remove_orphan offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, recover_orphans) == 48,
+        "vfs_superblock_ops.recover_orphans offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, statfs) == 56,
+        "vfs_superblock_ops.statfs offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, begin_transaction) == 64,
+        "vfs_superblock_ops.begin_transaction offset"
+    );
+    assert!(
+        core::mem::offset_of!(VfsSuperblockOps, end_transaction) == 72,
+        "vfs_superblock_ops.end_transaction offset"
+    );
 };
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 
@@ -380,12 +736,13 @@ unsafe fn ln_detach(node: *mut list_node_t) {
 
 // ---------------------------------------------------------------------------
 // `hlist.h` `static inline` bucket/entry walkers, specialized to
-// `vfs_superblock.__bindgen_anon_1.{inodes,inodes_buckets}`. Unlike the
-// general `hlist_t` (whose C `buckets` field is a flexible-array member
-// that `kernel/hlist.rs`'s private `bucket_at` reaches via raw pointer
+// `vfs_superblock.{inodes,inodes_buckets}` (the native `VfsSuperblock`'s
+// flattened anonymous struct, P3-N5). Unlike the general `hlist_t`
+// (whose C `buckets` field is a flexible-array member that
+// `kernel/hlist.rs`'s private `bucket_at` reaches via raw pointer
 // arithmetic past the header, not exported), the superblock's buckets are
-// addressable as a plain fixed-size `[hlist_bucket_t; 61]` array field
-// (`vfs_superblock__bindgen_ty_1`), so this file indexes that array
+// addressable as a plain fixed-size `[hlist_bucket_t; 61]` array field,
+// so this file indexes that array
 // directly instead of re-deriving the header-relative arithmetic.
 // `hlist_entry_t.list_entry` and `vfs_inode.hash_entry` are both their
 // container's first field (offset 0, verified against the bindgen
@@ -394,13 +751,15 @@ unsafe fn ln_detach(node: *mut list_node_t) {
 // each cast below is commented with that invariant.
 // ---------------------------------------------------------------------------
 
-const SB_HASH_BUCKETS: usize = 61; // VFS_SUPERBLOCK_HASH_BUCKETS
+// P3-N5: aliased to the native `VfsSuperblock`'s own array bound (one
+// definition of the value) instead of a second hardcoded 61.
+const SB_HASH_BUCKETS: usize = VFS_SUPERBLOCK_HASH_BUCKETS;
 
 /// # Safety
 /// `sb` must point to a live, initialized `vfs_superblock`.
 #[inline(always)]
 unsafe fn sb_buckets_base(sb: *mut vfs_superblock) -> *mut hlist_bucket_t {
-    unsafe { (&raw mut (*sb).__bindgen_anon_1.inodes_buckets) as *mut hlist_bucket_t }
+    unsafe { (&raw mut (*sb).inodes_buckets) as *mut hlist_bucket_t }
 }
 
 /// # Safety
@@ -683,12 +1042,12 @@ unsafe fn inode_valid(inode: *mut vfs_inode) -> c_int {
         if holding_mutex(&raw mut (*inode).mutex) == 0 {
             return neg(EPERM);
         }
-        if (*inode).__bindgen_anon_1.valid() == 0 {
+        if (*inode).flags.valid() == 0 {
             return neg(EINVAL);
         }
         if !ptr::eq(inode, &raw const vfs_root_inode) {
             let sb = (*inode).sb;
-            if sb.is_null() || (*sb).__bindgen_anon_2.valid() == 0 {
+            if sb.is_null() || (*sb).flags.valid() == 0 {
                 crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
                 return neg(EINVAL);
             }
@@ -709,7 +1068,7 @@ unsafe fn dir_inode_valid_holding(inode: *mut vfs_inode) -> c_int {
         if holding_mutex(&raw mut (*inode).mutex) == 0 {
             return neg(EPERM);
         }
-        if (*inode).__bindgen_anon_1.valid() == 0 {
+        if (*inode).flags.valid() == 0 {
             return neg(EINVAL);
         }
         if !is_dir((*inode).mode) {
@@ -717,7 +1076,7 @@ unsafe fn dir_inode_valid_holding(inode: *mut vfs_inode) -> c_int {
         }
         if !ptr::eq(inode, &raw const vfs_root_inode) {
             let sb = (*inode).sb;
-            if sb.is_null() || (*sb).__bindgen_anon_2.valid() == 0 {
+            if sb.is_null() || (*sb).flags.valid() == 0 {
                 return neg(EINVAL);
             }
         }
@@ -734,7 +1093,7 @@ unsafe fn vfs_rooti_init() {
     unsafe {
         vfs_root_inode = core::mem::zeroed();
         vfs_root_inode.mode = S_IFDIR | 0o755;
-        vfs_root_inode.__bindgen_anon_1.set_valid(1);
+        vfs_root_inode.flags.set_valid(1);
     }
 }
 
@@ -742,7 +1101,7 @@ unsafe fn vfs_rooti_init() {
 unsafe fn register_fs_type_locked(fs_type: *mut vfs_fs_type) {
     unsafe {
         ln_push_back(&raw mut VFS_FS_TYPES, &raw mut (*fs_type).list_entry);
-        (*fs_type).__bindgen_anon_1.set_registered(1);
+        (*fs_type).flags.set_registered(1);
         VFS_FS_TYPE_COUNT += 1;
         kassert!(
             VFS_FS_TYPE_COUNT <= MAX_FS_TYPES,
@@ -755,7 +1114,7 @@ unsafe fn register_fs_type_locked(fs_type: *mut vfs_fs_type) {
 unsafe fn unregister_fs_type_locked(fs_type: *mut vfs_fs_type) {
     unsafe {
         ln_detach(&raw mut (*fs_type).list_entry);
-        (*fs_type).__bindgen_anon_1.set_registered(0);
+        (*fs_type).flags.set_registered(0);
         VFS_FS_TYPE_COUNT -= 1;
         kassert!(
             VFS_FS_TYPE_COUNT <= MAX_FS_TYPES,
@@ -816,7 +1175,7 @@ unsafe fn inode_hash_get(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
         let mut key: vfs_inode = core::mem::zeroed();
         key.ino = ino;
         hlist_get(
-            &raw mut (*sb).__bindgen_anon_1.inodes,
+            &raw mut (*sb).inodes,
             (&raw mut key) as *mut c_void,
         ) as *mut vfs_inode
     }
@@ -826,7 +1185,7 @@ unsafe fn inode_hash_get(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
 unsafe fn inode_hash_add(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut vfs_inode {
     unsafe {
         hlist_put(
-            &raw mut (*sb).__bindgen_anon_1.inodes,
+            &raw mut (*sb).inodes,
             inode as *mut c_void,
             false,
         ) as *mut vfs_inode
@@ -839,7 +1198,7 @@ unsafe fn init_superblock_structure(sb: *mut vfs_superblock, fs_type: *mut vfs_f
         ln_init(&raw mut (*sb).siblings);
         ln_init(&raw mut (*sb).orphan_list);
         hlist_init(
-            &raw mut (*sb).__bindgen_anon_1.inodes,
+            &raw mut (*sb).inodes,
             SB_HASH_BUCKETS as u64,
             &SB_INODE_HLIST_FUNCS as *const hlist_func_t as *mut hlist_func_t,
         );
@@ -870,7 +1229,7 @@ unsafe fn init_sb_rooti(sb: *mut vfs_superblock) -> c_int {
                     vfs_superblock_unlock(sb);
                     scheduler_yield();
                     vfs_superblock_wlock(sb);
-                    if (*sb).__bindgen_anon_2.valid() == 0 && (*sb).__bindgen_anon_2.initialized() != 0 {
+                    if (*sb).flags.valid() == 0 && (*sb).flags.initialized() != 0 {
                         return neg(EINVAL);
                     }
                     continue;
@@ -915,7 +1274,7 @@ unsafe fn init_superblock_valid(sb: *mut vfs_superblock) -> bool {
         if sb.is_null() {
             return false;
         }
-        if (*sb).__bindgen_anon_2.valid() != 0 || (*sb).__bindgen_anon_2.dirty() != 0 {
+        if (*sb).flags.valid() != 0 || (*sb).flags.dirty() != 0 {
             return false;
         }
         if !superblock_ops_valid(sb) {
@@ -935,7 +1294,7 @@ unsafe fn attach_superblock_to_fstype(sb: *mut vfs_superblock) {
         let fs_type = (*sb).fs_type;
         ln_push_front(&raw mut (*fs_type).superblocks, &raw mut (*sb).siblings);
         (*fs_type).sb_count += 1;
-        (*sb).__bindgen_anon_2.set_registered(1);
+        (*sb).flags.set_registered(1);
         kassert!(
             (*fs_type).sb_count > 0,
             "Filesystem type superblock count overflow"
@@ -949,7 +1308,7 @@ unsafe fn detach_superblock_from_fstype(sb: *mut vfs_superblock) {
         ln_detach(&raw mut (*sb).siblings);
         let fs_type = (*sb).fs_type;
         (*fs_type).sb_count -= 1;
-        (*sb).__bindgen_anon_2.set_registered(0);
+        (*sb).flags.set_registered(0);
         kassert!(
             (*fs_type).sb_count >= 0,
             "Filesystem type superblock count underflow"
@@ -979,12 +1338,12 @@ unsafe fn turn_mountpoint(mountpoint: *mut vfs_inode) -> c_int {
         if inode_is_local_root(mountpoint) {
             return neg(EBUSY);
         }
-        if (*mountpoint).__bindgen_anon_1.mount() != 0 {
+        if (*mountpoint).flags.mount() != 0 {
             return neg(EBUSY);
         }
-        (*mountpoint).__bindgen_anon_1.set_mount(1);
-        (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti = ptr::null_mut();
-        (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_sb = ptr::null_mut();
+        (*mountpoint).flags.set_mount(1);
+        (*mountpoint).dev_mnt.mnt.mnt_rooti = ptr::null_mut();
+        (*mountpoint).dev_mnt.mnt.mnt_sb = ptr::null_mut();
         if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
             vfs_superblock_mountcount_inc((*mountpoint).sb);
             vfs_idup(mountpoint);
@@ -1011,14 +1370,14 @@ unsafe fn set_mountpoint(sb: *mut vfs_superblock, mountpoint: *mut vfs_inode) {
             "Mountpoint inode lock must be held to set mountpoint"
         );
         kassert!(
-            (*mountpoint).__bindgen_anon_1.mount() != 0,
+            (*mountpoint).flags.mount() != 0,
             "Mountpoint inode is not marked as a mountpoint"
         );
         kassert!((*sb).mountpoint.is_null(), "Superblock mountpoint is already set");
         (*sb).mountpoint = mountpoint;
         (*sb).parent_sb = (*mountpoint).sb;
-        (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_sb = sb;
-        (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti = (*sb).root_inode;
+        (*mountpoint).dev_mnt.mnt.mnt_sb = sb;
+        (*mountpoint).dev_mnt.mnt.mnt_rooti = (*sb).root_inode;
     }
 }
 
@@ -1036,15 +1395,15 @@ unsafe fn clear_mountpoint(mountpoint: *mut vfs_inode) {
             "Mountpoint inode lock must be held to clear mountpoint"
         );
         kassert!(
-            (*mountpoint).__bindgen_anon_1.mount() != 0,
+            (*mountpoint).flags.mount() != 0,
             "Mountpoint inode type is not MNT"
         );
         if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
             vfs_superblock_mountcount_dec((*mountpoint).sb);
         }
-        (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_sb = ptr::null_mut();
-        (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_rooti = ptr::null_mut();
-        (*mountpoint).__bindgen_anon_1.set_mount(0);
+        (*mountpoint).dev_mnt.mnt.mnt_sb = ptr::null_mut();
+        (*mountpoint).dev_mnt.mnt.mnt_rooti = ptr::null_mut();
+        (*mountpoint).flags.set_mount(0);
     }
 }
 
@@ -1267,7 +1626,7 @@ pub(crate) extern "C" fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_in
         if (*fs_type).sb_count != 0 {
             return neg(EINVAL);
         }
-        if (*fs_type).__bindgen_anon_1.registered() != 0 {
+        if (*fs_type).flags.registered() != 0 {
             return neg(EALREADY);
         }
         (*fs_type).kobj.ops.release = Some(vfs_fs_type_kobj_release);
@@ -1362,7 +1721,7 @@ pub(crate) extern "C" fn vfs_mount(
                 crate::kprintln!("vfs_mount: mountpoint superblock write lock not held");
                 return neg(EPERM);
             }
-            if (*(*mountpoint).sb).__bindgen_anon_2.valid() == 0 {
+            if (*(*mountpoint).sb).flags.valid() == 0 {
                 crate::kprintln!("vfs_mount: mountpoint superblock is not valid");
                 return neg(EINVAL);
             }
@@ -1391,7 +1750,7 @@ pub(crate) extern "C" fn vfs_mount(
             let arc = KArc::<vfs_fs_type>::from_raw(fs_type_raw);
             fs_type = KArc::as_ptr(&arc);
             fs_type_ref = Some(arc);
-            if (*fs_type).__bindgen_anon_1.registered() == 0 {
+            if (*fs_type).flags.registered() == 0 {
                 crate::kprintln!("vfs_mount: filesystem type '{}' not registered", crate::printf::Cs(type_));
                 ret_val = neg(ENODEV);
                 break 'cleanup;
@@ -1424,7 +1783,7 @@ pub(crate) extern "C" fn vfs_mount(
                 ret_val = neg(EINVAL);
                 break 'cleanup;
             }
-            if (*(*sb).root_inode).__bindgen_anon_1.valid() != 0 {
+            if (*(*sb).root_inode).flags.valid() != 0 {
                 crate::kprintln!("vfs_mount: root inode already marked valid");
                 ret_val = neg(EINVAL);
                 break 'cleanup;
@@ -1469,9 +1828,9 @@ pub(crate) extern "C" fn vfs_mount(
             // old unconditional `vfs_put_fs_type(fs_type)` on this path.
             return ret_val;
         } else if rwsem_is_write_holding(&raw mut (*sb).lock) {
-            (*sb).__bindgen_anon_2.set_initialized(1);
-            (*sb).__bindgen_anon_2.set_valid(1);
-            (*sb).__bindgen_anon_2.set_attached(1);
+            (*sb).flags.set_initialized(1);
+            (*sb).flags.set_valid(1);
+            (*sb).flags.set_attached(1);
             vfs_superblock_unlock(sb);
         }
         // `fs_type_ref` drops at the end of this scope, releasing the
@@ -1501,28 +1860,28 @@ unsafe fn evict_unused_inodes(sb: *mut vfs_superblock) -> usize {
                 if (*inode).ref_count > 1 {
                     break 'skip;
                 }
-                if (*inode).__bindgen_anon_1.destroying() != 0 {
+                if (*inode).flags.destroying() != 0 {
                     break 'skip;
                 }
-                if (*inode).__bindgen_anon_1.valid() == 0 {
+                if (*inode).flags.valid() == 0 {
                     break 'skip;
                 }
-                if (*inode).__bindgen_anon_1.mount() != 0 {
+                if (*inode).flags.mount() != 0 {
                     break 'skip;
                 }
 
                 vfs_ilock(inode);
 
                 if (*inode).ref_count > 1
-                    || (*inode).__bindgen_anon_1.destroying() != 0
-                    || (*inode).__bindgen_anon_1.valid() == 0
-                    || (*inode).__bindgen_anon_1.mount() != 0
+                    || (*inode).flags.destroying() != 0
+                    || (*inode).flags.valid() == 0
+                    || (*inode).flags.mount() != 0
                 {
                     vfs_iunlock(inode);
                     break 'skip;
                 }
 
-                if (*inode).__bindgen_anon_1.dirty() != 0 {
+                if (*inode).flags.dirty() != 0 {
                     if let Some(sync_inode) = (*(*inode).ops).sync_inode {
                         sync_inode(inode);
                     }
@@ -1531,7 +1890,7 @@ unsafe fn evict_unused_inodes(sb: *mut vfs_superblock) -> usize {
                 if (*inode).ref_count == 1 {
                     inode_refcount_atomic(inode).fetch_sub(1, Ordering::SeqCst);
                 }
-                (*inode).__bindgen_anon_1.set_valid(0);
+                (*inode).flags.set_valid(0);
                 vfs_remove_inode(sb, inode);
                 vfs_iunlock(inode);
 
@@ -1566,16 +1925,16 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         if !rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock) {
             return neg(EPERM);
         }
-        if (*(*mountpoint).sb).__bindgen_anon_2.valid() == 0 {
+        if (*(*mountpoint).sb).flags.valid() == 0 {
             return neg(EINVAL);
         }
         if !is_dir((*mountpoint).mode) {
             return neg(ENOTDIR);
         }
-        if (*mountpoint).__bindgen_anon_1.mount() == 0 {
+        if (*mountpoint).flags.mount() == 0 {
             return neg(EINVAL);
         }
-        let sb = (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_sb;
+        let sb = (*mountpoint).dev_mnt.mnt.mnt_sb;
         if sb.is_null() {
             return neg(EINVAL);
         }
@@ -1593,7 +1952,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         if !rwsem_is_write_holding(&raw mut (*sb).lock) {
             return neg(EPERM);
         }
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             return neg(EINVAL);
         }
         let mc = superblock_mountcount(sb);
@@ -1601,11 +1960,11 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
             crate::kprintln!("vfs_unmount: mount_count={}", mc);
             return neg(EBUSY);
         }
-        if (*sb).__bindgen_anon_2.dirty() != 0 {
+        if (*sb).flags.dirty() != 0 {
             crate::kprintln!(
                 "vfs_unmount: sb valid={} dirty={}",
-                ((*sb).__bindgen_anon_2.valid() as c_int as i32 as i64) as u64,
-                ((*sb).__bindgen_anon_2.dirty() as c_int as i32 as i64) as u64,
+                ((*sb).flags.valid() as c_int as i32 as i64) as u64,
+                ((*sb).flags.dirty() as c_int as i32 as i64) as u64,
             );
             return neg(EBUSY);
         }
@@ -1619,7 +1978,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         evict_unused_inodes(sb);
 
         // Superblock should have no active inodes except the root inode.
-        let remaining_inodes = hlist_len(&raw mut (*sb).__bindgen_anon_1.inodes);
+        let remaining_inodes = hlist_len(&raw mut (*sb).inodes);
         if remaining_inodes > 1 {
             crate::kprintln!(
                 "vfs_unmount: remaining inodes={} (expected 1 for root)",
@@ -1641,7 +2000,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         // Do NOT call destroy_inode on the root inode during unmount --
         // that would corrupt the on-disk filesystem. Just tear down the
         // in-memory state.
-        (*mounted_inode).__bindgen_anon_1.set_valid(0);
+        (*mounted_inode).flags.set_valid(0);
         vfs_remove_inode(sb, mounted_inode);
 
         detach_superblock_from_fstype(sb);
@@ -1696,14 +2055,14 @@ pub(crate) extern "C" fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int {
             "Must hold inode lock to make orphan"
         );
 
-        if (*inode).__bindgen_anon_1.orphan() != 0 {
+        if (*inode).flags.orphan() != 0 {
             return 0; // Already orphan.
         }
         if (*inode).n_links != 0 {
             return neg(EINVAL); // Not unlinked yet.
         }
 
-        (*inode).__bindgen_anon_1.set_orphan(1);
+        (*inode).flags.set_orphan(1);
         ln_push_back(&raw mut (*sb).orphan_list, &raw mut (*inode).orphan_entry);
         (*sb).orphan_count += 1;
 
@@ -1732,7 +2091,7 @@ pub(crate) extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
         }
 
         kassert!(
-            (*sb).__bindgen_anon_2.registered() == 0,
+            (*sb).flags.registered() == 0,
             "__vfs_final_unmount_cleanup: sb still attached"
         );
         kassert!((*sb).orphan_count == 0, "__vfs_final_unmount_cleanup: orphans remain");
@@ -1740,7 +2099,7 @@ pub(crate) extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
         vfs_mount_lock();
         vfs_superblock_wlock(sb);
 
-        if (*sb).__bindgen_anon_2.registered() != 0 {
+        if (*sb).flags.registered() != 0 {
             detach_superblock_from_fstype(sb);
         }
 
@@ -1750,7 +2109,7 @@ pub(crate) extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
             if let Some(destroy_inode) = (*(*rooti).ops).destroy_inode {
                 destroy_inode(rooti);
             }
-            (*rooti).__bindgen_anon_1.set_valid(0);
+            (*rooti).flags.set_valid(0);
             vfs_remove_inode(sb, rooti);
             vfs_iunlock(rooti);
             let free_inode = (*(*rooti).ops).free_inode.unwrap();
@@ -1793,11 +2152,11 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
         if !is_dir((*mountpoint).mode) {
             return neg(ENOTDIR);
         }
-        if (*mountpoint).__bindgen_anon_1.mount() == 0 {
+        if (*mountpoint).flags.mount() == 0 {
             return neg(EINVAL);
         }
 
-        let sb = (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_sb;
+        let sb = (*mountpoint).dev_mnt.mnt.mnt_sb;
         if sb.is_null() {
             return neg(EINVAL);
         }
@@ -1811,14 +2170,14 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
         }
 
         // Block new operations.
-        (*sb).__bindgen_anon_2.set_unmounting(1);
+        (*sb).flags.set_unmounting(1);
 
         // Phase 2: detach from mount tree.
         clear_mountpoint(mountpoint);
         (*sb).mountpoint = ptr::null_mut();
         (*sb).parent_sb = ptr::null_mut();
-        (*sb).__bindgen_anon_2.set_attached(0);
-        (*sb).__bindgen_anon_2.set_valid(0); // Prevent new lookups.
+        (*sb).flags.set_attached(0);
+        (*sb).flags.set_valid(0); // Prevent new lookups.
 
         vfs_iunlock(mountpoint);
         if !ptr::eq(mountpoint, &raw const vfs_root_inode) && !(*mountpoint).sb.is_null() {
@@ -1829,11 +2188,11 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
         }
 
         // Phase 3: sync if needed (backend filesystems).
-        if (*sb).__bindgen_anon_2.backendless() == 0 && (*sb).__bindgen_anon_2.dirty() != 0 {
-            (*sb).__bindgen_anon_2.set_syncing(1);
+        if (*sb).flags.backendless() == 0 && (*sb).flags.dirty() != 0 {
+            (*sb).flags.set_syncing(1);
             let sync_fs = (*(*sb).ops).sync_fs.unwrap();
             let sret = sync_fs(sb, 1);
-            (*sb).__bindgen_anon_2.set_syncing(0);
+            (*sb).flags.set_syncing(0);
             if sret != 0 {
                 crate::kprintln!("vfs_unmount_lazy: warning: sync failed, errno={}", sret);
             }
@@ -1850,9 +2209,9 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
             let tmp = sb_inodes_next(sb, pos);
             let inode = pos;
             if inode != rooti && (*inode).ref_count > 0 {
-                if (*inode).__bindgen_anon_1.orphan() == 0 {
+                if (*inode).flags.orphan() == 0 {
                     vfs_ilock(inode);
-                    (*inode).__bindgen_anon_1.set_orphan(1);
+                    (*inode).flags.set_orphan(1);
                     ln_push_back(&raw mut (*sb).orphan_list, &raw mut (*inode).orphan_entry);
                     (*sb).orphan_count += 1;
                     vfs_iunlock(inode);
@@ -1870,7 +2229,7 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
                 if let Some(destroy_inode) = (*(*rooti).ops).destroy_inode {
                     destroy_inode(rooti);
                 }
-                (*rooti).__bindgen_anon_1.set_valid(0);
+                (*rooti).flags.set_valid(0);
                 vfs_remove_inode(sb, rooti);
                 vfs_iunlock(rooti);
                 let free_inode = (*(*rooti).ops).free_inode.unwrap();
@@ -1911,11 +2270,11 @@ pub(crate) extern "C" fn vfs_get_mnt_rooti(
             vfs_iunlock(mountpoint);
             return neg(ENOTDIR);
         }
-        if (*mountpoint).__bindgen_anon_1.mount() == 0 {
+        if (*mountpoint).flags.mount() == 0 {
             vfs_iunlock(mountpoint);
             return neg(EINVAL);
         }
-        let sb = (*mountpoint).__bindgen_anon_2.__bindgen_anon_1.mnt_sb;
+        let sb = (*mountpoint).dev_mnt.mnt.mnt_sb;
         if sb.is_null() {
             vfs_iunlock(mountpoint);
             return neg(EINVAL);
@@ -2044,7 +2403,7 @@ fn vfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "vfs_alloc_inode: must hold superblock write lock"
         );
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
         let alloc_inode = (*(*sb).ops).alloc_inode.unwrap();
@@ -2085,7 +2444,7 @@ fn vfs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_in
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "vfs_get_inode: must hold superblock write lock"
         );
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
         let get_inode = (*(*sb).ops).get_inode.unwrap();
@@ -2133,16 +2492,16 @@ pub(crate) extern "C" fn vfs_sync_superblock(sb: *mut vfs_superblock, wait: c_in
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "vfs_sync_superblock: must hold superblock write lock"
         );
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             return neg(EINVAL);
         }
-        if (*sb).__bindgen_anon_2.dirty() == 0 {
+        if (*sb).flags.dirty() == 0 {
             return 0; // Already clean.
         }
         let sync_fs = (*(*sb).ops).sync_fs.unwrap();
         let ret = sync_fs(sb, wait);
         if ret == 0 {
-            (*sb).__bindgen_anon_2.set_dirty(0);
+            (*sb).flags.set_dirty(0);
         }
         ret
     }
@@ -2262,7 +2621,7 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> KResult<*mut vfs_ino
             vfs_superblock_wlock(sb);
         }
 
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
 
@@ -2309,7 +2668,7 @@ fn vfs_get_dentry_inode_locked_inner(dentry: *mut vfs_dentry) -> KResult<*mut vf
         if (*dentry).sb.is_null() {
             return Err(Errno::Inval);
         }
-        if (*(*dentry).sb).__bindgen_anon_2.valid() == 0 {
+        if (*(*dentry).sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
 
@@ -2343,7 +2702,7 @@ fn vfs_get_dentry_inode_inner(dentry: *mut vfs_dentry) -> KResult<*mut vfs_inode
 
         let sb = (*dentry).sb;
         vfs_superblock_rlock(sb);
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             vfs_superblock_unlock(sb);
             return Err(Errno::Inval);
         }
@@ -2369,7 +2728,7 @@ fn vfs_get_inode_cached_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut
         if sb.is_null() {
             return Err(Errno::Inval);
         }
-        if (*sb).__bindgen_anon_2.valid() == 0 {
+        if (*sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
         let inode = inode_hash_get(sb, ino);
@@ -2381,10 +2740,10 @@ fn vfs_get_inode_cached_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut
         // n_links>0 inodes alive in cache; allow bumping from 0 in that
         // case, otherwise the inode is unreachable.
         if !vfs_idup_not_zero(inode) {
-            if (*sb).__bindgen_anon_2.backendless() != 0
+            if (*sb).flags.backendless() != 0
                 && (*inode).n_links > 0
-                && (*inode).__bindgen_anon_1.valid() != 0
-                && (*inode).__bindgen_anon_1.destroying() == 0
+                && (*inode).flags.valid() != 0
+                && (*inode).flags.destroying() == 0
             {
                 inode_refcount_atomic(inode).fetch_add(1, Ordering::SeqCst);
             } else {
@@ -2392,7 +2751,7 @@ fn vfs_get_inode_cached_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut
             }
         }
         vfs_ilock(inode);
-        if (*inode).__bindgen_anon_1.valid() == 0 || (*inode).__bindgen_anon_1.destroying() != 0 {
+        if (*inode).flags.valid() == 0 || (*inode).flags.destroying() != 0 {
             // Invalidated or being destroyed after being fetched from the
             // cache. Can't call vfs_iput here (caller may hold sb wlock);
             // queue to the workqueue instead.
@@ -2421,13 +2780,13 @@ fn vfs_add_inode_inner(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> KResul
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "Superblock lock must be write held to add inode"
         );
-        if (*sb).__bindgen_anon_2.valid() == 0 && (*sb).__bindgen_anon_2.initialized() != 0 {
+        if (*sb).flags.valid() == 0 && (*sb).flags.initialized() != 0 {
             return Err(Errno::Inval);
         }
         if !(*inode).sb.is_null() {
             return Err(Errno::Inval);
         }
-        if (*inode).__bindgen_anon_1.valid() != 0 {
+        if (*inode).flags.valid() != 0 {
             return Err(Errno::Inval);
         }
         let existing = inode_hash_get(sb, (*inode).ino);
@@ -2437,12 +2796,12 @@ fn vfs_add_inode_inner(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> KResul
             // releases sb lock, calls destroy_inode; we hold sb lock, so
             // if it's set, the destroying thread has released sb lock and
             // is in destroy_inode).
-            if (*existing).__bindgen_anon_1.destroying() != 0 {
+            if (*existing).flags.destroying() != 0 {
                 return Err(Errno::Again);
             }
             vfs_ilock(existing);
-            if (*existing).__bindgen_anon_1.destroying() != 0
-                || (*existing).__bindgen_anon_1.valid() == 0
+            if (*existing).flags.destroying() != 0
+                || (*existing).flags.valid() == 0
             {
                 vfs_iunlock(existing);
                 return Err(Errno::Again);
@@ -2455,7 +2814,7 @@ fn vfs_add_inode_inner(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> KResul
                 c"vfs_add_inode: inode hash add returned existing inode unexpectedly".as_ptr(),
             );
         }
-        (*inode).__bindgen_anon_1.set_valid(1);
+        (*inode).flags.set_valid(1);
         (*inode).sb = sb;
         vfs_ilock(inode);
         Ok(inode)
@@ -2487,11 +2846,11 @@ pub(crate) extern "C" fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut v
             "Inode lock must be held to remove inode"
         );
         // Allow removal from detached superblocks (lazy unmount cleanup).
-        if (*sb).__bindgen_anon_2.valid() == 0 && (*sb).__bindgen_anon_2.attached() != 0 {
+        if (*sb).flags.valid() == 0 && (*sb).flags.attached() != 0 {
             return neg(EINVAL);
         }
 
-        let already_destroyed = (*inode).__bindgen_anon_1.valid() == 0;
+        let already_destroyed = (*inode).flags.valid() == 0;
 
         let existing = inode_hash_get(sb, (*inode).ino);
         if existing.is_null() {
@@ -2501,7 +2860,7 @@ pub(crate) extern "C" fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut v
             return neg(ENOENT);
         }
         let popped = hlist_pop(
-            &raw mut (*sb).__bindgen_anon_1.inodes,
+            &raw mut (*sb).inodes,
             inode as *mut c_void,
         ) as *mut vfs_inode;
         if popped != inode {
@@ -2509,7 +2868,7 @@ pub(crate) extern "C" fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut v
         }
 
         if !already_destroyed {
-            (*inode).__bindgen_anon_1.set_valid(0);
+            (*inode).flags.set_valid(0);
         }
 
         (*inode).sb = ptr::null_mut();
@@ -2718,9 +3077,9 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
         crate::kprintln!(
             "  Superblock {}: valid={} attached={} backendless={} inodes: total={} active={}",
             crate::printf::Ptr(sb as u64),
-            (*sb).__bindgen_anon_2.valid() as c_int,
-            (*sb).__bindgen_anon_2.attached() as c_int,
-            (*sb).__bindgen_anon_2.backendless() as c_int,
+            (*sb).flags.valid() as c_int,
+            (*sb).flags.attached() as c_int,
+            (*sb).flags.backendless() as c_int,
             inode_count,
             active_count,
         );
@@ -2736,10 +3095,10 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
                     crate::printf::Cs(inode_mode_str((*inode).mode)),
                     (*inode).ref_count,
                     (*inode).n_links,
-                    (*inode).__bindgen_anon_1.valid() as c_int,
-                    (*inode).__bindgen_anon_1.dirty() as c_int,
-                    (*inode).__bindgen_anon_1.destroying() as c_int,
-                    (*inode).__bindgen_anon_1.orphan() as c_int,
+                    (*inode).flags.valid() as c_int,
+                    (*inode).flags.dirty() as c_int,
+                    (*inode).flags.destroying() as c_int,
+                    (*inode).flags.orphan() as c_int,
                 );
                 if is_dir((*inode).mode) {
                     if !(*inode).name.is_null() {
@@ -2749,20 +3108,20 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
                         crate::kprint!(" parent_ino={}", (*(*inode).parent).ino as u64);
                     }
                 }
-                if (*inode).__bindgen_anon_1.mount() != 0 {
+                if (*inode).flags.mount() != 0 {
                     crate::kprint!(
                         " [mountpoint mnt_sb={}]",
-                        crate::printf::Ptr((*inode).__bindgen_anon_2.__bindgen_anon_1.mnt_sb as u64),
+                        crate::printf::Ptr((*inode).dev_mnt.mnt.mnt_sb as u64),
                     );
                 } else if is_chr((*inode).mode) {
                     crate::kprint!(
                         " cdev={}",
-                        ((*inode).__bindgen_anon_2.cdev as i32 as i64) as u64,
+                        ((*inode).dev_mnt.cdev as i32 as i64) as u64,
                     );
                 } else if is_blk((*inode).mode) {
                     crate::kprint!(
                         " bdev={}",
-                        ((*inode).__bindgen_anon_2.bdev as i32 as i64) as u64,
+                        ((*inode).dev_mnt.bdev as i32 as i64) as u64,
                     );
                 }
                 crate::kprintln!();

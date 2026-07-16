@@ -243,7 +243,7 @@ pub(crate) extern "C" fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock {
     // `tmpfs_superblock`-sized block from the slab cache.
     unsafe {
         ptr::write_bytes(sb as *mut u8, 0, core::mem::size_of::<tmpfs_superblock>());
-        (*sb).vfs_sb.__bindgen_anon_2.set_backendless(1); // tmpfs is backendless
+        (*sb).vfs_sb.flags.set_backendless(1); // tmpfs is backendless
         (*sb).vfs_sb.fs_data = ptr::addr_of_mut!((*sb).private_data) as *mut c_void;
     }
     sb
@@ -279,7 +279,7 @@ fn tmpfs_get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs
 pub(crate) extern "C" fn tmpfs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
     // SAFETY: `sb` is a live `vfs_superblock` (caller's contract, same
     // as the C `vfs_superblock_ops.sync_fs` callback convention).
-    unsafe { (*sb).__bindgen_anon_2.set_dirty(0) };
+    unsafe { (*sb).flags.set_dirty(0) };
     0
 }
 
@@ -309,7 +309,7 @@ pub(crate) extern "C" fn tmpfs_unmount_begin(sb: *mut vfs_superblock) {
     // SAFETY: non-null `sb`, caller holds the superblock write lock.
     unsafe {
         let root_inode = (*sb).root_inode;
-        let hlist = ptr::addr_of_mut!((*sb).__bindgen_anon_1.inodes);
+        let hlist = ptr::addr_of_mut!((*sb).inodes);
 
         let mut cur = hlist_first_entry(hlist);
         while !cur.is_null() {
@@ -329,7 +329,7 @@ pub(crate) extern "C" fn tmpfs_unmount_begin(sb: *mut vfs_superblock) {
                             destroy_inode(inode);
                         }
                         // Remove from hash and mark invalid.
-                        (*inode).__bindgen_anon_1.set_valid(0);
+                        (*inode).flags.set_valid(0);
                         vfs_remove_inode(sb, inode);
                         vfs_iunlock(inode);
                         // Free the inode structure.
@@ -511,7 +511,7 @@ extern "C" fn tmpfs_mount(
         (*sb).vfs_sb.block_size = PGSIZE as usize;
         (*sb).vfs_sb.root_inode = ptr::addr_of_mut!((*root_inode).vfs_inode);
         (*sb).private_data.next_ino = 2;
-        (*sb).vfs_sb.__bindgen_anon_2.set_backendless(1);
+        (*sb).vfs_sb.flags.set_backendless(1);
         (*sb).vfs_sb.ops = ptr::addr_of!(TMPFS_SUPERBLOCK_OPS) as *mut _;
         *ret_sb = ptr::addr_of_mut!((*sb).vfs_sb);
     }
@@ -590,7 +590,7 @@ pub(crate) extern "C" fn tmpfs_mount_root() {
     vfs_mount_unlock();
 
     // SAFETY: same as above.
-    let mnt_rooti = unsafe { vfs_root_inode.__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
+    let mnt_rooti = unsafe { vfs_root_inode.dev_mnt.mnt.mnt_rooti };
     let ret = vfs_chroot(mnt_rooti);
     kassert!(ret == 0, "tmpfs_mount_root: vfs_chroot failed");
 }
