@@ -2513,6 +2513,87 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   api-common-traits (derive fidelity), name-types-camel,
   doc-all-public. 11 files, ~+1100/−40.
 
+### Iteration 70 — 2026-07-17 — Wave P3-6: bindgen + wrapper.h DELETED — the last C-type machinery retired (hand-written bindings surface)
+
+- **The generator is gone.** With type nativization complete (P3-4c:
+  bindgen struct emission ZERO), the generated `kernel_bindings.rs`
+  was pure residue: 133 facade `pub use`/`pub type` lines, ~30
+  typedefs, ~180 consts, 52 `extern "C"` fn decls + 1 extern static.
+  This wave replaces it with a HAND-WRITTEN `kernel/bindings.rs`
+  reproducing exactly the **live** surface (extraction: qualified
+  `bindings::X` paths + multiline `use crate::bindings::{…}` braced
+  imports over `kernel/**/*.rs`, comments stripped → **255 live
+  identifiers**), and deletes `kernel/build.rs` (1668 lines: the
+  bindgen Builder + NativeTypeCallbacks + allowlists/blocklists +
+  align-64 post-processing — nothing else lived there),
+  `kernel/wrapper.h` (235 lines), the `bindgen = "0.72"`
+  build-dependency, and the CMake plumbing (`RUST_BINDGEN_INCLUDES`,
+  `XV6_KERNEL_INCLUDES`/`LAB` env wrapper, build.rs/wrapper.h
+  DEPENDS). `lib.rs`'s `mod bindings` now points at the source file
+  (`#[path = "bindings.rs"]`) instead of `include!(OUT_DIR)`.
+- **Live-surface inventory** (what the hand-written module contains,
+  418 lines): **115 facade `pub use` lines** (native-type re-exports
+  under historical C spellings, copied verbatim from the generated
+  file) + **11 `pub type` intrusive-node aliases** (list/hlist/
+  rbtree) + the `__IncompleteArrayField` helper (byte-identical copy;
+  used by native `Bio`/`TmpfsDentry`) + **34 typedefs** (types.h
+  scalars, callback fn-pointer Options, constified-enum aliases
+  `dev_type_e`/`thread_state`/`slab_state_t`) + **94 consts** (90 in
+  12 cited groups + 4 live enum-variant consts) (riscv.h page/PTE/MAXVA;
+  errno.h ×37; param.h; lock/rwsem_types.h; uabi/mman.h;
+  mm/vm_types.h; uabi/termios.h; mm/slab_type.h; mm/memlayout.h
+  user-VA layout; dev/fdt.h; dev/virtio.h) — every value copied
+  verbatim from the last bindgen output, per-group C-header citations
+  in comments.
+- **Extern-decl dispositions: all 52 fns + the `platform` static are
+  (c) DEAD as bindings items** — zero `crate::bindings::` consumers
+  (the three grep "hits" — `rb_find_key_rdown`, `superblock`,
+  `load_weight` — were all inside comments). Every caller uses its own
+  local `extern "C"` block (the crate-wide mesh convention), and the
+  symbols themselves are `#[no_mangle]` Rust (or .S) definitions, so
+  dropping the unused declarations is link-invisible. 16 unused
+  facades (`list_node`, `mutex`, `kobject_ops`, `device_major`,
+  `device_ops`, `device_instance`, `cdev_ops`, `cdev`, `blkdev_ops`,
+  `blkdev`, `slab_cache_struct`, `slab_struct`, `vma_t`, `sigval`,
+  `siginfo` (kept as direct `siginfo_t` typedef), `superblock`,
+  `thread_signal`, `virtq_used_elem`, `timer_node` dup spellings) and
+  ~100 unused consts/typedefs (`pde_t`, `tq_type_t`, hlist fn-ptr
+  typedefs, `page_type` family, `bool__*`, `EWOULDBLOCK`+80 more
+  errnos, `PTE_G`, `MAP_ANON`, `MS_*`, `MADV_FREE`, `ECHO*`,
+  `PCIE_REG_DBI/ATU/CONFIG`, enum variants) dropped with it.
+- **Headers untouched** (mkfs/user/.S still include kernel/inc/*.h;
+  a separate audit can prune) — only wrapper.h deleted. Cargo.lock
+  collapsed from 25 packages to 1 (`xv6_rust`); `Cargo.toml` lost
+  `build = "build.rs"` + `[build-dependencies]`.
+- **Build-time delta (clean A/B, same machine)**: HEAD-with-bindgen
+  14.3s wall / 26.9s user (25 crates: bindgen + 24 host deps + build
+  script run) → **5.8s wall / 5.5s user (1 crate)** — ~2.5× faster
+  clean builds, zero host build-dependencies. All-five-test-features
+  compile check also green (covers the feature-gated
+  pcache_test/workqueue_test/etc. consumers of `bindings::`).
+- **Verification**: cache discipline before+after (BUILD_TYPE empty,
+  toolchain gcc; one accidental LAB-less reconfigure flipped the cache
+  to Lab:util mid-wave — caught by the post-check and re-configured
+  LAB=fs before any verification run). Boot ×3, each with exactly ONE
+  `init: starting sh`. Battery: **testsig 21/21**, **mmaptest 16/16
+  all passed**, `usertests createdelete` OK + `usertests forkfork` OK
+  (single-test `lost some free pages` trailer = documented
+  pre-existing artifact, RUST_REWRITE.md Iteration-63/65 record),
+  stressfs completed to prompt, **bigfile done; ok**,
+  `cat doesnotexist` → ENOENT; forkforkfork → the IDENTICAL
+  pre-existing kerneltrap storm (scause=0xd,
+  stval=0xfffffffffffffff1, the Iteration-63 A/B-confirmed baseline).
+  Corruption-marker grep over all three logs: ZERO. The crate
+  compiling + linking WITHOUT bindgen/wrapper.h is the wave's proof
+  of surface completeness. rust-skills applied: doc-module-inner
+  (module doc), name-consts-screaming (inherited C spellings kept
+  under the pre-existing allow set), const-vs-static, unsafe-*
+  (no new unsafe; `__IncompleteArrayField`'s unsafe fns are verbatim
+  bindgen API), proj-build-rs-minimal (taken to its limit: no
+  build.rs at all). Files: bindings.rs NEW (+~420), build.rs/
+  wrapper.h DELETED (−1903), lib.rs/Cargo.toml/Cargo.lock/
+  kernel/CMakeLists.txt trimmed.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

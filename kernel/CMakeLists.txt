@@ -111,6 +111,10 @@ set(RUST_STATICLIB ${RUST_BUILD_DIR}/${RUST_TARGET_TRIPLE}/${RUST_PROFILE}/libxv
 file(GLOB_RECURSE RUST_CRATE_SOURCES
     ${RUST_CRATE_DIR}/Cargo.toml
     ${RUST_CRATE_DIR}/lib.rs
+    # kernel/bindings.rs (P3-6 — the hand-written replacement for the
+    # bindgen-generated kernel_bindings.rs; build.rs and wrapper.h are
+    # gone, see bindings.rs's module doc).
+    ${RUST_CRATE_DIR}/bindings.rs
     ${RUST_CRATE_DIR}/list.rs
     # kernel/{bintree,rbtree,hlist,kobject}.rs (Phase 2 Wave 1 — data
     # structures module, ported from the .c files of the same name).
@@ -181,10 +185,11 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # (tmpfs_smoketest.c/.h deleted outright, dead code); its
     # tmpfs_private.h header stays — not because any C file still
     # includes it (kernel/vfs/devtmpfs/superblock.c, its original reason
-    # for staying, was itself ported to Rust in Wave 20), but because
-    # kernel/vfs/tmpfs/*.rs's own bindgen layouts (struct tmpfs_inode /
-    # tmpfs_superblock / tmpfs_sb_private / tmpfs_dentry) still need it;
-    # see wrapper.h's own comment.
+    # for staying, was itself ported to Rust in Wave 20), but as the C
+    # reference layout for the native struct tmpfs_inode /
+    # tmpfs_superblock / tmpfs_sb_private / tmpfs_dentry types
+    # (kernel/vfs/tmpfs/*.rs carry layout asserts against it; the P3-6
+    # header audit may prune it).
     ${RUST_CRATE_DIR}/vfs/tmpfs/*.rs
     # kernel/vfs/xv6fs/{superblock,inode,truncate,file,log,block_cache}.rs
     # (Phase 2 Wave 19 — the root filesystem, ported in two sub-waves:
@@ -196,8 +201,9 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # Wave-1 Rust-rbtree-indexed free-extent cache)). kernel/vfs/xv6fs/
     # has no C sources left (xv6fs_smoketest.c/.h deleted outright, dead
     # code, same precedent as Wave 18's tmpfs_smoketest.c); its
-    # xv6fs_private.h/block_cache.h headers stay (kernel/wrapper.h
-    # includes them directly for bindgen; see wrapper.h's own comment).
+    # xv6fs_private.h/block_cache.h headers stay as the C reference
+    # layouts for the native xv6fs types (the P3-6 header audit may
+    # prune them).
     ${RUST_CRATE_DIR}/vfs/xv6fs/*.rs
     # kernel/vfs/devtmpfs/superblock.rs (Phase 2 Wave 20 —
     # vfs/devtmpfs/superblock.c, the last C file in kernel/vfs/). Reuses
@@ -249,13 +255,9 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
-# Pass the kernel C include search paths to bindgen (consumed by build.rs).
-# Keep this in sync with the include flags in the top-level CMakeLists.txt.
-# P3-5: ${CMAKE_BINARY_DIR}/kernel/inc dropped — the only header ever
-# generated there (asm-offsets.h) is a static checked-in file now, and
-# wrapper.h never included it anyway.
-set(RUST_BINDGEN_INCLUDES
-    "${CMAKE_SOURCE_DIR};${KERNEL_DIR}/inc")
+# P3-6: the bindgen include-path plumbing (RUST_BINDGEN_INCLUDES /
+# XV6_KERNEL_INCLUDES / LAB env for build.rs) is gone with build.rs and
+# wrapper.h — kernel/bindings.rs is a hand-written crate source now.
 
 # ==============================================================================
 # In-kernel test-suite launch gates (RWLOCK_TEST / SEMAPHORE_TEST /
@@ -341,18 +343,13 @@ add_custom_command(
     # `touch` guarantees "now" unconditionally, regardless of cargo's
     # internal cache/hardlink behavior.
     COMMAND ${CMAKE_COMMAND} -E rm -f ${RUST_STATICLIB}
-    COMMAND ${CMAKE_COMMAND} -E env
-            "XV6_KERNEL_INCLUDES=${RUST_BINDGEN_INCLUDES}"
-            "LAB=$ENV{LAB}"
-            ${CARGO_EXECUTABLE} build --${RUST_PROFILE}
+    COMMAND ${CARGO_EXECUTABLE} build --${RUST_PROFILE}
             --target ${RUST_TARGET_TRIPLE}
             --target-dir ${RUST_BUILD_DIR}
             --manifest-path ${RUST_CRATE_DIR}/Cargo.toml
             --features "${RUST_TEST_FEATURES_STR}"
     COMMAND ${CMAKE_COMMAND} -E touch ${RUST_STATICLIB}
     DEPENDS ${RUST_CRATE_SOURCES}
-            ${RUST_CRATE_DIR}/build.rs
-            ${RUST_CRATE_DIR}/wrapper.h
             ${RUST_TEST_FEATURES_STAMP}
     COMMENT "Building xv6_rust staticlib (${RUST_TARGET_TRIPLE}, ${RUST_PROFILE}, features=[${RUST_TEST_FEATURES_STR}])"
     VERBATIM

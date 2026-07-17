@@ -78,13 +78,10 @@
 //!      oversight — see the worker report for the phase that introduced this
 //!      seam.
 //!
-//! Bindgen (`build.rs`) needs **no changes** for this: it already generates
-//! `bindings` by pointing libclang at the riscv64/lp64d target explicitly
-//! (`clang_arg("-target").clang_arg("riscv64-unknown-elf")`, independent of
-//! whatever target `cargo` itself is building for), so the emitted struct
-//! layouts are identical LP64 layouts whether the *build script* runs to
-//! produce a riscv or a host artifact — a host `cargo test` reuses the exact
-//! same generated `kernel_bindings.rs` shape unchanged.
+//! `bindings` needs **no build-time step** for this: since wave P3-6 it is
+//! the hand-written `kernel/bindings.rs` (facades onto native Rust types +
+//! consts/typedefs — bindgen, `build.rs`, and `wrapper.h` are gone), so the
+//! same source compiles for either target.
 
 #![cfg_attr(not(test), no_std)]
 #![allow(non_upper_case_globals)]
@@ -104,17 +101,15 @@
 // wave's touch scope.
 #![allow(ambiguous_glob_reexports)]
 // P3-1D re-audit: down from ~60 warnings (pre-mesh-sweep) to exactly one
-// clash class now that the mesh sweep is crate-wide complete. Bindgen's
-// generated declaration for `printf` (`kernel_bindings.rs`, from the real
-// C prototype `int printf(char *fmt, ...)`, non-`const`) takes `*mut
-// c_char`; this crate's ~70 hand-written per-file `fn printf(fmt: *const
-// c_char, ...)` local redeclarations (the established convention, since
-// this function never writes through `fmt`) all agree with each other
-// but not with bindgen's -- both resolve to the same C symbol at link
-// time, only the pointer const-ness/caller-side-safety view differs.
-// Narrowing every one of the ~70 call sites to bindgen's `*mut` would
-// widen their signature for no behavioural gain (the read-only
-// convention is intentional) and is out of this wave's touch scope.
+// clash class once the mesh sweep was crate-wide complete: bindgen's
+// generated `printf` declaration (`*mut c_char` fmt) vs this crate's ~70
+// hand-written per-file `fn printf(fmt: *const c_char, ...)` local
+// redeclarations (the established read-only convention), which all agree
+// with each other. P3-6 removed the bindgen declaration with the rest of
+// the generated file, so the known clash source is gone; the allow stays
+// as cheap insurance for the ~70-strong local-redeclaration mesh (any
+// future accidental signature divergence between two local decls lands
+// in this same lint) -- auditing/untangling the mesh is its own wave.
 #![allow(clashing_extern_declarations)]
 // P3-1D re-audit: tried removing this too -- still fires 382 times (up
 // from ~60 pre-mesh-sweep denominator context; the mesh sweep didn't
@@ -160,8 +155,11 @@ macro_rules! u {
     };
 }
 
-/// Auto-generated bindings for selected kernel C types and constants.
-/// Produced at build time by `build.rs` via `bindgen` from `wrapper.h`.
+/// Hand-written bindings surface: the historical C type names, consts,
+/// and typedefs this crate's modules still consume under
+/// `crate::bindings::` paths. Replaced the bindgen-generated
+/// `kernel_bindings.rs` (and `build.rs`/`wrapper.h`) in wave P3-6 —
+/// see `kernel/bindings.rs`'s module doc.
 #[allow(
     non_camel_case_types,
     non_snake_case,
@@ -170,9 +168,8 @@ macro_rules! u {
     improper_ctypes,
     clippy::all
 )]
-pub mod bindings {
-    include!(concat!(env!("OUT_DIR"), "/kernel_bindings.rs"));
-}
+#[path = "bindings.rs"]
+pub mod bindings;
 
 // `machine` and `list` are the only two "real" (`#[path = ...]` onto the
 // actual production file) modules kept unconditional -- both are made fully
