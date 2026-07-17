@@ -2797,6 +2797,31 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   extern callbacks, 12 result_to_errptr conversions, 3 orphan stubs
   and the dead `is_eagain_ptr` helpers deleted).
 
+### Iteration 73 — 2026-07-17 — Wave P3-10c (partial): device ops → traits (worker stopped; orchestrator verified & landed)
+
+- The device-ops trio converted per the 0fac3cf/d578d63 pattern:
+  `pub trait DeviceOps: Sync` (dev/dev.rs), `CdevOps` (dev/cdev.rs),
+  `BlkdevOps` (dev/blkdev.rs); 15 `&'static dyn` dispatch sites across
+  virtio_disk/ramdisk/x1_sdhci/nullrand/console/tty_dev/ptmx + the vfs
+  file/syscall consumers. 14 files, +968/−678.
+- **Provenance note**: the worker was stopped by the user after reaching
+  a green build but before verification/report; the orchestrator ran the
+  full audit independently and landed the work. This entry is written by
+  the orchestrator from the diff, not a worker report — per-slot
+  disposition detail is therefore thinner than usual.
+- Verified (orchestrator): cache clean; 0-warning `cargo clean` rebuild;
+  boot gate (virtio-blk probed through `BlkdevOps`); `ls /dev` full
+  listing (Device/CdevOps); `cat README.md | wc` = 714 3365 26018;
+  **bigfile done ok** (heavy blkdev DMA through trait dispatch);
+  stressfs; **testsig 21/21**; **mmaptest all passed**; createdelete OK;
+  zero corruption/panic markers.
+- **Remaining P3-10 items (deliberately open)**: the closed-set table
+  dispositions — `kobject_ops` (KobjectRelease trait may already cover
+  it), `pcache_ops`, `netdev_ops`, `workqueue_callbacks`, `sched_class`
+  (plan verdict: enum dispatch), `tty_ops`, rb/hlist comparators (fine
+  as fn pointers). Each needs either a contained conversion or a
+  documented "fn pointers are right here" verdict in a future wave.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

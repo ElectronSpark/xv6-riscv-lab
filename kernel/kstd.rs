@@ -354,6 +354,22 @@ pub fn neg_errno(e: i32) -> u64 {
     (-e) as i64 as u64
 }
 
+/// Decode a raw "value on success, negative errno on failure" `c_int`
+/// (obtained from a cross-file boundary this cluster doesn't own, e.g.
+/// `tty_ioctl`/`tty_read`) into a [`KResult<c_int>`]. The negative value
+/// is carried verbatim in [`Errno::Raw`] (`Raw(n).neg() == n`), so
+/// re-encoding at a dispatch boundary reproduces the original `c_int`
+/// exactly — the `c_int` twin of `tty/ptmx.rs`'s isize-flavored
+/// `count_result` (added for P3-10c, the device ops-table trait wave).
+#[inline]
+pub fn cint_result(ret: c_int) -> KResult<c_int> {
+    if ret < 0 {
+        Err(Errno::Raw(ret))
+    } else {
+        Ok(ret)
+    }
+}
+
 // ===========================================================================
 // `KResult<T>` <-> `ERR_PTR` bridging — use exactly at the boundary where
 // a Rust-internal `Result` meets a raw-pointer C-ABI/storage convention.

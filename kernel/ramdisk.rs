@@ -28,7 +28,10 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, page_t, platform_info, EINVAL};
+use crate::bindings::{bio, bio_vec, blkdev_t, mode_t, page_t, platform_info, EINVAL};
+
+use crate::dev::blkdev::BlkdevOps;
+use crate::kstd::{Errno, KResult};
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -236,14 +239,27 @@ fn ramdisk_dev_ptr() -> *mut blkdev_t {
 // Block device interface.
 // ===========================================================================
 
-extern "C" fn ramdisk_open(_blkdev: *mut blkdev_t) -> c_int {
-    0
-}
-extern "C" fn ramdisk_release(_blkdev: *mut blkdev_t) -> c_int {
-    0
+/// Zero-sized [`BlkdevOps`] implementor for the ramdisk (P3-10c; was
+/// the `static blkdev_ops_t RAMDISK_OPS` fn-pointer table -- the three
+/// former `extern "C"` callbacks are trait methods now).
+struct RamdiskOps;
+
+/// The single shared instance `ramdisk_init` installs.
+static RAMDISK_OPS: RamdiskOps = RamdiskOps;
+
+impl BlkdevOps for RamdiskOps {
+    unsafe fn open(&self, _blkdev: *mut blkdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn release(&self, _blkdev: *mut blkdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
+        ramdisk_submit_bio(blkdev, bio_ptr)
+    }
 }
 
-extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
     let rd = RAMDISK.lock();
 
     // SAFETY: `bio_ptr` live (blkdev_submit_bio's contract).
@@ -268,7 +284,7 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
                 (*bio_ptr).error = -(EINVAL as c_int);
                 bio_complete(bio_ptr);
             }
-            return -(EINVAL as c_int);
+            return Err(Errno::Inval);
         }
 
         // Calculate offset in ramdisk.
@@ -290,7 +306,7 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
                 (*bio_ptr).error = -(EINVAL as c_int);
                 bio_complete(bio_ptr);
             }
-            return -(EINVAL as c_int);
+            return Err(Errno::Inval);
         }
 
         let pa = __page_to_pa(page) as *mut c_void;
@@ -301,7 +317,7 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
                 (*bio_ptr).error = -(EINVAL as c_int);
                 bio_complete(bio_ptr);
             }
-            return -(EINVAL as c_int);
+            return Err(Errno::Inval);
         }
 
         // Direct access to contiguous physical memory.
@@ -332,11 +348,8 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
         (*bio_ptr).error = 0;
         bio_complete(bio_ptr);
     }
-    0
+    Ok(())
 }
-
-static RAMDISK_OPS: blkdev_ops_t =
-    blkdev_ops_t { open: Some(ramdisk_open), release: Some(ramdisk_release), submit_bio: Some(ramdisk_submit_bio) };
 
 /// `void ramdisk_init(void)`.
 // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
@@ -385,7 +398,7 @@ pub(crate) extern "C" fn ramdisk_init() {
         (*dev).flags.set_readable(1);
         (*dev).flags.set_writable(1);
         (*dev).block_shift = 0; // 2^0 * 512 = 512 bytes per block
-        (*dev).ops = RAMDISK_OPS;
+        (*dev).ops = Some(&RAMDISK_OPS);
     }
 
     // `dev` fully initialised above.

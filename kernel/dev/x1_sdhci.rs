@@ -92,7 +92,7 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{fence, AtomicI32, Ordering};
 
-use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, mutex_t, page_t, platform_info};
+use crate::bindings::{bio, bio_vec, blkdev_t, mode_t, mutex_t, page_t, platform_info};
 use crate::machine;
 use crate::sync::KMutex;
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
@@ -1825,16 +1825,36 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
 // Block device interface.
 // ===========================================================================
 
-extern "C" fn sdhci_blk_open(_blkdev: *mut blkdev_t) -> c_int {
-    0
-}
-extern "C" fn sdhci_blk_release(_blkdev: *mut blkdev_t) -> c_int {
-    0
+/// Zero-sized [`BlkdevOps`](crate::dev::blkdev::BlkdevOps) implementor
+/// for the SDHCI block devices (P3-10c; was the `static blkdev_ops_t
+/// SDHCI_BLK_OPS` fn-pointer table -- the three former `extern "C"`
+/// callbacks are trait methods now).
+struct SdhciBlkOps;
+
+/// The single shared instance `sdhci_init_one` installs.
+static SDHCI_BLK_OPS: SdhciBlkOps = SdhciBlkOps;
+
+impl crate::dev::blkdev::BlkdevOps for SdhciBlkOps {
+    unsafe fn open(&self, _blkdev: *mut blkdev_t) -> crate::kstd::KResult<()> {
+        Ok(())
+    }
+    unsafe fn release(&self, _blkdev: *mut blkdev_t) -> crate::kstd::KResult<()> {
+        Ok(())
+    }
+    unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> crate::kstd::KResult<()> {
+        match sdhci_submit_bio(blkdev, bio_ptr) {
+            0 => Ok(()),
+            // `Errno::Raw` carries the already-negative cross-module
+            // `c_int` verbatim (`Raw(n).neg() == n`), so the dispatch
+            // boundary re-encodes exactly the old callback's return.
+            ret => Err(crate::kstd::Errno::Raw(ret)),
+        }
+    }
 }
 
 /// `submit_bio` -- process a block I/O request. Iterates over bio
 /// segments and reads/writes blocks via SDMA/PIO.
-extern "C" fn sdhci_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+fn sdhci_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
     // SAFETY: `blkdev` is `(*sc).bdev`'s address for the `sc` that
     // registered it (`sdhci_init_one`'s `blkdev_register(&(*sc).bdev)`
     // call, mirrored below) -- `bdev` is `SdhciSoftc`'s field, so this
@@ -1904,9 +1924,6 @@ extern "C" fn sdhci_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_in
     }
     ret
 }
-
-static SDHCI_BLK_OPS: blkdev_ops_t =
-    blkdev_ops_t { open: Some(sdhci_blk_open), release: Some(sdhci_blk_release), submit_bio: Some(sdhci_submit_bio) };
 
 // ===========================================================================
 // Instance initialisation.
@@ -2027,7 +2044,7 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
         (*sc).bdev.flags.set_readable(1);
         (*sc).bdev.flags.set_writable(1);
         (*sc).bdev.block_shift = 0; // 512 bytes per sector
-        (*sc).bdev.ops = SDHCI_BLK_OPS;
+        (*sc).bdev.ops = Some(&SDHCI_BLK_OPS);
 
         (*sc).bdev.dev.devname = if is_emmc { EMMC_NAMES[idx].as_ptr() } else { SD_NAMES[idx].as_ptr() };
     }

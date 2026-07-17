@@ -770,14 +770,14 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
         return Err(Errno::NoDev);
     }
 
-    // SAFETY: `cdev` is non-null and non-error (checked above); reading
-    // `ops.open_file` is a plain field access.
-    let open_file = unsafe { (*cdev).ops.open_file };
-    if let Some(open_file_fn) = open_file {
-        // SAFETY: `cdev`/`file` are both live; `open_file` is a
-        // filesystem/driver callback with the documented contract that
-        // it may install `file->ops`/`file->private_data`.
-        let ret = unsafe { open_file_fn(cdev, file) };
+    // SAFETY: `cdev` is non-null and non-error (checked above); `file`
+    // is live; `open_file` is a driver hook with the documented
+    // contract that it may install `file->ops`/`file->private_data`
+    // (P3-10c: `CdevOps::open_file` returns `None` — the default,
+    // mirroring the old `None` table slot — to select the
+    // direct-device-I/O fallback below).
+    let open_file = unsafe { (*cdev).ops.and_then(|o| o.open_file(cdev, file)) };
+    if let Some(ret) = open_file {
         if ret != 0 {
             cdev_put(cdev);
             return Err(Errno::Raw(ret));

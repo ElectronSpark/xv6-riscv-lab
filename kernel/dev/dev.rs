@@ -93,7 +93,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::bindings::{
-    device_major_t, device_ops_t, device_t, dev_type_e, dev_type_e_DEV_TYPE_BLOCK,
+    device_major_t, device_t, dev_type_e, dev_type_e_DEV_TYPE_BLOCK,
     dev_type_e_DEV_TYPE_CHAR, kobject, slab_cache_t,
     spinlock_t, EALREADY, EBUSY, EINVAL, ENODEV, ENOMEM, ENOSPC, ENOTTY, SLAB_FLAG_DEBUG_BITMAP,
     SLAB_FLAG_EMBEDDED,
@@ -110,11 +110,10 @@ use crate::sync::KSpinlock;
 // device_instance` now: `build.rs` blocklists the bindgen-generated
 // forms and injects `pub use crate::dev::dev::... as ...;` facade
 // re-exports (struct name + `_t` typedef alias each), so every
-// `crate::bindings::{device_major(_t),device_ops(_t),device_instance,
-// device_t}` path across the crate resolves here. The ops-table
-// fn-pointer fields reproduce bindgen's forms exactly
-// (`Option<unsafe extern "C" fn ...>`); trait-ifying the ops tables is
-// P3-10's job, not this wave's. The still-bindgen `rcu_head_t` is
+// `crate::bindings::{device_major(_t),device_instance,device_t}` path
+// across the crate resolves here. P3-10c finished the P3-10 ops-table
+// job: `DeviceOps` is a Rust trait (see its doc below), not a
+// fn-pointer struct. The still-bindgen `rcu_head_t` is
 // embedded *by value* (`DeviceMajor::rcu_head`) — the sanctioned
 // mixed-tier pattern (P3-N2/N3). `dev_type_e` stays the bindgen
 // constified-enum `c_uint` alias.
@@ -135,23 +134,78 @@ pub struct DeviceMajor {
     pub rcu_head: crate::bindings::rcu_head_t,
 }
 
-/// `struct device_ops` (`kernel/inc/dev/dev_types.h`).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct DeviceOps {
-    pub open: Option<unsafe extern "C" fn(dev: *mut DeviceInstance) -> c_int>,
-    pub release: Option<unsafe extern "C" fn(dev: *mut DeviceInstance) -> c_int>,
-    pub ioctl: Option<
-        unsafe extern "C" fn(
-            dev: *mut DeviceInstance,
-            cmd: crate::bindings::uint64,
-            arg: *mut c_void,
-        ) -> c_int,
-    >,
+/// The `device_t`-level operations vtable — wave P3-10c's replacement
+/// for the C-style `struct device_ops` fn-pointer table (ops-table
+/// redesign, following the P3-10a `FileOps` pilot pattern).
+/// Implementors are zero-sized unit structs with a `static` instance:
+/// the cdev/blkdev forwarders (`CDEV_DEVICE_OPS` in
+/// `kernel/dev/cdev.rs`, `BLKDEV_DEVICE_OPS` in
+/// `kernel/dev/blkdev.rs`, installed by `cdev_register`/
+/// `blkdev_register` — the old fixed "underlying ops" vtables) and the
+/// console's post-registration ioctl override (`CONSOLE_DEV_OPS` in
+/// `kernel/console.rs`).
+///
+/// Slot-nullability mapping:
+///
+/// * `open`/`release` — required methods: the old `dev_opts_validate`
+///   rejected registration unless both were `Some`. The console's
+///   post-registration override historically bypassed that validation
+///   with `None` slots — its implementor now spells out the exact
+///   `None`-slot dispatch outcomes instead (see `ConsoleDevOps`):
+///   `open` has *no dispatch site anywhere in the tree* (a `None` slot
+///   was never callable), and a `None` `release` made
+///   [`dev_call_release`]'s kassert panic.
+/// * `ioctl` — default `None` ("op not provided"): [`dev_ioctl`] keeps
+///   its exact `neg(ENOTTY)` fallback for it (the old `None`-slot
+///   behavior; blkdevs, whose old table left `.ioctl` `None`, simply
+///   don't override the default).
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait DeviceOps: Sync {
+    /// Device open hook.
+    ///
+    /// NOTE (dead-slot truth, preserved from the C): no code path in
+    /// the tree dispatches device-level `open` today — `device_get`
+    /// only takes a reference. The method is kept because the
+    /// registrant-facing contract (`cdev`/`blkdev` open forwarding)
+    /// remains the documented shape of the device table.
+    ///
+    /// # Safety
+    /// `dev` must be the live, registered `device_t` this instance was
+    /// installed on.
+    unsafe fn open(&self, dev: *mut DeviceInstance) -> KResult<()>;
+
+    /// Final-teardown hook, invoked (result discarded, matching the C)
+    /// by the kobject release callback once the refcount reaches zero.
+    ///
+    /// # Safety
+    /// Same contract as [`DeviceOps::open`]; the caller holds the final
+    /// reference.
+    unsafe fn release(&self, dev: *mut DeviceInstance) -> KResult<()>;
+
+    /// Driver ioctl: `Some(result)` (the raw `c_int`, which may itself
+    /// be a negative errno, passed through exactly as the old
+    /// fn-pointer result was) or `None` to let [`dev_ioctl`] fall back
+    /// to `ENOTTY`.
+    ///
+    /// # Safety
+    /// `dev` as in [`DeviceOps::open`]; `arg`'s validity is
+    /// `cmd`-specific.
+    unsafe fn ioctl(&self, _dev: *mut DeviceInstance, _cmd: u64, _arg: *mut c_void)
+        -> Option<c_int> {
+        None
+    }
 }
 
-/// `struct device_instance` (typedef `device_t`,
-/// `kernel/inc/dev/dev_types.h`).
+/// `struct device_instance` (typedef `device_t`) — as of wave P3-10c
+/// this layout is NATIVE-OWNED (post-P3-6 there is no bindgen, no
+/// wrapper.h, and no C consumer; `kernel/inc/dev/dev_types.h` no longer
+/// constrains it). The former embedded `device_ops` fn-pointer table is
+/// now a real Rust trait object, `Option<&'static dyn DeviceOps>` (a
+/// 16-byte fat pointer; `None` = the zeroed/unregistered state — valid
+/// via the null-data-pointer niche, same reasoning as P3-10b's zeroed
+/// root dummy).
 #[repr(C)]
 pub struct DeviceInstance {
     pub kobj: Kobject,
@@ -159,26 +213,22 @@ pub struct DeviceInstance {
     pub minor: c_int,
     pub type_: dev_type_e,
     pub unregistering: c_int,
-    pub ops: DeviceOps,
+    pub ops: Option<&'static dyn DeviceOps>,
     pub devname: *const c_char,
     pub devmode: crate::bindings::mode_t,
 }
 
-// P3-N4 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
-// device_major { num_minors: c_int, minors: *mut *mut device_t,
-// rcu_head: rcu_head_t }`, `pub struct device_ops { open/release:
-// Option<unsafe extern "C" fn(*mut device_t) -> c_int>, ioctl:
-// Option<unsafe extern "C" fn(*mut device_t, uint64, *mut c_void) ->
-// c_int> }`, `pub struct device_instance { kobj: kobject, major/minor:
-// c_int, type_: dev_type_e, unregistering: c_int, ops: device_ops_t,
-// devname: *const c_char, devmode: mode_t }`) and independently
-// confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
-// (rv64gc/lp64d) against `kernel/inc/dev/dev_types.h` — see the P3-N4
-// wave record: device_major 56/8 offsets 0/8/16 (rcu_head_t itself
-// 40/8), device_ops 24/8 offsets 0/8/16, device_instance 96/8 offsets
-// 0/40/44/48/52/56/80/88 (kobject itself proven 40/8 by kobject.rs's
-// own gate).
+// P3-10c layout facts — NATIVE-OWNED, no C mirror exists (bindgen,
+// wrapper.h, and every C consumer are gone). `DeviceMajor` (untouched
+// by the ops conversion) keeps its P3-N4 pins; for `DeviceInstance`
+// only the invariants the code actually leans on are kept: `kobj` at
+// offset 0 (the kobject-release `container_of` reinterpretation and
+// every `KArc`/`HasKobject` cast) and the niche-optimized
+// `Option<&'static dyn DeviceOps>` staying a plain fat pointer (16/8,
+// all-zero bytes == `None` — the zeroed-storage registration
+// precondition). Deleted: the stale P3-N4 C-fidelity size/offset pins
+// for the moved fields and the whole `device_ops` table block (the
+// table type itself no longer exists).
 const _: () = {
     assert!(core::mem::size_of::<crate::bindings::rcu_head_t>() == 40, "rcu_head_t size");
     assert!(core::mem::align_of::<crate::bindings::rcu_head_t>() == 8, "rcu_head_t alignment");
@@ -187,24 +237,16 @@ const _: () = {
     assert!(core::mem::offset_of!(DeviceMajor, num_minors) == 0, "device_major.num_minors offset");
     assert!(core::mem::offset_of!(DeviceMajor, minors) == 8, "device_major.minors offset");
     assert!(core::mem::offset_of!(DeviceMajor, rcu_head) == 16, "device_major.rcu_head offset");
-    assert!(core::mem::size_of::<DeviceOps>() == 24, "device_ops size");
-    assert!(core::mem::align_of::<DeviceOps>() == 8, "device_ops alignment");
-    assert!(core::mem::offset_of!(DeviceOps, open) == 0, "device_ops.open offset");
-    assert!(core::mem::offset_of!(DeviceOps, release) == 8, "device_ops.release offset");
-    assert!(core::mem::offset_of!(DeviceOps, ioctl) == 16, "device_ops.ioctl offset");
-    assert!(core::mem::size_of::<DeviceInstance>() == 96, "device_instance size");
     assert!(core::mem::align_of::<DeviceInstance>() == 8, "device_instance alignment");
     assert!(core::mem::offset_of!(DeviceInstance, kobj) == 0, "device_instance.kobj offset");
-    assert!(core::mem::offset_of!(DeviceInstance, major) == 40, "device_instance.major offset");
-    assert!(core::mem::offset_of!(DeviceInstance, minor) == 44, "device_instance.minor offset");
-    assert!(core::mem::offset_of!(DeviceInstance, type_) == 48, "device_instance.type_ offset");
     assert!(
-        core::mem::offset_of!(DeviceInstance, unregistering) == 52,
-        "device_instance.unregistering offset"
+        core::mem::size_of::<Option<&'static dyn DeviceOps>>() == 16,
+        "device ops fat pointer size"
     );
-    assert!(core::mem::offset_of!(DeviceInstance, ops) == 56, "device_instance.ops offset");
-    assert!(core::mem::offset_of!(DeviceInstance, devname) == 80, "device_instance.devname offset");
-    assert!(core::mem::offset_of!(DeviceInstance, devmode) == 88, "device_instance.devmode offset");
+    assert!(
+        core::mem::align_of::<Option<&'static dyn DeviceOps>>() == 8,
+        "device ops fat pointer alignment"
+    );
 };
 
 // ---------------------------------------------------------------------------
@@ -629,17 +671,6 @@ pub(crate) extern "C" fn device_put(device: *mut device_t) -> c_int {
     0
 }
 
-fn dev_opts_validate(ops: *const device_ops_t) -> bool {
-    if ops.is_null() {
-        return false;
-    }
-    // SAFETY: caller (device_register) guarantees `ops` points at the
-    // live, embedded `dev->ops` field of a caller-owned `device_t`.
-    let ops = unsafe { &*ops };
-    // Both open and release operations must be defined.
-    ops.open.is_some() && ops.release.is_some()
-}
-
 fn dev_type_validate(t: dev_type_e) -> bool {
     t == dev_type_e_DEV_TYPE_BLOCK || t == dev_type_e_DEV_TYPE_CHAR
 }
@@ -657,18 +688,23 @@ extern "C" fn underlying_kobject_release(obj: *mut kobject) {
 }
 
 /// Because only a validated device's ops are ever installed here (see
-/// `__dev_opts_validate`/`__cdev_opts_validate`/`__blkdev_ops_validate`),
-/// `.release` is asserted rather than branched on, matching the C's own
-/// comment ("their validity is asserted to be true").
-fn dev_call_release(dev: *mut device_t) -> c_int {
+/// `device_register`'s ops check), the table is asserted rather than
+/// branched on, matching the C's own comment ("their validity is
+/// asserted to be true"). P3-10c: `release` itself is a required trait
+/// method, so the old per-slot `release.is_some()` half of the assert
+/// is unrepresentable; the driver's `KResult` is discarded exactly as
+/// the old `c_int` return was (its one caller,
+/// `underlying_kobject_release`, always dropped it).
+fn dev_call_release(dev: *mut device_t) {
     // SAFETY: `dev` is a live device_t (kobject release contract);
-    // `.ops.release` is a plain field read.
-    let release = unsafe { (*dev).ops.release };
+    // `.ops` is a plain field read.
+    let ops = unsafe { (*dev).ops };
     // SAFETY: `xv6_panic` never returns.
-    unsafe { kassert!(!dev.is_null() && release.is_some(), "Invalid device or release operation") };
-    // SAFETY: `release` is `Some` per the assertion above; `dev` is the
-    // caller-verified live pointer this callback owns.
-    unsafe { release.unwrap()(dev) }
+    unsafe { kassert!(!dev.is_null() && ops.is_some(), "Invalid device or release operation") };
+    // SAFETY: `dev` is the caller-verified live pointer this callback
+    // owns, holding the final reference -- exactly
+    // `DeviceOps::release`'s contract; `ops` is `Some` per the assert.
+    let _ = unsafe { ops.unwrap().release(dev) };
 }
 
 /// Unregister a device from the device table. Called either by
@@ -731,11 +767,15 @@ pub(crate) extern "C" fn device_register(dev: *mut device_t) -> c_int {
     // SAFETY: `dev` is caller-provided; reading `.type_`/`.ops` is a
     // plain field read of caller-owned data (device_register does not
     // yet publish `dev` to any other observer).
-    let (dtype, ops_ptr) = unsafe { ((*dev).type_, &raw const (*dev).ops) };
+    let (dtype, ops) = unsafe { ((*dev).type_, (*dev).ops) };
     if !dev_type_validate(dtype) {
         return neg(EINVAL);
     }
-    if !dev_opts_validate(ops_ptr) {
+    // Ops validation (was `dev_opts_validate`): the old open/release
+    // `Some` checks are unrepresentable-by-construction now that both
+    // are required trait methods -- only "no table at all" remains
+    // rejectable.
+    if ops.is_none() {
         return neg(EINVAL);
     }
 
@@ -854,14 +894,15 @@ pub(crate) extern "C" fn dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_voi
     if unregistering_atomic(dev).load(Ordering::Acquire) != 0 {
         return neg(ENODEV);
     }
-    // SAFETY: `dev` is caller-provided and live for this call.
-    let ioctl = unsafe { (*dev).ops.ioctl };
-    match ioctl {
+    // SAFETY: `dev` is caller-provided and live for this call (the
+    // dispatch target's contract); `arg`'s validity is forwarded from
+    // the caller. `DeviceOps::ioctl`'s `None` return means "op not
+    // provided" -- the default, mirroring the old `None` table slot --
+    // and keeps the exact `ENOTTY` fallback (a `None` table, impossible
+    // on a registered device, takes the same fallback).
+    match unsafe { (*dev).ops.and_then(|o| o.ioctl(dev, cmd, arg)) } {
+        Some(ret) => ret,
         None => neg(ENOTTY),
-        // SAFETY: `ioctl` is a valid C-ABI function pointer installed by
-        // a validated `device_ops_t` (device_register's contract); `dev`
-        // is the same live pointer being dispatched on.
-        Some(f) => unsafe { f(dev, cmd, arg) },
     }
 }
 

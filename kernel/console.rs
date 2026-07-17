@@ -51,13 +51,15 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::bindings::{
-    cdev_ops_t, cdev_t, device_ops_t, device_t, mode_t, pipe, session, spinlock_t, tty,
+    cdev_t, device_t, mode_t, pipe, session, spinlock_t, tty,
     tty_ops,
 };
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
-// `extern "C"` redeclaration.
-use crate::dev::cdev::cdev_register;
+// `extern "C"` redeclaration. P3-10c: `CdevOps` is the ops-table trait
+// this file's `ConsoleCdevOps` implements.
+use crate::dev::cdev::{cdev_register, CdevOps};
+use crate::kstd::{cint_result, Errno, KResult};
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
 // crate-path items instead of `extern "C"` redeclarations.
 use crate::proc::{sleep_on_chan, wakeup, wakeup_on_chan};
@@ -284,7 +286,7 @@ static mut CONS_E: u32 = 0; // Edit index
 /// `buffer` must point to at least `n` readable bytes if `user_src` is
 /// false, or be a valid userspace address range otherwise (checked by
 /// `either_copyin`).
-pub(crate) unsafe extern "C" fn consolewrite(
+unsafe fn consolewrite(
     _cdev: *mut cdev_t,
     user_src: crate::bindings::bool_,
     buffer: *const c_void,
@@ -381,7 +383,7 @@ pub(crate) unsafe extern "C" fn consolewrite(
 /// `buffer` must point to at least `n` writable bytes if `user_dst` is
 /// false, or be a valid userspace address range otherwise (checked by
 /// `either_copyout`).
-pub(crate) unsafe extern "C" fn consoleread(
+unsafe fn consoleread(
     _cdev: *mut cdev_t,
     user_dst: crate::bindings::bool_,
     buffer: *mut c_void,
@@ -492,46 +494,108 @@ pub(crate) unsafe extern "C" fn consoleread(
     (target - n) as c_int
 }
 
-unsafe extern "C" fn consoleopen(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// Zero-sized [`CdevOps`] implementor for the console cdev (P3-10c; was
+/// the `static mut cdev_ops_t CONSOLE_CDEV_OPS` fn-pointer table,
+/// runtime-populated in `consoledevinit` -- now an immutable `Sync`
+/// static, same soundness payoff as the P3-10a ptmx conversion; the six
+/// former `extern "C"` callbacks are trait methods now, `open_file` is
+/// not overridden so the trait default reproduces the old `None` slot).
+struct ConsoleCdevOps;
 
-unsafe extern "C" fn consoleclose(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// The single shared instance `consoledevinit` installs.
+static CONSOLE_CDEV_OPS: ConsoleCdevOps = ConsoleCdevOps;
 
-/// Console ioctl -- delegates to the TTY layer for termios/TIOCSPGRP/etc.
-unsafe extern "C" fn consoleioctl(_cdev: *mut cdev_t, cmd: u64, arg: *mut c_void) -> c_int {
-    let tty_ptr = console_tty();
-    if tty_ptr.is_null() {
-        return -ENOTTY;
+impl CdevOps for ConsoleCdevOps {
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
     }
-    // SAFETY: `tty_ptr` is a live, permanently-allocated TTY once
-    // published (see `console_tty`).
-    unsafe { tty_ioctl(tty_ptr, cmd, arg) }
+
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+
+    unsafe fn read(&self, cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
+        -> KResult<c_int> {
+        // SAFETY: forwarded caller contract (see `consoleread`'s doc).
+        cint_result(unsafe { consoleread(cdev, user as crate::bindings::bool_, buf, count) })
+    }
+
+    unsafe fn write(&self, cdev: *mut cdev_t, user: bool, buf: *const c_void, count: usize)
+        -> KResult<c_int> {
+        // SAFETY: forwarded caller contract (see `consolewrite`'s doc).
+        cint_result(unsafe { consolewrite(cdev, user as crate::bindings::bool_, buf, count) })
+    }
+
+    /// Console ioctl -- delegates to the TTY layer for
+    /// termios/TIOCSPGRP/etc.
+    unsafe fn ioctl(&self, _cdev: *mut cdev_t, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
+        let tty_ptr = console_tty();
+        if tty_ptr.is_null() {
+            return Err(Errno::NotTy);
+        }
+        // SAFETY: `tty_ptr` is a live, permanently-allocated TTY once
+        // published (see `console_tty`); `arg`'s validity is forwarded
+        // from the dispatch contract.
+        cint_result(unsafe { tty_ioctl(tty_ptr, cmd, arg) })
+    }
+
+    /// Console poll -- check whether console has data ready for
+    /// reading/writing. Delegates to `tty_poll`, which inspects
+    /// `raw_buf` (raw mode) or `input_pipe` (canonical mode).
+    unsafe fn poll(&self, _cdev: *mut cdev_t, events: c_short) -> Option<c_int> {
+        let tty_ptr = console_tty();
+        if tty_ptr.is_null() {
+            return Some(0);
+        }
+        // SAFETY: see `ioctl` above.
+        Some(unsafe { tty_poll(tty_ptr, events) })
+    }
 }
 
-/// Console `device_t` ioctl -- same, but takes `device_t*` (called from
-/// `dev_ioctl` via `vfs_ioctl`).
-unsafe extern "C" fn console_dev_ioctl(_dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c_int {
-    let tty_ptr = console_tty();
-    if tty_ptr.is_null() {
-        return -ENOTTY;
-    }
-    // SAFETY: see `consoleioctl`.
-    unsafe { tty_ioctl(tty_ptr, cmd, arg) }
-}
+/// Zero-sized [`DeviceOps`] implementor for the console's underlying
+/// `device_t` (P3-10c; was the post-`cdev_register` `device_ops_t`
+/// override `{ open: None, release: None, ioctl: Some(console_dev_ioctl) }`,
+/// which replaced the cdev forwarder vtable to expose ioctl at the
+/// `dev_ioctl` level -- reached from `vfs_ioctl` on the direct-device
+/// fast path).
+///
+/// `open`/`release` reproduce the old override's `None` slots exactly:
+/// device-level `open` has *no dispatch site anywhere in the tree*
+/// (`device_get` only takes a reference), and a `None` `release` made
+/// `dev_call_release`'s kassert panic -- both bodies therefore panic if
+/// ever reached, exactly as the old `None` slots would have (the
+/// console device is permanent: never unregistered, refcount never
+/// reaches zero).
+struct ConsoleDevOps;
 
-/// Console poll -- check whether console has data ready for
-/// reading/writing. Delegates to `tty_poll`, which inspects `raw_buf`
-/// (raw mode) or `input_pipe` (canonical mode).
-unsafe extern "C" fn consolepoll(_cdev: *mut cdev_t, events: c_short) -> c_int {
-    let tty_ptr = console_tty();
-    if tty_ptr.is_null() {
-        return 0;
+/// The single shared instance `consoledevinit` installs (after
+/// `cdev_register`, replacing the cdev forwarder -- the historical
+/// install order, preserved).
+static CONSOLE_DEV_OPS: ConsoleDevOps = ConsoleDevOps;
+
+impl crate::dev::dev::DeviceOps for ConsoleDevOps {
+    unsafe fn open(&self, _dev: *mut device_t) -> KResult<()> {
+        // Old slot: `None`; no dispatcher exists (see type doc).
+        crate::kstd::xv6_panic(c"console: device-level open not supported".as_ptr())
     }
-    // SAFETY: see `consoleioctl`.
-    unsafe { tty_poll(tty_ptr, events) }
+
+    unsafe fn release(&self, _dev: *mut device_t) -> KResult<()> {
+        // Old slot: `None`; `dev_call_release` would have panicked.
+        crate::kstd::xv6_panic(c"console: device-level release not supported".as_ptr())
+    }
+
+    /// Console `device_t` ioctl -- same delegation as
+    /// [`ConsoleCdevOps::ioctl`] but reached from `dev_ioctl` via
+    /// `vfs_ioctl`.
+    unsafe fn ioctl(&self, _dev: *mut device_t, cmd: u64, arg: *mut c_void) -> Option<c_int> {
+        let tty_ptr = console_tty();
+        if tty_ptr.is_null() {
+            return Some(-ENOTTY);
+        }
+        // SAFETY: `tty_ptr` is a live, permanently-allocated TTY once
+        // published (see `console_tty`).
+        Some(unsafe { tty_ioctl(tty_ptr, cmd, arg) })
+    }
 }
 
 // ===========================================================================
@@ -786,33 +850,13 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
     }
 }
 
-static mut CONSOLE_CDEV_OPS: cdev_ops_t = cdev_ops_t {
-    read: None,
-    write: None,
-    open: None,
-    release: None,
-    ioctl: None,
-    poll: None,
-    open_file: None,
-};
-
 static mut CONSOLE_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
 pub(crate) extern "C" fn consoledevinit() {
     // SAFETY: `consoledevinit()` runs exactly once, from
     // `start_kernel.c`'s single-hart init sequence, before any other
-    // code can observe `CONSOLE_CDEV`/`CONSOLE_CDEV_OPS`.
+    // code can observe `CONSOLE_CDEV`.
     unsafe {
-        CONSOLE_CDEV_OPS = cdev_ops_t {
-            read: Some(consoleread),
-            write: Some(consolewrite),
-            open: Some(consoleopen),
-            release: Some(consoleclose),
-            ioctl: Some(consoleioctl),
-            poll: Some(consolepoll),
-            open_file: None,
-        };
-
         let cdev = CONSOLE_CDEV.as_mut_ptr();
         (*cdev).dev.major = CONSOLE_MAJOR;
         (*cdev).dev.minor = CONSOLE_MINOR;
@@ -820,7 +864,7 @@ pub(crate) extern "C" fn consoledevinit() {
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
         (*cdev).flags.set_readable(1);
         (*cdev).flags.set_writable(1);
-        (*cdev).ops = CONSOLE_CDEV_OPS;
+        (*cdev).ops = Some(&CONSOLE_CDEV_OPS);
 
         let errno = cdev_register(cdev);
         if errno != 0 {
@@ -834,8 +878,9 @@ pub(crate) extern "C" fn consoledevinit() {
         }
 
         // Install ioctl on the device_t level (used by vfs_ioctl ->
-        // dev_ioctl).
-        (*cdev).dev.ops = device_ops_t { open: None, release: None, ioctl: Some(console_dev_ioctl) };
+        // dev_ioctl) -- replaces the cdev forwarder installed by
+        // `cdev_register`, matching the historical install order.
+        (*cdev).dev.ops = Some(&CONSOLE_DEV_OPS);
 
         let mut irq_desc = IrqDesc {
             handler: Some(crate::uart::uartintr),

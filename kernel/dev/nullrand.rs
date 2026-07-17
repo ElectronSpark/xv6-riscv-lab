@@ -53,9 +53,10 @@ use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::bindings::{bool_, cdev_ops_t, cdev_t, mode_t, EFAULT, EINVAL};
+use crate::bindings::{cdev_t, mode_t};
+use crate::kstd::{Errno, KResult};
 
-use super::cdev::cdev_register;
+use super::cdev::{cdev_register, CdevOps};
 
 // ---------------------------------------------------------------------------
 // External C symbols, declared locally per this crate's established
@@ -123,25 +124,33 @@ const S_IFCHR: u32 = 0o020_000;
 // /dev/null
 // ---------------------------------------------------------------------------
 
-extern "C" fn null_open(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// Zero-sized [`CdevOps`] implementor for `/dev/null` (P3-10c; was the
+/// `static cdev_ops_t NULL_CDEV_OPS` fn-pointer table -- the four
+/// former `extern "C"` callbacks are trait methods now; the old `None`
+/// slots `ioctl`/`poll`/`open_file` are not overridden, the trait
+/// defaults reproduce their null-slot dispatch outcomes exactly).
+struct NullCdevOps;
 
-extern "C" fn null_release(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// The single shared instance `nullranddevinit` installs.
+static NULL_CDEV_OPS: NullCdevOps = NullCdevOps;
 
-extern "C" fn null_read(_cdev: *mut cdev_t, _user: bool_, _buf: *mut c_void, _count: usize) -> c_int {
-    0
-}
-
-extern "C" fn null_write(
-    _cdev: *mut cdev_t,
-    _user: bool_,
-    _buf: *const c_void,
-    count: usize,
-) -> c_int {
-    count as c_int
+impl CdevOps for NullCdevOps {
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+    /// Reads always return EOF (0 bytes).
+    unsafe fn read(&self, _cdev: *mut cdev_t, _user: bool, _buf: *mut c_void, _count: usize)
+        -> KResult<c_int> {
+        Ok(0)
+    }
+    /// Writes are discarded (report `count` bytes "written").
+    unsafe fn write(&self, _cdev: *mut cdev_t, _user: bool, _buf: *const c_void, count: usize)
+        -> KResult<c_int> {
+        Ok(count as c_int)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -194,143 +203,124 @@ pub(crate) extern "C" fn random_fill_bytes(buf: *mut u8, count: usize) {
     }
 }
 
-extern "C" fn random_open(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// Zero-sized [`CdevOps`] implementor for `/dev/random` (P3-10c; same
+/// conversion note as [`NullCdevOps`]).
+struct RandomCdevOps;
 
-extern "C" fn random_release(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// The single shared instance `nullranddevinit` installs.
+static RANDOM_CDEV_OPS: RandomCdevOps = RandomCdevOps;
 
-extern "C" fn random_read(_cdev: *mut cdev_t, user: bool_, buf: *mut c_void, count: usize) -> c_int {
-    if buf.is_null() {
-        return -(EINVAL as c_int);
+impl CdevOps for RandomCdevOps {
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
     }
-    if count == 0 {
-        return 0;
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
     }
-
-    if user == 0 {
-        random_fill_bytes(buf as *mut u8, count);
-        return count as c_int;
-    }
-
-    let mut kbuf = [0u8; 64];
-    let mut done: usize = 0;
-    while done < count {
-        let chunk = core::cmp::min(count - done, kbuf.len());
-        random_fill_bytes(kbuf.as_mut_ptr(), chunk);
-
-        // SAFETY: `either_copyout` validates the userspace destination
-        // range itself; `kbuf` is a live local buffer of at least
-        // `chunk` bytes.
-        let r = either_copyout(1, buf as u64 + done as u64, kbuf.as_ptr() as *const c_void, chunk as u64);
-        if r < 0 {
-            return if done != 0 { done as c_int } else { -(EFAULT as c_int) };
+    /// Fills the caller's buffer with pseudo-random bytes.
+    unsafe fn read(&self, _cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
+        -> KResult<c_int> {
+        if buf.is_null() {
+            return Err(Errno::Inval);
         }
-        done += chunk;
-    }
-    done as c_int
-}
+        if count == 0 {
+            return Ok(0);
+        }
 
-extern "C" fn random_write(
-    _cdev: *mut cdev_t,
-    _user: bool_,
-    _buf: *const c_void,
-    count: usize,
-) -> c_int {
-    count as c_int
+        if !user {
+            random_fill_bytes(buf as *mut u8, count);
+            return Ok(count as c_int);
+        }
+
+        let mut kbuf = [0u8; 64];
+        let mut done: usize = 0;
+        while done < count {
+            let chunk = core::cmp::min(count - done, kbuf.len());
+            random_fill_bytes(kbuf.as_mut_ptr(), chunk);
+
+            // SAFETY: `either_copyout` validates the userspace
+            // destination range itself; `kbuf` is a live local buffer
+            // of at least `chunk` bytes.
+            let r = either_copyout(1, buf as u64 + done as u64, kbuf.as_ptr() as *const c_void, chunk as u64);
+            if r < 0 {
+                return if done != 0 { Ok(done as c_int) } else { Err(Errno::Fault) };
+            }
+            done += chunk;
+        }
+        Ok(done as c_int)
+    }
+    /// Writes are discarded like `/dev/null`.
+    unsafe fn write(&self, _cdev: *mut cdev_t, _user: bool, _buf: *const c_void, count: usize)
+        -> KResult<c_int> {
+        Ok(count as c_int)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // /dev/zero
 // ---------------------------------------------------------------------------
 
-extern "C" fn zero_open(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// Zero-sized [`CdevOps`] implementor for `/dev/zero` (P3-10c; same
+/// conversion note as [`NullCdevOps`]; `poll` is deliberately not
+/// overridden -- "/dev/zero is always ready -- handled by fallback",
+/// the C comment on its old `None` slot).
+struct ZeroCdevOps;
 
-extern "C" fn zero_release(_cdev: *mut cdev_t) -> c_int {
-    0
-}
+/// The single shared instance `nullranddevinit` installs.
+static ZERO_CDEV_OPS: ZeroCdevOps = ZeroCdevOps;
 
-extern "C" fn zero_read(_cdev: *mut cdev_t, user: bool_, buf: *mut c_void, count: usize) -> c_int {
-    if buf.is_null() {
-        return -(EINVAL as c_int);
+impl CdevOps for ZeroCdevOps {
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
     }
-    if count == 0 {
-        return 0;
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
     }
-
-    if user == 0 {
-        // SAFETY: `buf` is caller-provided and valid for `count` bytes
-        // (checked non-null above); a byte-value memset can't
-        // misalign/overrun a correctly-sized destination.
-        unsafe { core::ptr::write_bytes(buf as *mut u8, 0, count) };
-        return count as c_int;
-    }
-
-    // Zero out in chunks to userspace (matches the C's `static const
-    // char zeros[64]`).
-    const ZEROS: [u8; 64] = [0u8; 64];
-    let mut done: usize = 0;
-    while done < count {
-        let chunk = core::cmp::min(count - done, ZEROS.len());
-        // SAFETY: `either_copyout` validates the userspace destination
-        // range itself; `ZEROS` is a live buffer of at least `chunk`
-        // bytes.
-        let r = either_copyout(1, buf as u64 + done as u64, ZEROS.as_ptr() as *const c_void, chunk as u64);
-        if r < 0 {
-            return if done != 0 { done as c_int } else { -(EFAULT as c_int) };
+    /// Fills the caller's buffer with zero bytes.
+    unsafe fn read(&self, _cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
+        -> KResult<c_int> {
+        if buf.is_null() {
+            return Err(Errno::Inval);
         }
-        done += chunk;
-    }
-    done as c_int
-}
+        if count == 0 {
+            return Ok(0);
+        }
 
-extern "C" fn zero_write(
-    _cdev: *mut cdev_t,
-    _user: bool_,
-    _buf: *const c_void,
-    count: usize,
-) -> c_int {
-    count as c_int
+        if !user {
+            // SAFETY: `buf` is caller-provided and valid for `count`
+            // bytes (checked non-null above); a byte-value memset can't
+            // misalign/overrun a correctly-sized destination.
+            unsafe { core::ptr::write_bytes(buf as *mut u8, 0, count) };
+            return Ok(count as c_int);
+        }
+
+        // Zero out in chunks to userspace (matches the C's `static
+        // const char zeros[64]`).
+        const ZEROS: [u8; 64] = [0u8; 64];
+        let mut done: usize = 0;
+        while done < count {
+            let chunk = core::cmp::min(count - done, ZEROS.len());
+            // SAFETY: `either_copyout` validates the userspace
+            // destination range itself; `ZEROS` is a live buffer of at
+            // least `chunk` bytes.
+            let r = either_copyout(1, buf as u64 + done as u64, ZEROS.as_ptr() as *const c_void, chunk as u64);
+            if r < 0 {
+                return if done != 0 { Ok(done as c_int) } else { Err(Errno::Fault) };
+            }
+            done += chunk;
+        }
+        Ok(done as c_int)
+    }
+    /// Writes are discarded like `/dev/null`.
+    unsafe fn write(&self, _cdev: *mut cdev_t, _user: bool, _buf: *const c_void, count: usize)
+        -> KResult<c_int> {
+        Ok(count as c_int)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
-
-static NULL_CDEV_OPS: cdev_ops_t = cdev_ops_t {
-    read: Some(null_read),
-    write: Some(null_write),
-    open: Some(null_open),
-    release: Some(null_release),
-    ioctl: None,
-    poll: None,
-    open_file: None,
-};
-
-static RANDOM_CDEV_OPS: cdev_ops_t = cdev_ops_t {
-    read: Some(random_read),
-    write: Some(random_write),
-    open: Some(random_open),
-    release: Some(random_release),
-    ioctl: None,
-    poll: None,
-    open_file: None,
-};
-
-static ZERO_CDEV_OPS: cdev_ops_t = cdev_ops_t {
-    read: Some(zero_read),
-    write: Some(zero_write),
-    open: Some(zero_open),
-    release: Some(zero_release),
-    ioctl: None,
-    // "/dev/zero is always ready -- handled by fallback" (C comment).
-    poll: None,
-    open_file: None,
-};
 
 /// Every field not set explicitly by [`nullranddevinit`] is
 /// intentionally left zero, matching the C static initializers'
@@ -359,7 +349,7 @@ pub(crate) extern "C" fn nullranddevinit() {
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
         (*cdev).flags.set_readable(1);
         (*cdev).flags.set_writable(1);
-        (*cdev).ops = NULL_CDEV_OPS;
+        (*cdev).ops = Some(&NULL_CDEV_OPS);
         let ret = cdev_register(cdev);
         assert_registered(ret, c"null", c"nullranddevinit");
 
@@ -370,7 +360,7 @@ pub(crate) extern "C" fn nullranddevinit() {
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
         (*cdev).flags.set_readable(1);
         (*cdev).flags.set_writable(1);
-        (*cdev).ops = RANDOM_CDEV_OPS;
+        (*cdev).ops = Some(&RANDOM_CDEV_OPS);
         let ret = cdev_register(cdev);
         assert_registered(ret, c"random", c"nullranddevinit");
 
@@ -381,7 +371,7 @@ pub(crate) extern "C" fn nullranddevinit() {
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
         (*cdev).flags.set_readable(1);
         (*cdev).flags.set_writable(1);
-        (*cdev).ops = ZERO_CDEV_OPS;
+        (*cdev).ops = Some(&ZERO_CDEV_OPS);
         let ret = cdev_register(cdev);
         assert_registered(ret, c"zero", c"nullranddevinit");
     }

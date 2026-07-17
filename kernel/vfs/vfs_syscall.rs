@@ -2640,14 +2640,21 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
                 }
             } else if is_chr(unsafe { (*inode).mode }) {
                 // Character device: delegate to its poll callback if one
-                // is registered, else "always ready".
-                // SAFETY: non-null `f`.
+                // is registered, else "always ready" (P3-10c:
+                // `CdevOps::poll` returns `None` — the default,
+                // mirroring the old `None` table slot — to select the
+                // fallback).
+                // SAFETY: non-null `f`; `cdev` (when non-null) is live
+                // for the duration of this scan (the file holds a
+                // device reference).
                 let cdev: *mut cdev_t = unsafe { (*f).pos.cdev };
-                let cdev_poll = if !cdev.is_null() { unsafe { (*cdev).ops.poll } } else { None };
-                if let Some(cdev_poll_fn) = cdev_poll {
-                    // SAFETY: `cdev` is live; `cdev_poll_fn` is a driver
-                    // callback.
-                    pfd.revents = unsafe { cdev_poll_fn(cdev, pfd.events) } as c_short;
+                let cdev_polled = if !cdev.is_null() {
+                    unsafe { (*cdev).ops.and_then(|o| o.poll(cdev, pfd.events)) }
+                } else {
+                    None
+                };
+                if let Some(revents) = cdev_polled {
+                    pfd.revents = revents as c_short;
                 } else {
                     // SAFETY: non-null `f`.
                     pfd.revents = vfs_poll_always_ready(pfd.events, unsafe { (*f).f_flags });

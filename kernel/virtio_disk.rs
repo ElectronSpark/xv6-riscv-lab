@@ -58,9 +58,9 @@
 //!
 //! # Sleeping-completion protocol with the Rust bufcache/bio layer
 //!
-//! `virtio_disk_rw` is the `blkdev_ops_t.submit_bio` implementation
+//! `virtio_disk_rw` is the [`BlkdevOps::submit_bio`] implementation
 //! ([`virtio_disk_submit_bio`]): it programs the three-descriptor chain
-//! and returns immediately (`0`, meaning "submitted") -- I/O completion
+//! and returns immediately (`Ok`, meaning "submitted") -- I/O completion
 //! is entirely interrupt-driven, signalled to the waiting thread via
 //! [`virtio_disk_intr`]'s [`bio_complete`] call (this file's local
 //! reimplementation of `dev/bio.h`'s `static inline bio_complete`,
@@ -111,9 +111,11 @@ use core::ptr;
 use core::sync::atomic::{compiler_fence, fence, AtomicU32, Ordering};
 
 use crate::bindings::{
-    bio, bio_vec, blkdev_ops_t, blkdev_t, device_t, mode_t, page_t, platform_info, spinlock_t,
+    bio, bio_vec, blkdev_t, device_t, mode_t, page_t, platform_info, spinlock_t,
     thread, tq_t, virtio_blk_req, virtq_avail, virtq_desc, virtq_used, EIO, PGSIZE,
 };
+use crate::dev::blkdev::BlkdevOps;
+use crate::kstd::KResult;
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 // P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached by crate path.
@@ -1023,17 +1025,34 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
 // Block device interface.
 // ===========================================================================
 
-extern "C" fn virtio_disk_open(_blkdev: *mut blkdev_t) -> c_int {
-    0
-}
-extern "C" fn virtio_disk_release(_blkdev: *mut blkdev_t) -> c_int {
-    0
+/// Zero-sized [`BlkdevOps`] implementor for the virtio disks (P3-10c;
+/// was the `static blkdev_ops_t VIRTIO_DISK_OPS` fn-pointer table --
+/// the three former `extern "C"` callbacks are trait methods now).
+struct VirtioDiskOps;
+
+/// The single shared instance `virtio_blkdev_init` installs.
+static VIRTIO_DISK_OPS: VirtioDiskOps = VirtioDiskOps;
+
+impl BlkdevOps for VirtioDiskOps {
+    unsafe fn open(&self, _blkdev: *mut blkdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn release(&self, _blkdev: *mut blkdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
+        virtio_disk_submit_bio(blkdev, bio_ptr);
+        // The old callback unconditionally returned 0 -- I/O completion
+        // (including per-bio errors) is signalled asynchronously via
+        // `bio_complete` from `virtio_disk_intr`.
+        Ok(())
+    }
 }
 
 /// `submit_bio` -- process a block I/O request. Iterates over bio
 /// segments and hands each one to [`virtio_disk_rw`]; completion is
 /// asynchronous (see module doc).
-extern "C" fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) {
     // SAFETY: `blkdev` is one of `VIRTIO_DISK_DEVS`'s entries, registered
     // in `virtio_blkdev_init` below with `minor` = diskno + 1.
     let diskno = (unsafe { (*blkdev).dev.minor } - 1) as usize; // minor 1 -> disk 0, minor 2 -> disk 1
@@ -1084,14 +1103,7 @@ extern "C" fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -
     // I/O has been submitted to the device. Completion (`bio_complete`)
     // is signalled by `virtio_disk_intr` when the device finishes.
     // Callers wait via `bio_await()`.
-    0
 }
-
-static VIRTIO_DISK_OPS: blkdev_ops_t = blkdev_ops_t {
-    open: Some(virtio_disk_open),
-    release: Some(virtio_disk_release),
-    submit_bio: Some(virtio_disk_submit_bio),
-};
 
 fn virtio_blkdev_init(diskno: usize) {
     // SAFETY: `diskno < N_VIRTIO_DISK`, storage 'static.
@@ -1111,7 +1123,7 @@ fn virtio_blkdev_init(diskno: usize) {
         (*dev).flags.set_readable(1);
         (*dev).flags.set_writable(1);
         (*dev).block_shift = 0; // 2^0 * 512 = 512 bytes per block
-        (*dev).ops = VIRTIO_DISK_OPS;
+        (*dev).ops = Some(&VIRTIO_DISK_OPS);
     }
 
     // `dev` fully initialised above.

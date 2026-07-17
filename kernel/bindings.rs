@@ -81,13 +81,12 @@ pub use crate::proc::signal::SigPending as sigpending_t;
 pub use crate::proc::signal::KsigInfo as ksiginfo;
 pub use crate::proc::signal::TgSharedPending as tg_shared_pending;
 pub use crate::proc::signal::SigStack as stack;
-// device layer (P3-N4)
+// device layer (P3-N4; P3-10c: the `*_ops_t` table aliases are gone --
+// `DeviceOps`/`CdevOps`/`BlkdevOps` are Rust traits now, reached by
+// crate path at their implementors)
 pub use crate::dev::dev::DeviceMajor as device_major_t;
-pub use crate::dev::dev::DeviceOps as device_ops_t;
 pub use crate::dev::dev::DeviceInstance as device_t;
-pub use crate::dev::cdev::CdevOps as cdev_ops_t;
 pub use crate::dev::cdev::Cdev as cdev_t;
-pub use crate::dev::blkdev::BlkdevOps as blkdev_ops_t;
 pub use crate::dev::blkdev::Blkdev as blkdev_t;
 pub use crate::dev::bio::BioVec as bio_vec;
 pub use crate::dev::bio::Bio as bio;

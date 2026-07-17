@@ -16,25 +16,26 @@
 //! established per-file convention.
 //!
 //! This is a thin dispatch layer on top of [`super::dev`]'s device-table
-//! core: `blkdev_register()` installs a fixed `device_ops_t` vtable
-//! (`BLKDEV_UNDERLYING_OPS`, no ioctl -- block devices have none) that
-//! forwards `device_t`-level open/release calls into the registrant's own
-//! `blkdev_ops_t` callbacks. `virtio_disk.c`/`ramdisk.c`/`x1_sdhci.c`
-//! (still C) call `blkdev_register`/`blkdev_get`/`blkdev_submit_bio` by
-//! this file's exact symbol names -- their call ABI is unchanged by this
-//! port.
+//! core: `blkdev_register()` installs a fixed [`DeviceOps`] forwarder
+//! (`BLKDEV_DEVICE_OPS`, no ioctl -- block devices have none) that
+//! forwards `device_t`-level open/release calls into the registrant's
+//! own [`BlkdevOps`] trait object (P3-10c: the C-style `blkdev_ops`
+//! fn-pointer table is gone; `kernel/virtio_disk.rs`/`kernel/ramdisk.rs`
+//! /`kernel/dev/x1_sdhci.rs` install ZST trait implementors instead).
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use core::ffi::c_int;
 
 use crate::bindings::{
-    bio, blkdev_ops_t, blkdev_t, device_ops_t, device_t, dev_type_e_DEV_TYPE_BLOCK, EACCES,
-    EINVAL, ENODEV, ENOSYS,
+    bio, blkdev_t, device_t, dev_type_e_DEV_TYPE_BLOCK, EACCES, EINVAL, ENODEV, ENOSYS,
 };
 use crate::kobject::KArc;
+use crate::kstd::{result_to_neg_errno, KResult};
 
-use super::dev::{device_dup, device_get, device_put, device_register, device_unregister};
+use super::dev::{
+    device_dup, device_get, device_put, device_register, device_unregister, DeviceOps,
+};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -65,16 +66,54 @@ use super::bio::bio_validate;
 // `device_t`), so `Blkdev` deliberately has no derives.
 // ---------------------------------------------------------------------------
 
-/// `struct blkdev_ops` (typedef `blkdev_ops_t`,
-/// `kernel/inc/dev/dev_types.h`).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct BlkdevOps {
-    pub open: Option<unsafe extern "C" fn(blkdev: *mut Blkdev) -> c_int>,
-    pub release: Option<unsafe extern "C" fn(blkdev: *mut Blkdev) -> c_int>,
-    pub submit_bio: Option<
-        unsafe extern "C" fn(blkdev: *mut Blkdev, bio: *mut bio) -> c_int,
-    >,
+/// The per-driver block-device operations vtable — wave P3-10c's
+/// replacement for the C-style `struct blkdev_ops` fn-pointer table
+/// (ops-table redesign, following the P3-10a `FileOps` pilot pattern).
+/// Implementors are zero-sized unit structs with a `static` instance
+/// (`VIRTIO_DISK_OPS` in `kernel/virtio_disk.rs`, `RAMDISK_OPS` in
+/// `kernel/ramdisk.rs`, `SDHCI_BLK_OPS` in `kernel/dev/x1_sdhci.rs`)
+/// installed into [`Blkdev::ops`] as `Some(&STATIC)`.
+///
+/// All three methods are *required*: the old `blkdev_ops_validate`
+/// rejected registration unless every slot was `Some`, so a per-slot
+/// `None` never existed on a registered device — the trait makes that
+/// invalid state unrepresentable. "No table at all" (the old null-ops
+/// pointer on a zeroed, unregistered `blkdev_t`) is now
+/// `Blkdev::ops == None`, and [`blkdev_submit_bio`]'s `ENOSYS` guard
+/// keys off exactly that.
+///
+/// Error encoding: `KResult<()>` — `Err(e)` is encoded to the same raw
+/// negative `c_int` the old callbacks returned (via [`Errno::neg`]) at
+/// the dispatch boundaries; drivers wrap already-negative cross-module
+/// results in `Errno::Raw` so every errno value survives verbatim.
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait BlkdevOps: Sync {
+    /// Device open hook, dispatched through the underlying
+    /// `device_t`-level ops when the device table opens this device.
+    ///
+    /// # Safety
+    /// `blkdev` must be the live, registered `Blkdev` this instance was
+    /// installed on.
+    unsafe fn open(&self, blkdev: *mut Blkdev) -> KResult<()>;
+
+    /// Final-teardown hook, dispatched from the kobject release path
+    /// once the device's refcount reaches zero.
+    ///
+    /// # Safety
+    /// Same contract as [`BlkdevOps::open`]; the caller holds the final
+    /// reference.
+    unsafe fn release(&self, blkdev: *mut Blkdev) -> KResult<()>;
+
+    /// Submit a block I/O request. Completion may be asynchronous
+    /// (`bio_complete` from an interrupt handler) or synchronous.
+    ///
+    /// # Safety
+    /// `blkdev` as in [`BlkdevOps::open`]; `bio` must be a live,
+    /// validated bio (`bio_validate` has passed) whose pages remain
+    /// valid until `bio_complete` fires.
+    unsafe fn submit_bio(&self, blkdev: *mut Blkdev, bio: *mut bio) -> KResult<()>;
 }
 
 /// Native replacement for the anonymous C bitfield struct
@@ -110,84 +149,85 @@ impl BlkdevFlagBits {
     }
 }
 
-/// `struct blkdev` (typedef `blkdev_t`, `kernel/inc/dev/dev_types.h`).
+/// `struct blkdev` (typedef `blkdev_t`) — as of wave P3-10c this layout
+/// is NATIVE-OWNED (post-P3-6 there is no bindgen, no wrapper.h, and no
+/// C consumer; `kernel/inc/dev/dev_types.h` no longer constrains it).
+/// The former embedded `blkdev_ops` fn-pointer table is now a real Rust
+/// trait object, `Option<&'static dyn BlkdevOps>` (a 16-byte fat
+/// pointer; `None` = the zeroed/unregistered state — valid via the
+/// null-data-pointer niche, same reasoning as P3-10b's zeroed root
+/// dummy).
 #[repr(C)]
 pub struct Blkdev {
     pub dev: device_t,
     pub flags: BlkdevFlagBits,
     pub block_shift: crate::bindings::uint16,
-    pub ops: BlkdevOps,
+    pub ops: Option<&'static dyn BlkdevOps>,
 }
 
-// P3-N4 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
-// blkdev_ops { open, release, submit_bio }` (all `Option<unsafe extern
-// "C" fn ...>`), `pub struct blkdev { dev: device_t, __bindgen_anon_1:
-// blkdev__bindgen_ty_1, block_shift: uint16, ops: blkdev_ops_t }`) and
-// independently confirmed by a riscv64-unknown-elf-gcc `_Static_assert`
-// probe (rv64gc/lp64d) against `kernel/inc/dev/dev_types.h` — see the
-// P3-N4 wave record: blkdev_ops 24/8 offsets 0/8/16, blkdev 136/8
-// offsets 0/[96]/104/112 (the anonymous bitfield struct occupies
-// [96,104)).
+// P3-10c layout facts — NATIVE-OWNED, no C mirror exists (bindgen,
+// wrapper.h, and every C consumer are gone; these asserts document the
+// invariants the code actually leans on rather than pinning to a
+// header). Kept: `dev` at offset 0 (every `*mut device_t` <-> `*mut
+// blkdev_t` cast in this file is a plain offset-0 reinterpretation) and
+// the niche-optimized `Option<&'static dyn BlkdevOps>` staying a plain
+// fat pointer (16/8, all-zero bytes == `None` — the zeroed-storage
+// registration precondition). Deleted: the stale P3-N4 C-fidelity
+// size/offset pins for the moved fields and the whole `blkdev_ops`
+// table block (the table type itself no longer exists).
 const _: () = {
-    assert!(core::mem::size_of::<BlkdevOps>() == 24, "blkdev_ops size");
-    assert!(core::mem::align_of::<BlkdevOps>() == 8, "blkdev_ops alignment");
-    assert!(core::mem::offset_of!(BlkdevOps, open) == 0, "blkdev_ops.open offset");
-    assert!(core::mem::offset_of!(BlkdevOps, release) == 8, "blkdev_ops.release offset");
-    assert!(core::mem::offset_of!(BlkdevOps, submit_bio) == 16, "blkdev_ops.submit_bio offset");
     assert!(core::mem::size_of::<BlkdevFlagBits>() == 8, "blkdev anon bitfield size");
     assert!(core::mem::align_of::<BlkdevFlagBits>() == 8, "blkdev anon bitfield alignment");
-    assert!(core::mem::size_of::<Blkdev>() == 136, "blkdev size");
     assert!(core::mem::align_of::<Blkdev>() == 8, "blkdev alignment");
-    assert!(core::mem::offset_of!(Blkdev, dev) == 0, "blkdev.dev offset");
-    assert!(core::mem::offset_of!(Blkdev, flags) == 96, "blkdev anon bitfield offset");
-    assert!(core::mem::offset_of!(Blkdev, block_shift) == 104, "blkdev.block_shift offset");
-    assert!(core::mem::offset_of!(Blkdev, ops) == 112, "blkdev.ops offset");
+    assert!(core::mem::offset_of!(Blkdev, dev) == 0, "blkdev.dev offset (cast invariant)");
+    assert!(
+        core::mem::size_of::<Option<&'static dyn BlkdevOps>>() == 16,
+        "blkdev ops fat pointer size"
+    );
+    assert!(
+        core::mem::align_of::<Option<&'static dyn BlkdevOps>>() == 8,
+        "blkdev ops fat pointer alignment"
+    );
 };
 
 // ---------------------------------------------------------------------------
-// Underlying device_ops_t vtable: forwards device_t-level calls into the
-// registrant's blkdev_ops_t. Block devices have no ioctl (`.ioctl: None`,
-// matching the C's `{ .open = ..., .release = ... }` designated
-// initializer, which leaves `.ioctl` implicitly NULL).
+// Underlying `DeviceOps` forwarder: forwards device_t-level calls into
+// the registrant's `BlkdevOps` trait object. Block devices have no
+// ioctl -- the trait default (`None` -> dev_ioctl's `ENOTTY` fallback)
+// reproduces the old table's implicitly-NULL `.ioctl` slot.
 // ---------------------------------------------------------------------------
 
-extern "C" fn underlying_dev_open(dev: *mut device_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    let blkdev = dev as *mut blkdev_t;
-    // SAFETY: `dev` is `blkdev_t`'s first field (offset 0) -- exact cast,
-    // matching the C `(blkdev_t *)dev`; `blkdev_register()`'s
-    // `blkdev_ops_validate` guarantees `.ops.open` is `Some` before
-    // registration can succeed.
-    unsafe { (*blkdev).ops.open.unwrap()(blkdev) }
-}
+/// Zero-sized [`DeviceOps`] forwarder installed on every registered
+/// blkdev's underlying `device_t` (P3-10c; was the fixed
+/// `BLKDEV_UNDERLYING_OPS` `device_ops_t` vtable of `extern "C"`
+/// trampolines). Every `*mut device_t` here is really the first field
+/// of a `blkdev_t` (offset 0 -- exact cast, matching the C
+/// `(blkdev_t *)dev`).
+struct BlkdevDeviceOps;
 
-extern "C" fn underlying_dev_release(dev: *mut device_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    let blkdev = dev as *mut blkdev_t;
-    // SAFETY: see `underlying_dev_open`; `.ops.release` is likewise
-    // guaranteed `Some` by `blkdev_ops_validate`.
-    unsafe { (*blkdev).ops.release.unwrap()(blkdev) }
-}
+/// The single shared instance `blkdev_register` installs.
+static BLKDEV_DEVICE_OPS: BlkdevDeviceOps = BlkdevDeviceOps;
 
-static BLKDEV_UNDERLYING_OPS: device_ops_t = device_ops_t {
-    open: Some(underlying_dev_open),
-    release: Some(underlying_dev_release),
-    ioctl: None,
-};
-
-fn blkdev_ops_validate(ops: *const blkdev_ops_t) -> bool {
-    if ops.is_null() {
-        return false;
+impl DeviceOps for BlkdevDeviceOps {
+    unsafe fn open(&self, dev: *mut device_t) -> KResult<()> {
+        let blkdev = dev as *mut blkdev_t;
+        // SAFETY: dispatch contract (`dev` live, registered) -- `.ops`
+        // is `Some` on any registered blkdev (`blkdev_register`'s
+        // check; the trait makes per-slot absence unrepresentable).
+        let ops = unsafe { (*blkdev).ops }.expect("blkdev: registered device without ops");
+        // SAFETY: `blkdev` is the live, registered device this instance
+        // was installed on -- exactly `BlkdevOps::open`'s contract.
+        unsafe { ops.open(blkdev) }
     }
-    // SAFETY: caller (blkdev_register) guarantees `ops` points at the
-    // live, embedded `dev->ops` field of a caller-owned `blkdev_t`.
-    let ops = unsafe { &*ops };
-    ops.open.is_some() && ops.release.is_some() && ops.submit_bio.is_some()
+
+    unsafe fn release(&self, dev: *mut device_t) -> KResult<()> {
+        let blkdev = dev as *mut blkdev_t;
+        // SAFETY: see `open` above.
+        let ops = unsafe { (*blkdev).ops }.expect("blkdev: registered device without ops");
+        // SAFETY: kobject-release contract -- the caller holds the
+        // final reference; `blkdev` is live for this call.
+        unsafe { ops.release(blkdev) }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,9 +287,13 @@ pub(crate) extern "C" fn blkdev_register(dev: *mut blkdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
-    // SAFETY: `dev` is caller-provided; reading `.ops`'s address is a
-    // plain field-address computation on caller-owned data.
-    if !blkdev_ops_validate(unsafe { &raw const (*dev).ops }) {
+    // Ops validation (was `blkdev_ops_validate`): the old per-slot
+    // `Some` checks are unrepresentable-by-construction now that all
+    // three methods are required trait methods -- only "no table at
+    // all" remains rejectable.
+    // SAFETY: `dev` is caller-provided; reading `.ops` is a plain field
+    // read of caller-owned data.
+    if unsafe { (*dev).ops }.is_none() {
         return neg(EINVAL);
     }
     let device = dev as *mut device_t;
@@ -257,7 +301,7 @@ pub(crate) extern "C" fn blkdev_register(dev: *mut blkdev_t) -> c_int {
     // (device_register is the point of publication).
     unsafe {
         (*device).type_ = dev_type_e_DEV_TYPE_BLOCK;
-        (*device).ops = BLKDEV_UNDERLYING_OPS;
+        (*device).ops = Some(&BLKDEV_DEVICE_OPS);
     }
     device_register(device)
 }
@@ -288,9 +332,11 @@ pub(crate) extern "C" fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut 
         if (*blkdev).dev.type_ != dev_type_e_DEV_TYPE_BLOCK {
             return neg(ENODEV);
         }
-        if (*blkdev).ops.submit_bio.is_none() {
+        // A missing table is the old "submit_bio slot `None`" state (a
+        // registered device always has `Some` ops) -- same `ENOSYS`.
+        let Some(ops) = (*blkdev).ops else {
             return neg(ENOSYS);
-        }
+        };
         let rw = (*bio_ptr).flags.rw() != 0;
         let writable = (*blkdev).flags.writable() != 0;
         let readable = (*blkdev).flags.readable() != 0;
@@ -307,6 +353,9 @@ pub(crate) extern "C" fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut 
             return ret;
         }
 
-        (*blkdev).ops.submit_bio.unwrap()(blkdev, bio_ptr)
+        // SAFETY: `bio_validate` just passed and the caller keeps `bio`
+        // live until completion -- exactly `BlkdevOps::submit_bio`'s
+        // contract.
+        result_to_neg_errno(ops.submit_bio(blkdev, bio_ptr))
     }
 }

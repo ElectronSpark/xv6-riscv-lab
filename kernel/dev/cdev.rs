@@ -8,25 +8,27 @@
 //! needed, same reasoning as `kernel/dev/dev.rs`'s kobject-release cast).
 //!
 //! This is a thin dispatch layer on top of [`super::dev`]'s device-table
-//! core: `cdev_register()` installs a fixed `device_ops_t` vtable
-//! (`CDEV_UNDERLYING_OPS`) that forwards `device_t`-level open/release/
-//! ioctl calls into the registrant's own `cdev_ops_t` callbacks. Every
-//! Rust cdev registrant (`kernel/console.rs`, `kernel/tty/tty_dev.rs`,
-//! `kernel/tty/ptmx.rs`) calls `cdev_register`/`cdev_get`/`cdev_put` by
-//! this file's exact symbol names -- their call ABI is unchanged by this
-//! port.
+//! core: `cdev_register()` installs a fixed [`DeviceOps`] forwarder
+//! (`CDEV_DEVICE_OPS`) that forwards `device_t`-level open/release/
+//! ioctl calls into the registrant's own [`CdevOps`] trait object
+//! (P3-10c: the C-style `cdev_ops` fn-pointer table is gone; every
+//! registrant -- `kernel/console.rs`, `kernel/tty/tty_dev.rs`,
+//! `kernel/tty/ptmx.rs`, `kernel/dev/nullrand.rs` -- installs a ZST
+//! trait implementor instead).
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use core::ffi::{c_int, c_void};
 
 use crate::bindings::{
-    bool_, cdev_ops_t, cdev_t, device_ops_t, device_t, dev_type_e_DEV_TYPE_CHAR, EINVAL, ENODEV,
-    ENOSYS,
+    bool_, cdev_t, device_t, dev_type_e_DEV_TYPE_CHAR, EINVAL, ENODEV, ENOSYS,
 };
 use crate::kobject::KArc;
+use crate::kstd::{Errno, KResult};
 
-use super::dev::{device_dup, device_get, device_put, device_register, device_unregister};
+use super::dev::{
+    device_dup, device_get, device_put, device_register, device_unregister, DeviceOps,
+};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -55,41 +57,112 @@ use crate::kstd::{err_ptr, is_err};
 // the non-Copy `device_t`), so `Cdev` deliberately has no derives.
 // ---------------------------------------------------------------------------
 
-/// `struct cdev_ops` (typedef `cdev_ops_t`, `kernel/inc/dev/dev_types.h`).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct CdevOps {
-    pub read: Option<
-        unsafe extern "C" fn(
-            cdev: *mut Cdev,
-            user: bool_,
-            buf: *mut c_void,
-            count: usize,
-        ) -> c_int,
-    >,
-    pub write: Option<
-        unsafe extern "C" fn(
-            cdev: *mut Cdev,
-            user: bool_,
-            buf: *const c_void,
-            count: usize,
-        ) -> c_int,
-    >,
-    pub open: Option<unsafe extern "C" fn(cdev: *mut Cdev) -> c_int>,
-    pub release: Option<unsafe extern "C" fn(cdev: *mut Cdev) -> c_int>,
-    pub ioctl: Option<
-        unsafe extern "C" fn(
-            cdev: *mut Cdev,
-            cmd: crate::bindings::uint64,
-            arg: *mut c_void,
-        ) -> c_int,
-    >,
-    pub poll: Option<
-        unsafe extern "C" fn(cdev: *mut Cdev, events: ::core::ffi::c_short) -> c_int,
-    >,
-    pub open_file: Option<
-        unsafe extern "C" fn(cdev: *mut Cdev, file: *mut crate::bindings::vfs_file) -> c_int,
-    >,
+/// The per-driver character-device operations vtable — wave P3-10c's
+/// replacement for the C-style `struct cdev_ops` fn-pointer table
+/// (ops-table redesign, following the P3-10a `FileOps` pilot pattern).
+/// Implementors are zero-sized unit structs with a `static` instance
+/// (`CONSOLE_CDEV_OPS` in `kernel/console.rs`, `TTY_CDEV_OPS` in
+/// `kernel/tty/tty_dev.rs`, `NULL/RANDOM/ZERO_CDEV_OPS` in
+/// `kernel/dev/nullrand.rs`, `PTS/PTMX_CDEV_OPS` in
+/// `kernel/tty/ptmx.rs`) installed into [`Cdev::ops`] as
+/// `Some(&STATIC)`.
+///
+/// Slot-nullability mapping (each old `Option<fn>` slot's `None`
+/// dispatch behavior is preserved exactly):
+///
+/// * `open`/`release` — required methods: the old `cdev_opts_validate`
+///   rejected registration unless both were `Some`, so "table present
+///   but slot `None`" never existed on a registered device.
+/// * `read`/`write` — default `Err(Errno::NoSys)`: exactly what
+///   [`cdev_read`]/[`cdev_write`] returned for a `None` slot (the
+///   ptmx/pts cdevs, whose I/O goes through `FileOps` instead, are the
+///   live users of this default).
+/// * `ioctl` — default `Err(Errno::NoSys)`: exactly the old
+///   `underlying_dev_ioctl` `None`-slot return. `Ok(n)` is the raw
+///   non-negative driver result; already-negative cross-module results
+///   ride in `Errno::Raw` so every value crosses the `device_t`-level
+///   dispatch verbatim.
+/// * `poll` — returns `Option<c_int>` (tri-state, mirrors
+///   `FileOps::poll`): `None` means "op not provided" and selects
+///   `vfs_poll_scan`'s always-ready fallback, which a sentinel `Errno`
+///   could not represent without conflating it with a driver result.
+/// * `open_file` — returns `Option<c_int>` (tri-state): `None` selects
+///   `open_cdev`'s direct-device-I/O fallback (`file->ops = None`,
+///   VFS stores the cdev); `Some(0)` means the driver took over the
+///   file (it may have installed `file->ops`); `Some(neg)` is the
+///   driver's raw failure, returned to the opener as-is.
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait CdevOps: Sync {
+    /// Device open hook, dispatched through the underlying
+    /// `device_t`-level ops.
+    ///
+    /// # Safety
+    /// `cdev` must be the live, registered `Cdev` this instance was
+    /// installed on.
+    unsafe fn open(&self, cdev: *mut Cdev) -> KResult<()>;
+
+    /// Final-teardown hook, dispatched from the kobject release path
+    /// once the device's refcount reaches zero.
+    ///
+    /// # Safety
+    /// Same contract as [`CdevOps::open`]; the caller holds the final
+    /// reference.
+    unsafe fn release(&self, cdev: *mut Cdev) -> KResult<()>;
+
+    /// Read up to `count` bytes into `buf` (a user VA when `user`).
+    /// `Ok(n)` is the byte count actually read.
+    ///
+    /// # Safety
+    /// `cdev` as in [`CdevOps::open`]; `buf` must be valid for `count`
+    /// bytes in the `user`-selected address space. May sleep.
+    unsafe fn read(&self, _cdev: *mut Cdev, _user: bool, _buf: *mut c_void, _count: usize)
+        -> KResult<c_int> {
+        Err(Errno::NoSys) // Read op not provided (old `None`-slot behavior).
+    }
+
+    /// Write up to `count` bytes from `buf` (a user VA when `user`).
+    /// `Ok(n)` is the byte count actually written.
+    ///
+    /// # Safety
+    /// Same contract as [`CdevOps::read`].
+    unsafe fn write(&self, _cdev: *mut Cdev, _user: bool, _buf: *const c_void, _count: usize)
+        -> KResult<c_int> {
+        Err(Errno::NoSys) // Write op not provided (old `None`-slot behavior).
+    }
+
+    /// Driver ioctl. `Ok(n)` is the raw non-negative result passed
+    /// through to the caller exactly as the old fn-pointer result was.
+    ///
+    /// # Safety
+    /// `cdev` as in [`CdevOps::open`]; `arg`'s validity is
+    /// `cmd`-specific.
+    unsafe fn ioctl(&self, _cdev: *mut Cdev, _cmd: u64, _arg: *mut c_void) -> KResult<c_int> {
+        Err(Errno::NoSys) // Ioctl op not provided (old `None`-slot behavior).
+    }
+
+    /// Poll for readiness: `Some(revents)` if this driver implements
+    /// polling, `None` to let `vfs_poll_scan` fall back to
+    /// always-ready.
+    ///
+    /// # Safety
+    /// `cdev` as in [`CdevOps::open`].
+    unsafe fn poll(&self, _cdev: *mut Cdev, _events: ::core::ffi::c_short) -> Option<c_int> {
+        None
+    }
+
+    /// File-open takeover hook: `Some(ret)` if this driver handles the
+    /// open itself (see the trait doc for the `ret` contract), `None`
+    /// to let `open_cdev` fall back to direct device I/O.
+    ///
+    /// # Safety
+    /// `cdev` as in [`CdevOps::open`]; `file` must be the live,
+    /// not-yet-published `vfs_file` being opened.
+    unsafe fn open_file(&self, _cdev: *mut Cdev, _file: *mut crate::bindings::vfs_file)
+        -> Option<c_int> {
+        None
+    }
 }
 
 /// Native replacement for the anonymous C bitfield struct
@@ -125,103 +198,105 @@ impl CdevFlagBits {
     }
 }
 
-/// `struct cdev` (typedef `cdev_t`, `kernel/inc/dev/dev_types.h`).
+/// `struct cdev` (typedef `cdev_t`) — as of wave P3-10c this layout is
+/// NATIVE-OWNED (post-P3-6 there is no bindgen, no wrapper.h, and no C
+/// consumer; `kernel/inc/dev/dev_types.h` no longer constrains it).
+/// The former embedded `cdev_ops` fn-pointer table is now a real Rust
+/// trait object, `Option<&'static dyn CdevOps>` (a 16-byte fat pointer;
+/// `None` = the zeroed/unregistered state — valid via the
+/// null-data-pointer niche, same reasoning as P3-10b's zeroed root
+/// dummy).
 #[repr(C)]
 pub struct Cdev {
     pub dev: device_t,
     pub flags: CdevFlagBits,
-    pub ops: CdevOps,
+    pub ops: Option<&'static dyn CdevOps>,
 }
 
-// P3-N4 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
-// cdev_ops { read, write, open, release, ioctl, poll, open_file }` (all
-// `Option<unsafe extern "C" fn ...>`), `pub struct cdev { dev: device_t,
-// __bindgen_anon_1: cdev__bindgen_ty_1, ops: cdev_ops_t }`) and
-// independently confirmed by a riscv64-unknown-elf-gcc `_Static_assert`
-// probe (rv64gc/lp64d) against `kernel/inc/dev/dev_types.h` — see the
-// P3-N4 wave record: cdev_ops 56/8 offsets 0/8/16/24/32/40/48, cdev
-// 160/8 offsets 0/[96]/104 (the anonymous bitfield struct occupies
-// [96,104), pinned in the probe by its predecessor plus the `ops`
-// offset).
+// P3-10c layout facts — NATIVE-OWNED, no C mirror exists (bindgen,
+// wrapper.h, and every C consumer are gone; these asserts document the
+// invariants the code actually leans on rather than pinning to a
+// header). Kept: `dev` at offset 0 (every `*mut device_t` <-> `*mut
+// cdev_t` cast in this file is a plain offset-0 reinterpretation) and
+// the niche-optimized `Option<&'static dyn CdevOps>` staying a plain
+// fat pointer (16/8, all-zero bytes == `None` — the zeroed-storage
+// registration precondition). Deleted: the stale P3-N4 C-fidelity
+// size/offset pins for the moved fields and the whole `cdev_ops` table
+// block (the table type itself no longer exists).
 const _: () = {
-    assert!(core::mem::size_of::<CdevOps>() == 56, "cdev_ops size");
-    assert!(core::mem::align_of::<CdevOps>() == 8, "cdev_ops alignment");
-    assert!(core::mem::offset_of!(CdevOps, read) == 0, "cdev_ops.read offset");
-    assert!(core::mem::offset_of!(CdevOps, write) == 8, "cdev_ops.write offset");
-    assert!(core::mem::offset_of!(CdevOps, open) == 16, "cdev_ops.open offset");
-    assert!(core::mem::offset_of!(CdevOps, release) == 24, "cdev_ops.release offset");
-    assert!(core::mem::offset_of!(CdevOps, ioctl) == 32, "cdev_ops.ioctl offset");
-    assert!(core::mem::offset_of!(CdevOps, poll) == 40, "cdev_ops.poll offset");
-    assert!(core::mem::offset_of!(CdevOps, open_file) == 48, "cdev_ops.open_file offset");
     assert!(core::mem::size_of::<CdevFlagBits>() == 8, "cdev anon bitfield size");
     assert!(core::mem::align_of::<CdevFlagBits>() == 8, "cdev anon bitfield alignment");
-    assert!(core::mem::size_of::<Cdev>() == 160, "cdev size");
     assert!(core::mem::align_of::<Cdev>() == 8, "cdev alignment");
-    assert!(core::mem::offset_of!(Cdev, dev) == 0, "cdev.dev offset");
-    assert!(core::mem::offset_of!(Cdev, flags) == 96, "cdev anon bitfield offset");
-    assert!(core::mem::offset_of!(Cdev, ops) == 104, "cdev.ops offset");
+    assert!(core::mem::offset_of!(Cdev, dev) == 0, "cdev.dev offset (cast invariant)");
+    assert!(
+        core::mem::size_of::<Option<&'static dyn CdevOps>>() == 16,
+        "cdev ops fat pointer size"
+    );
+    assert!(
+        core::mem::align_of::<Option<&'static dyn CdevOps>>() == 8,
+        "cdev ops fat pointer alignment"
+    );
 };
 
 // ---------------------------------------------------------------------------
-// Underlying device_ops_t vtable: forwards device_t-level calls into the
-// registrant's cdev_ops_t.
+// Underlying `DeviceOps` forwarder: forwards device_t-level calls into
+// the registrant's `CdevOps` trait object.
 // ---------------------------------------------------------------------------
 
-extern "C" fn underlying_dev_open(dev: *mut device_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    let cdev = dev as *mut cdev_t;
-    // SAFETY: `dev` is `cdev_t`'s first field (offset 0) -- exact cast,
-    // matching the C `(cdev_t *)dev`; `cdev_register()`'s
-    // `cdev_opts_validate` guarantees `.ops.open` is `Some` before
-    // registration can succeed, so this device_ops_t.open is only ever
-    // installed on a genuinely open-capable cdev.
-    unsafe { (*cdev).ops.open.unwrap()(cdev) }
-}
+/// Zero-sized [`DeviceOps`] forwarder installed on every registered
+/// cdev's underlying `device_t` (P3-10c; was the fixed
+/// `CDEV_UNDERLYING_OPS` `device_ops_t` vtable of `extern "C"`
+/// trampolines). Every `*mut device_t` here is really the first field
+/// of a `cdev_t` (offset 0 -- exact cast, matching the C
+/// `(cdev_t *)dev`).
+struct CdevDeviceOps;
 
-extern "C" fn underlying_dev_release(dev: *mut device_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    let cdev = dev as *mut cdev_t;
-    // SAFETY: see `underlying_dev_open`; `.ops.release` is likewise
-    // guaranteed `Some` by `cdev_opts_validate`.
-    unsafe { (*cdev).ops.release.unwrap()(cdev) }
-}
+/// The single shared instance `cdev_register` installs.
+static CDEV_DEVICE_OPS: CdevDeviceOps = CdevDeviceOps;
 
-extern "C" fn underlying_dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
+impl DeviceOps for CdevDeviceOps {
+    unsafe fn open(&self, dev: *mut device_t) -> KResult<()> {
+        let cdev = dev as *mut cdev_t;
+        // SAFETY: dispatch contract (`dev` live, registered) -- `.ops`
+        // is `Some` on any registered cdev (`cdev_register`'s check);
+        // open/release are required trait methods, so per-slot absence
+        // is unrepresentable.
+        let ops = unsafe { (*cdev).ops }.expect("cdev: registered device without ops");
+        // SAFETY: `cdev` is the live, registered device this instance
+        // was installed on -- exactly `CdevOps::open`'s contract.
+        unsafe { ops.open(cdev) }
     }
-    let cdev = dev as *mut cdev_t;
-    // SAFETY: `dev` is `cdev_t`'s first field; `.ops.ioctl` is read as a
-    // plain `Option`, branched on below (ioctl is optional, unlike
-    // open/release).
-    let ioctl = unsafe { (*cdev).ops.ioctl };
-    match ioctl {
-        None => neg(ENOSYS),
-        // SAFETY: `f` is a valid C-ABI function pointer from the
-        // registrant's own `cdev_ops_t`; `cdev` is the same live pointer.
-        Some(f) => unsafe { f(cdev, cmd, arg) },
-    }
-}
 
-static CDEV_UNDERLYING_OPS: device_ops_t = device_ops_t {
-    open: Some(underlying_dev_open),
-    release: Some(underlying_dev_release),
-    ioctl: Some(underlying_dev_ioctl),
-};
-
-fn cdev_opts_validate(ops: *const cdev_ops_t) -> bool {
-    if ops.is_null() {
-        return false;
+    unsafe fn release(&self, dev: *mut device_t) -> KResult<()> {
+        let cdev = dev as *mut cdev_t;
+        // SAFETY: see `open` above.
+        let ops = unsafe { (*cdev).ops }.expect("cdev: registered device without ops");
+        // SAFETY: kobject-release contract -- the caller holds the
+        // final reference; `cdev` is live for this call.
+        unsafe { ops.release(cdev) }
     }
-    // SAFETY: caller (cdev_register) guarantees `ops` points at the
-    // live, embedded `dev->ops` field of a caller-owned `cdev_t`.
-    let ops = unsafe { &*ops };
-    ops.open.is_some() && ops.release.is_some()
+
+    unsafe fn ioctl(&self, dev: *mut device_t, cmd: u64, arg: *mut c_void) -> Option<c_int> {
+        let cdev = dev as *mut cdev_t;
+        // SAFETY: dispatch contract; reading `.ops` is a plain field
+        // read. A `None` table can't occur on a registered cdev, but
+        // `neg(ENOSYS)` (the trait default's value) keeps the old
+        // `None`-slot behavior for a hypothetical torn-down device.
+        let Some(ops) = (unsafe { (*cdev).ops }) else {
+            return Some(neg(ENOSYS));
+        };
+        // SAFETY: `cdev` is the live device being dispatched on;
+        // `arg`'s validity is forwarded from `dev_ioctl`'s contract.
+        // `Ok(n)`/`Err(Raw(n))` re-encode to the exact `c_int` the old
+        // fn-pointer returned; the default method's `Err(NoSys)` is the
+        // old `None`-slot `neg(ENOSYS)` (deliberately `Some(..)` here,
+        // NOT the device-level `ENOTTY` fallback -- cdevs always
+        // provided a device-level ioctl trampoline).
+        Some(match unsafe { ops.ioctl(cdev, cmd, arg) } {
+            Ok(n) => n,
+            Err(e) => e.neg(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,9 +359,13 @@ pub(crate) extern "C" fn cdev_register(dev: *mut cdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
-    // SAFETY: `dev` is caller-provided; reading `.ops`'s address is a
-    // plain field-address computation on caller-owned data.
-    if !cdev_opts_validate(unsafe { &raw const (*dev).ops }) {
+    // Ops validation (was `cdev_opts_validate`): the old open/release
+    // `Some` checks are unrepresentable-by-construction now that both
+    // are required trait methods -- only "no table at all" remains
+    // rejectable.
+    // SAFETY: `dev` is caller-provided; reading `.ops` is a plain field
+    // read of caller-owned data.
+    if unsafe { (*dev).ops }.is_none() {
         return neg(EINVAL); // invalid character device operations
     }
     let device = dev as *mut device_t;
@@ -294,7 +373,7 @@ pub(crate) extern "C" fn cdev_register(dev: *mut cdev_t) -> c_int {
     // is the point of publication).
     unsafe {
         (*device).type_ = dev_type_e_DEV_TYPE_CHAR;
-        (*device).ops = CDEV_UNDERLYING_OPS; // set underlying device operations
+        (*device).ops = Some(&CDEV_DEVICE_OPS); // set underlying device operations
     }
     device_register(device)
 }
@@ -321,10 +400,18 @@ pub(crate) extern "C" fn cdev_read(cdev: *mut cdev_t, user: bool_, buf: *mut c_v
         if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
             return neg(ENODEV); // not a character device
         }
-        if (*cdev).flags.readable() == 0 || (*cdev).ops.read.is_none() {
+        // A missing table and the trait's default `Err(NoSys)` `read`
+        // both reproduce the old `None`-slot `neg(ENOSYS)`.
+        if (*cdev).flags.readable() == 0 {
             return neg(ENOSYS); // read operation not supported
         }
-        (*cdev).ops.read.unwrap()(cdev, user, buf, count)
+        let Some(ops) = (*cdev).ops else {
+            return neg(ENOSYS);
+        };
+        match ops.read(cdev, user != 0, buf, count) {
+            Ok(n) => n,
+            Err(e) => e.neg(),
+        }
     }
 }
 
@@ -344,9 +431,17 @@ pub(crate) extern "C" fn cdev_write(
         if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
             return neg(ENODEV); // not a character device
         }
-        if (*cdev).flags.writable() == 0 || (*cdev).ops.write.is_none() {
+        // Same `None`-table / default-`Err(NoSys)` mapping as
+        // `cdev_read`.
+        if (*cdev).flags.writable() == 0 {
             return neg(ENOSYS); // write operation not supported
         }
-        (*cdev).ops.write.unwrap()(cdev, user, buf, count)
+        let Some(ops) = (*cdev).ops else {
+            return neg(ENOSYS);
+        };
+        match ops.write(cdev, user != 0, buf, count) {
+            Ok(n) => n,
+            Err(e) => e.neg(),
+        }
     }
 }

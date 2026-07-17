@@ -32,7 +32,7 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
-use crate::bindings::{cdev_ops_t, cdev_t, mode_t, slab_cache_t, spinlock_t, tty, vfs_file, vfs_inode};
+use crate::bindings::{cdev_t, mode_t, slab_cache_t, spinlock_t, tty, vfs_file, vfs_inode};
 use crate::sync::KSpinlock;
 
 // P3-10a: the file-ops tables are `FileOps` trait implementors now
@@ -46,7 +46,7 @@ use super::tty::load_acquire_u32;
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signatures are
 // identical, so these become plain crate-path imports instead of `extern
 // "C"` redeclarations.
-use crate::dev::cdev::{cdev_register, cdev_unregister};
+use crate::dev::cdev::{cdev_register, cdev_unregister, CdevOps};
 
 // ===========================================================================
 // Externs.
@@ -380,11 +380,40 @@ impl FileOps for PtsSlaveFileOps {
 // `/dev/pts/N` -- cdev (`open_file` installs the `FileOps` above).
 // ===========================================================================
 
-/// Called by `__vfs_open_cdev`. Installs the slave file ops on the
-/// `vfs_file` so that the VFS manages the fd lifecycle. The cdev
-/// kobject ref is released by `__vfs_open_cdev` immediately after this
-/// returns (because we set `file->ops`).
-unsafe extern "C" fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
+/// Zero-sized [`CdevOps`] implementor for the per-pair `/dev/pts/N`
+/// slave cdevs (P3-10c; was a per-pair-written `cdev_ops_t` struct
+/// whose contents were constant -- now one immutable shared `Sync`
+/// static; the old `None` slots `read`/`write`/`ioctl`/`poll` are not
+/// overridden, the trait defaults reproduce their null-slot dispatch
+/// outcomes exactly -- slave I/O goes through `FileOps` instead).
+struct PtsCdevOps;
+
+/// The single shared instance `ptmx_open_file` installs on every
+/// freshly-allocated pair's `slave_cdev`.
+static PTS_CDEV_OPS: PtsCdevOps = PtsCdevOps;
+
+impl CdevOps for PtsCdevOps {
+    /// cdev open/release are no-ops; lifecycle is via `FileOps`.
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn open_file(&self, cdev: *mut cdev_t, file: *mut vfs_file) -> Option<c_int> {
+        // SAFETY: dispatch contract (`open_cdev`) -- `cdev`/`file` are
+        // both live; `cdev` is a `pair.slave_cdev` (the only cdev this
+        // implementor is ever installed on).
+        Some(unsafe { pts_open_file(cdev, file) })
+    }
+}
+
+/// Called by `__vfs_open_cdev` (via [`PtsCdevOps::open_file`]).
+/// Installs the slave file ops on the `vfs_file` so that the VFS
+/// manages the fd lifecycle. The cdev kobject ref is released by
+/// `__vfs_open_cdev` immediately after this returns (because we set
+/// `file->ops`).
+unsafe fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
     // SAFETY: `cdev` is caller-guaranteed to be `&pair.slave_cdev` for
     // some live `PtyPair` (the only cdev this callback is ever
     // installed on, in `ptmx_open_file` below).
@@ -417,13 +446,6 @@ unsafe extern "C" fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_
     0
 }
 
-/// cdev open/release are no-ops; lifecycle is via `FileOps`.
-unsafe extern "C" fn pts_cdev_open(_cdev: *mut cdev_t) -> c_int {
-    0
-}
-unsafe extern "C" fn pts_cdev_release(_cdev: *mut cdev_t) -> c_int {
-    0
-}
 
 // ===========================================================================
 // PTY master -- `FileOps` implementor (installed by `ptmx` `open_file`).
@@ -569,7 +591,29 @@ fn ptmx_fops_poll(file: *mut vfs_file, events: c_short) -> c_int {
 // `/dev/ptmx` -- character device (`open_file` allocates a PTY pair).
 // ===========================================================================
 
-unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
+/// Zero-sized [`CdevOps`] implementor for `/dev/ptmx` (P3-10c; same
+/// conversion note as [`PtsCdevOps`] -- `open_file` does the real
+/// work, cdev open/release are no-ops).
+struct PtmxCdevOps;
+
+/// The single shared instance `ptmxinit` installs.
+static PTMX_CDEV_OPS: PtmxCdevOps = PtmxCdevOps;
+
+impl CdevOps for PtmxCdevOps {
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        Ok(())
+    }
+    unsafe fn open_file(&self, cdev: *mut cdev_t, file: *mut vfs_file) -> Option<c_int> {
+        // SAFETY: dispatch contract (`open_cdev`) -- `cdev`/`file` are
+        // both live.
+        Some(unsafe { ptmx_open_file(cdev, file) })
+    }
+}
+
+unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
     // Allocate a PTY index -- reuse freed slots.
     let idx: i32;
     {
@@ -637,15 +681,7 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
         (*pair).slave_cdev.dev.minor = dev_minor;
         (*pair).slave_cdev.flags.set_readable(1);
         (*pair).slave_cdev.flags.set_writable(1);
-        (*pair).slave_cdev.ops = cdev_ops_t {
-            read: None,
-            write: None,
-            open: Some(pts_cdev_open),
-            release: Some(pts_cdev_release),
-            ioctl: None,
-            poll: None,
-            open_file: Some(pts_open_file),
-        };
+        (*pair).slave_cdev.ops = Some(&PTS_CDEV_OPS);
         // devname/devmode so `device_register()` auto-creates the
         // devtmpfs node.
         (*pair).slave_cdev.dev.devname = (*slave).name.as_ptr(); // e.g. "pts/0"
@@ -674,14 +710,6 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
     0
 }
 
-/// The ptmx cdev open/release are no-ops -- `open_file` does the real
-/// work.
-unsafe extern "C" fn ptmx_cdev_open(_cdev: *mut cdev_t) -> c_int {
-    0
-}
-unsafe extern "C" fn ptmx_cdev_release(_cdev: *mut cdev_t) -> c_int {
-    0
-}
 
 // ===========================================================================
 // Initialization.
@@ -711,15 +739,7 @@ pub(crate) extern "C" fn ptmxinit() {
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
         (*cdev).flags.set_readable(1);
         (*cdev).flags.set_writable(1);
-        (*cdev).ops = cdev_ops_t {
-            read: None,
-            write: None,
-            open: Some(ptmx_cdev_open),
-            release: Some(ptmx_cdev_release),
-            ioctl: None,
-            poll: None,
-            open_file: Some(ptmx_open_file),
-        };
+        (*cdev).ops = Some(&PTMX_CDEV_OPS);
 
         let ret = cdev_register(cdev);
         ptmx_assert_errno!(ret == 0, "ptmxinit: cdev_register failed: {}", ret);

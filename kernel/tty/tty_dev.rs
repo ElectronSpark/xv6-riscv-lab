@@ -20,7 +20,8 @@
 use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
-use crate::bindings::{bool_, cdev_ops_t, cdev_t, mode_t, session, tty};
+use crate::bindings::{cdev_t, mode_t, session, tty};
+use crate::kstd::{cint_result, Errno, KResult};
 
 // ===========================================================================
 // Externs.
@@ -38,8 +39,9 @@ unsafe extern "C" {
 use crate::proc::{pid_wlock, pid_wunlock};
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
-// `extern "C"` redeclaration.
-use crate::dev::cdev::cdev_register;
+// `extern "C"` redeclaration. P3-10c: `CdevOps` is the ops-table trait
+// this file's `TtyCdevOps` implements.
+use crate::dev::cdev::{cdev_register, CdevOps};
 
 // P3-1C mesh sweep: tty/{tty,session}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
@@ -50,8 +52,6 @@ use crate::dev::cdev::cdev_register;
 // explicit `unsafe { }` block below.
 use super::session::session_get_ctrl_tty;
 use super::tty::{tty_close, tty_ioctl, tty_open, tty_poll, tty_read, tty_write};
-
-const ENXIO: c_int = 6;
 
 /// `S_IFCHR` (`kernel/inc/uabi/stat.h`).
 const S_IFCHR: u32 = 0o020_000;
@@ -116,108 +116,94 @@ fn ctrl_tty() -> *mut tty {
 // cdev ops.
 // ===========================================================================
 
-unsafe extern "C" fn ttydev_open(_cdev: *mut cdev_t) -> c_int {
-    let t = ctrl_tty();
-    if t.is_null() {
-        return -ENXIO;
-    }
-    tty_open(t)
-}
+/// Zero-sized [`CdevOps`] implementor for `/dev/tty` (P3-10c; was the
+/// `static mut cdev_ops_t TTY_CDEV_OPS` fn-pointer table,
+/// runtime-populated in `ttydevinit` -- now an immutable `Sync` static;
+/// the six former `extern "C"` callbacks are trait methods now,
+/// `open_file` is not overridden so the trait default reproduces the
+/// old `None` slot).
+struct TtyCdevOps;
 
-unsafe extern "C" fn ttydev_release(_cdev: *mut cdev_t) -> c_int {
-    let t = ctrl_tty();
-    if t.is_null() {
-        return 0;
-    }
-    tty_close(t);
-    0
-}
+/// The single shared instance `ttydevinit` installs.
+static TTY_CDEV_OPS: TtyCdevOps = TtyCdevOps;
 
-/// # Safety
-/// `buffer` must point to at least `count` writable bytes if `user` is
-/// false, or be a valid userspace address range otherwise (`tty_read`
-/// validates the userspace case internally).
-unsafe extern "C" fn ttydev_read(
-    _cdev: *mut cdev_t,
-    user: bool_,
-    buffer: *mut c_void,
-    count: usize,
-) -> c_int {
-    let t = ctrl_tty();
-    if t.is_null() {
-        return -ENXIO;
+impl CdevOps for TtyCdevOps {
+    unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        let t = ctrl_tty();
+        if t.is_null() {
+            return Err(Errno::NxIo);
+        }
+        // SAFETY: `t` is the live controlling tty just resolved.
+        match unsafe { tty_open(t) } {
+            0 => Ok(()),
+            ret => Err(Errno::Raw(ret)),
+        }
     }
-    // SAFETY: forwarded straight to `tty_read`, which validates
-    // `buffer` itself per the userspace/kernel split encoded by `user`
-    // (caller's obligation, restated in this fn's doc).
-    unsafe { tty_read(t, buffer as *mut c_char, count as u64, user as c_int) as c_int }
-}
 
-/// # Safety
-/// `buffer` must point to at least `count` readable bytes if `user` is
-/// false, or be a valid userspace address range otherwise (`tty_write`
-/// validates the userspace case internally).
-unsafe extern "C" fn ttydev_write(
-    _cdev: *mut cdev_t,
-    user: bool_,
-    buffer: *const c_void,
-    count: usize,
-) -> c_int {
-    let t = ctrl_tty();
-    if t.is_null() {
-        return -ENXIO;
+    unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
+        let t = ctrl_tty();
+        if !t.is_null() {
+            // SAFETY: `t` is the live controlling tty just resolved.
+            unsafe { tty_close(t) };
+        }
+        Ok(())
     }
-    // SAFETY: see `ttydev_read`.
-    unsafe { tty_write(t, buffer as *const c_char, count as u64, user as c_int) as c_int }
-}
 
-unsafe extern "C" fn ttydev_ioctl(_cdev: *mut cdev_t, cmd: u64, arg: *mut c_void) -> c_int {
-    let t = ctrl_tty();
-    if t.is_null() {
-        return -ENXIO;
+    unsafe fn read(&self, _cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
+        -> KResult<c_int> {
+        let t = ctrl_tty();
+        if t.is_null() {
+            return Err(Errno::NxIo);
+        }
+        // SAFETY: forwarded straight to `tty_read`, which validates
+        // `buf` itself per the userspace/kernel split encoded by `user`
+        // (dispatch contract).
+        cint_result(unsafe { tty_read(t, buf as *mut c_char, count as u64, user as c_int) as c_int })
     }
-    tty_ioctl(t, cmd, arg)
-}
 
-unsafe extern "C" fn ttydev_poll(_cdev: *mut cdev_t, events: c_short) -> c_int {
-    let t = ctrl_tty();
-    if t.is_null() {
-        return 0;
+    unsafe fn write(&self, _cdev: *mut cdev_t, user: bool, buf: *const c_void, count: usize)
+        -> KResult<c_int> {
+        let t = ctrl_tty();
+        if t.is_null() {
+            return Err(Errno::NxIo);
+        }
+        // SAFETY: see `read` above.
+        cint_result(unsafe {
+            tty_write(t, buf as *const c_char, count as u64, user as c_int) as c_int
+        })
     }
-    tty_poll(t, events)
+
+    unsafe fn ioctl(&self, _cdev: *mut cdev_t, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
+        let t = ctrl_tty();
+        if t.is_null() {
+            return Err(Errno::NxIo);
+        }
+        // SAFETY: `t` live; `arg`'s validity forwarded from the
+        // dispatch contract.
+        cint_result(unsafe { tty_ioctl(t, cmd, arg) })
+    }
+
+    unsafe fn poll(&self, _cdev: *mut cdev_t, events: c_short) -> Option<c_int> {
+        let t = ctrl_tty();
+        if t.is_null() {
+            return Some(0);
+        }
+        // SAFETY: `t` live.
+        Some(unsafe { tty_poll(t, events) })
+    }
 }
 
 // ===========================================================================
 // Registration.
 // ===========================================================================
 
-static mut TTY_CDEV_OPS: cdev_ops_t = cdev_ops_t {
-    read: None,
-    write: None,
-    open: None,
-    release: None,
-    ioctl: None,
-    poll: None,
-    open_file: None,
-};
-
 static mut TTY_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
 pub(crate) extern "C" fn ttydevinit() {
     // SAFETY: `ttydevinit()` runs exactly once, from `start_kernel.c`'s
     // single-hart init sequence, before any other code can observe
-    // `TTY_CDEV`/`TTY_CDEV_OPS`.
+    // `TTY_CDEV`.
     unsafe {
-        TTY_CDEV_OPS = cdev_ops_t {
-            read: Some(ttydev_read),
-            write: Some(ttydev_write),
-            open: Some(ttydev_open),
-            release: Some(ttydev_release),
-            ioctl: Some(ttydev_ioctl),
-            poll: Some(ttydev_poll),
-            open_file: None,
-        };
-
         let cdev = TTY_CDEV.as_mut_ptr();
         (*cdev).dev.major = TTY_DEV_MAJOR;
         (*cdev).dev.minor = TTY_DEV_MINOR;
@@ -225,7 +211,7 @@ pub(crate) extern "C" fn ttydevinit() {
         (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
         (*cdev).flags.set_readable(1);
         (*cdev).flags.set_writable(1);
-        (*cdev).ops = TTY_CDEV_OPS;
+        (*cdev).ops = Some(&TTY_CDEV_OPS);
 
         let ret = cdev_register(cdev);
         if ret != 0 {
