@@ -2861,6 +2861,131 @@ static-mut ops tables made immutable, 66+ dead exports, 1 orphan file.
 documented pre-existing bugs (forkforkfork tq panic, diskfull hang,
 session baseline-ref leak, rm-dir EBUSY, sh redirect parser).
 
+### Iteration 75 — 2026-07-17 — Wave P3-10d: the ops-arc closing wave (tty_ops → trait; every remaining table dispositioned)
+
+The P3-10 tail: each remaining fn-pointer table got a deliberate
+disposition — one conversion (tty_ops, the only table where it
+genuinely paid) and documented "fn pointers are right here" /
+"deferred" verdicts for the rest. `Option<extern "C" fn>` slot census
+(crude-grep, like-for-like with Iteration 74): **103 → 89** (−14, the
+tty table). Of the 89, ~14 are doc-comment/census-noise matches (3
+vfs + 2 lock files match only on *stale* "trait-ification is P3-10's
+job" comments — those conversions landed in P3-10a/b; kobject 2 of 3,
+bio 1 of 4, sched.rs 1, workqueue 2, pcache 1 are comment lines too).
+
+**CONVERTED — tty_ops → `pub trait TtyOps: Sync`** (tty/tty.rs,
+tty/pty.rs, console.rs, bindings.rs):
+
+- Ground truth first: the crate had exactly ONE implementor (the pty
+  slave's `static mut PTY_SLAVE_OPS`) and the console tty passed a
+  NULL ops pointer to `tty_alloc` — so every dispatcher's null/None
+  fallback is the console's behavior. Slot-by-slot: 7 slots were
+  dispatched (open/close/hangup/discard_input/set_termios/set_winsize/
+  ioctl), 2 were populated-but-never-dispatched (read/write — slave
+  I/O flows through the line-discipline pipes, as in the C original),
+  and 6 were never-populated AND never-dispatched (throttle/
+  unthrottle/stop/start/rx/tx) — those six were deleted outright
+  (P3-10b orphan-stub precedent).
+- Trait shape: all 9 methods DEFAULTED, each default reproducing the
+  old per-slot `None` fallback exactly (open → `Ok(())`, ioctl →
+  `Err(Errno::NotTy)` ≡ -ENOTTY, read/write → `Err(Errno::NoSys)`,
+  rest no-op). `PtySlaveOps` (ZST, `static PTY_SLAVE_OPS`) overrides
+  only read/write via `KResult<usize>` + lossless `Errno::Raw` pipe
+  decode — its old open/close callbacks were behaviorally identical to
+  the defaults and are gone. 4 extern "C" callbacks deleted; the
+  `static mut` table (which existed only for the C `*mut tty_ops`
+  signature) became a plain immutable `static`.
+- `Tty.ops`: `*mut TtyOps` → `Option<&'static dyn TtyOps>` (16-byte
+  fat pointer; `None` = console's no-driver state via the null-data
+  niche). `Tty` is native-owned (P3-N8, zero C consumers): NEW-TRUTH
+  layout asserts — every field after `ops` shifted +8, total size
+  UNCHANGED at 512/64 (absorbed by trailing align padding).
+  `tty_alloc` dropped `extern "C"` (fat pointer isn't FFI-safe; all
+  callers are Rust) and takes `Option<&'static dyn TtyOps>`; the
+  `&'static` bound replaces the old "ops must outlive the tty" prose.
+  `bindings::tty_ops` facade alias retired.
+
+**VERDICTS (no conversion):**
+
+- **kobject_ops** (kobject.rs, 1 real slot): KEEP as fn pointer. The
+  `release` slot is per-object destructor glue (Drop-analog), not a
+  polymorphism table; the Rust-side abstraction ALREADY exists
+  (`KobjectRelease` trait + `karc_release_trampoline` + `KArc`), and
+  the raw slot is its C-shaped plumbing plus 3 hand-installed release
+  fns (bio/dev/vfs_fs_type). A `&dyn` would fatten every embedded
+  `Kobject` (+8) and re-pin bio/device/fs_type layouts for zero
+  expressiveness gain.
+- **sched_class** (proc/sched.rs, 10 slots): DEFER (enum SchedClass
+  static dispatch remains the right target). Not contained today: the
+  `*mut sched_class` is stored in THREE layout-pinned places
+  (`Rq.sched_class` @0, `SchedEntity.sched_class` @48 — embedded in
+  every thread —, `RqGlobal`'s boot-registered priority array), and
+  `access.rs`'s `SchedClassRef` + per-slot call wrappers mirror it.
+  Enum-ification forces layout churn across rq/thread/cpu_local
+  mirrors on the scheduler hot path — exactly the brief's DEFER
+  trigger. Needs its own wave with forkforkfork A/B baseline.
+- **pcache_ops** (mm/pcache.rs, 5 real slots + test fixture): KEEP for
+  now. 3 implementors (xv6fs, tmpfs, pcache_test's error-injection
+  fixture); dispatch already funneled through 5 typed accessors
+  (`ops_read_page` etc.), and the hot page-IO path's indirection cost
+  would be identical under `dyn` — conversion is possible but pure
+  churn against a live test fixture; acceptable-verdict per plan.
+- **netdev_ops** (dev/netdev.rs, 1 slot `transmit` + `netdev_link_cb_t`):
+  KEEP, verdict-only. 2 implementors (e1000, x1_emac) but the network
+  stack is UNTESTABLE on this QEMU config (no NIC probed) — a
+  conversion could not pass any runtime gate. Conservative hold.
+- **workqueue callbacks** (proc/workqueue.rs + access.rs accessors +
+  the 2 bindings.rs typedefs): CORRECT AS FN POINTERS. `func`/`fault`
+  are per-work-item *data* (every `work_struct` carries its own
+  callback, set at submit time) and the lifecycle cbs are per-queue
+  config — callbacks-as-data, not a closed polymorphism set; a trait
+  object would force an allocation/fat-pointer per work item for
+  nothing.
+- **rb/hlist comparators** (bintree.rs 2, hlist.rs 3+1): CORRECT AS FN
+  POINTERS — data-structure parameterization (C qsort-style), each
+  container instance carries its comparator.
+- **timer callbacks** (timer_core.rs `TimerNode.callback`,
+  sched_timer.rs `SchedTimerWork.callback`, bindings.rs
+  `rcu_callback_t`): CORRECT AS FN POINTERS — per-instance completion
+  callbacks (callbacks-as-data).
+- **signal `SigActionHandler`** (proc/signal.rs, 2 union arms):
+  MANDATORY fn pointers — userspace-ABI (`sigaction`) values, raw
+  user-provided handler addresses.
+- **proc_shims iterator `fn_cb` params** (3): fn-pointer *parameters*
+  to for-each helpers, not tables; fine as-is (a future P3-7-style
+  genericization could take `impl FnMut`, out of ops-arc scope).
+- **irq/trap.rs `TRAMPOLINE_USERRET`** (1): computed runtime-relocated
+  trampoline address — must remain a raw fn pointer.
+
+**rust-skills applied**: trait-dyn-vs-generic (dyn for the
+closed-set ops table; fn-pointers kept for callbacks-as-data),
+trait-default-methods (all-defaulted trait mirroring None-slot
+fallbacks), type-enum-states/type-option-nullable (`Option<&'static
+dyn>` for the console's no-driver state — invalid states
+unrepresentable, null niche layout-proven), err-result-over-panic +
+Result-first (`KResult` methods, errno encoded only at the c_int
+dispatch boundaries, `Errno::Raw` lossless pipe decode),
+unsafe-safety-comment (`# Safety` on every trait method + SAFETY at
+every dispatch site), unsafe-minimize-scope, const-block (new-truth
+layout asserts), name-* (UpperCamelCase implementor ZST).
+
+**Verified** (cache discipline BUILD_TYPE=""/toolchain-gcc checked
+before AND after; `cargo clean` + full rebuild = **0 warnings**):
+boot ×4, each with exactly ONE `init: starting sh`; **testsig 21/21**;
+stressfs completed (4 writers/readers, prompt recovered); ENOENT
+(`cat /no/such/file` → "cannot open"); `ls /dev` full listing;
+`cat README.md | wc` = 714 3365 26018; **interactive tty gates**:
+line-editing (3× backspace mid-line → `line-edit-OK` executed
+correctly, erase echo sequences intact), `cat` stdin echo, **Ctrl-C**
+kills fg job and the prompt returns, post-^C commands run; **pty
+smoke**: `cat /dev/ptmx` opens the master (pty_alloc through the new
+trait install), blocks, ^C recovers, `/dev/pts` empty after teardown
+(slave cdev unregistered). Zero panic/corruption markers. Scheduler
+untouched (no forkforkfork A/B needed).
+
+LOC: 4 files, tty family only. 4 extern "C" callbacks + 1 C-shaped
+table type + 6 dead slots + 1 facade alias deleted.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

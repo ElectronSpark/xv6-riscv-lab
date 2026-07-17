@@ -43,7 +43,8 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
-use crate::bindings::{pid_t, pipe, session, slab_cache_t, spinlock_t, termios, thread, tty, tty_ops};
+use crate::bindings::{pid_t, pipe, session, slab_cache_t, spinlock_t, termios, thread, tty};
+use crate::kstd::{result_to_neg_errno, Errno, KResult};
 use crate::sync::{KSpinGuard, KSpinlock};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
@@ -166,12 +167,13 @@ const _: () = {
 
 // ===========================================================================
 // Native tty types — P3-N8 nativization (user directive: remove the
-// C-compatible interfaces). `Tty`/`TtyOps` are the canonical native
-// definitions of `kernel/inc/tty/tty_types.h`'s `struct tty`/`struct
-// tty_ops`: `build.rs` blocklists the bindgen emissions and re-exports
-// these types as `crate::bindings::tty`/`tty_ops` (facade `pub use`, N2
-// pattern). The C header stays unchanged (no C consumers remain — the
-// kernel tree has zero `.c` files).
+// C-compatible interfaces). `Tty` is the canonical native definition
+// of `kernel/inc/tty/tty_types.h`'s `struct tty`, re-exported as
+// `crate::bindings::tty` (facade `pub use`, N2 pattern). The C header
+// stays unchanged (no C consumers remain — the kernel tree has zero
+// `.c` files). P3-10d: the C-shaped `struct tty_ops` fn-pointer table
+// (and its `bindings::tty_ops` facade alias) is gone — [`TtyOps`]
+// below is a real Rust trait now.
 //
 // `termios`/`winsize` stayed bindgen-emitted through N8..P3-4a
 // (userspace-ABI layout contracts, the P3-4 scrutiny class) and are
@@ -195,42 +197,155 @@ const _: () = {
 // uses are pointers).
 // ===========================================================================
 
-/// Native `struct tty_ops` (`kernel/inc/tty/tty_types.h`) — the
-/// per-terminal line-discipline/driver operations table (fn-pointer
-/// `Option` forms reproduced verbatim; trait-ification is P3-10).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct TtyOps {
-    pub open: Option<unsafe extern "C" fn(tty: *mut Tty) -> c_int>,
-    pub close: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub hangup: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub throttle: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub unthrottle: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub stop: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub start: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub discard_input: Option<unsafe extern "C" fn(tty: *mut Tty)>,
-    pub read: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *mut c_char, nr: usize) -> isize>,
-    pub write: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *const c_char, nr: usize) -> isize>,
-    pub rx: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *const c_char, nr: usize) -> isize>,
-    pub tx: Option<unsafe extern "C" fn(tty: *mut Tty, buf: *mut c_char, nr: usize) -> isize>,
-    pub set_termios: Option<unsafe extern "C" fn(tty: *mut Tty, new_termios: *mut termios)>,
-    pub set_winsize:
-        Option<unsafe extern "C" fn(tty: *mut Tty, new_winsize: *mut crate::bindings::winsize)>,
-    pub ioctl: Option<
-        unsafe extern "C" fn(tty: *mut Tty, cmd: crate::bindings::uint64, arg: *mut c_void) -> c_int,
-    >,
+/// The per-terminal line-discipline/driver operations vtable — wave
+/// P3-10d's replacement for the C-style `struct tty_ops` fn-pointer
+/// table (`kernel/inc/tty/tty_types.h`), following the P3-10a
+/// `FileOps` pilot pattern.
+///
+/// Implementors are zero-sized unit structs with a `static` instance
+/// installed into [`Tty::ops`] as `Some(&STATIC)`. Exactly one
+/// implementor exists today: `PTY_SLAVE_OPS` in `kernel/tty/pty.rs`.
+/// The console tty deliberately has *no* ops (`Tty::ops == None` — it
+/// always passed a null `tty_ops*` to `tty_alloc`), so every
+/// dispatcher's `None` fallback is the console's behavior.
+///
+/// *Every* method is defaulted, and each default reproduces the old
+/// per-slot `None` fallback exactly (the old tables were sparse:
+/// the pty slave populated only `open`/`close`/`read`/`write`, and
+/// `open`/`close` were behaviorally identical to the fallback):
+/// `open` → success, `ioctl` → `ENOTTY`, everything else → no-op.
+///
+/// The old table's `throttle`/`unthrottle`/`stop`/`start`/`rx`/`tx`
+/// slots were deleted outright (P3-10b "orphan stub" precedent): no
+/// implementor ever populated them AND no dispatcher ever called them
+/// — dead in both directions. `read`/`write` are retained (the pty
+/// slave implements them) even though no tty-core path dispatches
+/// them yet: slave I/O currently flows through the line-discipline
+/// pipes (`tty_read`/`tty_write`), exactly as in the C original.
+///
+/// Error encoding: `KResult` — `Err(e)` is encoded to the same raw
+/// negative `c_int`/`isize` the old callbacks returned (via
+/// [`Errno::neg`]) at the dispatch boundaries.
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait TtyOps: Sync {
+    /// Driver open hook, called from [`tty_open`] after the refcount
+    /// bump. Default: success (the old `None` fallback returned 0).
+    ///
+    /// # Safety
+    /// `tty` must be the live `Tty` this instance was installed on.
+    unsafe fn open(&self, tty: *mut Tty) -> KResult<()> {
+        let _ = tty;
+        Ok(())
+    }
+
+    /// Driver close hook, called from [`tty_close`] before the
+    /// refcount drop. Default: no-op.
+    ///
+    /// # Safety
+    /// Same contract as [`TtyOps::open`].
+    unsafe fn close(&self, tty: *mut Tty) {
+        let _ = tty;
+    }
+
+    /// Carrier-loss hook, called from [`tty_hangup`]. Default: no-op.
+    ///
+    /// # Safety
+    /// Same contract as [`TtyOps::open`].
+    unsafe fn hangup(&self, tty: *mut Tty) {
+        let _ = tty;
+    }
+
+    /// Discard-pending-input hook (`TCSETSF`). Default: no-op (the
+    /// tty core has already flushed its own raw ring buffer).
+    ///
+    /// # Safety
+    /// Same contract as [`TtyOps::open`].
+    unsafe fn discard_input(&self, tty: *mut Tty) {
+        let _ = tty;
+    }
+
+    /// Slave-side read (pull from the driver). Not dispatched by any
+    /// tty-core path today — see the trait doc. Default: `ENOSYS`.
+    ///
+    /// # Safety
+    /// `tty` as in [`TtyOps::open`]; `buf` must point to at least
+    /// `nr` writable bytes.
+    unsafe fn read(&self, tty: *mut Tty, buf: *mut c_char, nr: usize) -> KResult<usize> {
+        let _ = (tty, buf, nr);
+        Err(Errno::NoSys)
+    }
+
+    /// Slave-side write (push to the driver). Not dispatched by any
+    /// tty-core path today — see the trait doc. Default: `ENOSYS`.
+    ///
+    /// # Safety
+    /// `tty` as in [`TtyOps::open`]; `buf` must point to at least
+    /// `nr` readable bytes.
+    unsafe fn write(&self, tty: *mut Tty, buf: *const c_char, nr: usize) -> KResult<usize> {
+        let _ = (tty, buf, nr);
+        Err(Errno::NoSys)
+    }
+
+    /// Termios-changed notification (`TCSETS*`), called after the tty
+    /// core has updated `tty->termios`. Default: no-op.
+    ///
+    /// # Safety
+    /// `tty` as in [`TtyOps::open`]; `new_termios` points to the
+    /// caller's already-validated `termios`.
+    unsafe fn set_termios(&self, tty: *mut Tty, new_termios: *mut termios) {
+        let _ = (tty, new_termios);
+    }
+
+    /// Winsize-changed notification (`TIOCSWINSZ`), called after the
+    /// tty core has updated `tty->winsize`. Default: no-op.
+    ///
+    /// # Safety
+    /// `tty` as in [`TtyOps::open`]; `new_winsize` points to the
+    /// caller's already-validated `winsize`.
+    unsafe fn set_winsize(&self, tty: *mut Tty, new_winsize: *mut crate::bindings::winsize) {
+        let _ = (tty, new_winsize);
+    }
+
+    /// Driver escape hatch for ioctls the tty core doesn't recognize.
+    /// Default: `Err(Errno::NotTy)` (the old fallback returned
+    /// `-ENOTTY` both when the table had no `ioctl` slot and when
+    /// there was no table at all).
+    ///
+    /// # Safety
+    /// `tty` as in [`TtyOps::open`]; `arg`'s required validity depends
+    /// on `cmd` (same contract as [`tty_ioctl`]).
+    unsafe fn ioctl(
+        &self,
+        tty: *mut Tty,
+        cmd: crate::bindings::uint64,
+        arg: *mut c_void,
+    ) -> KResult<c_int> {
+        let _ = (tty, cmd, arg);
+        Err(Errno::NotTy)
+    }
 }
 
 /// Native `struct tty` (`kernel/inc/tty/tty_types.h`) — one terminal:
 /// termios/winsize state, the canonical-mode pipes, the raw-mode ring
 /// buffer, and the owning session.
+///
+/// As of wave P3-10d this layout is NATIVE-OWNED (post-P3-6 there is
+/// no bindgen, no wrapper.h, and no C consumer; the header no longer
+/// constrains it). The former `tty_ops*` pointer is now a real Rust
+/// trait object, `Option<&'static dyn TtyOps>` (a 16-byte fat pointer;
+/// `None` = the console's deliberate no-driver state, previously a
+/// null ops pointer — every field after `ops` shifted by 8 and the
+/// asserts below are the new truth, same precedent as P3-10c's
+/// `Blkdev`).
 #[repr(C, align(64))]
 #[derive(Copy, Clone)]
 pub struct Tty {
     pub lock: spinlock_t,
     pub termios: termios,
     pub winsize: crate::bindings::winsize,
-    pub ops: *mut TtyOps,
+    pub ops: Option<&'static dyn TtyOps>,
     pub ref_count: c_int,
     pub input_pipe: *mut pipe,
     pub output_pipe: *mut pipe,
@@ -243,28 +358,13 @@ pub struct Tty {
     pub name: [c_char; 64],
 }
 
-// P3-N8 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output via the temporary in-tree
-// `offset_of!` gate and cross-checked by the gcc probe (see the module
-// note above).
+// P3-10d NEW-TRUTH layout proof — `Tty` is native-owned (module note
+// above); these values pin the layout *with* the 16-byte
+// `Option<&'static dyn TtyOps>` fat pointer at `ops` (every later
+// field shifted +8 vs the P3-N8 values; total size unchanged at 512 —
+// the shift was absorbed by the trailing align(64) padding).
 const _: () = {
-    assert!(core::mem::size_of::<TtyOps>() == 120, "tty_ops size");
-    assert!(core::mem::align_of::<TtyOps>() == 8, "tty_ops alignment");
-    assert!(core::mem::offset_of!(TtyOps, open) == 0, "tty_ops.open offset");
-    assert!(core::mem::offset_of!(TtyOps, close) == 8, "tty_ops.close offset");
-    assert!(core::mem::offset_of!(TtyOps, hangup) == 16, "tty_ops.hangup offset");
-    assert!(core::mem::offset_of!(TtyOps, throttle) == 24, "tty_ops.throttle offset");
-    assert!(core::mem::offset_of!(TtyOps, unthrottle) == 32, "tty_ops.unthrottle offset");
-    assert!(core::mem::offset_of!(TtyOps, stop) == 40, "tty_ops.stop offset");
-    assert!(core::mem::offset_of!(TtyOps, start) == 48, "tty_ops.start offset");
-    assert!(core::mem::offset_of!(TtyOps, discard_input) == 56, "tty_ops.discard_input offset");
-    assert!(core::mem::offset_of!(TtyOps, read) == 64, "tty_ops.read offset");
-    assert!(core::mem::offset_of!(TtyOps, write) == 72, "tty_ops.write offset");
-    assert!(core::mem::offset_of!(TtyOps, rx) == 80, "tty_ops.rx offset");
-    assert!(core::mem::offset_of!(TtyOps, tx) == 88, "tty_ops.tx offset");
-    assert!(core::mem::offset_of!(TtyOps, set_termios) == 96, "tty_ops.set_termios offset");
-    assert!(core::mem::offset_of!(TtyOps, set_winsize) == 104, "tty_ops.set_winsize offset");
-    assert!(core::mem::offset_of!(TtyOps, ioctl) == 112, "tty_ops.ioctl offset");
+    assert!(core::mem::size_of::<Option<&'static dyn TtyOps>>() == 16, "tty.ops fat-pointer size");
 
     assert!(core::mem::size_of::<Tty>() == 512, "tty size");
     assert!(core::mem::align_of::<Tty>() == 64, "tty alignment");
@@ -272,16 +372,16 @@ const _: () = {
     assert!(core::mem::offset_of!(Tty, termios) == 24, "tty.termios offset");
     assert!(core::mem::offset_of!(Tty, winsize) == 64, "tty.winsize offset");
     assert!(core::mem::offset_of!(Tty, ops) == 72, "tty.ops offset");
-    assert!(core::mem::offset_of!(Tty, ref_count) == 80, "tty.ref_count offset");
-    assert!(core::mem::offset_of!(Tty, input_pipe) == 88, "tty.input_pipe offset");
-    assert!(core::mem::offset_of!(Tty, output_pipe) == 96, "tty.output_pipe offset");
-    assert!(core::mem::offset_of!(Tty, raw_buf) == 104, "tty.raw_buf offset");
-    assert!(core::mem::offset_of!(Tty, raw_r) == 360, "tty.raw_r offset");
-    assert!(core::mem::offset_of!(Tty, raw_w) == 364, "tty.raw_w offset");
-    assert!(core::mem::offset_of!(Tty, raw_wait) == 368, "tty.raw_wait offset");
-    assert!(core::mem::offset_of!(Tty, driver_data) == 416, "tty.driver_data offset");
-    assert!(core::mem::offset_of!(Tty, session) == 424, "tty.session offset");
-    assert!(core::mem::offset_of!(Tty, name) == 432, "tty.name offset");
+    assert!(core::mem::offset_of!(Tty, ref_count) == 88, "tty.ref_count offset");
+    assert!(core::mem::offset_of!(Tty, input_pipe) == 96, "tty.input_pipe offset");
+    assert!(core::mem::offset_of!(Tty, output_pipe) == 104, "tty.output_pipe offset");
+    assert!(core::mem::offset_of!(Tty, raw_buf) == 112, "tty.raw_buf offset");
+    assert!(core::mem::offset_of!(Tty, raw_r) == 368, "tty.raw_r offset");
+    assert!(core::mem::offset_of!(Tty, raw_w) == 372, "tty.raw_w offset");
+    assert!(core::mem::offset_of!(Tty, raw_wait) == 376, "tty.raw_wait offset");
+    assert!(core::mem::offset_of!(Tty, driver_data) == 424, "tty.driver_data offset");
+    assert!(core::mem::offset_of!(Tty, session) == 432, "tty.session offset");
+    assert!(core::mem::offset_of!(Tty, name) == 440, "tty.name offset");
 };
 
 // ===========================================================================
@@ -472,12 +572,17 @@ pub(crate) extern "C" fn tty_init() {
 
 /// Allocate a new `tty`, along with its input/output pipes.
 ///
+/// P3-10d: `ops` is a [`TtyOps`] trait object now (`None` = no driver
+/// hooks, the console's configuration — previously a null `tty_ops*`);
+/// the `&'static` bound replaces the old "must remain live for as long
+/// as the returned `tty`" prose contract. Plain `unsafe fn` (the
+/// `extern "C"` ABI is gone — a fat pointer is not FFI-safe, and every
+/// caller is Rust).
+///
 /// # Safety
 /// `name` must be a valid, NUL-terminated C string for the duration of
-/// this call. `ops`, if non-null, must remain live for as long as the
-/// returned `tty` (every `tty_*` dispatcher checks `ops` for null
-/// before use, and the pointer is stored, not copied-from).
-pub(crate) unsafe extern "C" fn tty_alloc(name: *const c_char, ops: *mut tty_ops) -> *mut tty {
+/// this call.
+pub(crate) unsafe fn tty_alloc(name: *const c_char, ops: Option<&'static dyn TtyOps>) -> *mut tty {
     let raw = slab_alloc(TTY_CACHE.get()) as *mut tty;
     if raw.is_null() {
         return err_ptr(-ENOMEM);
@@ -1162,13 +1267,12 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             }
 
             // Notify driver if it cares.
-            // SAFETY: `t` is live; `t->ops`, if non-null, points to a
-            // live `tty_ops` for `t`'s lifetime (tty_alloc's contract).
+            // SAFETY: `t` is live; `t->ops`, if present, is a
+            // `&'static` trait object (tty_alloc's contract); `tp` is
+            // a valid `termios*` for this cmd (fn doc).
             unsafe {
-                if let Some(ops) = (*t).ops.as_ref() {
-                    if let Some(f) = ops.set_termios {
-                        f(t, tp);
-                    }
+                if let Some(ops) = (*t).ops {
+                    ops.set_termios(t, tp);
                 }
             }
 
@@ -1179,11 +1283,10 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
                     // flush raw ring buffer
                     unsafe { (*t).raw_r = (*t).raw_w };
                 }
+                // SAFETY: as the `set_termios` dispatch above.
                 unsafe {
-                    if let Some(ops) = (*t).ops.as_ref() {
-                        if let Some(f) = ops.discard_input {
-                            f(t);
-                        }
+                    if let Some(ops) = (*t).ops {
+                        ops.discard_input(t);
                     }
                 }
             }
@@ -1202,11 +1305,12 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
                 let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
                 unsafe { (*t).winsize = *wsp };
             }
+            // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
+            // (tty_alloc's contract); `wsp` is a valid `winsize*` for
+            // this cmd (fn doc).
             unsafe {
-                if let Some(ops) = (*t).ops.as_ref() {
-                    if let Some(f) = ops.set_winsize {
-                        f(t, wsp);
-                    }
+                if let Some(ops) = (*t).ops {
+                    ops.set_winsize(t, wsp);
                 }
             }
             0
@@ -1251,16 +1355,20 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             0
         }
         _ => {
-            // Let the driver handle unknown ioctls.
-            // SAFETY: `t` is live.
+            // Let the driver handle unknown ioctls. The trait default
+            // is `Err(Errno::NotTy)`, so "no ops" and "driver doesn't
+            // override ioctl" both encode to the old `-ENOTTY`.
+            // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
+            // (tty_alloc's contract); `arg` per this fn's contract.
             unsafe {
-                if let Some(ops) = (*t).ops.as_ref() {
-                    if let Some(f) = ops.ioctl {
-                        return f(t, cmd, arg);
-                    }
+                match (*t).ops {
+                    Some(ops) => match ops.ioctl(t, cmd, arg) {
+                        Ok(v) => v,
+                        Err(e) => e.neg(),
+                    },
+                    None => -ENOTTY,
                 }
             }
-            -ENOTTY
         }
     }
 }
@@ -1274,24 +1382,26 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
 pub(crate) unsafe extern "C" fn tty_open(t: *mut tty) -> c_int {
     // SAFETY: `t` is caller-guaranteed live (fn doc).
     unsafe { tty_ref(t) };
+    // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
+    // (tty_alloc's contract). The trait default is `Ok(())`, so "no
+    // ops" and "driver doesn't override open" both encode to the old
+    // fallback 0.
     unsafe {
-        if let Some(ops) = (*t).ops.as_ref() {
-            if let Some(f) = ops.open {
-                return f(t);
-            }
+        match (*t).ops {
+            Some(ops) => result_to_neg_errno(ops.open(t)),
+            None => 0,
         }
     }
-    0
 }
 
 /// # Safety
 /// `t` must be a live `tty` previously returned by [`tty_alloc`].
 pub(crate) unsafe extern "C" fn tty_close(t: *mut tty) {
+    // SAFETY: `t` is caller-guaranteed live (fn doc); `t->ops`, if
+    // present, is `&'static` (tty_alloc's contract).
     unsafe {
-        if let Some(ops) = (*t).ops.as_ref() {
-            if let Some(f) = ops.close {
-                f(t);
-            }
+        if let Some(ops) = (*t).ops {
+            ops.close(t);
         }
     }
     // SAFETY: `t` is caller-guaranteed live (fn doc).
@@ -1305,11 +1415,11 @@ pub(crate) unsafe extern "C" fn tty_close(t: *mut tty) {
 /// # Safety
 /// `t` must be a live `tty`.
 pub(crate) unsafe extern "C" fn tty_hangup(t: *mut tty) {
+    // SAFETY: `t` is caller-guaranteed live (fn doc); `t->ops`, if
+    // present, is `&'static` (tty_alloc's contract).
     unsafe {
-        if let Some(ops) = (*t).ops.as_ref() {
-            if let Some(f) = ops.hangup {
-                f(t);
-            }
+        if let Some(ops) = (*t).ops {
+            ops.hangup(t);
         }
     }
 }

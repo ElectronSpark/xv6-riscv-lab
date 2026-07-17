@@ -52,7 +52,6 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::bindings::{
     cdev_t, device_t, mode_t, pipe, session, spinlock_t, tty,
-    tty_ops,
 };
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
@@ -909,7 +908,10 @@ pub(crate) extern "C" fn consoledevinit() {
         }
 
         // --- Allocate the console TTY ---
-        let t = tty_alloc(c"console".as_ptr(), core::ptr::null_mut());
+        // P3-10d: `None` = no driver ops (previously a null `tty_ops*`
+        // — the console tty deliberately has no `TtyOps` hooks; every
+        // tty-core dispatcher's `None` fallback is its behavior).
+        let t = tty_alloc(c"console".as_ptr(), None);
         if is_err_or_null(t) {
             __panic_start();
             crate::kprintln!(

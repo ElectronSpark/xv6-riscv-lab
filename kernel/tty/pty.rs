@@ -28,7 +28,9 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-use crate::bindings::{bool_, pipe, tty, tty_ops};
+use crate::bindings::{bool_, pipe, tty};
+use crate::kstd::{Errno, KResult};
+use crate::tty::tty::TtyOps;
 
 // ===========================================================================
 // Externs.
@@ -60,51 +62,57 @@ use crate::kstd::{is_err, ptr_err};
 // PTY slave ops.
 // ===========================================================================
 
-unsafe extern "C" fn pty_slave_open(_tty: *mut tty) -> c_int {
-    0
-}
-
-unsafe extern "C" fn pty_slave_close(_tty: *mut tty) {}
-
-/// Slave write -> push into the output pipe (master can read it).
+/// The PTY slave's [`TtyOps`] implementor — wave P3-10d's replacement
+/// for the C-style `static mut PTY_SLAVE_OPS: tty_ops` fn-pointer
+/// table (and the crate's only `TtyOps` implementor; the console tty
+/// runs with `ops == None`).
 ///
-/// # Safety
-/// `tty` must be a live slave `tty` allocated by [`pty_alloc`], whose
-/// `output_pipe` is non-null for the pty's lifetime; `buf` must point
-/// to at least `nr` readable bytes (the `tty_ops::write` contract).
-unsafe extern "C" fn pty_slave_write(tty: *mut tty, buf: *const c_char, nr: usize) -> isize {
-    // SAFETY: see fn doc.
-    unsafe { pipe_write((*tty).output_pipe, buf, nr as u64, 0) as isize }
+/// Only `read`/`write` are overridden: the old table's
+/// `open`/`close` slots were behaviorally identical to the trait
+/// defaults (return-0 / no-op) and every other slot was `None`, which
+/// the defaults reproduce exactly.
+struct PtySlaveOps;
+
+/// Decode a `pipe_read`/`pipe_write` "count or negative errno" `i64`
+/// into the [`TtyOps`] `KResult<usize>` convention, losslessly
+/// (`Errno::Raw` carries the exact negative value back across the
+/// dispatch boundary).
+#[inline]
+fn pipe_ret_to_result(r: i64) -> KResult<usize> {
+    if r < 0 {
+        Err(Errno::Raw(r as c_int))
+    } else {
+        Ok(r as usize)
+    }
 }
 
-/// Slave read <- pull from the input pipe (fed by master write).
-///
-/// # Safety
-/// `tty` must be a live slave `tty` allocated by [`pty_alloc`], whose
-/// `input_pipe` is non-null for the pty's lifetime; `buf` must point
-/// to at least `nr` writable bytes (the `tty_ops::read` contract).
-unsafe extern "C" fn pty_slave_read(tty: *mut tty, buf: *mut c_char, nr: usize) -> isize {
-    // SAFETY: see fn doc.
-    unsafe { pipe_read((*tty).input_pipe, buf, nr as u64, 0) as isize }
+impl TtyOps for PtySlaveOps {
+    /// Slave read <- pull from the input pipe (fed by master write).
+    ///
+    /// # Safety
+    /// `tty` must be a live slave `tty` allocated by [`pty_alloc`],
+    /// whose `input_pipe` is non-null for the pty's lifetime; `buf`
+    /// must point to at least `nr` writable bytes (the
+    /// [`TtyOps::read`] contract).
+    unsafe fn read(&self, tty: *mut tty, buf: *mut c_char, nr: usize) -> KResult<usize> {
+        // SAFETY: see fn doc.
+        pipe_ret_to_result(unsafe { pipe_read((*tty).input_pipe, buf, nr as u64, 0) })
+    }
+
+    /// Slave write -> push into the output pipe (master can read it).
+    ///
+    /// # Safety
+    /// `tty` must be a live slave `tty` allocated by [`pty_alloc`],
+    /// whose `output_pipe` is non-null for the pty's lifetime; `buf`
+    /// must point to at least `nr` readable bytes (the
+    /// [`TtyOps::write`] contract).
+    unsafe fn write(&self, tty: *mut tty, buf: *const c_char, nr: usize) -> KResult<usize> {
+        // SAFETY: see fn doc.
+        pipe_ret_to_result(unsafe { pipe_write((*tty).output_pipe, buf, nr as u64, 0) })
+    }
 }
 
-static mut PTY_SLAVE_OPS: tty_ops = tty_ops {
-    open: Some(pty_slave_open),
-    close: Some(pty_slave_close),
-    hangup: None,
-    throttle: None,
-    unthrottle: None,
-    stop: None,
-    start: None,
-    discard_input: None,
-    read: Some(pty_slave_read),
-    write: Some(pty_slave_write),
-    rx: None,
-    tx: None,
-    set_termios: None,
-    set_winsize: None,
-    ioctl: None,
-};
+static PTY_SLAVE_OPS: PtySlaveOps = PtySlaveOps;
 
 // ===========================================================================
 // PTY master.
@@ -216,13 +224,10 @@ pub(crate) unsafe extern "C" fn pty_alloc(
     name: *const c_char,
     _minor: c_int,
 ) -> c_int {
-    // SAFETY: `PTY_SLAVE_OPS` is a static table of function pointers,
-    // fully initialized at compile time and never mutated afterward;
-    // forming a raw pointer to it (never dereferenced here) is not a
-    // data race. `static mut` (rather than `static`) is required only
-    // because `tty_alloc`'s C signature takes `*mut tty_ops`.
-    let ops = unsafe { &raw mut PTY_SLAVE_OPS };
-    let slave = tty_alloc(name, ops);
+    // P3-10d: the ops table is a `&'static dyn TtyOps` trait object
+    // now (the old `static mut` existed only because `tty_alloc`'s C
+    // signature took `*mut tty_ops`).
+    let slave = tty_alloc(name, Some(&PTY_SLAVE_OPS));
     if is_err(slave) {
         return ptr_err(slave);
     }

@@ -136,7 +136,8 @@ pub use crate::proc::rq::RqPercpu as rq_percpu;
 pub use crate::proc::rq::SchedEntity as sched_entity;
 // tty / sock (P3-N8) + uabi terminal pair (P3-4b)
 pub use crate::tty::tty::Tty as tty;
-pub use crate::tty::tty::TtyOps as tty_ops;
+// (`tty_ops` facade alias retired in P3-10d: `TtyOps` is a trait now,
+// imported by its real path.)
 pub use crate::tty::tty::Termios as termios;
 pub use crate::tty::tty::Winsize as winsize;
 pub use crate::sysnet::sock;
