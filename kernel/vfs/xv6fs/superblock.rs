@@ -38,9 +38,10 @@ use core::ptr;
 
 use crate::bindings::{
     bio, blkdev_t, buf, dinode, page_t, pcache, pcache_ops, slab_cache_t, statfs,
-    vfs_fs_type, vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops, xv6fs_inode,
+    vfs_fs_type, vfs_inode, vfs_superblock, xv6fs_inode,
     xv6fs_superblock, EINVAL, EIO, ENOMEM, ENOSPC, PGSIZE,
 };
+use crate::vfs::fs::{FsTypeOps, SuperblockOps};
 
 use super::inode::XV6FS_INODE_OPS;
 // Sub-wave B siblings -- plain Rust-path imports, not `extern "C"`; see
@@ -266,7 +267,7 @@ use crate::vfs::fs::{
     vfs_fs_type_allocate, vfs_mount, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type,
     vfs_root_inode, vfs_superblock_unlock, vfs_superblock_wlock,
 };
-use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, vfs_mkdir, vfs_mknod};
+use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock};
 
 // `kassert!`/`is_err`/`is_err_or_null`'s canonical homes are
 // `crate::kstd`/crate root (P3-CS1 centralization). P3-CS12: the two
@@ -276,7 +277,7 @@ use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, vfs_mkdir,
 // boundary via `result_to_errptr`; only the error-return encoding changed,
 // the on-disk I/O / bread-brelse pairing is byte-identical.
 use crate::kassert;
-use crate::kstd::{is_err, is_err_or_null, result_to_errptr, Errno, KResult};
+use crate::kstd::{is_err, is_err_or_null, ptr_err, Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -569,10 +570,10 @@ pub(crate) extern "C" fn xv6fs_shrink_caches() {
 // Superblock read/write helpers
 // ===========================================================================
 
-fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> c_int {
+fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> KResult<()> {
     let bp = bread(dev, 1);
     if bp.is_null() {
-        return neg(EIO);
+        return Err(Errno::Io);
     }
     // SAFETY: `bp` is a live, just-read buffer; `disk_sb` is a valid
     // exclusively-owned out-param.
@@ -580,16 +581,16 @@ fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> c_int {
         memmove(disk_sb as *mut c_void, (*bp).data as *const c_void, core::mem::size_of::<OndiskSuperblock>());
         brelse(bp);
         if (*disk_sb).magic != FSMAGIC {
-            return neg(EINVAL);
+            return Err(Errno::Inval);
         }
     }
-    0
+    Ok(())
 }
 
-fn __xv6fs_write_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> c_int {
+fn __xv6fs_write_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> KResult<()> {
     let bp = bread(dev, 1);
     if bp.is_null() {
-        return neg(EIO);
+        return Err(Errno::Io);
     }
     // SAFETY: `bp` is a live, just-read buffer; `disk_sb` is live.
     unsafe {
@@ -597,7 +598,7 @@ fn __xv6fs_write_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> c_int {
         bwrite(bp);
         brelse(bp);
     }
-    0
+    Ok(())
 }
 
 // ===========================================================================
@@ -613,16 +614,14 @@ fn __xv6fs_alloc_inode_structure() -> *mut xv6fs_inode {
     // `xv6fs_inode`-sized block from the slab cache.
     unsafe {
         ptr::write_bytes(xi as *mut u8, 0, core::mem::size_of::<xv6fs_inode>());
-        (*xi).vfs_inode.ops = ptr::addr_of!(XV6FS_INODE_OPS) as *mut _;
+        (*xi).vfs_inode.ops = Some(&XV6FS_INODE_OPS);
     }
     xi
 }
 
-/// Mirrors `xv6fs_alloc_inode()`.
-pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
-    result_to_errptr(xv6fs_alloc_inode_inner(sb))
-}
-
+/// Mirrors `xv6fs_alloc_inode()` (P3-10b: dispatched directly through
+/// [`SuperblockOps`]; the old `extern "C"` + `result_to_errptr` wrapper
+/// is gone).
 fn xv6fs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
     if sb.is_null() {
         return Err(Errno::Inval);
@@ -639,7 +638,7 @@ fn xv6fs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
         while inum < (*disk_sb).ninodes as u64 {
             let bp = bread(dev, xv6fs_iblock(inum, (*disk_sb).inodestart));
             if bp.is_null() {
-                return Err(Errno::Raw(neg(EIO)));
+                return Err(Errno::Io);
             }
             let dip = ((*bp).data as *mut dinode).add((inum % IPB) as usize);
             if (*dip).type_ == 0 {
@@ -666,18 +665,16 @@ fn xv6fs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
         }
     }
 
-    Err(Errno::Raw(neg(ENOSPC)))
+    Err(Errno::NoSpc)
 }
 
 // ===========================================================================
 // Get inode from disk
 // ===========================================================================
 
-/// Mirrors `xv6fs_get_inode()`.
-pub(crate) extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
-    result_to_errptr(xv6fs_get_inode_inner(sb, ino))
-}
-
+/// Mirrors `xv6fs_get_inode()` (P3-10b: dispatched directly through
+/// [`SuperblockOps`]; the old `extern "C"` + `result_to_errptr` wrapper
+/// is gone).
 fn xv6fs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
     if sb.is_null() || ino == 0 {
         return Err(Errno::Inval);
@@ -694,7 +691,7 @@ fn xv6fs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_
 
         let bp = bread(dev, xv6fs_iblock(ino, (*disk_sb).inodestart));
         if bp.is_null() {
-            return Err(Errno::Raw(neg(EIO)));
+            return Err(Errno::Io);
         }
 
         let dip = ((*bp).data as *mut dinode).add((ino % IPB) as usize);
@@ -740,78 +737,43 @@ fn xv6fs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_
 // Sync operations
 // ===========================================================================
 
-/// Mirrors `xv6fs_sync_fs()`.
-pub(crate) extern "C" fn xv6fs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
+/// Mirrors `xv6fs_sync_fs()` (P3-10b: `KResult`-native, dispatched
+/// through [`SuperblockOps`] and called directly by `unmount_begin`).
+fn xv6fs_sync_fs_impl(sb: *mut vfs_superblock, _wait: c_int) -> KResult<()> {
     if sb.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     let xv6_sb = sb as *mut xv6fs_superblock;
     // SAFETY: `xv6_sb`/`sb` are live (caller's contract).
     unsafe {
         if (*xv6_sb).dirty != 0 {
-            let ret = __xv6fs_write_superblock(xv6fs_sb_dev(xv6_sb), ptr::addr_of_mut!((*xv6_sb).disk_sb));
-            if ret != 0 {
-                return ret;
-            }
+            __xv6fs_write_superblock(xv6fs_sb_dev(xv6_sb), ptr::addr_of_mut!((*xv6_sb).disk_sb))?;
             (*xv6_sb).dirty = 0;
         }
         (*sb).flags.set_dirty(0);
     }
-    0
-}
-
-/// Mirrors `xv6fs_unmount_begin()`.
-pub(crate) extern "C" fn xv6fs_unmount_begin(sb: *mut vfs_superblock) {
-    xv6fs_sync_fs(sb, 1);
-}
-
-extern "C" fn xv6fs_statfs(sb: *mut vfs_superblock, buf: *mut statfs) -> c_int {
-    let xv6_sb = sb as *mut xv6fs_superblock;
-    // SAFETY: `sb`/`buf` are live (caller's contract).
-    unsafe {
-        let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
-        (*buf).f_type = FSMAGIC as u64;
-        (*buf).f_bsize = super::BSIZE as u64;
-        (*buf).f_frsize = super::BSIZE as u64;
-        (*buf).f_blocks = (*disk_sb).size as u64;
-        (*buf).f_namelen = super::DIRSIZ as u64;
-        (*buf).f_files = (*disk_sb).ninodes as u64;
-
-        if (*xv6_sb).block_cache.initialized != 0 {
-            (*buf).f_bfree = (*xv6_sb).block_cache.free_count as u64;
-            (*buf).f_bavail = (*buf).f_bfree;
-        }
-    }
-    0
+    Ok(())
 }
 
 // ===========================================================================
 // Mount/Free operations
 // ===========================================================================
 
-/// Mirrors `xv6fs_free()`.
-pub(crate) extern "C" fn xv6fs_free(sb: *mut vfs_superblock) {
-    let xv6_sb = sb as *mut xv6fs_superblock;
-    // SAFETY: `xv6_sb` is live and being torn down (caller's contract).
-    unsafe {
-        xv6fs_bcache_destroy(xv6_sb);
-        if !(*xv6_sb).blkdev.is_null() {
-            blkdev_put((*xv6_sb).blkdev);
-        }
-    }
-    slab_free(xv6_sb as *mut c_void);
-}
+/// xv6fs's [`FsTypeOps`] implementor (P3-10b). `mount` mirrors
+/// `xv6fs_mount()` (the old `ret_sb` out-param + errno return became
+/// `KResult<*mut vfs_superblock>`); `free` mirrors `xv6fs_free()`.
+struct Xv6fsFsTypeOps;
 
-/// Mirrors `xv6fs_mount()`.
-extern "C" fn xv6fs_mount(
-    mountpoint: *mut vfs_inode,
-    device: *mut vfs_inode,
-    _flags: c_int,
-    _data: *const c_char,
-    ret_sb: *mut *mut vfs_superblock,
-) -> c_int {
-    if mountpoint.is_null() || ret_sb.is_null() {
-        return neg(EINVAL);
+impl FsTypeOps for Xv6fsFsTypeOps {
+    unsafe fn mount(
+        &self,
+        mountpoint: *mut vfs_inode,
+        device: *mut vfs_inode,
+        _flags: c_int,
+        _data: *const c_char,
+    ) -> KResult<*mut vfs_superblock> {
+    if mountpoint.is_null() {
+        return Err(Errno::Inval);
     }
 
     // Get the block device from the device inode. The device inode's
@@ -820,31 +782,33 @@ extern "C" fn xv6fs_mount(
     // SAFETY: `device` checked non-null before deref.
     let dev_num = unsafe {
         if device.is_null() || !super::s_isblk((*device).mode) {
-            return neg(EINVAL); // xv6fs does not support block device inode
+            return Err(Errno::Inval); // xv6fs does not support block device inode
         }
         (*device).dev_mnt.bdev
     };
 
+    // `blkdev_get` is a dev-layer ERR_PTR boundary this driver does not
+    // own — decode it once here (`Errno::Raw` passthrough, kstd's
+    // sanctioned cross-family case).
     let blkdev = blkdev_get(major(dev_num), minor(dev_num));
     if is_err(blkdev) {
-        return blkdev as isize as c_int;
+        return Err(Errno::Raw(ptr_err(blkdev)));
     }
 
     let xv6_sb = slab_alloc(xv6fs_sb_cache()) as *mut xv6fs_superblock;
     if xv6_sb.is_null() {
         blkdev_put(blkdev);
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
     // SAFETY: `xv6_sb` is a freshly allocated, exclusively-owned block.
     unsafe {
         ptr::write_bytes(xv6_sb as *mut u8, 0, core::mem::size_of::<xv6fs_superblock>());
         (*xv6_sb).blkdev = blkdev;
 
-        let ret = __xv6fs_read_superblock(xv6fs_sb_dev(xv6_sb), ptr::addr_of_mut!((*xv6_sb).disk_sb));
-        if ret != 0 {
+        if let Err(e) = __xv6fs_read_superblock(xv6fs_sb_dev(xv6_sb), ptr::addr_of_mut!((*xv6_sb).disk_sb)) {
             blkdev_put(blkdev);
             slab_free(xv6_sb as *mut c_void);
-            return ret;
+            return Err(e);
         }
 
         (*xv6_sb).dirty = 0;
@@ -870,83 +834,109 @@ extern "C" fn xv6fs_mount(
         // disk. Root inodes and mountpoint inodes are protected in
         // vfs_iput.
         (*xv6_sb).vfs_sb.flags.set_backendless(0);
-        (*xv6_sb).vfs_sb.ops = ptr::addr_of!(XV6FS_SUPERBLOCK_OPS) as *mut _;
+        (*xv6_sb).vfs_sb.ops = Some(&XV6FS_SUPERBLOCK_OPS);
         (*xv6_sb).vfs_sb.fs_data = xv6_sb as *mut c_void;
 
-        // Load root inode (inode 1 in xv6).
-        let root_inode = xv6fs_get_inode(ptr::addr_of_mut!((*xv6_sb).vfs_sb), ROOTINO);
-        if is_err_or_null(root_inode) {
-            blkdev_put(blkdev);
-            slab_free(xv6_sb as *mut c_void);
-            return if root_inode.is_null() { neg(ENOMEM) } else { root_inode as isize as c_int };
-        }
+        // Load root inode (inode 1 in xv6). (P3-10b: `KResult`-native;
+        // the old dead null -> `ENOMEM` branch had no producer.)
+        let root_inode = match xv6fs_get_inode_inner(ptr::addr_of_mut!((*xv6_sb).vfs_sb), ROOTINO) {
+            Ok(i) => i,
+            Err(e) => {
+                blkdev_put(blkdev);
+                slab_free(xv6_sb as *mut c_void);
+                return Err(e);
+            }
+        };
 
         (*xv6_sb).vfs_sb.root_inode = root_inode;
 
-        *ret_sb = ptr::addr_of_mut!((*xv6_sb).vfs_sb);
+        Ok(ptr::addr_of_mut!((*xv6_sb).vfs_sb))
     }
-    0
+    }
+
+    /// Mirrors `xv6fs_free()`.
+    unsafe fn free(&self, sb: *mut vfs_superblock) {
+        let xv6_sb = sb as *mut xv6fs_superblock;
+        // SAFETY: `xv6_sb` is live and being torn down (caller's contract).
+        unsafe {
+            xv6fs_bcache_destroy(xv6_sb);
+            if !(*xv6_sb).blkdev.is_null() {
+                blkdev_put((*xv6_sb).blkdev);
+            }
+        }
+        slab_free(xv6_sb as *mut c_void);
+    }
 }
 
 // ===========================================================================
-// Orphan inode operations
-//
-// TODO: Implement persistent orphan journal. For now, these are stubs
-// that allow the VFS unmount path to work correctly. If the system
-// crashes with orphan inodes, those inodes will leak until fsck is run.
+// VFS operations structures (P3-10b: `SuperblockOps`/`FsTypeOps` trait
+// impls over zero-sized unit structs; the fn-pointer tables are gone).
 // ===========================================================================
 
-extern "C" fn xv6fs_add_orphan(_sb: *mut vfs_superblock, _inode: *mut vfs_inode) -> c_int {
-    0
-}
-extern "C" fn xv6fs_remove_orphan(_sb: *mut vfs_superblock, _inode: *mut vfs_inode) -> c_int {
-    0
-}
-extern "C" fn xv6fs_recover_orphans(_sb: *mut vfs_superblock) -> c_int {
-    0
+/// xv6fs's [`SuperblockOps`] implementor (P3-10b).
+///
+/// The old table's always-0 orphan stubs (`xv6fs_add_orphan`/
+/// `xv6fs_remove_orphan`/`xv6fs_recover_orphans` — placeholders until a
+/// persistent orphan journal exists; if the system crashes with orphan
+/// inodes they leak until fsck) are DELETED: the trait's `Ok(())`
+/// defaults are behaviorally identical (success, no warning printed).
+///
+/// Transaction callbacks: see the C original's design-choice comment —
+/// xv6fs registers `begin`/`end_transaction` for metadata operations
+/// (create/unlink/etc, single transaction each); file operations
+/// (write/truncate) manage transactions internally because they need
+/// batching for large files.
+pub(crate) struct Xv6fsSuperblockOps;
+
+impl SuperblockOps for Xv6fsSuperblockOps {
+    unsafe fn alloc_inode(&self, sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
+        xv6fs_alloc_inode_inner(sb)
+    }
+    unsafe fn get_inode(&self, sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
+        xv6fs_get_inode_inner(sb, ino)
+    }
+    unsafe fn sync_fs(&self, sb: *mut vfs_superblock, wait: c_int) -> KResult<()> {
+        xv6fs_sync_fs_impl(sb, wait)
+    }
+    /// Mirrors `xv6fs_unmount_begin()` (sync, result ignored — exactly
+    /// the old void callback's behavior).
+    unsafe fn unmount_begin(&self, sb: *mut vfs_superblock) {
+        let _ = xv6fs_sync_fs_impl(sb, 1);
+    }
+    unsafe fn statfs(&self, sb: *mut vfs_superblock, buf: *mut statfs) -> KResult<()> {
+        let xv6_sb = sb as *mut xv6fs_superblock;
+        // SAFETY: `sb`/`buf` are live (caller's contract).
+        unsafe {
+            let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
+            (*buf).f_type = FSMAGIC as u64;
+            (*buf).f_bsize = super::BSIZE as u64;
+            (*buf).f_frsize = super::BSIZE as u64;
+            (*buf).f_blocks = (*disk_sb).size as u64;
+            (*buf).f_namelen = super::DIRSIZ as u64;
+            (*buf).f_files = (*disk_sb).ninodes as u64;
+
+            if (*xv6_sb).block_cache.initialized != 0 {
+                (*buf).f_bfree = (*xv6_sb).block_cache.free_count as u64;
+                (*buf).f_bavail = (*buf).f_bfree;
+            }
+        }
+        Ok(())
+    }
+    unsafe fn begin_transaction(&self, sb: *mut vfs_superblock) -> KResult<()> {
+        let xv6_sb = sb as *mut xv6fs_superblock;
+        let ret = xv6fs_begin_op(xv6_sb);
+        if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
+    }
+    unsafe fn end_transaction(&self, sb: *mut vfs_superblock) -> KResult<()> {
+        let xv6_sb = sb as *mut xv6fs_superblock;
+        xv6fs_end_op(xv6_sb);
+        Ok(())
+    }
 }
 
-// ===========================================================================
-// Transaction Callbacks for VFS-managed operations
-//
-// See the C original's design-choice comment (reproduced in
-// `vfs/vfs_types.h`'s `vfs_superblock_ops.begin_transaction` doc): xv6fs
-// registers callbacks for metadata operations (create/unlink/etc, single
-// transaction each); file operations (write/truncate) manage transactions
-// internally because they need batching for large files.
-// ===========================================================================
+pub(crate) static XV6FS_SUPERBLOCK_OPS: Xv6fsSuperblockOps = Xv6fsSuperblockOps;
 
-extern "C" fn xv6fs_begin_transaction_op(sb: *mut vfs_superblock) -> c_int {
-    let xv6_sb = sb as *mut xv6fs_superblock;
-    xv6fs_begin_op(xv6_sb)
-}
-extern "C" fn xv6fs_end_transaction_op(sb: *mut vfs_superblock) -> c_int {
-    let xv6_sb = sb as *mut xv6fs_superblock;
-    xv6fs_end_op(xv6_sb);
-    0
-}
-
-// ===========================================================================
-// VFS operations structures
-// ===========================================================================
-
-pub(crate) static XV6FS_SUPERBLOCK_OPS: vfs_superblock_ops = vfs_superblock_ops {
-    alloc_inode: Some(xv6fs_alloc_inode),
-    get_inode: Some(xv6fs_get_inode),
-    sync_fs: Some(xv6fs_sync_fs),
-    unmount_begin: Some(xv6fs_unmount_begin),
-    add_orphan: Some(xv6fs_add_orphan),
-    remove_orphan: Some(xv6fs_remove_orphan),
-    recover_orphans: Some(xv6fs_recover_orphans),
-    statfs: Some(xv6fs_statfs),
-    begin_transaction: Some(xv6fs_begin_transaction_op),
-    end_transaction: Some(xv6fs_end_transaction_op),
-};
-
-static XV6FS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
-    mount: Some(xv6fs_mount),
-    free: Some(xv6fs_free),
-};
+static XV6FS_FS_TYPE_OPS: Xv6fsFsTypeOps = Xv6fsFsTypeOps;
 
 // ===========================================================================
 // Filesystem type initialization
@@ -966,7 +956,7 @@ pub(crate) extern "C" fn xv6fs_init() {
     // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
     unsafe {
         (*fs_type).name = c"xv6fs".as_ptr();
-        (*fs_type).ops = ptr::addr_of!(XV6FS_FS_TYPE_OPS) as *mut _;
+        (*fs_type).ops = Some(&XV6FS_FS_TYPE_OPS);
     }
 
     vfs_mount_lock();
@@ -994,25 +984,35 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
         return;
     }
 
-    // Create /root directory in tmpfs root (vfs_mkdir handles its own locking).
-    let root_dir = vfs_mkdir(tmpfs_root, 0o755, c"root".as_ptr(), 4);
-    if is_err_or_null(root_dir) {
+    // Create /root directory in tmpfs root (vfs_mkdir handles its own
+    // locking; P3-10b: `KResult`-native, no ERR_PTR decode).
+    let Ok(root_dir) = crate::vfs::inode::vfs_mkdir_inner(tmpfs_root, 0o755, c"root".as_ptr(), 4)
+    else {
         crate::kprintln!("xv6fs: failed to create /root directory");
         return;
-    }
+    };
 
     // Select root device: prefer ramdisk if available.
     let ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
     let root_dev = if !ramdisk.is_null() && !is_err(ramdisk) { RAMDISK_DEV } else { ROOTDEV };
 
-    // Create a block device inode for root device.
-    let dev_inode = vfs_mknod(tmpfs_root, super::S_IFBLK | 0o600, root_dev, c"rootdev".as_ptr(), 7);
-    if is_err_or_null(dev_inode) {
-        let errno = if dev_inode.is_null() { neg(ENOMEM) } else { dev_inode as isize as c_int };
-        crate::kprintln!("xv6fs: failed to create device inode, errno={}", errno as i64);
-        vfs_iput(root_dir);
-        return;
-    }
+    // Create a block device inode for root device. (P3-10b:
+    // `KResult`-native; the old dead null -> `ENOMEM` branch had no
+    // producer.)
+    let dev_inode = match crate::vfs::inode::vfs_mknod_inner(
+        tmpfs_root,
+        super::S_IFBLK | 0o600,
+        root_dev,
+        c"rootdev".as_ptr(),
+        7,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            crate::kprintln!("xv6fs: failed to create device inode, errno={}", e.neg() as i64);
+            vfs_iput(root_dir);
+            return;
+        }
+    };
 
     // Mount xv6fs at /root. vfs_mount requires: mount mutex, superblock
     // write lock, and inode lock. On success, caller must release locks.

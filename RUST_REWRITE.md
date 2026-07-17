@@ -2696,6 +2696,107 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   files (net +228, dominated by trait/method docs; the table type,
   its asserts, 24 extern wrappers, and 2 dead APIs deleted).
 
+### Iteration 72 — 2026-07-17 — Wave P3-10b: vfs_inode_ops (19 slots) + vfs_superblock_ops + vfs_fs_type_ops → `InodeOps`/`SuperblockOps`/`FsTypeOps` traits — the ops-table redesign COMPLETED, ERR_PTR eliminated from the fs-dispatch family
+
+- **The big one.** All three remaining VFS fn-pointer tables are GONE,
+  replaced by `pub trait ... : Sync` with `unsafe fn` methods +
+  `# Safety` sections and `&'static dyn` dispatch (P3-10a pilot
+  pattern): `FsTypeOps` (fs.rs; `mount`/`free` both required — the old
+  registration-time slot checks collapse into the `ops.is_some()`
+  check; `mount`'s `ret_sb` out-param + errno return became
+  `KResult<*mut VfsSuperblock>`); `SuperblockOps` (fs.rs;
+  `alloc_inode`/`get_inode` → `KResult<*mut vfs_inode>`, `sync_fs`,
+  `unmount_begin` required per the old `__vfs_superblock_ops_valid`
+  gate; `add_orphan`/`remove_orphan`/`recover_orphans` (no dispatch
+  site yet)/`statfs`/`begin_transaction`/`end_transaction` defaulted
+  `Ok(())` = the old `None`-slot skips); `InodeOps` (inode.rs, 19
+  slots; 16 required — every historical table filled them, so the old
+  `None`-slot ENOSYS/skip branches were dead; `move_` defaults
+  `Err(NoSys)` (xv6fs's `None` slot; the fn-pointer equality gate
+  collapsed — same-superblock ⇒ same ops instance, proven before
+  dispatch by the EXDEV check), `dirty_inode`/`sync_inode` default
+  `Ok(())` (tmpfs's `None` slots)). Holder fields:
+  `VfsFsType.ops`/`VfsSuperblock.ops`/`VfsInode.ops` are all
+  `Option<&'static dyn ...>` — `None` only for the
+  not-yet-registered/not-yet-validated/zeroed-dummy-root cases the old
+  null table pointer marked (each nullability documented at the field).
+  Dispatch helpers `sb_ops()`/`inode_ops()` panic on the
+  never-happens `None` where the old code would have been null-deref
+  UB.
+
+- **Implementors: 56 `extern "C"` table-callback spellings deleted**
+  across xv6fs(30: 18 inode + 12 superblock)/tmpfs(24:
+  17 inode-family + 7 superblock)/devtmpfs(2), replaced by zero-sized
+  unit-struct impls (`Xv6fsInodeOps`/`Xv6fsSuperblockOps`/
+  `Xv6fsFsTypeOps`/`TmpfsInodeOps`/`TmpfsSuperblockOps`/
+  `TmpfsFsTypeOps`/`DevtmpfsSuperblockOps`/`DevtmpfsFsTypeOps`)
+  delegating to now-`KResult`-native former bodies. **12 driver-side
+  `result_to_errptr` boundary conversions deleted** (CS12/13's
+  `_inner` pattern paid off exactly as designed). xv6fs's three
+  always-0 orphan stubs deleted outright (trait defaults cover them);
+  both drivers' dead `setattr` EOPNOTSUPP stubs became one-line
+  required-method impls. devtmpfs reuses tmpfs semantics by
+  delegating trait impls (old table reused tmpfs fn pointers; statfs
+  NOT overridden = old `None` slot → generic-fields default).
+
+- **ERR_PTR ELIMINATED from the family** (the Result-arc payoff):
+  `vfs_create/mknod/mkdir/symlink` retry loops are `KResult` end to
+  end (`is_again(&ret)` replaces `is_eagain_ptr`, catching
+  `Errno::Again` AND raw `-EAGAIN` passthrough; retry/cleanup/lock
+  order byte-identical); `vfs_alloc_inode_inner`/`vfs_get_inode_inner`/
+  `init_sb_rooti`/`__vfs_get_dentry_inode_impl` consume
+  `vfs_add_inode_inner`/`vfs_get_inode_cached_inner` natively;
+  drivers call `vfs_alloc_inode_inner`/`vfs_get_dentry_inode_inner`
+  directly; devtmpfs + xv6fs_mount_root consume
+  `vfs_mkdir_inner`/`vfs_mknod_inner`. Token accounting
+  (err_ptr/ptr_err/is_err/Errno::Raw call sites, before → after):
+  `err_ptr()` constructors 17 → **0** across the whole vfs family;
+  remaining `ptr_err`/`is_err` decodes are ONLY at genuine
+  cross-family boundaries (vfs_curroot/vfs_curdir in the namei path,
+  fs.rs vfs_init's vfs_namei bootstrap consumers, dev-layer
+  blkdev_get/bread in xv6fs) — the vfs_namei public ERR_PTR domain
+  itself (consumed by vfs_syscall.rs) is out of this family and
+  unchanged. `Errno::Raw` in the family is now only (a) `c_int`
+  passthrough from helpers this family doesn't own
+  (`vfs_inode_valid_locked`, `vfs_ilookup`, `xv6fs_begin_op`) and
+  (b) the documented cross-cluster decodes above; driver files:
+  xv6fs/inode.rs 11 → 0, tmpfs/inode.rs 6 → 0. New `Errno::Busy`
+  (EBUSY) variant for tmpfs move's busy-target check.
+
+- **Layout (owned since P3-6, rewritten as new-truth asserts)**:
+  `vfs_superblock` — fat `ops` absorbed one word of `_pad0` ([u64;7] →
+  [u64;6]): 1472/64 UNCHANGED, `lock` stays on its cache line at 1152,
+  every other offset identical. `vfs_inode` — fat `ops` absorbed the
+  trailing `_pad2`: 1088/64 UNCHANGED, `completion` stays on its cache
+  line at 960 (ref_count..dev_mnt shifted +8; no consumer depends on
+  them). `vfs_fs_type` 104 → 112 (tail pointer went fat; nothing
+  depends on its size). All-zero bytes still read as ops `None` (data
+  -pointer null niche) — `fs.rs`'s `mem::zeroed()` `vfs_root_inode`
+  init is preserved and documented at the assert block. `bindings.rs`
+  aliases `vfs_inode_ops`/`vfs_superblock_ops`/`vfs_fs_type_ops`
+  deleted.
+
+- Verified (cache discipline BEFORE and AFTER: `CMAKE_BUILD_TYPE`
+  empty + toolchain gcc + `Lab: fs`): `cargo clean` + full rebuild =
+  **0 warnings, 0 errors**. Boot ×4 on fresh `fs_img`s, each exactly
+  ONE `init: starting sh` + `tmpfs: mounted at /tmp` + `devtmpfs:
+  populated 9 device nodes` + `devtmpfs: mounted at /dev` + `xv6fs:
+  mounted at /root` (all three tables on the boot path). Battery:
+  mkdir + EEXIST; `ln /README.md rr` + `wc rr` = **714 3365 26018**;
+  symlinktest both ok; usertests createdelete/bigdir/linktest/
+  unlinkread all **OK** (single-test "lost some free pages" trailer =
+  documented pre-existing artifact); **stressfs ×2** completed (shell
+  alive); **bigfile ok** (65803 blocks); `mkdir /tmp/tx` + `ls /tmp`
+  (tmpfs inode ops); `ls /dev` (devtmpfs); `cat noexist` → ENOENT;
+  **testsig 21/21**; **mmaptest 16/16**; zero
+  panic/corruption markers in all logs. `usertests forkforkfork` →
+  the IDENTICAL pre-existing panic signature ("Failed to remove
+  interrupted waiter from queue" → IPI_REASON_CRASH both harts).
+  LOC: +1647/−1390 across 14 files (net +257, dominated by
+  trait/method `# Safety` docs; three table types, their asserts, 56
+  extern callbacks, 12 result_to_errptr conversions, 3 orphan stubs
+  and the dead `is_eagain_ptr` helpers deleted).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

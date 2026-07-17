@@ -32,9 +32,10 @@ use core::ptr;
 
 use crate::bindings::{
     hlist_entry_t, hlist_t, list_node_t, slab_cache_t, statfs, tmpfs_inode, tmpfs_sb_private,
-    tmpfs_superblock, vfs_fs_type, vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops,
+    tmpfs_superblock, vfs_fs_type, vfs_inode, vfs_superblock,
     EINVAL, ENOMEM, PGSIZE, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
+use crate::vfs::fs::{FsTypeOps, SuperblockOps};
 
 use super::inode::TMPFS_INODE_OPS;
 use super::{NAME_MAX, TMPFS_MAX_FILE_SIZE};
@@ -145,14 +146,14 @@ use crate::vfs::fs::{
 use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iunlock};
 
 // `kassert!`'s canonical home is `crate::kstd`/crate root (P3-CS1
-// centralization). P3-CS13: the two ERR_PTR-returning superblock-ops
-// vtable methods (`tmpfs_alloc_inode`/`tmpfs_get_inode`) now build a
-// `KResult<*mut vfs_inode>` internally and encode it to the ABI-fixed
-// ERR_PTR exactly once at the `extern "C"` boundary via
-// `result_to_errptr`; only the error-return encoding changed, the
-// alloc/`slab_free` cleanup control flow is byte-identical.
+// centralization). P3-10b (ops-table redesign): the CS13-era
+// `extern "C"` wrappers + their `result_to_errptr` boundary
+// conversions are GONE — the `KResult`-native bodies below are now
+// dispatched directly through the `SuperblockOps`/`FsTypeOps` trait
+// impls (and reused by devtmpfs's delegating impls); no ERR_PTR
+// encoding remains anywhere in this driver.
 use crate::kassert;
-use crate::kstd::{result_to_errptr, Errno, KResult};
+use crate::kstd::{Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -236,17 +237,15 @@ fn __tmpfs_alloc_inode_structure() -> *mut tmpfs_inode {
     // `tmpfs_inode`-sized block from the slab cache.
     unsafe {
         ptr::write_bytes(ti as *mut u8, 0, core::mem::size_of::<tmpfs_inode>());
-        (*ti).vfs_inode.ops = ptr::addr_of!(TMPFS_INODE_OPS) as *mut _;
+        (*ti).vfs_inode.ops = Some(&TMPFS_INODE_OPS);
     }
     ti
 }
 
-/// Mirrors `tmpfs_alloc_inode()`.
-pub(crate) extern "C" fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
-    result_to_errptr(tmpfs_alloc_inode_inner(sb))
-}
-
-fn tmpfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
+/// Mirrors `tmpfs_alloc_inode()`. `pub(crate)`: reached through
+/// [`SuperblockOps`] for tmpfs itself and reused directly by
+/// devtmpfs's delegating trait impl (P3-10b).
+pub(crate) fn tmpfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
     if sb.is_null() {
         return Err(Errno::Inval);
     }
@@ -282,7 +281,7 @@ fn tmpfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
 /// (directories) before this is called. `inode` must be a live
 /// `vfs_inode` embedded in a `tmpfs_inode` allocated by
 /// [`tmpfs_alloc_inode`] (`vfs_inode` is its first field, offset 0).
-pub(crate) extern "C" fn tmpfs_free_inode(inode: *mut vfs_inode) {
+pub(crate) fn tmpfs_free_inode(inode: *mut vfs_inode) {
     let ti = inode as *mut tmpfs_inode;
     slab_free(ti as *mut c_void);
 }
@@ -306,7 +305,7 @@ pub(crate) extern "C" fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock {
 /// Mirrors `tmpfs_free()`. `sb` must be a live `vfs_superblock` embedded
 /// in a `tmpfs_superblock` allocated by [`tmpfs_alloc_superblock`]
 /// (`vfs_sb` is its first field, offset 0).
-pub(crate) extern "C" fn tmpfs_free(sb: *mut vfs_superblock) {
+pub(crate) fn tmpfs_free_impl(sb: *mut vfs_superblock) {
     let tsb = sb as *mut tmpfs_superblock;
     slab_free(tsb as *mut c_void);
 }
@@ -316,12 +315,9 @@ pub(crate) extern "C" fn tmpfs_free(sb: *mut vfs_superblock) {
 // ===========================================================================
 
 /// Mirrors `tmpfs_get_inode()`. tmpfs does not persist inodes, so it
-/// cannot load an inode by number -- always `-ENOENT`.
-pub(crate) extern "C" fn tmpfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
-    result_to_errptr(tmpfs_get_inode_inner(sb, ino))
-}
-
-fn tmpfs_get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs_inode> {
+/// cannot load an inode by number -- always `-ENOENT`. `pub(crate)`:
+/// see [`tmpfs_alloc_inode_inner`].
+pub(crate) fn tmpfs_get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs_inode> {
     if sb.is_null() {
         return Err(Errno::Inval);
     }
@@ -329,12 +325,12 @@ fn tmpfs_get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs
 }
 
 /// Mirrors `tmpfs_sync_fs()`. tmpfs is an in-memory filesystem, nothing
-/// to sync.
-pub(crate) extern "C" fn tmpfs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
+/// to sync. `pub(crate)`: see [`tmpfs_alloc_inode_inner`].
+pub(crate) fn tmpfs_sync_fs_impl(sb: *mut vfs_superblock, _wait: c_int) -> KResult<()> {
     // SAFETY: `sb` is a live `vfs_superblock` (caller's contract, same
-    // as the C `vfs_superblock_ops.sync_fs` callback convention).
+    // as the `SuperblockOps::sync_fs` callback convention).
     unsafe { (*sb).flags.set_dirty(0) };
-    0
+    Ok(())
 }
 
 /// `tmpfs_unmount_begin` — prepare tmpfs for unmount by evicting
@@ -356,7 +352,7 @@ pub(crate) extern "C" fn tmpfs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) ->
 /// never shared a function either (both are macro-expansion call
 /// sites), matching this crate's established per-file self-contained
 /// convention.
-pub(crate) extern "C" fn tmpfs_unmount_begin(sb: *mut vfs_superblock) {
+pub(crate) fn tmpfs_unmount_begin_impl(sb: *mut vfs_superblock) {
     if sb.is_null() {
         return;
     }
@@ -379,17 +375,16 @@ pub(crate) extern "C" fn tmpfs_unmount_begin(sb: *mut vfs_superblock) {
                     // Double-check ref_count under lock.
                     if (*inode).ref_count == 0 {
                         // Destroy the inode's data if it has any.
-                        if let Some(destroy_inode) = (*(*inode).ops).destroy_inode {
-                            destroy_inode(inode);
-                        }
+                        // (P3-10b: `destroy_inode`/`free_inode` are
+                        // required trait methods — the old `None`-slot
+                        // skips had no live instance.)
+                        crate::vfs::inode::inode_ops(inode).destroy_inode(inode);
                         // Remove from hash and mark invalid.
                         (*inode).flags.set_valid(0);
                         vfs_remove_inode(sb, inode);
                         vfs_iunlock(inode);
                         // Free the inode structure.
-                        if let Some(free_inode) = (*(*inode).ops).free_inode {
-                            free_inode(inode);
-                        }
+                        crate::vfs::inode::inode_ops(inode).free_inode(inode);
                     } else {
                         vfs_iunlock(inode);
                     }
@@ -503,79 +498,96 @@ unsafe fn hlist_next_entry(hlist: *mut hlist_t, entry: *mut hlist_entry_t) -> *m
     }
 }
 
-extern "C" fn tmpfs_statfs(_sb: *mut vfs_superblock, buf: *mut statfs) -> c_int {
-    // SAFETY: `buf` is a live `statfs` (caller's contract, matches the C
-    // `vfs_superblock_ops.statfs` callback convention).
-    unsafe {
-        (*buf).f_bsize = PGSIZE as u64;
-        (*buf).f_frsize = PGSIZE as u64;
-        (*buf).f_namelen = NAME_MAX;
+/// tmpfs's [`SuperblockOps`] implementor (P3-10b) — a zero-sized unit
+/// struct whose single `static` instance ([`TMPFS_SUPERBLOCK_OPS`]) is
+/// installed into every tmpfs superblock's `ops` as `Some(&STATIC)`.
+/// The old table's `None` slots (`add_orphan`/`remove_orphan`/
+/// `recover_orphans`/`begin_transaction`/`end_transaction`) are the
+/// trait's do-nothing defaults.
+pub struct TmpfsSuperblockOps;
+
+impl SuperblockOps for TmpfsSuperblockOps {
+    unsafe fn alloc_inode(&self, sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
+        tmpfs_alloc_inode_inner(sb)
     }
-    0
+    unsafe fn get_inode(&self, sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
+        tmpfs_get_inode_inner(sb, ino)
+    }
+    unsafe fn sync_fs(&self, sb: *mut vfs_superblock, wait: c_int) -> KResult<()> {
+        tmpfs_sync_fs_impl(sb, wait)
+    }
+    unsafe fn unmount_begin(&self, sb: *mut vfs_superblock) {
+        tmpfs_unmount_begin_impl(sb);
+    }
+    unsafe fn statfs(&self, _sb: *mut vfs_superblock, buf: *mut statfs) -> KResult<()> {
+        // SAFETY: `buf` is a live `statfs` (caller's contract, matches
+        // the `SuperblockOps::statfs` callback convention).
+        unsafe {
+            (*buf).f_bsize = PGSIZE as u64;
+            (*buf).f_frsize = PGSIZE as u64;
+            (*buf).f_namelen = NAME_MAX;
+        }
+        Ok(())
+    }
 }
 
-pub static TMPFS_SUPERBLOCK_OPS: vfs_superblock_ops = vfs_superblock_ops {
-    alloc_inode: Some(tmpfs_alloc_inode),
-    get_inode: Some(tmpfs_get_inode),
-    sync_fs: Some(tmpfs_sync_fs),
-    unmount_begin: Some(tmpfs_unmount_begin),
-    add_orphan: None,
-    remove_orphan: None,
-    recover_orphans: None,
-    statfs: Some(tmpfs_statfs),
-    begin_transaction: None,
-    end_transaction: None,
-};
+pub static TMPFS_SUPERBLOCK_OPS: TmpfsSuperblockOps = TmpfsSuperblockOps;
 
 // ===========================================================================
 // tmpfs filesystem type implementation
 // ===========================================================================
 
-/// Mirrors `tmpfs_mount()`.
-extern "C" fn tmpfs_mount(
-    mountpoint: *mut vfs_inode,
-    device: *mut vfs_inode,
-    _flags: c_int,
-    _data: *const c_char,
-    ret_sb: *mut *mut vfs_superblock,
-) -> c_int {
-    if mountpoint.is_null() || ret_sb.is_null() {
-        return neg(EINVAL);
+/// tmpfs's [`FsTypeOps`] implementor (P3-10b). `mount` mirrors
+/// `tmpfs_mount()` (the old `ret_sb` out-param + errno return became
+/// `KResult<*mut vfs_superblock>`); `free` mirrors `tmpfs_free()`.
+struct TmpfsFsTypeOps;
+
+impl FsTypeOps for TmpfsFsTypeOps {
+    unsafe fn mount(
+        &self,
+        mountpoint: *mut vfs_inode,
+        device: *mut vfs_inode,
+        _flags: c_int,
+        _data: *const c_char,
+    ) -> KResult<*mut vfs_superblock> {
+        if mountpoint.is_null() {
+            return Err(Errno::Inval);
+        }
+        if !device.is_null() {
+            return Err(Errno::Inval); // tmpfs does not support device inode
+        }
+        let sb = tmpfs_alloc_superblock();
+        if sb.is_null() {
+            return Err(Errno::NoMem);
+        }
+        let root_inode = __tmpfs_alloc_inode_structure();
+        if root_inode.is_null() {
+            // SAFETY: `sb` is a live, exclusively-owned `tmpfs_superblock`;
+            // `vfs_sb` is its first field (offset 0).
+            tmpfs_free_impl(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
+            return Err(Errno::NoMem);
+        }
+        super::inode::tmpfs_make_directory(root_inode);
+        // SAFETY: `sb`/`root_inode` are freshly allocated and exclusively
+        // owned here.
+        unsafe {
+            (*root_inode).vfs_inode.ino = 1; // Root inode number is 1
+            (*root_inode).vfs_inode.n_links = 2; // "." and ".." both point to self
+            (*sb).vfs_sb.block_size = PGSIZE as usize;
+            (*sb).vfs_sb.root_inode = ptr::addr_of_mut!((*root_inode).vfs_inode);
+            (*sb).private_data.next_ino = 2;
+            (*sb).vfs_sb.flags.set_backendless(1);
+            (*sb).vfs_sb.ops = Some(&TMPFS_SUPERBLOCK_OPS);
+            Ok(ptr::addr_of_mut!((*sb).vfs_sb))
+        }
     }
-    if !device.is_null() {
-        return neg(EINVAL); // tmpfs does not support device inode
+
+    unsafe fn free(&self, sb: *mut vfs_superblock) {
+        tmpfs_free_impl(sb);
     }
-    let sb = tmpfs_alloc_superblock();
-    if sb.is_null() {
-        return neg(ENOMEM);
-    }
-    let root_inode = __tmpfs_alloc_inode_structure();
-    if root_inode.is_null() {
-        // SAFETY: `sb` is a live, exclusively-owned `tmpfs_superblock`;
-        // `vfs_sb` is its first field (offset 0).
-        tmpfs_free(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
-        return neg(ENOMEM);
-    }
-    super::inode::tmpfs_make_directory(root_inode);
-    // SAFETY: `sb`/`root_inode` are freshly allocated and exclusively
-    // owned here.
-    unsafe {
-        (*root_inode).vfs_inode.ino = 1; // Root inode number is 1
-        (*root_inode).vfs_inode.n_links = 2; // "." and ".." both point to self
-        (*sb).vfs_sb.block_size = PGSIZE as usize;
-        (*sb).vfs_sb.root_inode = ptr::addr_of_mut!((*root_inode).vfs_inode);
-        (*sb).private_data.next_ino = 2;
-        (*sb).vfs_sb.flags.set_backendless(1);
-        (*sb).vfs_sb.ops = ptr::addr_of!(TMPFS_SUPERBLOCK_OPS) as *mut _;
-        *ret_sb = ptr::addr_of_mut!((*sb).vfs_sb);
-    }
-    0
 }
 
-static TMPFS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
-    mount: Some(tmpfs_mount),
-    free: Some(tmpfs_free),
-};
+static TMPFS_FS_TYPE_OPS: TmpfsFsTypeOps = TmpfsFsTypeOps;
 
 /// `tmpfs_init` - Initialize tmpfs filesystem type (caches and
 /// registration).
@@ -592,7 +604,7 @@ pub(crate) extern "C" fn tmpfs_init() {
     // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
     unsafe {
         (*fs_type).name = c"tmpfs".as_ptr();
-        (*fs_type).ops = ptr::addr_of!(TMPFS_FS_TYPE_OPS) as *mut _;
+        (*fs_type).ops = Some(&TMPFS_FS_TYPE_OPS);
     }
 
     vfs_mount_lock();

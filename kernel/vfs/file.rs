@@ -892,24 +892,18 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
         return Ok(file);
     }
 
-    // Regular files and directories use inode->ops->open.
-    // SAFETY: non-null `inode`.
-    let open_fn = unsafe { (*(*inode).ops).open };
-    let Some(open_fn) = open_fn else {
-        vfs_iunlock(inode);
-        vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
-        file_free(file);
-        return Err(Errno::NoSys);
-    };
+    // Regular files and directories use the driver's `InodeOps::open`
+    // (P3-10b: a required trait method — the old `None`-slot
+    // cleanup-and-`ENOSYS` path had no live instance; a driver refusing
+    // an open returns `Err`, taking the identical cleanup below).
     // SAFETY: `inode`/`file` are both live; `open` is a filesystem
     // driver callback invoked with the inode lock held, matching its
     // documented contract.
-    let ret = unsafe { open_fn(inode, file, f_flags) };
-    if ret != 0 {
+    if let Err(e) = unsafe { crate::vfs::inode::inode_ops(inode).open(inode, file, f_flags) } {
         vfs_iunlock(inode);
         vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
         file_free(file);
-        return Err(Errno::Raw(ret));
+        return Err(e);
     }
     // SAFETY: non-null `file`.
     if unsafe { (*file).ops.is_none() } {
@@ -1217,15 +1211,21 @@ fn vfs_filestat_inner(file: *mut vfs_file, out: *mut stat) -> KResult<c_int> {
         return Err(Errno::BadF);
     }
 
-    // SAFETY: non-null `inode`.
-    if let Some(getattr) = unsafe { (*(*inode).ops).getattr } {
-        // SAFETY: `inode`/`out` are both live; `getattr` is a
-        // filesystem driver callback.
-        return Ok(unsafe { getattr(inode, out) });
+    // SAFETY: non-null `inode`. P3-10b: `getattr` is a required trait
+    // method, so the generic fallback below now keys on the whole ops
+    // table being absent (the zeroed dummy root inode) — exactly the
+    // reachable half of the old `None` check.
+    if let Some(ops) = unsafe { (*inode).ops } {
+        // SAFETY: `inode` (not locked — the driver locks it) and `out`
+        // are both live; `getattr` is a filesystem driver callback.
+        return match unsafe { ops.getattr(inode, out) } {
+            Ok(()) => Ok(0),
+            Err(e) => Err(e),
+        };
     }
 
-    // Generic fallback when the filesystem doesn't implement inode
-    // getattr yet.
+    // Generic fallback when the inode has no driver ops (the dummy
+    // VFS-root inode).
     vfs_ilock(inode);
     // SAFETY: non-null `inode`/`out`.
     unsafe {

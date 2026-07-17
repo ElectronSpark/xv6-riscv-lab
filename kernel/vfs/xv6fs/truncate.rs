@@ -40,7 +40,8 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use crate::bindings::{buf, loff_t, vfs_inode, xv6fs_inode, xv6fs_superblock, EFBIG, EINVAL, ENOSPC};
+use crate::bindings::{buf, loff_t, vfs_inode, xv6fs_inode, xv6fs_superblock};
+use crate::kstd::{Errno, KResult};
 use crate::proc::proc_shims::xv6_panic;
 
 use super::block_cache::{xv6fs_bcache_find_free_block, xv6fs_bcache_find_free_block_near, xv6fs_bcache_mark_free};
@@ -702,22 +703,22 @@ unsafe fn __xv6fs_truncate_partial(ip: *mut xv6fs_inode, first_block: u32) -> c_
     }
 }
 
-/// Mirrors `xv6fs_truncate()`.
-///
-/// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
-/// declaration; this is also [`super::inode::XV6FS_INODE_OPS`]'s
-/// `.truncate` entry.
-pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+/// Mirrors `xv6fs_truncate()` (P3-10b: `KResult`-native, reached
+/// through [`super::inode::Xv6fsInodeOps`]'s `truncate` — the old
+/// `extern "C"` C-ABI spelling is gone with the fn-pointer table).
+/// `xv6fs_begin_op` failures (a `c_int` boundary this driver's log
+/// layer owns; `-EINTR` today) pass through as `Errno::Raw`.
+pub(crate) fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> KResult<()> {
     if inode.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if new_size < 0 {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     // Check max file size (MAXFILE blocks).
     if new_size > super::MAXFILE as loff_t * super::BSIZE as loff_t {
-        return neg(EFBIG);
+        return Err(Errno::FBig);
     }
 
     let ip = inode as *mut xv6fs_inode;
@@ -726,18 +727,18 @@ pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t)
     let old_size = unsafe { (*inode).size };
 
     if new_size == old_size {
-        return 0; // No change needed.
+        return Ok(()); // No change needed.
     }
 
     if new_size == 0 {
         // Full truncation -- use the optimized path.
         let ret = xv6fs_begin_op(xv6_sb);
         if ret != 0 {
-            return ret;
+            return Err(Errno::Raw(ret));
         }
         xv6fs_itrunc(ip);
         xv6fs_end_op(xv6_sb);
-        return 0;
+        return Ok(());
     }
 
     if new_size < old_size {
@@ -750,7 +751,7 @@ pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t)
 
         let ret = xv6fs_begin_op(xv6_sb);
         if ret != 0 {
-            return ret;
+            return Err(Errno::Raw(ret));
         }
         // SAFETY: `ip` is live with a transaction now active.
         unsafe {
@@ -759,7 +760,7 @@ pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t)
         }
         xv6fs_iupdate(ip);
         xv6fs_end_op(xv6_sb);
-        return 0;
+        return Ok(());
     }
 
     // Extending file -- allocate blocks as needed.
@@ -768,13 +769,13 @@ pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t)
 
     let ret = xv6fs_begin_op(xv6_sb);
     if ret != 0 {
-        return ret;
+        return Err(Errno::Raw(ret));
     }
     let mut bn = old_blocks;
     while bn < new_blocks {
         if xv6fs_bmap(ip, bn) == 0 {
             xv6fs_end_op(xv6_sb);
-            return neg(ENOSPC);
+            return Err(Errno::NoSpc);
         }
         bn += 1;
     }
@@ -783,5 +784,5 @@ pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t)
     xv6fs_iupdate(ip);
     xv6fs_end_op(xv6_sb);
 
-    0
+    Ok(())
 }

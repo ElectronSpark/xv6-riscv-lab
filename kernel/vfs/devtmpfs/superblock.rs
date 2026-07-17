@@ -128,19 +128,21 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::bindings::{
     device_t, dev_t, list_node_t, mode_t, tmpfs_inode, tmpfs_superblock, vfs_dentry, vfs_fs_type,
-    vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops, EEXIST, EINVAL, ENODEV, ENOENT,
+    vfs_inode, vfs_superblock, EEXIST, EINVAL, ENODEV, ENOENT,
     ENOMEM, PGSIZE,
 };
+use crate::kstd::{Errno, KResult};
+use crate::vfs::fs::{FsTypeOps, SuperblockOps};
 use crate::sync::SpinLock;
 // P3-1C mesh sweep: vfs/{fs,inode}.rs and vfs/tmpfs/{superblock,inode}.rs
 // are in scope for this wave; converted from `extern "C"` redeclarations
 // to plain crate-path items (identical signatures).
 use crate::vfs::fs::{vfs_fs_type_allocate, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type, vfs_release_dentry};
-use crate::vfs::inode::{vfs_idup, vfs_ilookup, vfs_iput, vfs_mkdir, vfs_mknod, vfs_unlink};
+use crate::vfs::inode::{vfs_idup, vfs_ilookup, vfs_iput, vfs_unlink};
 use crate::vfs::tmpfs::inode::tmpfs_make_directory;
 use crate::vfs::tmpfs::superblock::{
-    tmpfs_alloc_inode, tmpfs_alloc_superblock, tmpfs_free, tmpfs_get_inode, tmpfs_sync_fs,
-    tmpfs_unmount_begin,
+    tmpfs_alloc_inode_inner, tmpfs_alloc_superblock, tmpfs_free_impl, tmpfs_get_inode_inner,
+    tmpfs_sync_fs_impl, tmpfs_unmount_begin_impl,
 };
 
 // ===========================================================================
@@ -172,7 +174,8 @@ use crate::dev::dev::dev_for_each_device;
 // returned `isize`; both of its call sites already cast the result to
 // `c_int` immediately, see below).
 use crate::kassert;
-use crate::kstd::{err_ptr, is_err, is_err_or_null, ptr_err};
+// P3-10b: the ERR_PTR helper imports are gone — every VFS-core call
+// this file makes is `KResult`-native now.
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -404,28 +407,27 @@ unsafe fn __devtmpfs_walk_parent(
                 // `vfs_get_inode()` cache-lookup wrapper -- ported
                 // faithfully, see the Wave 20 report).
                 let sb = unsafe { (*dir).sb };
-                // SAFETY: `sb`/`ops` live per the comment above; calling
-                // through the vtable function pointer is unsafe in Rust
-                // regardless (raw fn-pointer call).
-                let child = unsafe {
-                    let get_inode = (*(*sb).ops).get_inode.unwrap();
-                    get_inode(sb, dentry.ino)
-                };
+                // SAFETY: `sb`/`ops` live per the comment above; the
+                // trait method is a driver callback with exactly this
+                // contract (P3-10b: `KResult`-native dyn dispatch, no
+                // ERR_PTR decode).
+                let child = unsafe { crate::vfs::fs::sb_ops(sb).get_inode(sb, dentry.ino) };
                 // Deliberate fix (see module doc): release the dentry's
                 // heap-allocated name now that `.ino` has been consumed.
                 vfs_release_dentry(&mut dentry);
                 vfs_iput(dir);
-                if is_err_or_null(child) {
+                let Ok(child) = child else {
                     return ptr::null_mut();
-                }
+                };
                 dir = child;
             } else {
-                // Not found -- create the directory.
-                let sub = vfs_mkdir(dir, 0o755, comp, comp_len);
+                // Not found -- create the directory. (P3-10b:
+                // `KResult`-native, no ERR_PTR decode.)
+                let sub = crate::vfs::inode::vfs_mkdir_inner(dir, 0o755, comp, comp_len);
                 vfs_iput(dir);
-                if is_err_or_null(sub) {
+                let Ok(sub) = sub else {
                     return ptr::null_mut();
-                }
+                };
                 dir = sub;
             }
             start = end + 1;
@@ -467,15 +469,16 @@ unsafe fn __devtmpfs_mknod_relative(
         return neg(ENOENT);
     }
 
-    let inode = vfs_mknod(parent, mode, dev, leaf, leaf_len);
+    // P3-10b: `KResult`-native, no ERR_PTR decode.
     let mut ret = 0;
-    if is_err(inode) {
-        ret = ptr_err(inode);
-        if ret == neg(EEXIST) {
-            ret = 0; // idempotent
+    match crate::vfs::inode::vfs_mknod_inner(parent, mode, dev, leaf, leaf_len) {
+        Ok(inode) => vfs_iput(inode),
+        Err(e) => {
+            ret = e.neg();
+            if ret == neg(EEXIST) {
+                ret = 0; // idempotent
+            }
         }
-    } else {
-        vfs_iput(inode);
     }
     vfs_iput(parent);
     ret
@@ -559,45 +562,60 @@ pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
 //  Superblock ops — delegate to tmpfs
 // ------------------------------------------------------------------ */
 
-static DEVTMPFS_SUPERBLOCK_OPS: vfs_superblock_ops = vfs_superblock_ops {
-    alloc_inode: Some(tmpfs_alloc_inode),
-    get_inode: Some(tmpfs_get_inode),
-    sync_fs: Some(tmpfs_sync_fs),
-    unmount_begin: Some(tmpfs_unmount_begin),
-    add_orphan: None,
-    remove_orphan: None,
-    recover_orphans: None,
-    statfs: None,
-    begin_transaction: None,
-    end_transaction: None,
-};
+/// devtmpfs's [`SuperblockOps`] implementor (P3-10b): delegates the
+/// four required methods to tmpfs's `KResult`-native bodies exactly as
+/// the old table reused tmpfs's fn pointers. Unlike tmpfs, `statfs` is
+/// NOT overridden — the old table's `None` slot becomes the trait's
+/// do-nothing `Ok(())` default (generic statfs fields only).
+struct DevtmpfsSuperblockOps;
+
+impl SuperblockOps for DevtmpfsSuperblockOps {
+    unsafe fn alloc_inode(&self, sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
+        tmpfs_alloc_inode_inner(sb)
+    }
+    unsafe fn get_inode(&self, sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
+        tmpfs_get_inode_inner(sb, ino)
+    }
+    unsafe fn sync_fs(&self, sb: *mut vfs_superblock, wait: core::ffi::c_int) -> KResult<()> {
+        tmpfs_sync_fs_impl(sb, wait)
+    }
+    unsafe fn unmount_begin(&self, sb: *mut vfs_superblock) {
+        tmpfs_unmount_begin_impl(sb);
+    }
+}
+
+static DEVTMPFS_SUPERBLOCK_OPS: DevtmpfsSuperblockOps = DevtmpfsSuperblockOps;
 
 // ------------------------------------------------------------------ */
 //  Filesystem type mount/free
 // ------------------------------------------------------------------ */
 
-/// Mirrors `devtmpfs_mount()`. Only ever reached through
-/// [`DEVTMPFS_FS_TYPE_OPS`]'s `mount` function pointer (the generic VFS
-/// mount machinery in `vfs/fs.rs`), so this stays a private `extern "C"
-/// fn` -- no other caller, same precedent as `tmpfs/superblock.rs`'s
-/// `tmpfs_mount`.
-extern "C" fn devtmpfs_mount(
-    mountpoint: *mut vfs_inode,
-    device: *mut vfs_inode,
-    _flags: c_int,
-    _data: *const c_char,
-    ret_sb: *mut *mut vfs_superblock,
-) -> c_int {
-    if mountpoint.is_null() || ret_sb.is_null() {
-        return neg(EINVAL);
+/// devtmpfs's [`FsTypeOps`] implementor (P3-10b). `mount` mirrors
+/// `devtmpfs_mount()` (only ever reached through the generic VFS mount
+/// machinery in `vfs/fs.rs`, exactly like the old `mount` fn pointer;
+/// the `ret_sb` out-param + errno return became
+/// `KResult<*mut vfs_superblock>`); `free` mirrors
+/// `devtmpfs_umount_free()`.
+struct DevtmpfsFsTypeOps;
+
+impl FsTypeOps for DevtmpfsFsTypeOps {
+    unsafe fn mount(
+        &self,
+        mountpoint: *mut vfs_inode,
+        device: *mut vfs_inode,
+        _flags: c_int,
+        _data: *const c_char,
+    ) -> KResult<*mut vfs_superblock> {
+    if mountpoint.is_null() {
+        return Err(Errno::Inval);
     }
     if !device.is_null() {
-        return neg(EINVAL); // devtmpfs is backendless
+        return Err(Errno::Inval); // devtmpfs is backendless
     }
 
     let sb = tmpfs_alloc_superblock();
     if sb.is_null() {
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
 
     // Initialise next_ino to 1 BEFORE allocating the root inode.
@@ -608,12 +626,15 @@ extern "C" fn devtmpfs_mount(
     // SAFETY: `sb` is freshly allocated and exclusively owned here.
     unsafe { (*sb).private_data.next_ino = 1 };
 
-    // Use tmpfs_alloc_inode to get a proper inode from the shared cache.
-    let vi = tmpfs_alloc_inode(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
-    if is_err(vi) {
-        tmpfs_free(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
-        return ptr_err(vi);
-    }
+    // Use tmpfs's inode allocator to get a proper inode from the shared
+    // cache (P3-10b: `KResult`-native, no ERR_PTR decode).
+    let vi = match tmpfs_alloc_inode_inner(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) }) {
+        Ok(vi) => vi,
+        Err(e) => {
+            tmpfs_free_impl(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
+            return Err(e);
+        }
+    };
     let root_inode = vi as *mut tmpfs_inode;
     tmpfs_make_directory(root_inode);
     // SAFETY: `sb`/`root_inode` are freshly allocated and exclusively
@@ -624,9 +645,7 @@ extern "C" fn devtmpfs_mount(
         (*sb).vfs_sb.block_size = PGSIZE as usize;
         (*sb).vfs_sb.root_inode = ptr::addr_of_mut!((*root_inode).vfs_inode);
         (*sb).vfs_sb.flags.set_backendless(1);
-        (*sb).vfs_sb.ops = ptr::addr_of!(DEVTMPFS_SUPERBLOCK_OPS) as *mut _;
-
-        *ret_sb = ptr::addr_of_mut!((*sb).vfs_sb);
+        (*sb).vfs_sb.ops = Some(&DEVTMPFS_SUPERBLOCK_OPS);
     }
 
     // Save the superblock so create_node/remove_node can find the root
@@ -639,23 +658,20 @@ extern "C" fn devtmpfs_mount(
     // which run AFTER the mount callback returns). Population is done by
     // devtmpfs_post_mount_populate() called from vfs_init().
 
-    0
-}
-
-/// Mirrors `devtmpfs_umount_free()`. Only reached through
-/// [`DEVTMPFS_FS_TYPE_OPS`]'s `free` function pointer, same precedent as
-/// [`devtmpfs_mount`] above.
-extern "C" fn devtmpfs_umount_free(sb: *mut vfs_superblock) {
-    if __DEVTMPFS_SB.load(Ordering::Relaxed) == sb {
-        __DEVTMPFS_SB.store(ptr::null_mut(), Ordering::Relaxed);
+    // SAFETY: `sb` is live (allocated above); `vfs_sb` is its first field.
+    Ok(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) })
     }
-    tmpfs_free(sb);
+
+    /// Mirrors `devtmpfs_umount_free()`.
+    unsafe fn free(&self, sb: *mut vfs_superblock) {
+        if __DEVTMPFS_SB.load(Ordering::Relaxed) == sb {
+            __DEVTMPFS_SB.store(ptr::null_mut(), Ordering::Relaxed);
+        }
+        tmpfs_free_impl(sb);
+    }
 }
 
-static DEVTMPFS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
-    mount: Some(devtmpfs_mount),
-    free: Some(devtmpfs_umount_free),
-};
+static DEVTMPFS_FS_TYPE_OPS: DevtmpfsFsTypeOps = DevtmpfsFsTypeOps;
 
 // ------------------------------------------------------------------ */
 //  Public API: create / remove device nodes across all instances
@@ -869,7 +885,7 @@ pub(crate) extern "C" fn devtmpfs_init() {
     // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
     unsafe {
         (*fs_type).name = c"devtmpfs".as_ptr();
-        (*fs_type).ops = ptr::addr_of!(DEVTMPFS_FS_TYPE_OPS) as *mut _;
+        (*fs_type).ops = Some(&DEVTMPFS_FS_TYPE_OPS);
     }
 
     vfs_mount_lock();

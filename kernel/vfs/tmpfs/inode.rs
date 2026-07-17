@@ -29,9 +29,9 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::bindings::{
     bool_, dev_t, hlist_bucket_t, hlist_entry_t, hlist_func_struct, hlist_t, ht_hash_t,
     list_node_t, loff_t, mode_t, stat, tmpfs_dentry, tmpfs_inode, vfs_dentry, vfs_dir_iter,
-    vfs_inode, vfs_inode_ops, vfs_superblock, __IncompleteArrayField, EBUSY, EEXIST, EINVAL,
-    ENAMETOOLONG, ENOENT, ENOMEM, EOPNOTSUPP,
+    vfs_inode, vfs_superblock, __IncompleteArrayField, EEXIST, EINVAL, ENOMEM,
 };
+use crate::vfs::inode::InodeOps;
 
 use super::{
     s_isblk, s_ischr, S_IFBLK, S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG, TMPFS_HASH_BUCKETS,
@@ -41,7 +41,7 @@ use super::{
 // P3-1C mesh sweep: vfs/{inode,fs}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
-use crate::vfs::fs::{vfs_alloc_inode, vfs_remove_inode, vfs_release_dentry};
+use crate::vfs::fs::{vfs_remove_inode, vfs_release_dentry};
 use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 // ===========================================================================
@@ -88,19 +88,17 @@ fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
 // preserve the `safe fn` facade the old redeclarations asserted.
 use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 
-// `kassert!`/`is_err`'s canonical homes are `crate::kstd`/crate root
-// (P3-CS1 centralization). See `superblock.rs`. P3-CS13: the four
-// ERR_PTR-returning inode-ops vtable methods (`__tmpfs_create`/
-// `__tmpfs_mkdir`/`__tmpfs_mknod`/`__tmpfs_symlink`) now build a
-// `KResult<*mut vfs_inode>` internally and encode it to the ABI-fixed
-// ERR_PTR exactly once at the `extern "C"` boundary via
-// `result_to_errptr`; only the error-return encoding changed, the
-// alloc/link/cleanup control flow is byte-identical. The already-negative
-// `c_int` returned by `__tmpfs_alloc_link_inode`/`__tmpfs_make_symlink_target`
-// (which own the cross-module `vfs_alloc_inode` ERR_PTR / `ENOMEM`
-// encoding) is carried through losslessly as `Errno::Raw(..)`.
+// `kassert!`'s canonical home is `crate::kstd`/crate root (P3-CS1
+// centralization). See `superblock.rs`. P3-10b (ops-table redesign):
+// the CS13-era `extern "C"` wrappers + `result_to_errptr` boundary
+// conversions are GONE — every former callback body below is
+// `KResult`-native and dispatched directly through the
+// [`TmpfsInodeOps`] trait impl; the private helpers
+// (`__tmpfs_alloc_link_inode`/`__tmpfs_dentry_name_copy`/
+// `__tmpfs_do_link`/`__tmpfs_make_symlink_target`) speak `Errno` too,
+// so no ERR_PTR or raw-errno encoding remains anywhere in this driver.
 use crate::kassert;
-use crate::kstd::{is_err, result_to_errptr, Errno, KResult};
+use crate::kstd::{Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -320,10 +318,10 @@ fn __tmpfs_make_symlink_target_embedded(ti: *mut tmpfs_inode, target: *const c_c
 }
 
 /// Initialize a tmpfs inode as a symlink with allocated target.
-fn __tmpfs_make_symlink_target(ti: *mut tmpfs_inode, target: *const c_char, len: usize) -> c_int {
+fn __tmpfs_make_symlink_target(ti: *mut tmpfs_inode, target: *const c_char, len: usize) -> KResult<()> {
     let allocated = strndup(target, len);
     if allocated.is_null() {
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
     // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`.
     unsafe {
@@ -331,7 +329,7 @@ fn __tmpfs_make_symlink_target(ti: *mut tmpfs_inode, target: *const c_char, len:
         (*ti).vfs_inode.size = len as loff_t;
         (*ti).vfs_inode.mode = S_IFLNK | 0o777;
     }
-    0
+    Ok(())
 }
 
 /// Initialize a tmpfs inode as a regular file.
@@ -400,10 +398,10 @@ fn __tmpfs_free_dentry(dentry: *mut tmpfs_dentry) {
 }
 
 /// Allocate and copy a tmpfs directory entry name.
-fn __tmpfs_dentry_name_copy(name: *const c_char, name_len: usize) -> Result<*mut tmpfs_dentry, c_int> {
+fn __tmpfs_dentry_name_copy(name: *const c_char, name_len: usize) -> Result<*mut tmpfs_dentry, Errno> {
     let dentry = __tmpfs_alloc_dentry(name_len);
     if dentry.is_null() {
-        return Err(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
     // SAFETY: `dentry` was just allocated with `name_len + 1` bytes of
     // trailing storage for `__name_start`/`name`.
@@ -563,21 +561,21 @@ fn __tmpfs_dir_lookup_by_name(ti: *mut tmpfs_inode, name: *const c_char, name_le
 
 /// Allocate a dentry and link a target inode into a tmpfs directory with
 /// the given name. Will increase the link count of the target inode.
-fn __tmpfs_do_link(dir: *mut tmpfs_inode, dentry: *mut tmpfs_dentry) -> c_int {
+fn __tmpfs_do_link(dir: *mut tmpfs_inode, dentry: *mut tmpfs_dentry) -> KResult<()> {
     // SAFETY: `dir` is a live directory `tmpfs_inode`; `dentry` is a
     // live, detached `tmpfs_dentry` (caller's contract).
     unsafe {
         let ret = hlist_put(dir_hlist(dir), dentry as *mut c_void, false) as *mut tmpfs_dentry;
         if ret == dentry {
             (*(*dentry).inode).vfs_inode.n_links += 1;
-            return 0;
+            return Ok(());
         }
         if !ret.is_null() {
-            return neg(EEXIST); // Entry already exists
+            return Err(Errno::Exist); // Entry already exists
         }
         (*dentry).parent = dir;
         (*dentry).sb = (*dir).vfs_inode.sb;
-        0
+        Ok(())
     }
 }
 
@@ -600,29 +598,30 @@ fn __tmpfs_alloc_link_inode(
     mode: mode_t,
     name: *const c_char,
     name_len: usize,
-) -> Result<(*mut tmpfs_inode, *mut tmpfs_dentry), c_int> {
+) -> Result<(*mut tmpfs_inode, *mut tmpfs_dentry), Errno> {
     let dentry = match __tmpfs_dentry_name_copy(name, name_len) {
         Ok(d) => d,
         Err(e) => return Err(e),
     };
-    let ret = __tmpfs_do_link(dir, dentry);
-    if ret != 0 {
+    if let Err(e) = __tmpfs_do_link(dir, dentry) {
         __tmpfs_free_dentry(dentry);
-        return Err(ret);
+        return Err(e);
     }
-    // SAFETY: `dir` is a live directory `tmpfs_inode`.
+    // SAFETY: `dir` is a live directory `tmpfs_inode`. (P3-10b:
+    // `KResult`-native VFS-core call, no ERR_PTR decode.)
     let sb = unsafe { (*dir).vfs_inode.sb };
-    let vfs_inode = vfs_alloc_inode(sb);
-    if is_err(vfs_inode) {
-        let ret = vfs_inode as isize as c_int;
-        __tmpfs_do_unlink(dentry);
-        __tmpfs_free_dentry(dentry);
-        return Err(ret);
-    }
+    let vfs_inode = match crate::vfs::fs::vfs_alloc_inode_inner(sb) {
+        Ok(i) => i,
+        Err(e) => {
+            __tmpfs_do_unlink(dentry);
+            __tmpfs_free_dentry(dentry);
+            return Err(e);
+        }
+    };
     // SAFETY: `vfs_inode` is the first field of `tmpfs_inode` (offset 0);
-    // `vfs_alloc_inode` returned a live, locked, ref-count-1 inode
-    // allocated by `tmpfs_alloc_inode` (this driver's own
-    // `vfs_superblock_ops.alloc_inode`), so this reinterpretation is sound.
+    // `vfs_alloc_inode_inner` returned a live, locked, ref-count-1 inode
+    // allocated by this driver's own `SuperblockOps::alloc_inode`, so
+    // this reinterpretation is sound.
     let ti = vfs_inode as *mut tmpfs_inode;
     // SAFETY: `dentry`/`ti` are live and exclusively owned here.
     unsafe {
@@ -659,7 +658,7 @@ pub(crate) extern "C" fn tmpfs_free_symlink_target(ti: *mut tmpfs_inode) {
 // tmpfs inode callbacks.
 // ===========================================================================
 
-extern "C" fn __tmpfs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_char, name_len: usize) -> c_int {
+fn __tmpfs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_char, name_len: usize) -> KResult<()> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
 
     // VFS handles "." and ".." for process root and local root. Driver
@@ -673,19 +672,19 @@ extern "C" fn __tmpfs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name:
                 (*dentry).sb = (*dir).sb;
                 (*dentry).name = strndup(name, name_len);
                 if (*dentry).name.is_null() {
-                    return neg(ENOMEM);
+                    return Err(Errno::NoMem);
                 }
                 (*dentry).name_len = 2;
                 (*dentry).ino = (*(*dir).parent).ino;
                 (*dentry).cookies = VFS_DENTRY_COOKIE_PARENT;
             }
-            return 0;
+            return Ok(());
         }
     }
 
     let child_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
     if child_dentry.is_null() {
-        return neg(ENOENT); // Not found
+        return Err(Errno::NoEnt); // Not found
     }
     // SAFETY: `dir`/`dentry`/`child_dentry` are all live.
     unsafe {
@@ -694,12 +693,12 @@ extern "C" fn __tmpfs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name:
         (*dentry).parent = dir;
         (*dentry).name = strndup(name, name_len);
         if (*dentry).name.is_null() {
-            return neg(ENOMEM);
+            return Err(Errno::NoMem);
         }
         (*dentry).name_len = name_len as u16;
         (*dentry).cookies = child_dentry as i64;
     }
-    0
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +782,7 @@ unsafe fn hlist_next_entry(hlist: *mut hlist_t, entry: *mut hlist_entry_t) -> *m
 /// VFS synthesizes "." at index 0 and ".." for process/local roots at
 /// index 1. Driver handles ".." for ordinary dirs (index 1) and all
 /// children (index > 2).
-extern "C" fn __tmpfs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, dentry: *mut vfs_dentry) -> c_int {
+fn __tmpfs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, dentry: *mut vfs_dentry) -> KResult<()> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
 
     // SAFETY: `dir`/`iter`/`dentry` are live (caller's contract).
@@ -791,17 +790,17 @@ extern "C" fn __tmpfs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, den
         if (*iter).index == 1 {
             // VFS passes ".." to driver only for non-root directories.
             if (*dir).parent.is_null() {
-                return neg(ENOENT); // No parent (should not happen for non-root)
+                return Err(Errno::NoEnt); // No parent (should not happen for non-root)
             }
             vfs_release_dentry(dentry); // Release any previous name
             (*dentry).name = strndup(c"..".as_ptr(), 2);
             if (*dentry).name.is_null() {
-                return neg(ENOMEM);
+                return Err(Errno::NoMem);
             }
             (*dentry).name_len = 2;
             (*dentry).cookies = VFS_DENTRY_COOKIE_PARENT;
             (*dentry).ino = (*(*dir).parent).ino;
-            return 0;
+            return Ok(());
         }
 
         // index > 2: iterate over directory children.
@@ -818,29 +817,29 @@ extern "C" fn __tmpfs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, den
             vfs_release_dentry(dentry); // Release any previous name
             (*dentry).name = ptr::null_mut();
             (*dentry).cookies = VFS_DENTRY_COOKIE_END;
-            return 0;
+            return Ok(());
         }
 
         let name = strndup((*current).name, (*current).name_len);
         if name.is_null() {
-            return neg(ENOMEM);
+            return Err(Errno::NoMem);
         }
         vfs_release_dentry(dentry); // Release any previous name
         (*dentry).name = name;
         (*dentry).name_len = (*current).name_len as u16;
         (*dentry).ino = (*(*current).inode).vfs_inode.ino;
         (*dentry).cookies = current as i64;
-        0
+        Ok(())
     }
 }
 
-extern "C" fn __tmpfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize {
+fn __tmpfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> KResult<isize> {
     let ti = inode as *mut tmpfs_inode;
     // SAFETY: `inode`/`buf` are live (caller's contract).
     unsafe {
         let link_len = (*inode).size as usize;
         if link_len + 1 > buflen {
-            return neg(ENAMETOOLONG) as isize; // Buffer too small
+            return Err(Errno::NameTooLong); // Buffer too small
         }
         if link_len < TMPFS_INODE_EMBEDDED_DATA_LEN {
             memmove(buf as *mut c_void, embedded_data(ti) as *const c_void, link_len);
@@ -848,18 +847,14 @@ extern "C" fn __tmpfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: 
             memmove(buf as *mut c_void, *symlink_target_slot(ti) as *const c_void, link_len);
         }
         *buf.add(link_len) = 0; // Null-terminate the string
-        link_len as isize
+        Ok(link_len as isize)
     }
-}
-
-extern "C" fn __tmpfs_create(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
-    result_to_errptr(__tmpfs_create_inner(dir, mode, name, name_len))
 }
 
 fn __tmpfs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => Err(Errno::Raw(e)),
+        Err(e) => Err(e),
         Ok((ti, _dentry)) => {
             __tmpfs_make_regfile(ti);
             // SAFETY: `ti` is a live, locked `tmpfs_inode`.
@@ -869,17 +864,17 @@ fn __tmpfs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
     }
 }
 
-extern "C" fn __tmpfs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> c_int {
+fn __tmpfs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
     // SAFETY: `dentry`/`target` are live (caller's contract).
     unsafe {
         let tmpfs_dir = (*dentry).parent as *mut tmpfs_inode;
         // We need to lookup the dentry again to get the tmpfs_dentry.
         let tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, (*dentry).name, (*dentry).name_len as usize);
         if tmpfs_dentry.is_null() {
-            return neg(ENOENT); // Entry not found
+            return Err(Errno::NoEnt); // Entry not found
         }
         if ptr::addr_of_mut!((*(*tmpfs_dentry).inode).vfs_inode) != target {
-            return neg(EINVAL); // Target inode does not match
+            return Err(Errno::Inval); // Target inode does not match
         }
 
         // Remove directory entry -- this makes the file inaccessible by
@@ -889,11 +884,11 @@ extern "C" fn __tmpfs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) ->
         __tmpfs_free_dentry(tmpfs_dentry);
 
         // VFS layer will call vfs_iput on target after we return.
-        0
+        Ok(())
     }
 }
 
-extern "C" fn __tmpfs_link(target: *mut vfs_inode, dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int {
+fn __tmpfs_link(target: *mut vfs_inode, dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     let tmpfs_target = target as *mut tmpfs_inode;
 
@@ -904,28 +899,24 @@ extern "C" fn __tmpfs_link(target: *mut vfs_inode, dir: *mut vfs_inode, name: *c
         Ok(d) => d,
         Err(e) => {
             unsafe { (*target).n_links -= 1 };
-            return e;
+            return Err(e);
         }
     };
 
     // SAFETY: `new_entry` is a live, detached `tmpfs_dentry`.
     unsafe { (*new_entry).inode = tmpfs_target };
     let ret = __tmpfs_do_link(tmpfs_dir, new_entry);
-    if ret != 0 {
+    if ret.is_err() {
         unsafe { (*target).n_links -= 1 };
         __tmpfs_free_dentry(new_entry);
     }
     ret
 }
 
-extern "C" fn __tmpfs_mkdir(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
-    result_to_errptr(__tmpfs_mkdir_inner(dir, mode, name, name_len))
-}
-
 fn __tmpfs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => Err(Errno::Raw(e)),
+        Err(e) => Err(e),
         Ok((ti, _dentry)) => {
             tmpfs_make_directory(ti);
             // SAFETY: `ti`/`dir` are live.
@@ -941,16 +932,16 @@ fn __tmpfs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
     }
 }
 
-extern "C" fn __tmpfs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> c_int {
+fn __tmpfs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
     // SAFETY: `dentry`/`target` are live (caller's contract).
     unsafe {
         let tmpfs_dir = (*dentry).parent as *mut tmpfs_inode;
         let tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, (*dentry).name, (*dentry).name_len as usize);
         if tmpfs_dentry.is_null() {
-            return neg(ENOENT); // Entry not found
+            return Err(Errno::NoEnt); // Entry not found
         }
         if ptr::addr_of_mut!((*(*tmpfs_dentry).inode).vfs_inode) != target {
-            return neg(EINVAL); // Target inode does not match
+            return Err(Errno::Inval); // Target inode does not match
         }
         // VFS core already verified directory is empty and not in use.
         // Directory n_links should be 2 (for "." and "..") when empty.
@@ -961,12 +952,8 @@ extern "C" fn __tmpfs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> 
         __tmpfs_do_unlink(tmpfs_dentry);
         __tmpfs_free_dentry(tmpfs_dentry);
         // VFS layer will call vfs_iput on target after we return.
-        0
+        Ok(())
     }
-}
-
-extern "C" fn __tmpfs_mknod(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
-    result_to_errptr(__tmpfs_mknod_inner(dir, mode, dev, name, name_len))
 }
 
 fn __tmpfs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
@@ -976,7 +963,7 @@ fn __tmpfs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
         return Err(Errno::Inval); // Mknod can only create block/char device files
     }
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => Err(Errno::Raw(e)),
+        Err(e) => Err(e),
         Ok((ti, _dentry)) => {
             if s_isblk(mode) {
                 tmpfs_make_bdev(ti, dev);
@@ -1000,13 +987,13 @@ fn vfs_inode_refcount(inode: *mut vfs_inode) -> c_int {
     unsafe { (*(ptr::addr_of_mut!((*inode).ref_count) as *const AtomicI32)).load(Ordering::SeqCst) }
 }
 
-extern "C" fn __tmpfs_move(
+fn __tmpfs_move(
     old_dir: *mut vfs_inode,
     old_dentry: *mut vfs_dentry,
     new_dir: *mut vfs_inode,
     name: *const c_char,
     name_len: usize,
-) -> c_int {
+) -> KResult<()> {
     let tmpfs_old_dir = old_dir as *mut tmpfs_inode;
     let tmpfs_new_dir = new_dir as *mut tmpfs_inode;
 
@@ -1014,7 +1001,7 @@ extern "C" fn __tmpfs_move(
     let tmpfs_old_dentry =
         unsafe { __tmpfs_dir_lookup_by_name(tmpfs_old_dir, (*old_dentry).name, (*old_dentry).name_len as usize) };
     if tmpfs_old_dentry.is_null() {
-        return neg(ENOENT); // Old entry not found
+        return Err(Errno::NoEnt); // Old entry not found
     }
 
     // Increase the link count and refcount of the old inode.
@@ -1023,22 +1010,22 @@ extern "C" fn __tmpfs_move(
     let refcount = vfs_inode_refcount(target);
     if refcount > 2 {
         crate::kprintln!("Tmpfs move: target inode is busy, {}", refcount);
-        return neg(EBUSY); // Target inode is busy
+        return Err(Errno::Busy); // Target inode is busy
     }
     // SAFETY: `target` is live.
     unsafe { (*target).n_links += 1 };
 
     // Create a new dentry in the new directory.
-    let mut ret: c_int;
+    let mut ret: KResult<()>;
     let mut new_entry: *mut tmpfs_dentry = ptr::null_mut();
     match __tmpfs_dentry_name_copy(name, name_len) {
-        Err(e) => ret = e,
+        Err(e) => ret = Err(e),
         Ok(d) => {
             new_entry = d;
             // SAFETY: `new_entry`/`tmpfs_old_dentry` are live.
             unsafe { (*new_entry).inode = (*tmpfs_old_dentry).inode };
             ret = __tmpfs_do_link(tmpfs_new_dir, new_entry);
-            if ret == 0 {
+            if ret.is_ok() {
                 __tmpfs_do_unlink(tmpfs_old_dentry);
             }
         }
@@ -1063,23 +1050,12 @@ extern "C" fn __tmpfs_move(
     // nothing (`tmpfs_old_dentry` is still live and linked, so leaving
     // it alone is the only safe outcome) instead of corrupting the hash
     // list.
-    if ret != 0 && !new_entry.is_null() {
+    if ret.is_err() && !new_entry.is_null() {
         __tmpfs_free_dentry(new_entry);
-    } else if ret == 0 {
+    } else if ret.is_ok() {
         __tmpfs_free_dentry(tmpfs_old_dentry);
     }
     ret
-}
-
-extern "C" fn __tmpfs_symlink(
-    dir: *mut vfs_inode,
-    mode: mode_t,
-    name: *const c_char,
-    name_len: usize,
-    target: *const c_char,
-    target_len: usize,
-) -> *mut vfs_inode {
-    result_to_errptr(__tmpfs_symlink_inner(dir, mode, name, name_len, target, target_len))
 }
 
 fn __tmpfs_symlink_inner(
@@ -1092,14 +1068,13 @@ fn __tmpfs_symlink_inner(
 ) -> KResult<*mut vfs_inode> {
     let tmpfs_dir = dir as *mut tmpfs_inode;
     let (new_inode, dentry) = match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
-        Err(e) => return Err(Errno::Raw(e)),
+        Err(e) => return Err(e),
         Ok(v) => v,
     };
     if target_len < TMPFS_INODE_EMBEDDED_DATA_LEN {
         __tmpfs_make_symlink_target_embedded(new_inode, target, target_len);
-    } else {
-        let ret = __tmpfs_make_symlink_target(new_inode, target, target_len);
-        if ret != 0 {
+    } else if let Err(e) = __tmpfs_make_symlink_target(new_inode, target, target_len) {
+        {
             __tmpfs_do_unlink(dentry);
             // SAFETY: `dir`/`new_inode` are live.
             let rm_ret = unsafe { vfs_remove_inode((*dir).sb, ptr::addr_of_mut!((*new_inode).vfs_inode)) };
@@ -1114,7 +1089,7 @@ fn __tmpfs_symlink_inner(
                 vfs_iunlock(ptr::addr_of_mut!((*new_inode).vfs_inode));
                 super::superblock::tmpfs_free_inode(ptr::addr_of_mut!((*new_inode).vfs_inode));
             }
-            return Err(Errno::Raw(ret));
+            return Err(e);
         }
     }
     // SAFETY: `new_inode` is live and locked.
@@ -1124,7 +1099,7 @@ fn __tmpfs_symlink_inner(
 
 /// Destroy inode data when the last reference is dropped and `n_links ==
 /// 0`. Called with inode locked and superblock write-locked.
-extern "C" fn __tmpfs_destroy_inode(inode: *mut vfs_inode) {
+fn __tmpfs_destroy_inode(inode: *mut vfs_inode) {
     // SAFETY: `inode` is live (caller's contract).
     unsafe {
         let mode = (*inode).mode;
@@ -1141,9 +1116,9 @@ extern "C" fn __tmpfs_destroy_inode(inode: *mut vfs_inode) {
     }
 }
 
-extern "C" fn __tmpfs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> c_int {
+fn __tmpfs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
     if inode.is_null() || stat.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     vfs_ilock(inode);
     // SAFETY: `inode`/`stat` are live and `inode` is now locked.
@@ -1156,31 +1131,73 @@ extern "C" fn __tmpfs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> c_int {
         (*stat).size = (*inode).size as u64;
     }
     vfs_iunlock(inode);
-    0
+    Ok(())
 }
 
-extern "C" fn __tmpfs_setattr(_inode: *mut vfs_inode, _stat: *const stat) -> c_int {
-    neg(EOPNOTSUPP)
+/// tmpfs's [`InodeOps`] implementor (P3-10b) — a zero-sized unit
+/// struct whose single `static` instance ([`TMPFS_INODE_OPS`]) is
+/// installed into every tmpfs (and devtmpfs) inode's `ops` as
+/// `Some(&STATIC)` by `__tmpfs_alloc_inode_structure`. The old table's
+/// `None` slots (`dirty_inode`/`sync_inode`) are the trait's
+/// do-nothing `Ok(())` defaults; every other method delegates to the
+/// (now `KResult`-native) former callback bodies in this module and
+/// its siblings.
+pub(crate) struct TmpfsInodeOps;
+
+impl InodeOps for TmpfsInodeOps {
+    unsafe fn lookup(&self, dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_char, name_len: usize) -> KResult<()> {
+        __tmpfs_lookup(dir, dentry, name, name_len)
+    }
+    unsafe fn dir_iter(&self, dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *mut vfs_dentry) -> KResult<()> {
+        __tmpfs_dir_iter(dir, iter, ret_dentry)
+    }
+    unsafe fn readlink(&self, inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> KResult<isize> {
+        __tmpfs_readlink(inode, buf, buflen)
+    }
+    unsafe fn create(&self, dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
+        __tmpfs_create_inner(dir, mode, name, name_len)
+    }
+    unsafe fn getattr(&self, inode: *mut vfs_inode, stat: *mut crate::bindings::stat) -> KResult<()> {
+        __tmpfs_getattr(inode, stat)
+    }
+    /// Mirrors `__tmpfs_setattr` — not supported (no VFS dispatch site
+    /// exists yet either).
+    unsafe fn setattr(&self, _inode: *mut vfs_inode, _stat: *const crate::bindings::stat) -> KResult<()> {
+        Err(Errno::OpNotSupp)
+    }
+    unsafe fn link(&self, old: *mut vfs_inode, dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
+        __tmpfs_link(old, dir, name, name_len)
+    }
+    unsafe fn unlink(&self, dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
+        __tmpfs_unlink(dentry, target)
+    }
+    unsafe fn mkdir(&self, dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
+        __tmpfs_mkdir_inner(dir, mode, name, name_len)
+    }
+    unsafe fn rmdir(&self, dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
+        __tmpfs_rmdir(dentry, target)
+    }
+    unsafe fn mknod(&self, dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
+        __tmpfs_mknod_inner(dir, mode, dev, name, name_len)
+    }
+    unsafe fn move_(&self, old_dir: *mut vfs_inode, old_dentry: *mut vfs_dentry, new_dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
+        __tmpfs_move(old_dir, old_dentry, new_dir, name, name_len)
+    }
+    unsafe fn symlink(&self, dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize, target: *const c_char, target_len: usize) -> KResult<*mut vfs_inode> {
+        __tmpfs_symlink_inner(dir, mode, name, name_len, target, target_len)
+    }
+    unsafe fn truncate(&self, inode: *mut vfs_inode, new_size: loff_t) -> KResult<()> {
+        super::truncate::__tmpfs_truncate(inode, new_size)
+    }
+    unsafe fn destroy_inode(&self, inode: *mut vfs_inode) {
+        __tmpfs_destroy_inode(inode);
+    }
+    unsafe fn free_inode(&self, inode: *mut vfs_inode) {
+        super::superblock::tmpfs_free_inode(inode);
+    }
+    unsafe fn open(&self, inode: *mut vfs_inode, file: *mut crate::bindings::vfs_file, f_flags: c_int) -> KResult<()> {
+        super::file::tmpfs_open(inode, file, f_flags)
+    }
 }
 
-pub(crate) static TMPFS_INODE_OPS: vfs_inode_ops = vfs_inode_ops {
-    lookup: Some(__tmpfs_lookup),
-    dir_iter: Some(__tmpfs_dir_iter),
-    readlink: Some(__tmpfs_readlink),
-    create: Some(__tmpfs_create),
-    getattr: Some(__tmpfs_getattr),
-    setattr: Some(__tmpfs_setattr),
-    link: Some(__tmpfs_link),
-    unlink: Some(__tmpfs_unlink),
-    mkdir: Some(__tmpfs_mkdir),
-    rmdir: Some(__tmpfs_rmdir),
-    mknod: Some(__tmpfs_mknod),
-    move_: Some(__tmpfs_move),
-    symlink: Some(__tmpfs_symlink),
-    truncate: Some(super::truncate::__tmpfs_truncate),
-    destroy_inode: Some(__tmpfs_destroy_inode),
-    free_inode: Some(super::superblock::tmpfs_free_inode),
-    dirty_inode: None,
-    sync_inode: None,
-    open: Some(super::file::tmpfs_open),
-};
+pub(crate) static TMPFS_INODE_OPS: TmpfsInodeOps = TmpfsInodeOps;

@@ -253,6 +253,11 @@ pub enum Errno {
     /// `ENOSPC`: no space left on device (added for P3-10a, the xv6fs
     /// `FileOps::write` block-allocation-failure path).
     NoSpc,
+    /// `EBUSY`: device or resource busy (added for P3-10b, the
+    /// `vfs_inode_ops` -> `InodeOps`-trait wave — tmpfs's
+    /// `move_`/rename busy-target check, now that the implementor
+    /// returns [`KResult`] natively).
+    Busy,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -312,6 +317,7 @@ impl Errno {
             Errno::Io => crate::bindings::EIO as c_int,
             Errno::FBig => crate::bindings::EFBIG as c_int,
             Errno::NoSpc => crate::bindings::ENOSPC as c_int,
+            Errno::Busy => crate::bindings::EBUSY as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`

@@ -105,11 +105,13 @@ pub use crate::vfs::file::VfsFile as vfs_file;
 // `crate::vfs::file::FileOps` trait (`&'static dyn` dispatch) — the
 // first ops family with no C-compatible spelling at all.
 pub use crate::vfs::fs::VfsFsType as vfs_fs_type;
-pub use crate::vfs::fs::VfsFsTypeOps as vfs_fs_type_ops;
+// `vfs_fs_type_ops`/`vfs_superblock_ops` are GONE (P3-10b): the
+// fn-pointer tables became the `crate::vfs::fs::FsTypeOps`/
+// `SuperblockOps` traits (`&'static dyn` dispatch), P3-10a precedent.
 pub use crate::vfs::fs::VfsSuperblock as vfs_superblock;
-pub use crate::vfs::fs::VfsSuperblockOps as vfs_superblock_ops;
 pub use crate::vfs::inode::VfsInode as vfs_inode;
-pub use crate::vfs::inode::VfsInodeOps as vfs_inode_ops;
+// `vfs_inode_ops` is GONE (P3-10b): the 19-slot fn-pointer table became
+// the `crate::vfs::inode::InodeOps` trait (`&'static dyn` dispatch).
 pub use crate::vfs::inode::VfsInodeRef as vfs_inode_ref;
 // mm family (P3-N6)
 pub use crate::mm::slab::PercpuSlabCache as percpu_slab_cache_t;

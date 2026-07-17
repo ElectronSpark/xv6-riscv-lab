@@ -811,11 +811,15 @@ pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
 fn vfs_inode_stat_fallback(inode: *mut vfs_inode, kst: *mut stat) -> c_int {
     // SAFETY: caller guarantees non-null `inode`/`kst`.
     unsafe {
-        let ops = (*inode).ops;
-        if !ops.is_null() {
-            if let Some(getattr) = (*ops).getattr {
-                return getattr(inode, kst);
-            }
+        // P3-10b: `getattr` is a required trait method; the fallback
+        // below keys on the whole ops table being absent (the zeroed
+        // dummy root inode) — exactly the reachable half of the old
+        // null-table/`None`-slot check.
+        if let Some(ops) = (*inode).ops {
+            return match ops.getattr(inode, kst) {
+                Ok(()) => 0,
+                Err(e) => e.neg(),
+            };
         }
         vfs_ilock(inode);
         memset(kst as *mut c_void, 0, core::mem::size_of::<stat>());
@@ -2546,18 +2550,16 @@ fn statfs_inner() -> KResult<()> {
     }
     kbuf.f_namelen = DIRSIZ as u64;
 
-    // Let the filesystem fill in additional details if it implements statfs.
-    // SAFETY: non-null `sb`.
-    let ops = unsafe { (*sb).ops };
-    if !ops.is_null() {
-        if let Some(statfs_cb) = unsafe { (*ops).statfs } {
-            // SAFETY: `sb`/`kbuf` are both live; `statfs_cb` is a
-            // filesystem driver callback.
-            let ret = unsafe { statfs_cb(sb, &mut kbuf) };
-            if ret < 0 {
-                vfs_iput(inode);
-                return Err(Errno::Raw(ret));
-            }
+    // Let the filesystem fill in additional details if it implements
+    // statfs (P3-10b: a driver without the op inherits the trait's
+    // do-nothing `Ok(())` default, keeping the generic fields — the old
+    // `None`-slot skip).
+    if let Some(ops) = unsafe { (*sb).ops } {
+        // SAFETY: `sb`/`kbuf` are both live; `statfs` is a filesystem
+        // driver callback with exactly this contract.
+        if let Err(e) = unsafe { ops.statfs(sb, &mut kbuf) } {
+            vfs_iput(inode);
+            return Err(e);
         }
     }
 

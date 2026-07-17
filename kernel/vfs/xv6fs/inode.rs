@@ -55,9 +55,9 @@ use core::ptr;
 
 use crate::bindings::{
     dev_t, dinode, dirent, loff_t, mode_t, stat, vfs_dentry, vfs_dir_iter, vfs_file, vfs_inode,
-    vfs_inode_ops, vfs_superblock, xv6fs_inode, xv6fs_superblock, EEXIST, EINVAL, EIO, ENOENT,
-    ENOMEM, ENOSPC, ENOTDIR, EOPNOTSUPP, EPERM,
+    vfs_superblock, xv6fs_inode, xv6fs_superblock, EINVAL,
 };
+use crate::vfs::inode::InodeOps;
 
 use super::{xv6fs_mode_to_type, DIRSIZ};
 
@@ -221,7 +221,7 @@ const _: () = {
 use crate::proc::proc_shims::xv6_panic;
 
 use super::log::xv6fs_log_write;
-use super::truncate::{xv6fs_bmap, xv6fs_bmap_read, xv6fs_itrunc, xv6fs_truncate};
+use super::truncate::{xv6fs_bmap, xv6fs_bmap_read, xv6fs_itrunc};
 
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention (this
@@ -259,7 +259,7 @@ fn slab_free(obj: *mut c_void) {
 // P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
-use crate::vfs::fs::{vfs_alloc_inode, vfs_release_dentry};
+use crate::vfs::fs::vfs_release_dentry;
 use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 #[inline(always)]
@@ -273,7 +273,7 @@ const fn neg(e: u32) -> c_int {
 // ABI-fixed ERR_PTR exactly once at the `extern "C"` boundary via
 // `result_to_errptr`; only the error-return encoding changed, the on-disk
 // I/O / lock / cleanup control flow is byte-identical.
-use crate::kstd::{is_err_or_null, ptr_err, result_to_errptr, Errno, KResult};
+use crate::kstd::{Errno, KResult};
 
 /// Mirrors `major(dev)`/`minor(dev)` (`kernel/inc/defs.h`) — hardcoded
 /// locally, same rationale/precedent as `superblock.rs`'s own copy.
@@ -346,26 +346,28 @@ pub(crate) extern "C" fn xv6fs_iupdate(ip: *mut xv6fs_inode) {
     }
 }
 
-/// Mirrors `xv6fs_sync_inode()`.
-pub(crate) extern "C" fn xv6fs_sync_inode(inode: *mut vfs_inode) -> c_int {
+/// Mirrors `xv6fs_sync_inode()` (P3-10b: `KResult`-native, reached
+/// through [`Xv6fsInodeOps`]).
+fn xv6fs_sync_inode(inode: *mut vfs_inode) -> KResult<()> {
     if inode.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     let ip = inode as *mut xv6fs_inode;
     xv6fs_iupdate(ip);
     // SAFETY: `inode` is live.
     unsafe { (*inode).flags.set_dirty(0) };
-    0
+    Ok(())
 }
 
-/// Mirrors `xv6fs_dirty_inode()`.
-pub(crate) extern "C" fn xv6fs_dirty_inode(inode: *mut vfs_inode) -> c_int {
+/// Mirrors `xv6fs_dirty_inode()` (P3-10b: `KResult`-native, reached
+/// through [`Xv6fsInodeOps`]).
+fn xv6fs_dirty_inode(inode: *mut vfs_inode) -> KResult<()> {
     if inode.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     // SAFETY: `inode` is live.
     unsafe { (*inode).flags.set_dirty(1) };
-    0
+    Ok(())
 }
 
 // ===========================================================================
@@ -408,13 +410,13 @@ unsafe fn read_dirent(dp: *mut xv6fs_inode, off: u32, alloc: bool) -> Option<dir
 // ===========================================================================
 
 /// Mirrors `xv6fs_lookup()`.
-extern "C" fn __xv6fs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_char, mut name_len: usize) -> c_int {
+fn __xv6fs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_char, mut name_len: usize) -> KResult<()> {
     if dir.is_null() || dentry.is_null() || name.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     // SAFETY: `dir` is live (caller's contract).
     if !super::s_isdir(unsafe { (*dir).mode }) {
-        return neg(ENOTDIR);
+        return Err(Errno::NotDir);
     }
     if name_len > DIRSIZ {
         name_len = DIRSIZ;
@@ -437,28 +439,28 @@ extern "C" fn __xv6fs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name:
                         (*dentry).parent = dir;
                         (*dentry).name = strndup(name, name_len);
                         if (*dentry).name.is_null() {
-                            return neg(ENOMEM);
+                            return Err(Errno::NoMem);
                         }
                         (*dentry).name_len = name_len as u16;
                     }
-                    return 0;
+                    return Ok(());
                 }
             }
         }
         off += DIRENT_SIZE;
     }
 
-    neg(ENOENT)
+    Err(Errno::NoEnt)
 }
 
 /// Mirrors `xv6fs_dir_iter()`.
-extern "C" fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *mut vfs_dentry) -> c_int {
+fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *mut vfs_dentry) -> KResult<()> {
     if dir.is_null() || iter.is_null() || ret_dentry.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     // SAFETY: `dir` is live.
     if !super::s_isdir(unsafe { (*dir).mode }) {
-        return neg(ENOTDIR);
+        return Err(Errno::NotDir);
     }
 
     let dp = dir as *mut xv6fs_inode;
@@ -480,20 +482,20 @@ extern "C" fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret
                         vfs_release_dentry(ret_dentry);
                         (*ret_dentry).name = strndup(c"..".as_ptr(), 2);
                         if (*ret_dentry).name.is_null() {
-                            return neg(ENOMEM);
+                            return Err(Errno::NoMem);
                         }
                         (*ret_dentry).name_len = 2;
                         (*ret_dentry).ino = de.inum as u64;
                         (*ret_dentry).sb = (*dir).sb; // VFS doesn't set sb for index==1
                         (*ret_dentry).cookies = 0; // Will be reset by VFS for index > 1
                     }
-                    return 0;
+                    return Ok(());
                 }
             }
             off += DIRENT_SIZE;
         }
         // ".." not found on disk (shouldn't happen for valid dirs).
-        return neg(ENOENT);
+        return Err(Errno::NoEnt);
     }
 
     // Handle regular entries when index > 1.
@@ -511,7 +513,7 @@ extern "C" fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret
                     let namelen = strnlen(de.name.as_ptr(), DIRSIZ);
                     let name = strndup(de.name.as_ptr(), namelen);
                     if name.is_null() {
-                        return neg(ENOMEM);
+                        return Err(Errno::NoMem);
                     }
                     // SAFETY: `ret_dentry` is live.
                     unsafe {
@@ -521,7 +523,7 @@ extern "C" fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret
                         (*ret_dentry).name_len = namelen as u16;
                         (*ret_dentry).cookies = (off + DIRENT_SIZE) as i64; // Next offset for continuation.
                     }
-                    return 0;
+                    return Ok(());
                 }
             }
         }
@@ -536,7 +538,7 @@ extern "C" fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret
         (*ret_dentry).name_len = 0;
         (*ret_dentry).cookies = super::VFS_DENTRY_COOKIE_END;
     }
-    0
+    Ok(())
 }
 
 // ===========================================================================
@@ -570,7 +572,7 @@ unsafe fn __xv6fs_dir_name_exists(dp: *mut xv6fs_inode, name: *const c_char) -> 
 /// `xv6_sb`/`dp` must point to live, exclusively-accessed structures with
 /// a transaction active; `name` must be a valid C string no longer than
 /// `DIRSIZ` bytes.
-unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, name: *const c_char, inum: u32) -> c_int {
+unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, name: *const c_char, inum: u32) -> KResult<()> {
     unsafe {
         // Look for an empty directory slot.
         let mut off: u32 = 0;
@@ -595,13 +597,13 @@ unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, n
         let block_off = (off % super::BSIZE) as usize;
         let addr = xv6fs_bmap(dp, bn);
         if addr == 0 {
-            return neg(ENOSPC);
+            return Err(Errno::NoSpc);
         }
         let bp = bread((*dp).dev, addr);
         if bp.is_null() {
             // See the module doc's "Fidelity note": C does not NULL-check
             // here, but an unconditional deref would be Rust UB.
-            return neg(EIO);
+            return Err(Errno::Io);
         }
         memmove(
             (*bp).data.add(block_off) as *mut c_void,
@@ -616,12 +618,8 @@ unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, n
             xv6fs_iupdate(dp);
         }
 
-        0
+        Ok(())
     }
-}
-
-extern "C" fn __xv6fs_create(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
-    result_to_errptr(__xv6fs_create_inner(dir, mode, name, name_len))
 }
 
 fn __xv6fs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
@@ -656,12 +654,11 @@ fn __xv6fs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
         return Err(Errno::Exist);
     }
 
-    // SAFETY: `dir` is live.
-    let new_inode = vfs_alloc_inode(unsafe { (*dir).sb });
-    if is_err_or_null(new_inode) {
-        return if new_inode.is_null() { Err(Errno::NoMem) } else { Err(Errno::Raw(ptr_err(new_inode))) };
-    }
-    // vfs_alloc_inode returns the inode locked.
+    // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call —
+    // no ERR_PTR decode, and the old dead null -> `ENOMEM` branch had
+    // no producer.)
+    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
     // SAFETY: `ip`/`new_inode`/`dp` are live.
@@ -674,19 +671,14 @@ fn __xv6fs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
     xv6fs_iupdate(ip);
 
     // Add directory entry (name_buf already prepared above).
-    let ret = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) };
-    if ret != 0 {
+    if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) } {
         // TODO: Free inode on failure.
         vfs_iunlock(new_inode);
-        return Err(Errno::Raw(ret));
+        return Err(e);
     }
 
     vfs_iunlock(new_inode); // VFS's vfs_create will re-lock it.
     Ok(new_inode)
-}
-
-extern "C" fn __xv6fs_mkdir(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
-    result_to_errptr(__xv6fs_mkdir_inner(dir, mode, name, name_len))
 }
 
 fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
@@ -706,12 +698,9 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
         return Err(Errno::Exist);
     }
 
-    // SAFETY: `dir` is live.
-    let new_inode = vfs_alloc_inode(unsafe { (*dir).sb });
-    if is_err_or_null(new_inode) {
-        return if new_inode.is_null() { Err(Errno::NoMem) } else { Err(Errno::Raw(ptr_err(new_inode))) };
-    }
-    // vfs_alloc_inode returns the inode locked.
+    // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call.)
+    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
     // SAFETY: `ip`/`new_inode`/`dp` are live.
@@ -722,25 +711,25 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
         (*new_inode).size = 0;
     }
 
-    // Create . and .. entries.
+    // Create . and .. entries. (Any failure maps to `-EIO`, exactly as
+    // the old `< 0` checks did.)
     // SAFETY: `xv6_sb`/`ip`/`dir` are live.
     unsafe {
-        if __xv6fs_dirlink(xv6_sb, ip, c".".as_ptr(), (*new_inode).ino as u32) < 0
-            || __xv6fs_dirlink(xv6_sb, ip, c"..".as_ptr(), (*dir).ino as u32) < 0
+        if __xv6fs_dirlink(xv6_sb, ip, c".".as_ptr(), (*new_inode).ino as u32).is_err()
+            || __xv6fs_dirlink(xv6_sb, ip, c"..".as_ptr(), (*dir).ino as u32).is_err()
         {
             // TODO: Cleanup on failure.
             vfs_iunlock(new_inode);
-            return Err(Errno::Raw(neg(EIO)));
+            return Err(Errno::Io);
         }
     }
 
     xv6fs_iupdate(ip);
 
     // Add directory entry in parent (name_buf already set earlier).
-    let ret = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) };
-    if ret < 0 {
+    if unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) }.is_err() {
         vfs_iunlock(new_inode);
-        return Err(Errno::Raw(neg(EIO)));
+        return Err(Errno::Io);
     }
 
     // Update parent's link count for "..".
@@ -752,17 +741,17 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
     Ok(new_inode)
 }
 
-extern "C" fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> c_int {
+fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
     if dentry.is_null() || target.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     // SAFETY: `dentry`/`target` are live (caller's contract).
     unsafe {
         if (*dentry).sb.is_null() || (*dentry).sb != (*target).sb {
-            return neg(EINVAL);
+            return Err(Errno::Inval);
         }
         if (*dentry).ino != (*target).ino {
-            return neg(EINVAL);
+            return Err(Errno::Inval);
         }
 
         // VFS core handled checking for "." and "..".
@@ -776,7 +765,7 @@ extern "C" fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) ->
                     if (*dentry).name_len as usize == de_name_len && strncmp((*dentry).name, de.name.as_ptr(), (*dentry).name_len as usize) == 0 {
                         // Found -- clear the entry.
                         if de.inum as u64 != (*target).ino {
-                            return neg(EINVAL); // Inode number mismatch.
+                            return Err(Errno::Inval); // Inode number mismatch.
                         }
 
                         de = core::mem::zeroed();
@@ -787,7 +776,7 @@ extern "C" fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) ->
                         let bp = bread((*dp).dev, addr);
                         if bp.is_null() {
                             // See the module doc's "Fidelity note".
-                            return neg(EIO);
+                            return Err(Errno::Io);
                         }
                         memmove(
                             (*bp).data.add(block_off) as *mut c_void,
@@ -810,20 +799,20 @@ extern "C" fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) ->
                         // (inode freed when refcount reaches 0) or
                         // n_links > 0 (just releases the reference from
                         // vfs_get_inode).
-                        return 0;
+                        return Ok(());
                     }
                 }
             }
             off += DIRENT_SIZE;
         }
 
-        neg(ENOENT)
+        Err(Errno::NoEnt)
     }
 }
 
-extern "C" fn __xv6fs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> c_int {
+fn __xv6fs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
     let ret = __xv6fs_unlink(dentry, target);
-    if ret == 0 {
+    if ret.is_ok() {
         // Decrement parent's link count (for the ".." entry in the
         // removed directory). This mirrors xv6fs_mkdir which increments
         // parent's n_links when creating a subdir.
@@ -838,13 +827,13 @@ extern "C" fn __xv6fs_rmdir(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> 
     ret
 }
 
-extern "C" fn __xv6fs_link(old: *mut vfs_inode, dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int {
+fn __xv6fs_link(old: *mut vfs_inode, dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
     if old.is_null() || dir.is_null() || name.is_null() || name_len > DIRSIZ {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     // SAFETY: `old` is live.
     if super::s_isdir(unsafe { (*old).mode }) {
-        return neg(EPERM); // Can't hard link directories.
+        return Err(Errno::Perm); // Can't hard link directories.
     }
 
     let dp = dir as *mut xv6fs_inode;
@@ -857,35 +846,34 @@ extern "C" fn __xv6fs_link(old: *mut vfs_inode, dir: *mut vfs_inode, name: *cons
     unsafe { memmove(name_buf.as_mut_ptr() as *mut c_void, name as *const c_void, name_len) };
 
     if unsafe { __xv6fs_dir_name_exists(dp, name_buf.as_ptr() as *const c_char) } != 0 {
-        return neg(EEXIST);
+        return Err(Errno::Exist);
     }
 
     // SAFETY: `old` is live.
     unsafe { (*old).n_links += 1 };
     xv6fs_iupdate(ip);
 
-    let ret = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*old).ino as u32) };
-    if ret != 0 {
+    if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*old).ino as u32) } {
         // SAFETY: `old` is live.
         unsafe { (*old).n_links -= 1 };
         xv6fs_iupdate(ip);
-        return ret;
+        return Err(e);
     }
 
-    0
+    Ok(())
 }
 
 // ===========================================================================
 // Symlink operations
 // ===========================================================================
 
-extern "C" fn __xv6fs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize {
+fn __xv6fs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> KResult<isize> {
     if inode.is_null() || buf.is_null() {
-        return neg(EINVAL) as isize;
+        return Err(Errno::Inval);
     }
     // SAFETY: `inode` is live.
     if !super::s_islnk(unsafe { (*inode).mode }) {
-        return neg(EINVAL) as isize;
+        return Err(Errno::Inval);
     }
 
     let ip = inode as *mut xv6fs_inode;
@@ -893,7 +881,7 @@ extern "C" fn __xv6fs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: 
     let link_len = unsafe { (*inode).size } as usize;
 
     if link_len + 1 > buflen {
-        return neg(crate::bindings::ENAMETOOLONG) as isize;
+        return Err(Errno::NameTooLong);
     }
 
     // Read symlink target from data blocks.
@@ -908,12 +896,12 @@ extern "C" fn __xv6fs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: 
 
         let addr = xv6fs_bmap(ip, bn);
         if addr == 0 {
-            return neg(EIO) as isize;
+            return Err(Errno::Io);
         }
         // SAFETY: `ip` is live.
         let bp = bread(unsafe { (*ip).dev }, addr);
         if bp.is_null() {
-            return neg(EIO) as isize;
+            return Err(Errno::Io);
         }
         // SAFETY: `bp`/`buf` are live.
         unsafe {
@@ -931,18 +919,7 @@ extern "C" fn __xv6fs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: 
     // SAFETY: `buf` has at least `link_len + 1` writable bytes (checked
     // above).
     unsafe { *buf.add(link_len) = 0 };
-    link_len as isize
-}
-
-extern "C" fn __xv6fs_symlink(
-    dir: *mut vfs_inode,
-    _mode: mode_t,
-    name: *const c_char,
-    name_len: usize,
-    target: *const c_char,
-    target_len: usize,
-) -> *mut vfs_inode {
-    result_to_errptr(__xv6fs_symlink_inner(dir, _mode, name, name_len, target, target_len))
+    Ok(link_len as isize)
 }
 
 fn __xv6fs_symlink_inner(
@@ -969,12 +946,9 @@ fn __xv6fs_symlink_inner(
         return Err(Errno::Exist);
     }
 
-    // SAFETY: `dir` is live.
-    let new_inode = vfs_alloc_inode(unsafe { (*dir).sb });
-    if is_err_or_null(new_inode) {
-        return if new_inode.is_null() { Err(Errno::NoMem) } else { Err(Errno::Raw(ptr_err(new_inode))) };
-    }
-    // vfs_alloc_inode returns the inode locked.
+    // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call.)
+    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
     // SAFETY: `ip`/`new_inode`/`dp` are live.
@@ -1000,7 +974,7 @@ fn __xv6fs_symlink_inner(
             // Failed to allocate block -- cleanup.
             xv6fs_itrunc(ip);
             vfs_iunlock(new_inode);
-            return Err(Errno::Raw(neg(ENOSPC)));
+            return Err(Errno::NoSpc);
         }
 
         // SAFETY: `ip` is live.
@@ -1008,7 +982,7 @@ fn __xv6fs_symlink_inner(
         if bp.is_null() {
             xv6fs_itrunc(ip);
             vfs_iunlock(new_inode);
-            return Err(Errno::Raw(neg(EIO)));
+            return Err(Errno::Io);
         }
         // SAFETY: `bp`/`target` are live.
         unsafe {
@@ -1029,11 +1003,10 @@ fn __xv6fs_symlink_inner(
     xv6fs_iupdate(ip);
 
     // Add directory entry (name_buf already set earlier).
-    let ret = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) };
-    if ret != 0 {
+    if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) } {
         xv6fs_itrunc(ip);
         vfs_iunlock(new_inode);
-        return Err(Errno::Raw(ret));
+        return Err(e);
     }
 
     vfs_iunlock(new_inode);
@@ -1043,10 +1016,6 @@ fn __xv6fs_symlink_inner(
 // ===========================================================================
 // Device file operations (mknod)
 // ===========================================================================
-
-extern "C" fn __xv6fs_mknod(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> *mut vfs_inode {
-    result_to_errptr(__xv6fs_mknod_inner(dir, mode, dev, name, name_len))
-}
 
 fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
     if dir.is_null() || name.is_null() || name_len == 0 || name_len > DIRSIZ {
@@ -1061,12 +1030,9 @@ fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
     // SAFETY: `dir` is live.
     let xv6_sb = unsafe { (*dir).sb as *mut xv6fs_superblock };
 
-    // SAFETY: `dir` is live.
-    let new_inode = vfs_alloc_inode(unsafe { (*dir).sb });
-    if is_err_or_null(new_inode) {
-        return if new_inode.is_null() { Err(Errno::NoMem) } else { Err(Errno::Raw(ptr_err(new_inode))) };
-    }
-    // vfs_alloc_inode returns the inode locked.
+    // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call.)
+    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
     // SAFETY: `ip`/`new_inode`/`dp` are live.
@@ -1091,11 +1057,10 @@ fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
     // SAFETY: `name` has at least `name_len` readable bytes.
     unsafe { memmove(name_buf.as_mut_ptr() as *mut c_void, name as *const c_void, name_len) };
 
-    let ret = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) };
-    if ret != 0 {
+    if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) } {
         // TODO: Free inode on failure.
         vfs_iunlock(new_inode);
-        return Err(Errno::Raw(ret));
+        return Err(e);
     }
 
     vfs_iunlock(new_inode); // VFS's vfs_mknod will re-lock it.
@@ -1106,8 +1071,9 @@ fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
 // Inode lifecycle
 // ===========================================================================
 
-/// Mirrors `xv6fs_destroy_inode()`.
-pub(crate) extern "C" fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
+/// Mirrors `xv6fs_destroy_inode()` (P3-10b: reached through
+/// [`Xv6fsInodeOps`]).
+fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
     if inode.is_null() {
         return;
     }
@@ -1144,8 +1110,9 @@ pub(crate) extern "C" fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
     }
 }
 
-/// Mirrors `xv6fs_free_inode()`.
-pub(crate) extern "C" fn xv6fs_free_inode(inode: *mut vfs_inode) {
+/// Mirrors `xv6fs_free_inode()` (P3-10b: reached through
+/// [`Xv6fsInodeOps`]).
+fn xv6fs_free_inode(inode: *mut vfs_inode) {
     if inode.is_null() {
         return;
     }
@@ -1168,10 +1135,11 @@ pub(crate) extern "C" fn xv6fs_free_inode(inode: *mut vfs_inode) {
 // Open callback
 // ===========================================================================
 
-/// Mirrors `xv6fs_open()`.
-pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> c_int {
+/// Mirrors `xv6fs_open()` (P3-10b: `KResult`-native, reached through
+/// [`Xv6fsInodeOps`]).
+fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> KResult<()> {
     if inode.is_null() || file.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     // SAFETY: `inode` is live.
@@ -1187,14 +1155,14 @@ pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
                 super::superblock::xv6fs_inode_pcache_init(inode);
             }
         }
-        return 0;
+        return Ok(());
     }
 
     if super::s_isdir(mode) {
         // Directories use dir_iter for reading.
         // SAFETY: `file` is live.
         unsafe { (*file).ops = Some(&super::file::XV6FS_FILE_OPS) };
-        return 0;
+        return Ok(());
     }
 
     if super::s_islnk(mode) {
@@ -1205,20 +1173,20 @@ pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
         // display symlink information.
         // SAFETY: `file` is live.
         unsafe { (*file).ops = Some(&super::file::XV6FS_FILE_OPS) };
-        return 0;
+        return Ok(());
     }
 
     // Character/block devices are handled by VFS core.
     if super::s_ischr(mode) || super::s_isblk(mode) {
-        return neg(EINVAL); // Should be handled by VFS.
+        return Err(Errno::Inval); // Should be handled by VFS.
     }
 
-    neg(crate::bindings::ENOSYS)
+    Err(Errno::NoSys)
 }
 
-extern "C" fn __xv6fs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> c_int {
+fn __xv6fs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
     if inode.is_null() || stat.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     let ip = inode as *mut xv6fs_inode;
     vfs_ilock(inode);
@@ -1232,35 +1200,78 @@ extern "C" fn __xv6fs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> c_int {
         (*stat).size = (*inode).size as u64;
     }
     vfs_iunlock(inode);
-    0
-}
-
-extern "C" fn __xv6fs_setattr(_inode: *mut vfs_inode, _stat: *const stat) -> c_int {
-    neg(EOPNOTSUPP)
+    Ok(())
 }
 
 // ===========================================================================
-// VFS inode operations structure
+// VFS inode operations structure (P3-10b: `InodeOps` trait impl over a
+// zero-sized unit struct; the 19-slot fn-pointer table is gone).
 // ===========================================================================
 
-pub(crate) static XV6FS_INODE_OPS: vfs_inode_ops = vfs_inode_ops {
-    lookup: Some(__xv6fs_lookup),
-    dir_iter: Some(__xv6fs_dir_iter),
-    readlink: Some(__xv6fs_readlink),
-    getattr: Some(__xv6fs_getattr),
-    setattr: Some(__xv6fs_setattr),
-    create: Some(__xv6fs_create),
-    link: Some(__xv6fs_link),
-    unlink: Some(__xv6fs_unlink),
-    mkdir: Some(__xv6fs_mkdir),
-    rmdir: Some(__xv6fs_rmdir),
-    mknod: Some(__xv6fs_mknod),
-    move_: None, // TODO: Implement move/rename.
-    symlink: Some(__xv6fs_symlink),
-    truncate: Some(xv6fs_truncate),
-    destroy_inode: Some(xv6fs_destroy_inode),
-    free_inode: Some(xv6fs_free_inode),
-    dirty_inode: Some(xv6fs_dirty_inode),
-    sync_inode: Some(xv6fs_sync_inode),
-    open: Some(xv6fs_open),
-};
+/// xv6fs's [`InodeOps`] implementor (P3-10b). The old table's `None`
+/// `move_` slot is the trait's `Err(NoSys)` default (TODO: implement
+/// move/rename); every other method delegates to the (now
+/// `KResult`-native) former callback bodies in this module and its
+/// siblings.
+pub(crate) struct Xv6fsInodeOps;
+
+impl InodeOps for Xv6fsInodeOps {
+    unsafe fn lookup(&self, dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_char, name_len: usize) -> KResult<()> {
+        __xv6fs_lookup(dir, dentry, name, name_len)
+    }
+    unsafe fn dir_iter(&self, dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *mut vfs_dentry) -> KResult<()> {
+        __xv6fs_dir_iter(dir, iter, ret_dentry)
+    }
+    unsafe fn readlink(&self, inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> KResult<isize> {
+        __xv6fs_readlink(inode, buf, buflen)
+    }
+    unsafe fn create(&self, dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
+        __xv6fs_create_inner(dir, mode, name, name_len)
+    }
+    unsafe fn getattr(&self, inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
+        __xv6fs_getattr(inode, stat)
+    }
+    /// Mirrors `__xv6fs_setattr` — not supported (no VFS dispatch site
+    /// exists yet either).
+    unsafe fn setattr(&self, _inode: *mut vfs_inode, _stat: *const stat) -> KResult<()> {
+        Err(Errno::OpNotSupp)
+    }
+    unsafe fn link(&self, old: *mut vfs_inode, dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
+        __xv6fs_link(old, dir, name, name_len)
+    }
+    unsafe fn unlink(&self, dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
+        __xv6fs_unlink(dentry, target)
+    }
+    unsafe fn mkdir(&self, dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
+        __xv6fs_mkdir_inner(dir, mode, name, name_len)
+    }
+    unsafe fn rmdir(&self, dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()> {
+        __xv6fs_rmdir(dentry, target)
+    }
+    unsafe fn mknod(&self, dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
+        __xv6fs_mknod_inner(dir, mode, dev, name, name_len)
+    }
+    unsafe fn symlink(&self, dir: *mut vfs_inode, mode: mode_t, name: *const c_char, name_len: usize, target: *const c_char, target_len: usize) -> KResult<*mut vfs_inode> {
+        __xv6fs_symlink_inner(dir, mode, name, name_len, target, target_len)
+    }
+    unsafe fn truncate(&self, inode: *mut vfs_inode, new_size: loff_t) -> KResult<()> {
+        super::truncate::xv6fs_truncate(inode, new_size)
+    }
+    unsafe fn destroy_inode(&self, inode: *mut vfs_inode) {
+        xv6fs_destroy_inode(inode);
+    }
+    unsafe fn free_inode(&self, inode: *mut vfs_inode) {
+        xv6fs_free_inode(inode);
+    }
+    unsafe fn dirty_inode(&self, inode: *mut vfs_inode) -> KResult<()> {
+        xv6fs_dirty_inode(inode)
+    }
+    unsafe fn sync_inode(&self, inode: *mut vfs_inode) -> KResult<()> {
+        xv6fs_sync_inode(inode)
+    }
+    unsafe fn open(&self, inode: *mut vfs_inode, file: *mut vfs_file, f_flags: c_int) -> KResult<()> {
+        xv6fs_open(inode, file, f_flags)
+    }
+}
+
+pub(crate) static XV6FS_INODE_OPS: Xv6fsInodeOps = Xv6fsInodeOps;

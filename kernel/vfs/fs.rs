@@ -83,7 +83,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::bindings::{
     fs_struct, hlist_bucket_t, hlist_entry_t, hlist_func_t, hlist_t, kobject, list_node_t,
     mutex_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
-    vfs_fs_type_ops, vfs_inode, vfs_inode_ref, vfs_superblock, vfs_superblock_ops, work_struct,
+    vfs_inode, vfs_inode_ref, vfs_superblock, work_struct,
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
 };
@@ -163,20 +163,54 @@ const _: () = {
 // `pcache` stay bindgen-emitted, referenced by `crate::bindings` path.
 // ---------------------------------------------------------------------------
 
-/// `struct vfs_fs_type_ops` (`kernel/inc/vfs/vfs_types.h`).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct VfsFsTypeOps {
-    pub mount: Option<
-        unsafe extern "C" fn(
-            mountpoint: *mut vfs_inode,
-            device: *mut vfs_inode,
-            flags: c_int,
-            data: *const c_char,
-            ret_sb: *mut *mut VfsSuperblock,
-        ) -> c_int,
-    >,
-    pub free: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock)>,
+/// The per-filesystem type-operations vtable — wave P3-10b's
+/// replacement for the C-style `struct vfs_fs_type_ops` fn-pointer
+/// table (ops-table redesign, P3-10a `FileOps` precedent: full Rust
+/// style, C-compatible interface removed). Implementors are zero-sized
+/// unit structs with a `static` instance (`XV6FS_FS_TYPE_OPS`,
+/// `TMPFS_FS_TYPE_OPS`, `DEVTMPFS_FS_TYPE_OPS`) installed into
+/// [`VfsFsType::ops`] as `Some(&STATIC)`.
+///
+/// Slot-nullability mapping: `mount` and `free` are both REQUIRED
+/// methods — `vfs_register_fs_type` used to reject a table with either
+/// slot `None` (`-EINVAL`), so no registered type ever dispatched a
+/// missing slot; the trait now guarantees both at compile time and the
+/// registration-time slot checks collapse into the single
+/// [`VfsFsType::ops`] `is_some` check.
+///
+/// `mount`'s C shape (`ret_sb` out-param + `int` errno return) became a
+/// `KResult<*mut VfsSuperblock>`: `Ok(sb)` is exactly the old
+/// "`return 0` with `*ret_sb` written", `Err(e)` the old non-zero errno
+/// return (every implementor wrote `*ret_sb` only on success, so no
+/// information is lost).
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait FsTypeOps: Sync {
+    /// Allocate and initialize a new (still-private) superblock for a
+    /// mount of this filesystem type at `mountpoint` backed by `device`
+    /// (null for backendless filesystems).
+    ///
+    /// # Safety
+    /// `mountpoint` must be a live, locked directory inode;
+    /// `device` must be null or a live device inode; `data` must be
+    /// null or a NUL-terminated option string. Called with the mount
+    /// mutex held.
+    unsafe fn mount(
+        &self,
+        mountpoint: *mut vfs_inode,
+        device: *mut vfs_inode,
+        flags: c_int,
+        data: *const c_char,
+    ) -> KResult<*mut VfsSuperblock>;
+
+    /// Free a superblock previously returned by [`FsTypeOps::mount`]
+    /// (after the VFS core has fully detached it).
+    ///
+    /// # Safety
+    /// `sb` must be a superblock allocated by this instance's `mount`,
+    /// already detached from the mount tree with no live inodes.
+    unsafe fn free(&self, sb: *mut VfsSuperblock);
 }
 
 /// Native replacement for the anonymous C bitfield struct
@@ -215,7 +249,12 @@ pub struct VfsFsType {
     pub flags: VfsFsTypeFlagBits,
     pub sb_count: c_int,
     pub name: *const c_char,
-    pub ops: *mut VfsFsTypeOps,
+    /// The driver's type-operations vtable — a real Rust trait object
+    /// as of P3-10b (16-byte fat pointer; `None` only for a
+    /// freshly-allocated, not-yet-registered `vfs_fs_type`, which
+    /// `vfs_register_fs_type` rejects exactly as it rejected the old
+    /// null table pointer).
+    pub ops: Option<&'static dyn FsTypeOps>,
 }
 
 /// Native replacement for the anonymous C bitfield struct inside
@@ -351,8 +390,14 @@ pub struct VfsSuperblock {
     pub mountpoint: *mut vfs_inode,
     pub device: *mut vfs_inode,
     pub root_inode: *mut vfs_inode,
-    pub ops: *mut VfsSuperblockOps,
-    pub(crate) _pad0: [u64; 7],
+    /// The driver's superblock-operations vtable — a real Rust trait
+    /// object as of P3-10b (16-byte fat pointer; `None` only for a
+    /// driver-private superblock whose `mount` callback forgot to set
+    /// it, which mount-time validation rejects exactly as it rejected
+    /// the old null table pointer). The fat pointer absorbed one `u64`
+    /// of the old `_pad0`, keeping `lock` on its cache-line boundary.
+    pub ops: Option<&'static dyn SuperblockOps>,
+    pub(crate) _pad0: [u64; 6],
     pub lock: crate::bindings::rwsem,
     pub fs_data: *mut c_void,
     pub mount_count: c_int,
@@ -370,48 +415,173 @@ pub struct VfsSuperblock {
 /// (bindgen hardcoded `61usize` from the macro-expanded header).
 pub(crate) const VFS_SUPERBLOCK_HASH_BUCKETS: usize = 61;
 
-/// `struct vfs_superblock_ops` (`kernel/inc/vfs/vfs_types.h`).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct VfsSuperblockOps {
-    pub alloc_inode: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> *mut vfs_inode>,
-    pub get_inode: Option<
-        unsafe extern "C" fn(sb: *mut VfsSuperblock, ino: crate::bindings::uint64) -> *mut vfs_inode,
-    >,
-    pub sync_fs: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock, wait: c_int) -> c_int>,
-    pub unmount_begin: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock)>,
-    pub add_orphan:
-        Option<unsafe extern "C" fn(sb: *mut VfsSuperblock, inode: *mut vfs_inode) -> c_int>,
-    pub remove_orphan:
-        Option<unsafe extern "C" fn(sb: *mut VfsSuperblock, inode: *mut vfs_inode) -> c_int>,
-    pub recover_orphans: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> c_int>,
-    pub statfs: Option<
-        unsafe extern "C" fn(sb: *mut VfsSuperblock, buf: *mut crate::bindings::statfs) -> c_int,
-    >,
-    pub begin_transaction: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> c_int>,
-    pub end_transaction: Option<unsafe extern "C" fn(sb: *mut VfsSuperblock) -> c_int>,
+/// The per-filesystem superblock-operations vtable — wave P3-10b's
+/// replacement for the C-style `struct vfs_superblock_ops` fn-pointer
+/// table (ops-table redesign, P3-10a `FileOps` precedent: full Rust
+/// style, C-compatible interface removed). Implementors are zero-sized
+/// unit structs with a `static` instance (`XV6FS_SUPERBLOCK_OPS`,
+/// `TMPFS_SUPERBLOCK_OPS`, `DEVTMPFS_SUPERBLOCK_OPS`) installed into
+/// [`VfsSuperblock::ops`] by the driver's `mount` callback as
+/// `Some(&STATIC)`.
+///
+/// Slot-nullability mapping (each old `Option<fn>` slot's `None`
+/// dispatch behavior is preserved exactly):
+///
+/// * `alloc_inode`/`get_inode`/`sync_fs`/`unmount_begin` — required
+///   methods: `__vfs_superblock_ops_valid` (mount-time validation)
+///   used to reject a table missing any of the four, so no attached
+///   superblock ever dispatched a missing slot; the trait guarantees
+///   them and the validation collapses into the [`VfsSuperblock::ops`]
+///   `is_some` check ([`superblock_ops_valid`]).
+/// * `add_orphan`/`remove_orphan` — default `Ok(())`: a `None` slot
+///   was silently skipped by `vfs_make_orphan`/`vfs_iput` (no call, no
+///   warning), and `Ok(())` takes the identical no-warning path.
+///   (xv6fs's old always-0 stubs are likewise covered by the default.)
+/// * `recover_orphans` — default `Ok(())`; the VFS core has NO dispatch
+///   site for it yet (slot preserved from the C table for the future
+///   orphan-recovery mount path).
+/// * `statfs` — default `Ok(())`: `sys_statfs` treated a `None` slot as
+///   "keep the generic `kbuf` fields", which is exactly what a
+///   do-nothing `Ok(())` does. (The old callback's positive returns
+///   were also passed through as success; no implementor ever returned
+///   one, so `KResult<()>` loses nothing.)
+/// * `begin_transaction`/`end_transaction` — default `Ok(())`: every
+///   dispatch site skipped a `None` slot (transactionless filesystems,
+///   i.e. tmpfs/devtmpfs), and a no-op `Ok(())` is behaviorally
+///   identical at each of them.
+///
+/// `alloc_inode`/`get_inode`'s old `*mut vfs_inode` `ERR_PTR` encoding
+/// became `KResult<*mut vfs_inode>` (never `Ok(null)` — the VFS core
+/// unconditionally initializes the success pointer). Kept as a raw
+/// pointer rather than `NonNull` because every consumer immediately
+/// stores/casts it as a raw pointer anyway.
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait SuperblockOps: Sync {
+    /// Allocate a fresh in-memory inode for `sb` (returned unlocked,
+    /// un-hashed; the VFS core initializes and hashes it).
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver; caller holds the
+    /// superblock write lock.
+    unsafe fn alloc_inode(&self, sb: *mut VfsSuperblock) -> KResult<*mut vfs_inode>;
+
+    /// Load inode `ino` from the backend (returned unlocked, un-hashed).
+    ///
+    /// # Safety
+    /// Same contract as [`SuperblockOps::alloc_inode`].
+    unsafe fn get_inode(&self, sb: *mut VfsSuperblock, ino: u64) -> KResult<*mut vfs_inode>;
+
+    /// Flush all dirty filesystem state to the backend.
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver; caller holds the
+    /// superblock write lock.
+    unsafe fn sync_fs(&self, sb: *mut VfsSuperblock, wait: c_int) -> KResult<()>;
+
+    /// Prepare for unmount (evict unreferenced cached inodes, quiesce
+    /// background work).
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver; caller holds the
+    /// superblock write lock.
+    unsafe fn unmount_begin(&self, sb: *mut VfsSuperblock);
+
+    /// Persist `inode` into the on-disk orphan journal.
+    ///
+    /// # Safety
+    /// `sb`/`inode` must be live and belong together; caller holds the
+    /// superblock write lock and the inode mutex.
+    unsafe fn add_orphan(&self, _sb: *mut VfsSuperblock, _inode: *mut vfs_inode) -> KResult<()> {
+        Ok(()) // Journal-less filesystem (old `None`-slot skip).
+    }
+
+    /// Remove `inode` from the on-disk orphan journal.
+    ///
+    /// # Safety
+    /// Same contract as [`SuperblockOps::add_orphan`].
+    unsafe fn remove_orphan(&self, _sb: *mut VfsSuperblock, _inode: *mut vfs_inode) -> KResult<()> {
+        Ok(()) // Journal-less filesystem (old `None`-slot skip).
+    }
+
+    /// Reclaim orphaned inodes left by a crash. (No VFS dispatch site
+    /// exists yet — slot preserved from the C table for the future
+    /// orphan-recovery mount path.)
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver.
+    unsafe fn recover_orphans(&self, _sb: *mut VfsSuperblock) -> KResult<()> {
+        Ok(())
+    }
+
+    /// Fill in filesystem-specific `statfs(2)` fields (the VFS core
+    /// pre-fills the generic ones; a driver without the op keeps them).
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver; `buf` must be a
+    /// live kernel `statfs` buffer.
+    unsafe fn statfs(&self, _sb: *mut VfsSuperblock, _buf: *mut crate::bindings::statfs) -> KResult<()> {
+        Ok(()) // Keep the generic fields (old `None`-slot skip).
+    }
+
+    /// Open a metadata transaction (paired with
+    /// [`SuperblockOps::end_transaction`]). May sleep; never called
+    /// with the superblock or inode locks held.
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver.
+    unsafe fn begin_transaction(&self, _sb: *mut VfsSuperblock) -> KResult<()> {
+        Ok(()) // Transactionless filesystem (old `None`-slot skip).
+    }
+
+    /// Close the transaction opened by
+    /// [`SuperblockOps::begin_transaction`].
+    ///
+    /// # Safety
+    /// `sb` must be a live superblock of this driver with an open
+    /// transaction on the calling thread.
+    unsafe fn end_transaction(&self, _sb: *mut VfsSuperblock) -> KResult<()> {
+        Ok(()) // Transactionless filesystem (old `None`-slot skip).
+    }
 }
 
-// P3-N5 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (verified in-tree by a temporary
-// `offset_of!` gate on the `crate::bindings` forms before the switch)
-// and independently confirmed by the cross-compiler `_Static_assert`
-// probe (toolchain riscv64-unknown-elf-gcc, rv64gc/lp64d, gcc &
-// clang-18 agree; scratchpad p3n5_static_assert_probe.c):
-// vfs_fs_type_ops 16/8 offsets 0/8; vfs_fs_type 104/8 offsets
-// 0/16/32/[72]/80/88/96 (the anonymous bitfield struct occupies
-// [72,80), pinned in the probe by its neighbors); vfs_superblock
-// 1472/64 offsets 0/16/24/72/[1048]/1056/1064/1072/1080/1088/1152/
-// 1344/1352/1356/1360/1368/1408/1432/1440/1448; vfs_superblock_ops
-// 80/8 offsets 0..72 by 8.
+/// The driver ops of a validated superblock. Mount-time validation
+/// ([`superblock_ops_valid`]) guarantees every attached superblock has
+/// `Some` ops, so a `None` here is a driver bug (the old code would
+/// have dereferenced a null table pointer — UB; this panics instead).
+#[inline]
+pub(crate) fn sb_ops(sb: *mut VfsSuperblock) -> &'static dyn SuperblockOps {
+    // SAFETY: every caller passes a non-null, live superblock (their own
+    // documented precondition).
+    unsafe { (*sb).ops.expect("vfs: superblock ops missing") }
+}
+
+// P3-10b layout facts — NATIVE-OWNED, no C mirror exists (bindgen,
+// wrapper.h, and every C consumer are gone; these asserts document the
+// new truth rather than pinning to a header). `vfs_fs_type_ops`/
+// `vfs_superblock_ops` no longer exist as record types (they are the
+// `FsTypeOps`/`SuperblockOps` traits now), so their table asserts are
+// deleted. `vfs_fs_type` grew 104 -> 112 (its tail `ops` pointer went
+// fat; nothing depended on its total size). `vfs_superblock` keeps
+// EVERY former offset and its 1472/64 size/align: the fat `ops`
+// absorbed one `u64` of the old 7-word `_pad0`, so `lock` stays on the
+// 64-byte cache-line boundary at 1152 (the record's alignment
+// invariant) and all fields after it are untouched. The
+// niche-optimized `Option<&'static dyn ...>` holders stay plain fat
+// pointers (16/8).
 const _: () = {
-    assert!(core::mem::size_of::<VfsFsTypeOps>() == 16, "vfs_fs_type_ops size");
-    assert!(core::mem::align_of::<VfsFsTypeOps>() == 8, "vfs_fs_type_ops alignment");
-    assert!(core::mem::offset_of!(VfsFsTypeOps, mount) == 0, "vfs_fs_type_ops.mount offset");
-    assert!(core::mem::offset_of!(VfsFsTypeOps, free) == 8, "vfs_fs_type_ops.free offset");
+    assert!(
+        core::mem::size_of::<Option<&'static dyn FsTypeOps>>() == 16,
+        "fs_type ops fat pointer size"
+    );
+    assert!(
+        core::mem::size_of::<Option<&'static dyn SuperblockOps>>() == 16,
+        "superblock ops fat pointer size"
+    );
     assert!(core::mem::size_of::<VfsFsTypeFlagBits>() == 8, "vfs_fs_type anon bitfield size");
     assert!(core::mem::align_of::<VfsFsTypeFlagBits>() == 8, "vfs_fs_type anon bitfield align");
-    assert!(core::mem::size_of::<VfsFsType>() == 104, "vfs_fs_type size");
+    assert!(core::mem::size_of::<VfsFsType>() == 112, "vfs_fs_type size");
     assert!(core::mem::align_of::<VfsFsType>() == 8, "vfs_fs_type alignment");
     assert!(core::mem::offset_of!(VfsFsType, list_entry) == 0, "vfs_fs_type.list_entry offset");
     assert!(core::mem::offset_of!(VfsFsType, superblocks) == 16, "vfs_fs_type.superblocks offset");
@@ -473,48 +643,6 @@ const _: () = {
     assert!(
         core::mem::offset_of!(VfsSuperblock, used_blocks) == 1448,
         "vfs_superblock.used_blocks offset"
-    );
-    assert!(core::mem::size_of::<VfsSuperblockOps>() == 80, "vfs_superblock_ops size");
-    assert!(core::mem::align_of::<VfsSuperblockOps>() == 8, "vfs_superblock_ops alignment");
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, alloc_inode) == 0,
-        "vfs_superblock_ops.alloc_inode offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, get_inode) == 8,
-        "vfs_superblock_ops.get_inode offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, sync_fs) == 16,
-        "vfs_superblock_ops.sync_fs offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, unmount_begin) == 24,
-        "vfs_superblock_ops.unmount_begin offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, add_orphan) == 32,
-        "vfs_superblock_ops.add_orphan offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, remove_orphan) == 40,
-        "vfs_superblock_ops.remove_orphan offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, recover_orphans) == 48,
-        "vfs_superblock_ops.recover_orphans offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, statfs) == 56,
-        "vfs_superblock_ops.statfs offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, begin_transaction) == 64,
-        "vfs_superblock_ops.begin_transaction offset"
-    );
-    assert!(
-        core::mem::offset_of!(VfsSuperblockOps, end_transaction) == 72,
-        "vfs_superblock_ops.end_transaction offset"
     );
 };
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
@@ -662,8 +790,8 @@ use crate::vfs::devtmpfs::superblock::{devtmpfs_init, devtmpfs_post_mount_popula
 use crate::vfs::fdtable::{__vfs_fdtable_global_init, vfs_fdtable_init};
 use crate::vfs::file::{__vfs_file_init, __vfs_file_shrink_cache};
 use crate::vfs::inode::{
-    __vfs_inode_init, vfs_chroot, vfs_idup, vfs_idup_not_zero, vfs_ilock, vfs_iunlock, vfs_iput,
-    vfs_mkdir, vfs_namei,
+    __vfs_inode_init, inode_ops, vfs_chroot, vfs_idup, vfs_idup_not_zero, vfs_ilock, vfs_iunlock,
+    vfs_iput, vfs_mkdir, vfs_namei,
 };
 use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
 use crate::vfs::vfs_syscall::vfs_mount_path;
@@ -695,12 +823,7 @@ const fn neg(e: u32) -> c_int {
 // to `c_int`/`u64` or compares it against another `c_int` (`neg(...)`),
 // so the narrower return type is a no-op change (see `is_eagain_ptr`,
 // whose `as isize` comparison cast is dropped accordingly).
-use crate::kstd::{is_err, is_err_or_null, ptr_err, result_to_errptr, Errno, KResult};
-
-#[inline(always)]
-fn is_eagain_ptr<T>(p: *mut T) -> bool {
-    ptr_err(p) == neg(EAGAIN)
-}
+use crate::kstd::{is_err_or_null, result_to_errptr, Errno, KResult};
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros (full set — `__inode_mode_str`
 // touches every file type).
@@ -1298,9 +1421,12 @@ unsafe fn init_sb_rooti(sb: *mut vfs_superblock) -> c_int {
     unsafe {
         __vfs_inode_init((*sb).root_inode);
         loop {
-            let inode = vfs_add_inode(sb, (*sb).root_inode);
-            if is_err_or_null(inode) {
-                if is_eagain_ptr(inode) {
+            // P3-10b: `KResult`-native insert (the old `ERR_PTR`
+            // consumption and its dead null -> `ENOENT` branch are
+            // gone; `Errno::Again` drives the same retry).
+            let inode = match vfs_add_inode_inner(sb, (*sb).root_inode) {
+                Ok(i) => i,
+                Err(Errno::Again) => {
                     vfs_superblock_unlock(sb);
                     scheduler_yield();
                     vfs_superblock_wlock(sb);
@@ -1309,11 +1435,8 @@ unsafe fn init_sb_rooti(sb: *mut vfs_superblock) -> c_int {
                     }
                     continue;
                 }
-                if inode.is_null() {
-                    return neg(ENOENT);
-                }
-                return ptr_err(inode) as c_int;
-            }
+                Err(e) => return e.neg(),
+            };
             if inode != (*sb).root_inode {
                 vfs_iunlock(inode);
                 return neg(EEXIST);
@@ -1325,22 +1448,12 @@ unsafe fn init_sb_rooti(sb: *mut vfs_superblock) -> c_int {
     }
 }
 
-/// Mirrors `__vfs_superblock_ops_valid()`.
+/// Mirrors `__vfs_superblock_ops_valid()`. The old per-slot checks
+/// (`alloc_inode`/`get_inode`/`sync_fs`/`unmount_begin` non-null)
+/// collapsed into the [`SuperblockOps`] trait's required methods
+/// (P3-10b) — presence of the table is the only remaining question.
 unsafe fn superblock_ops_valid(sb: *mut vfs_superblock) -> bool {
-    unsafe {
-        let ops = (*sb).ops;
-        if ops.is_null() {
-            return false;
-        }
-        if (*ops).alloc_inode.is_none()
-            || (*ops).get_inode.is_none()
-            || (*ops).sync_fs.is_none()
-            || (*ops).unmount_begin.is_none()
-        {
-            return false;
-        }
-        true
-    }
+    unsafe { (*sb).ops.is_some() }
 }
 
 /// Mirrors `__vfs_init_superblock_valid()`.
@@ -1692,10 +1805,10 @@ pub(crate) extern "C" fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_in
         if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
             return neg(EPERM);
         }
-        if fs_type.is_null() || (*fs_type).name.is_null() || (*fs_type).ops.is_null() {
-            return neg(EINVAL);
-        }
-        if (*(*fs_type).ops).mount.is_none() || (*(*fs_type).ops).free.is_none() {
+        // The old per-slot checks (`mount`/`free` non-null) collapsed
+        // into the `FsTypeOps` trait's required methods (P3-10b) —
+        // presence of the table is the only remaining question.
+        if fs_type.is_null() || (*fs_type).name.is_null() || (*fs_type).ops.is_none() {
             return neg(EINVAL);
         }
         if (*fs_type).sb_count != 0 {
@@ -1832,16 +1945,26 @@ pub(crate) extern "C" fn vfs_mount(
             }
             // Ask the filesystem type to allocate/initialize a new
             // superblock. Private to the filesystem until attached, so no
-            // locking is needed yet.
-            let mount_fn = (*(*fs_type).ops).mount.unwrap();
-            ret_val = mount_fn(mountpoint, device, flags, data, &mut sb);
-            if ret_val != 0 {
-                crate::kprintln!(
-                    "vfs_mount: filesystem type '{}' mount failed, errno={}",
-                    crate::printf::Cs(type_),
-                    ret_val,
-                );
-                break 'cleanup;
+            // locking is needed yet. (`ops` is `Some` for every
+            // registered type — checked at registration; `sb` stays null
+            // on failure, exactly like the old out-param, so the cleanup
+            // path below skips the driver-free.)
+            match (*fs_type).ops.expect("vfs_mount: registered fs_type without ops")
+                .mount(mountpoint, device, flags, data)
+            {
+                Ok(new_sb) => {
+                    sb = new_sb;
+                    ret_val = 0;
+                }
+                Err(e) => {
+                    ret_val = e.neg();
+                    crate::kprintln!(
+                        "vfs_mount: filesystem type '{}' mount failed, errno={}",
+                        crate::printf::Cs(type_),
+                        ret_val,
+                    );
+                    break 'cleanup;
+                }
             }
             if !init_superblock_valid(sb) {
                 crate::kprintln!("vfs_mount: invalid superblock returned by mount");
@@ -1884,11 +2007,9 @@ pub(crate) extern "C" fn vfs_mount(
         if ret_val != 0 {
             if !sb.is_null() {
                 if !(*sb).root_inode.is_null() {
-                    let free_inode = (*(*(*sb).root_inode).ops).free_inode.unwrap();
-                    free_inode((*sb).root_inode);
+                    inode_ops((*sb).root_inode).free_inode((*sb).root_inode);
                 }
-                let free_fn = (*(*fs_type).ops).free.unwrap();
-                free_fn(sb);
+                (*fs_type).ops.expect("vfs: registered fs_type without ops").free(sb);
             }
             clear_mountpoint(mountpoint);
             vfs_iunlock(mountpoint);
@@ -1957,9 +2078,10 @@ unsafe fn evict_unused_inodes(sb: *mut vfs_superblock) -> usize {
                 }
 
                 if (*inode).flags.dirty() != 0 {
-                    if let Some(sync_inode) = (*(*inode).ops).sync_inode {
-                        sync_inode(inode);
-                    }
+                    // P3-10b: a driver without `sync_inode` inherits
+                    // the no-op `Ok(())` default (old `None`-slot
+                    // skip); the result was ignored here before too.
+                    let _ = inode_ops(inode).sync_inode(inode);
                 }
 
                 if (*inode).ref_count == 1 {
@@ -1969,8 +2091,7 @@ unsafe fn evict_unused_inodes(sb: *mut vfs_superblock) -> usize {
                 vfs_remove_inode(sb, inode);
                 vfs_iunlock(inode);
 
-                let free_inode = (*(*inode).ops).free_inode.unwrap();
-                free_inode(inode);
+                inode_ops(inode).free_inode(inode);
                 evicted += 1;
             }
 
@@ -2044,10 +2165,10 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
             return neg(EBUSY);
         }
 
-        // Begin unmounting.
-        if let Some(unmount_begin) = (*(*sb).ops).unmount_begin {
-            unmount_begin(sb);
-        }
+        // Begin unmounting. (Required trait method as of P3-10b; the
+        // old `None`-slot skip had no live instance -- mount-time
+        // validation always required the slot.)
+        sb_ops(sb).unmount_begin(sb);
 
         // Evict all unreferenced inodes from the cache before checking.
         evict_unused_inodes(sb);
@@ -2085,8 +2206,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         // Free the root inode (one ref from `set_mountpoint`'s `vfs_idup`
         // plus the creation ref -- freed directly since already removed
         // from cache).
-        let free_inode = (*(*mounted_inode).ops).free_inode.unwrap();
-        free_inode(mounted_inode);
+        inode_ops(mounted_inode).free_inode(mounted_inode);
         (*sb).root_inode = ptr::null_mut();
 
         let fs_type = (*sb).fs_type;
@@ -2100,8 +2220,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
             vfs_iput(mountpoint);
         }
 
-        let free_fn = (*(*fs_type).ops).free.unwrap();
-        free_fn(sb);
+        (*fs_type).ops.expect("vfs: registered fs_type without ops").free(sb);
 
         0
     }
@@ -2142,15 +2261,12 @@ pub(crate) extern "C" fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int {
         (*sb).orphan_count += 1;
 
         // For backend fs: persist to on-disk orphan journal.
-        if let Some(add_orphan) = (*(*sb).ops).add_orphan {
-            let ret = add_orphan(sb, inode);
-            if ret != 0 {
-                crate::kprintln!(
-                    "vfs: warning: failed to persist orphan inode {}, errno={}",
-                    (*inode).ino as u64,
-                    ret,
-                );
-            }
+        if let Err(e) = sb_ops(sb).add_orphan(sb, inode) {
+            crate::kprintln!(
+                "vfs: warning: failed to persist orphan inode {}, errno={}",
+                (*inode).ino as u64,
+                e.neg(),
+            );
         }
 
         0
@@ -2181,14 +2297,13 @@ pub(crate) extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
         if !(*sb).root_inode.is_null() {
             let rooti = (*sb).root_inode;
             vfs_ilock(rooti);
-            if let Some(destroy_inode) = (*(*rooti).ops).destroy_inode {
-                destroy_inode(rooti);
-            }
+            // P3-10b: `destroy_inode` is a required trait method (the
+            // old `None`-slot skip had no live instance).
+            inode_ops(rooti).destroy_inode(rooti);
             (*rooti).flags.set_valid(0);
             vfs_remove_inode(sb, rooti);
             vfs_iunlock(rooti);
-            let free_inode = (*(*rooti).ops).free_inode.unwrap();
-            free_inode(rooti);
+            inode_ops(rooti).free_inode(rooti);
             (*sb).root_inode = ptr::null_mut();
         }
 
@@ -2196,8 +2311,7 @@ pub(crate) extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
         vfs_superblock_unlock(sb);
         vfs_mount_unlock();
 
-        let free_fn = (*(*fs_type).ops).free.unwrap();
-        free_fn(sb);
+        (*fs_type).ops.expect("vfs: registered fs_type without ops").free(sb);
     }
 }
 
@@ -2265,17 +2379,14 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
         // Phase 3: sync if needed (backend filesystems).
         if (*sb).flags.backendless() == 0 && (*sb).flags.dirty() != 0 {
             (*sb).flags.set_syncing(1);
-            let sync_fs = (*(*sb).ops).sync_fs.unwrap();
-            let sret = sync_fs(sb, 1);
+            let sret = sb_ops(sb).sync_fs(sb, 1);
             (*sb).flags.set_syncing(0);
-            if sret != 0 {
-                crate::kprintln!("vfs_unmount_lazy: warning: sync failed, errno={}", sret);
+            if let Err(e) = sret {
+                crate::kprintln!("vfs_unmount_lazy: warning: sync failed, errno={}", e.neg());
             }
         }
 
-        if let Some(unmount_begin) = (*(*sb).ops).unmount_begin {
-            unmount_begin(sb);
-        }
+        sb_ops(sb).unmount_begin(sb);
 
         // Phase 4: mark all referenced inodes as orphans.
         let rooti = (*sb).root_inode;
@@ -2301,21 +2412,19 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
 
             if !rooti.is_null() {
                 vfs_ilock(rooti);
-                if let Some(destroy_inode) = (*(*rooti).ops).destroy_inode {
-                    destroy_inode(rooti);
-                }
+                // P3-10b: required trait method (see
+                // `__vfs_final_unmount_cleanup`).
+                inode_ops(rooti).destroy_inode(rooti);
                 (*rooti).flags.set_valid(0);
                 vfs_remove_inode(sb, rooti);
                 vfs_iunlock(rooti);
-                let free_inode = (*(*rooti).ops).free_inode.unwrap();
-                free_inode(rooti);
+                inode_ops(rooti).free_inode(rooti);
                 (*sb).root_inode = ptr::null_mut();
             }
 
             let fs_type = (*sb).fs_type;
             vfs_superblock_unlock(sb);
-            let free_fn = (*(*fs_type).ops).free.unwrap();
-            free_fn(sb);
+            (*fs_type).ops.expect("vfs: registered fs_type without ops").free(sb);
         } else {
             // Orphans exist -- cleanup deferred to vfs_iput.
             vfs_superblock_unlock(sb);
@@ -2469,7 +2578,7 @@ pub(crate) extern "C" fn vfs_superblock_put(sb: *mut vfs_superblock) {
     }
 }
 
-fn vfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
+pub(crate) fn vfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
     unsafe {
         if sb.is_null() {
             return Err(Errno::Inval);
@@ -2481,27 +2590,20 @@ fn vfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
         if (*sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
-        let alloc_inode = (*(*sb).ops).alloc_inode.unwrap();
-        let inode = alloc_inode(sb);
-        if is_err(inode) {
-            return Err(Errno::Raw(ptr_err(inode)));
-        }
+        // P3-10b: the driver call and the inode-cache insert are both
+        // `KResult`-native now -- the old internal `ERR_PTR` encoding
+        // (and its dead `Ok(null)` -> `NoEnt` branch, which had no
+        // producer) is gone; `Errno::Again` propagates to the caller's
+        // retry loops exactly as the old `EAGAIN` pointer did.
+        let inode = sb_ops(sb).alloc_inode(sb)?;
         __vfs_inode_init(inode);
-        let existing = vfs_add_inode(sb, inode);
-        if is_err_or_null(existing) {
-            if is_eagain_ptr(existing) {
-                let free_inode = (*(*inode).ops).free_inode.unwrap();
-                free_inode(inode);
-                return Err(Errno::Again);
+        match vfs_add_inode_inner(sb, inode) {
+            Ok(_) => Ok(inode), // locked
+            Err(e) => {
+                inode_ops(inode).free_inode(inode);
+                Err(e)
             }
-            let free_inode = (*(*inode).ops).free_inode.unwrap();
-            free_inode(inode);
-            if existing.is_null() {
-                return Err(Errno::NoEnt);
-            }
-            return Err(Errno::Raw(ptr_err(existing)));
         }
-        Ok(inode) // locked
     }
 }
 
@@ -2522,33 +2624,24 @@ fn vfs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_in
         if (*sb).flags.valid() == 0 {
             return Err(Errno::Inval);
         }
-        let get_inode = (*(*sb).ops).get_inode.unwrap();
-        let inode = get_inode(sb, ino);
-        if is_err(inode) {
-            return Err(Errno::Raw(ptr_err(inode)));
-        }
+        // P3-10b: `KResult`-native end to end (see `vfs_alloc_inode_inner`).
+        let inode = sb_ops(sb).get_inode(sb, ino)?;
         __vfs_inode_init(inode);
-        let existing = vfs_add_inode(sb, inode);
-        if is_err_or_null(existing) {
-            if is_eagain_ptr(existing) {
-                let free_inode = (*(*inode).ops).free_inode.unwrap();
-                free_inode(inode);
-                return Err(Errno::Again);
+        match vfs_add_inode_inner(sb, inode) {
+            Ok(existing) => {
+                if existing != inode {
+                    // Found existing inode in hash -- free the newly
+                    // loaded one.
+                    inode_ops(inode).free_inode(inode);
+                    return Ok(existing); // locked
+                }
+                Ok(inode) // locked
             }
-            let free_inode = (*(*inode).ops).free_inode.unwrap();
-            free_inode(inode);
-            if existing.is_null() {
-                return Err(Errno::NoEnt);
+            Err(e) => {
+                inode_ops(inode).free_inode(inode);
+                Err(e)
             }
-            return Err(Errno::Raw(ptr_err(existing)));
         }
-        if existing != inode {
-            // Found existing inode in hash -- free the newly loaded one.
-            let free_inode = (*(*inode).ops).free_inode.unwrap();
-            free_inode(inode);
-            return Ok(existing); // locked
-        }
-        Ok(inode) // locked
     }
 }
 
@@ -2573,12 +2666,13 @@ pub(crate) extern "C" fn vfs_sync_superblock(sb: *mut vfs_superblock, wait: c_in
         if (*sb).flags.dirty() == 0 {
             return 0; // Already clean.
         }
-        let sync_fs = (*(*sb).ops).sync_fs.unwrap();
-        let ret = sync_fs(sb, wait);
-        if ret == 0 {
-            (*sb).flags.set_dirty(0);
+        match sb_ops(sb).sync_fs(sb, wait) {
+            Ok(()) => {
+                (*sb).flags.set_dirty(0);
+                0
+            }
+            Err(e) => e.neg(),
         }
-        ret
     }
 }
 
@@ -2680,15 +2774,21 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> KResult<*mut vfs_ino
     unsafe {
         let sb = (*dentry).sb;
 
+        // P3-10b: `KResult`-native cache/load calls end to end (the old
+        // internal ERR_PTR consumption, including its dead `Ok(null)`
+        // passthrough branches, is gone). `-ENOENT` falls through to
+        // the next lookup stage exactly as before; any other error
+        // propagates.
+        //
         // vfs_get_inode_cached returns with refcount already incremented.
-        let mut inode = vfs_get_inode_cached(sb, (*dentry).ino);
-        if !is_err_or_null(inode) {
-            set_name_if_null(inode, dentry);
-            vfs_iunlock(inode);
-            return Ok(inode);
-        }
-        if ptr_err(inode) != neg(ENOENT) {
-            return if is_err(inode) { Err(Errno::Raw(ptr_err(inode))) } else { Ok(inode) };
+        match vfs_get_inode_cached_inner(sb, (*dentry).ino) {
+            Ok(inode) => {
+                set_name_if_null(inode, dentry);
+                vfs_iunlock(inode);
+                return Ok(inode);
+            }
+            Err(e) if e.neg() != neg(ENOENT) => return Err(e),
+            Err(_) => {}
         }
 
         if !rwsem_is_write_holding(&raw mut (*sb).lock) {
@@ -2700,20 +2800,17 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> KResult<*mut vfs_ino
             return Err(Errno::Inval);
         }
 
-        inode = vfs_get_inode_cached(sb, (*dentry).ino);
-        if !is_err_or_null(inode) {
-            set_name_if_null(inode, dentry);
-            vfs_iunlock(inode);
-            return Ok(inode);
-        }
-        if ptr_err(inode) != neg(ENOENT) {
-            return if is_err(inode) { Err(Errno::Raw(ptr_err(inode))) } else { Ok(inode) };
+        match vfs_get_inode_cached_inner(sb, (*dentry).ino) {
+            Ok(inode) => {
+                set_name_if_null(inode, dentry);
+                vfs_iunlock(inode);
+                return Ok(inode);
+            }
+            Err(e) if e.neg() != neg(ENOENT) => return Err(e),
+            Err(_) => {}
         }
 
-        inode = vfs_get_inode(sb, (*dentry).ino);
-        if is_err_or_null(inode) {
-            return if is_err(inode) { Err(Errno::Raw(ptr_err(inode))) } else { Ok(inode) };
-        }
+        let inode = vfs_get_inode_inner(sb, (*dentry).ino)?;
 
         // "." and ".." are synthesized by VFS and should always hit the
         // cache.
@@ -2761,7 +2858,7 @@ pub(crate) extern "C" fn vfs_get_dentry_inode_locked(dentry: *mut vfs_dentry) ->
     result_to_errptr(vfs_get_dentry_inode_locked_inner(dentry))
 }
 
-fn vfs_get_dentry_inode_inner(dentry: *mut vfs_dentry) -> KResult<*mut vfs_inode> {
+pub(crate) fn vfs_get_dentry_inode_inner(dentry: *mut vfs_dentry) -> KResult<*mut vfs_inode> {
     unsafe {
         if dentry.is_null() {
             return Err(Errno::Inval);

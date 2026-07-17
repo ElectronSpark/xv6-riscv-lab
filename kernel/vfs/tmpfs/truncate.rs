@@ -19,7 +19,8 @@
 
 use core::ffi::{c_int, c_void};
 
-use crate::bindings::{loff_t, pcache, tmpfs_inode, vfs_inode, EFBIG, ENOMEM, PAGE_SHIFT, PGSIZE};
+use crate::bindings::{loff_t, pcache, tmpfs_inode, vfs_inode, ENOMEM, PAGE_SHIFT, PGSIZE};
+use crate::kstd::{Errno, KResult};
 
 use super::TMPFS_MAX_FILE_SIZE;
 
@@ -217,12 +218,14 @@ fn __tmpfs_truncate_grow(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
 
 /// Top-level truncate: grow or shrink a tmpfs regular file.
 ///
-/// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
-/// declaration (`int __tmpfs_truncate(...)`), and it is also the
-/// `.truncate` entry of [`super::inode::TMPFS_INODE_OPS`].
-pub(crate) extern "C" fn __tmpfs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+/// P3-10b: `KResult`-native, reached through
+/// [`super::inode::TmpfsInodeOps`]'s `truncate` (the old `extern "C"`
+/// C-ABI spelling is gone with the fn-pointer table). The internal
+/// grow/shrink helpers keep their `c_int` returns (`-ENOMEM` on page
+/// allocation failure), decoded once here.
+pub(crate) fn __tmpfs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> KResult<()> {
     if new_size > TMPFS_MAX_FILE_SIZE as loff_t {
-        return neg(EFBIG);
+        return Err(Errno::FBig);
     }
     let mut ret = 0;
     // SAFETY: `inode` is live (caller holds the inode mutex).
@@ -239,6 +242,9 @@ pub(crate) extern "C" fn __tmpfs_truncate(inode: *mut vfs_inode, new_size: loff_
     if ret == 0 {
         // SAFETY: `inode` is live.
         unsafe { (*inode).size = new_size };
+        Ok(())
+    } else {
+        // Grow/shrink fail with `-ENOMEM` only (page allocation).
+        Err(Errno::NoMem)
     }
-    ret
 }

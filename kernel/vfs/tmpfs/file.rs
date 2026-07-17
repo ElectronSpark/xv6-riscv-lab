@@ -612,12 +612,12 @@ impl FileOps for TmpfsFileOps {
 /// Open callback for tmpfs inodes. Sets up file operations based on
 /// inode type.
 ///
-/// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
-/// declaration, and it is also the `.open` entry of
-/// [`super::inode::TMPFS_INODE_OPS`].
-pub(crate) extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> c_int {
+/// P3-10b: `KResult`-native, reached through
+/// [`super::inode::TmpfsInodeOps`]'s `open` (the old `extern "C"`
+/// C-ABI spelling is gone with the fn-pointer table).
+pub(crate) fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> KResult<()> {
     if inode.is_null() || file.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     // SAFETY: `inode` is live (caller's contract).
@@ -626,13 +626,13 @@ pub(crate) extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
     if s_isreg(mode) {
         // SAFETY: `file` is live.
         unsafe { (*file).ops = Some(&TMPFS_FILE_OPS) };
-        return 0;
+        return Ok(());
     }
 
     if s_isdir(mode) {
         // Directories don't need special file ops -- they use dir_iter.
         unsafe { (*file).ops = Some(&TMPFS_FILE_OPS) };
-        return 0;
+        return Ok(());
     }
 
     if s_islnk(mode) {
@@ -641,14 +641,14 @@ pub(crate) extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
         // on the symlink itself (not its target). This is needed by
         // programs like ls and symlinktest that want to stat symlink info.
         unsafe { (*file).ops = Some(&TMPFS_FILE_OPS) };
-        return 0;
+        return Ok(());
     }
 
     // Character/block devices and pipes are handled by VFS core. They
     // should not reach here as vfs_fileopen handles them.
     if super::s_ischr(mode) || super::s_isblk(mode) || super::s_isfifo(mode) {
-        return neg(EINVAL); // Should be handled by VFS
+        return Err(Errno::Inval); // Should be handled by VFS
     }
 
-    neg(crate::bindings::ENOSYS)
+    Err(Errno::NoSys)
 }
