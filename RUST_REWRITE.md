@@ -2594,6 +2594,108 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   wrapper.h DELETED (−1903), lib.rs/Cargo.toml/Cargo.lock/
   kernel/CMakeLists.txt trimmed.
 
+### Iteration 71 — 2026-07-17 — Wave P3-10a: vfs_file_ops → `FileOps` trait (`&'static dyn` dispatch) — the ops-table redesign PILOT
+
+- **First wave with LAYOUT FREEDOM exercised.** The `struct
+  vfs_file_ops` fn-pointer table (9 `Option<unsafe extern "C" fn>`
+  slots) is GONE — replaced by `pub trait FileOps: Sync` in
+  `kernel/vfs/file.rs` with `unsafe fn` methods (raw-pointer
+  preconditions stay honest; reference-ification is a later wave):
+  `read`/`write` (required, `KResult<isize>`, Rust `bool` user flag),
+  `llseek` (default `Err(Errno::SPipe)` = old None-slot "not
+  seekable"), `release`/`fsync`/`fflush` (default `Ok(())` = old
+  None-slot silent skip), and `poll`/`ioctl`/`fault` (return
+  `Option<..>` where `None` = "op not provided" → dispatch falls back,
+  exactly the old None-slot fallback chains: always-ready poll,
+  `dev_ioctl`/`ENOTTY`, generic file-page loader; `fault`'s
+  `Some(ptr)` payload may be null = driver-handled failure, NOT a
+  fallback cue). `VfsFile.ops` is `Option<&'static dyn FileOps>` (fat
+  pointer, 16 bytes; `None` = the old null-ops "direct device/socket
+  I/O" marker). `bindings.rs`'s `vfs_file_ops` facade alias deleted —
+  first ops family with no C-compatible spelling at all.
+- **Layout**: the fat `ops` widened the `VfsFile` header so
+  `private_data` ends exactly at byte 64 — the old bindgen `_pad0`
+  field is deleted; `lock` stays at 64 (cache line), `pos` at 192,
+  size/align 256/64 UNCHANGED. Asserts rewritten as native-owned
+  documentation (size/align + `lock`/`pos` offsets + the
+  `Option<&dyn>` fat pointer being 16/8); the stale C-fidelity
+  per-field offsets and the whole vfs_file_ops assert block deleted.
+  `file_alloc` writes `ops = None` explicitly after the zeroing
+  memset (all-zero bytes are not a documented None for a fat
+  pointer).
+- **Implementors** (unit structs + `static` instances, installed as
+  `Some(&STATIC)`): `Xv6fsFileOps`/`XV6FS_FILE_OPS` (read/write/
+  llseek/fsync/fflush/fault), `TmpfsFileOps`/`TMPFS_FILE_OPS`
+  (read/write/llseek/fault), `PipeFileOps`/`PIPE_FILE_OPS`
+  (read/write/release/poll), `PtsSlaveFileOps` + `PtmxMasterFileOps`
+  (read/write/ioctl/poll/release) — the two ptmx tables were `static
+  mut`; now immutable `Sync` statics (a genuine soundness-debt
+  payoff). **24 `extern "C"` table-callback fns deleted** (xv6fs 6,
+  tmpfs 4, pipe 4, ptmx 10): bodies became plain Rust fns returning
+  `KResult` natively (or were absorbed into the impls) — every raw
+  negative-errno `isize`/`c_int` encode site inside them became
+  `Err(Errno::…)` (`Inval`/`Io`/`Intr`/`Fault`/`FBig`/`NoSpc`/
+  `NxIo`; cross-module already-negative results pass through as
+  `Errno::Raw`, lossless round-trip). NOTE: this family had no
+  `*_inner`+`result_to_errptr` pairs to delete (the CS12/13 pattern
+  never covered it — the callbacks were direct raw encoders); the
+  errno path is now KResult end-to-end from driver body to the
+  `vfs_fileread`/`vfs_filewrite`/`vfs_filelseek`/`vfs_ioctl`
+  boundary fns, whose exported signatures are unchanged.
+- **Errno additions** (kstd): `Io` (EIO), `FBig` (EFBIG), `NoSpc`
+  (ENOSPC) — needed once implementor bodies returned KResult
+  natively; each errno VALUE to userspace is preserved exactly.
+- **Deletions beyond the table**: `vfs_custom_fd_alloc`(+`_inner`)
+  — zero callers anywhere (C-facing convenience API; header proto
+  vestigial), and its `ops: *mut vfs_file_ops` param was the last
+  table-by-pointer interface; trivially reintroducible with a
+  `Option<&'static dyn FileOps>` signature when a real caller
+  appears. `machine.rs`'s dead `vfs_file_ops(p)` accessor deleted
+  (kernel/ll/ll.rs turns out to be an ORPHAN — not in the module
+  tree; its stale copy still references the deleted type and the
+  build passes, proving it never compiles).
+- **Dispatch sites** rewritten (file.rs read×3/write×3/llseek/
+  ioctl×2/release/fflush/stat/open null-checks; vfs_syscall.rs
+  `vfs_poll_scan`; mm/vm.rs `xv6_vm_call_vma_fault`): `if let
+  Some(ops) = (*file).ops` + method call; every None-table and
+  None-slot outcome byte-identical per the mapping above (verified
+  slot-by-slot against all five historical tables: read/write filled
+  in ALL of them, so making them required methods loses no reachable
+  behavior).
+- **rust-skills applied**: trait-dyn-vs-generic (dyn chosen
+  deliberately: heterogeneous per-file plug-in table stored across
+  calls), trait-object-safety (all methods dispatchable; `Sync`
+  supertrait so `&'static dyn` shares across CPUs),
+  trait-default-methods (None-slot semantics as defaults),
+  unsafe-safety-comment + doc-safety-section (`# Safety` on every
+  trait method; SAFETY: at every dispatch/impl site),
+  unsafe-minimize-scope, err-result-over-panic + the crate's
+  Result-first Errno idiom (err-from-impl N/A — Raw passthrough),
+  api-must-use (KResult is Result — already must_use),
+  name-types-camel, mem-assert-type-size (const asserts on the new
+  layout). Deviation: `poll`/`ioctl`/`fault` return `Option` rather
+  than `KResult` — deliberate, documented in the trait doc (tri-state
+  "absent vs handled-failed vs handled-ok" can't be two-state).
+- **Verification**: cargo clean + full rebuild → **0 warnings 0
+  errors**; cache discipline verified before AND after every QEMU
+  run (`CMAKE_BUILD_TYPE` empty, toolchain gcc). Boot ×4, each
+  exactly ONE `init: starting sh` + stable `/ $`. Battery: `ls` OK;
+  `cat README.md | wc` = **714 3365 26018**; `usertests pipe1` OK;
+  `usertests createdelete` OK (single-test "lost some free pages"
+  trailer = documented pre-existing artifact); standalone
+  **stressfs** completed (4-proc write/read storm, shell alive
+  after); **testsig 21/21**; **mmaptest 16/16** (file-backed mmap →
+  the trait `fault` path); symlinktest both parts ok; `cat
+  /nonexistent` → ENOENT; interactive shell echo + `ls /dev` (cdev
+  null-ops direct-I/O route). forkforkfork → the IDENTICAL
+  pre-existing panic signature ("Failed to remove interrupted waiter
+  from queue" → IPI crash → kerneltrap storm; documented since
+  Iteration ~25). sysnet: no easy runtime test exists (sockets have
+  no userspace driver in the image) — the socket path's only change
+  is `ops = None` spelling, noted honestly. LOC: +675/−447 across 11
+  files (net +228, dominated by trait/method docs; the table type,
+  its asserts, 24 extern wrappers, and 2 dead APIs deleted).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

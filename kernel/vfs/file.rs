@@ -25,9 +25,8 @@
 //! — `file->ops->read`/`write`/`llseek` — are documented at each call
 //! site as sleep-safe), so unlike `vfs/inode.rs`'s `vfs_iput` this is a
 //! clean RAII fit: [`crate::sync::KMutex`] via [`file_lock`]. The
-//! global open-file table (`__vfs_ftable_lock`, a `spinlock_t`) and the
-//! per-process `fdtable.lock` (`vfs_custom_fd_alloc`) are likewise
-//! single lexically-scoped critical sections and use
+//! global open-file table (`__vfs_ftable_lock`, a `spinlock_t`) is
+//! likewise a single lexically-scoped critical section and uses
 //! [`crate::sync::KSpinlock`] RAII. [`crate::sysnet::SOCKETS`] (owned by
 //! `sysnet.rs`) is locked in one straight-line block inside
 //! [`vfs_sockalloc`] with no early return while held — Wave P3-8d
@@ -96,10 +95,9 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // (infallible-return) `fflush`-result comparison.
 use crate::bindings::{
     blkdev_t, bool_, cdev_t, device_t, list_node_t, loff_t, pipe, slab_cache_t,
-    spinlock_t, stat, thread, vfs_fdtable, vfs_file, vfs_file_ops, vfs_inode, vfs_inode_ref,
+    spinlock_t, stat, vfs_file, vfs_inode, vfs_inode_ref,
     EAGAIN, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
-use crate::proc::proc_shims::xv6_current_thread;
 use crate::sync::{KMutex, KSpinlock};
 
 // ===========================================================================
@@ -200,9 +198,16 @@ pub union VfsFilePos {
     pub sock: *mut crate::bindings::sock,
 }
 
-/// `struct vfs_file` (`kernel/inc/vfs/vfs_types.h`). The anonymous
-/// union became the named `pos` field (consumers re-pointed from
-/// bindgen's `__bindgen_anon_1`).
+/// `struct vfs_file` — as of wave P3-10a this layout is NATIVE-OWNED
+/// (post-P3-6 there is no bindgen, no wrapper.h, and no C consumer of
+/// this record; `kernel/inc/vfs/vfs_types.h` no longer constrains it).
+/// The anonymous union became the named `pos` field back in P3-N5; the
+/// former `ops: *mut vfs_file_ops` table pointer is now a real Rust
+/// trait object, `Option<&'static dyn FileOps>` (a 16-byte fat pointer;
+/// `None` replaces the old null-ops "direct device/socket I/O" marker).
+/// The explicit `_pad0` bindgen used to emit before `lock` is gone: the
+/// fat `ops` pointer widened the header so `private_data` now ends
+/// exactly at the 64-byte boundary `lock` sits on.
 #[repr(C, align(64))]
 #[derive(Copy, Clone)]
 pub struct VfsFile {
@@ -210,86 +215,156 @@ pub struct VfsFile {
     pub inode: vfs_inode_ref,
     pub f_flags: c_int,
     pub ref_count: c_int,
-    pub ops: *mut VfsFileOps,
+    pub ops: Option<&'static dyn FileOps>,
     pub private_data: *mut c_void,
-    pub(crate) _pad0: u64,
     pub lock: crate::bindings::mutex_t,
     pub pos: VfsFilePos,
 }
 
-/// `struct vfs_file_ops` (`kernel/inc/vfs/vfs_types.h`).
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct VfsFileOps {
-    pub read: Option<
-        unsafe extern "C" fn(
-            file: *mut VfsFile,
-            buf: *mut c_char,
-            count: usize,
-            user: bool_,
-        ) -> isize,
-    >,
-    pub write: Option<
-        unsafe extern "C" fn(
-            file: *mut VfsFile,
-            buf: *const c_char,
-            count: usize,
-            user: bool_,
-        ) -> isize,
-    >,
-    pub llseek:
-        Option<unsafe extern "C" fn(file: *mut VfsFile, offset: loff_t, whence: c_int) -> loff_t>,
-    pub release: Option<unsafe extern "C" fn(inode: *mut vfs_inode, file: *mut VfsFile) -> c_int>,
-    pub fsync:
-        Option<unsafe extern "C" fn(file: *mut VfsFile, start: loff_t, len: loff_t) -> c_int>,
-    pub fflush: Option<unsafe extern "C" fn(file: *mut VfsFile) -> c_int>,
-    pub poll: Option<unsafe extern "C" fn(file: *mut VfsFile, events: ::core::ffi::c_short) -> c_int>,
-    pub ioctl: Option<
-        unsafe extern "C" fn(file: *mut VfsFile, cmd: crate::bindings::uint64, arg: *mut c_void) -> c_int,
-    >,
-    pub fault: Option<
-        unsafe extern "C" fn(
-            file: *mut VfsFile,
-            vma: *mut crate::bindings::vma,
-            va: crate::bindings::uint64,
-        ) -> *mut c_void,
-    >,
+/// The per-filesystem/driver file-operations vtable — wave P3-10a's
+/// replacement for the C-style `struct vfs_file_ops` fn-pointer table
+/// (the ops-table redesign PILOT: full Rust style, C-compatible
+/// interface removed). Implementors are zero-sized unit structs with a
+/// `static` instance (`XV6FS_FILE_OPS`, `TMPFS_FILE_OPS`,
+/// `PIPE_FILE_OPS`, `PTS_SLAVE_FILE_OPS`, `PTMX_MASTER_FILE_OPS`)
+/// installed into [`VfsFile::ops`] as `Some(&STATIC)`.
+///
+/// Slot-nullability mapping (each old `Option<fn>` slot's `None`
+/// dispatch behavior is preserved exactly):
+///
+/// * `read`/`write` — required methods: every historical table filled
+///   both slots, so "ops present but slot `None`" never existed; the
+///   old dispatch's missing-slot fallbacks keyed off the whole table
+///   being null, which is now `VfsFile::ops == None`.
+/// * `llseek` — default `Err(Errno::SPipe)`, exactly what
+///   `vfs_filelseek` returned for a `None` slot ("not seekable").
+/// * `release`/`fflush`/`fsync` — default `Ok(())`: a `None` slot was
+///   silently skipped by `file_free`/`vfs_fput` (no call, no error
+///   log), and `Ok(())` takes the identical no-log path.
+/// * `poll`/`ioctl`/`fault` — return `Option<..>` where `None` means
+///   "op not provided": their dispatch sites (`vfs_poll_scan`,
+///   `vfs_ioctl`, `xv6_vm_call_vma_fault`) have genuine *fallback*
+///   behavior for a missing slot (always-ready poll, `dev_ioctl`/
+///   `ENOTTY`, generic file-page loader) that a sentinel `Errno` could
+///   not represent without conflating it with a real driver error.
+///   Note `fault`'s `Some(ptr)` payload may itself be null — that is
+///   the driver's own "handled, but failed" result and is returned to
+///   the faulting path as-is, NOT a cue to fall back.
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait FileOps: Sync {
+    /// Read up to `count` bytes into `buf` (a user VA when `user`).
+    ///
+    /// # Safety
+    /// `file` must be a live, open `vfs_file` whose `ops` is this
+    /// instance; `buf` must be valid for `count` bytes in the `user`-
+    /// selected address space. May sleep.
+    unsafe fn read(&self, file: *mut VfsFile, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize>;
+
+    /// Write up to `count` bytes from `buf` (a user VA when `user`).
+    ///
+    /// # Safety
+    /// Same contract as [`FileOps::read`].
+    unsafe fn write(&self, file: *mut VfsFile, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize>;
+
+    /// Compute (but do not store) the new file position.
+    ///
+    /// # Safety
+    /// `file` must be a live, open `vfs_file` whose `ops` is this
+    /// instance.
+    unsafe fn llseek(&self, _file: *mut VfsFile, _offset: loff_t, _whence: c_int)
+        -> KResult<loff_t> {
+        Err(Errno::SPipe) // Not seekable (old `None`-slot behavior).
+    }
+
+    /// Last-reference teardown hook, called from `file_free`.
+    ///
+    /// # Safety
+    /// `file` must be a live `vfs_file` holding its final reference;
+    /// `inode` is `file`'s (possibly null) backing inode.
+    unsafe fn release(&self, _inode: *mut vfs_inode, _file: *mut VfsFile) -> KResult<()> {
+        Ok(())
+    }
+
+    /// Flush a byte range to stable storage. (No VFS dispatch site
+    /// exists yet — slot preserved from the C table for the future
+    /// `fsync(2)` path; xv6fs already implements it.)
+    ///
+    /// # Safety
+    /// `file` must be a live, open `vfs_file` whose `ops` is this
+    /// instance.
+    unsafe fn fsync(&self, _file: *mut VfsFile, _start: loff_t, _len: loff_t) -> KResult<()> {
+        Ok(())
+    }
+
+    /// Flush all dirty data, called from `vfs_fput` before the inode
+    /// reference is dropped.
+    ///
+    /// # Safety
+    /// `file` must be a live `vfs_file` holding its final reference.
+    unsafe fn fflush(&self, _file: *mut VfsFile) -> KResult<()> {
+        Ok(())
+    }
+
+    /// Poll for readiness: `Some(revents)` if this driver implements
+    /// polling, `None` to let `vfs_poll_scan` fall back.
+    ///
+    /// # Safety
+    /// `file` must be a live, open `vfs_file` whose `ops` is this
+    /// instance.
+    unsafe fn poll(&self, _file: *mut VfsFile, _events: core::ffi::c_short) -> Option<c_int> {
+        None
+    }
+
+    /// Driver ioctl: `Some(result)` (the raw `c_int`, which may itself
+    /// be a negative errno, passed through to userspace exactly as the
+    /// old fn-pointer result was) or `None` to let `vfs_ioctl` fall
+    /// back (`dev_ioctl` / `ENOTTY`).
+    ///
+    /// # Safety
+    /// `file` must be a live, open `vfs_file` whose `ops` is this
+    /// instance; `arg`'s validity is `cmd`-specific.
+    unsafe fn ioctl(&self, _file: *mut VfsFile, _cmd: u64, _arg: *mut c_void) -> Option<c_int> {
+        None
+    }
+
+    /// mmap demand-page hook: `Some(page)` if this driver handles
+    /// file-backed faults (`page` null on failure, exactly as the old
+    /// callback returned null), `None` to let `xv6_vm_call_vma_fault`
+    /// fall back to the generic file-page loader.
+    ///
+    /// # Safety
+    /// `file` must be a live, open `vfs_file` whose `ops` is this
+    /// instance; `vma` must be a live mapping of `file` containing `va`.
+    unsafe fn fault(&self, _file: *mut VfsFile, _vma: *mut crate::bindings::vma, _va: u64)
+        -> Option<*mut c_void> {
+        None
+    }
 }
 
-// P3-N5 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (verified in-tree by a temporary
-// `offset_of!` gate on `crate::bindings::{vfs_file,vfs_file_ops}`
-// before the switch) and independently confirmed by the cross-compiler
-// `_Static_assert` probe (toolchain riscv64-unknown-elf-gcc,
-// rv64gc/lp64d, gcc & clang-18 agree; scratchpad
-// p3n5_static_assert_probe.c): vfs_file 256/64 offsets
-// 0/16/32/36/40/48/[64]/192 (the anonymous union occupies [192,208),
-// struct padded to 256 by the record alignment), union 16/8,
-// vfs_file_ops 72/8 offsets 0/8/16/24/32/40/48/56/64.
+// P3-10a layout facts — NATIVE-OWNED, no C mirror exists (bindgen,
+// wrapper.h, and every C consumer are gone; these asserts document the
+// new truth rather than pinning to a header). Kept: size/align and the
+// two invariants the code actually leans on — `lock` starting exactly
+// at the 64-byte cache-line boundary (the record's whole reason for
+// `align(64)`, now satisfied without the old `_pad0` because the fat
+// `ops` pointer widened the header to exactly 64 bytes) and the
+// niche-optimized `Option<&'static dyn FileOps>` staying a plain fat
+// pointer (16/8). Deleted: the stale C-fidelity offsets for the moved
+// fields and the whole `vfs_file_ops` table block (the table type
+// itself no longer exists).
 const _: () = {
     assert!(core::mem::size_of::<VfsFilePos>() == 16, "vfs_file pos union size");
     assert!(core::mem::align_of::<VfsFilePos>() == 8, "vfs_file pos union alignment");
+    assert!(core::mem::size_of::<Option<&'static dyn FileOps>>() == 16, "file ops fat pointer size");
+    assert!(core::mem::align_of::<Option<&'static dyn FileOps>>() == 8, "file ops fat pointer alignment");
     assert!(core::mem::size_of::<VfsFile>() == 256, "vfs_file size");
     assert!(core::mem::align_of::<VfsFile>() == 64, "vfs_file alignment");
-    assert!(core::mem::offset_of!(VfsFile, list_entry) == 0, "vfs_file.list_entry offset");
-    assert!(core::mem::offset_of!(VfsFile, inode) == 16, "vfs_file.inode offset");
-    assert!(core::mem::offset_of!(VfsFile, f_flags) == 32, "vfs_file.f_flags offset");
-    assert!(core::mem::offset_of!(VfsFile, ref_count) == 36, "vfs_file.ref_count offset");
-    assert!(core::mem::offset_of!(VfsFile, ops) == 40, "vfs_file.ops offset");
-    assert!(core::mem::offset_of!(VfsFile, private_data) == 48, "vfs_file.private_data offset");
-    assert!(core::mem::offset_of!(VfsFile, lock) == 64, "vfs_file.lock offset");
+    assert!(core::mem::offset_of!(VfsFile, lock) == 64, "vfs_file.lock offset (cache-line boundary)");
     assert!(core::mem::offset_of!(VfsFile, pos) == 192, "vfs_file.pos offset");
-    assert!(core::mem::size_of::<VfsFileOps>() == 72, "vfs_file_ops size");
-    assert!(core::mem::align_of::<VfsFileOps>() == 8, "vfs_file_ops alignment");
-    assert!(core::mem::offset_of!(VfsFileOps, read) == 0, "vfs_file_ops.read offset");
-    assert!(core::mem::offset_of!(VfsFileOps, write) == 8, "vfs_file_ops.write offset");
-    assert!(core::mem::offset_of!(VfsFileOps, llseek) == 16, "vfs_file_ops.llseek offset");
-    assert!(core::mem::offset_of!(VfsFileOps, release) == 24, "vfs_file_ops.release offset");
-    assert!(core::mem::offset_of!(VfsFileOps, fsync) == 32, "vfs_file_ops.fsync offset");
-    assert!(core::mem::offset_of!(VfsFileOps, fflush) == 40, "vfs_file_ops.fflush offset");
-    assert!(core::mem::offset_of!(VfsFileOps, poll) == 48, "vfs_file_ops.poll offset");
-    assert!(core::mem::offset_of!(VfsFileOps, ioctl) == 56, "vfs_file_ops.ioctl offset");
-    assert!(core::mem::offset_of!(VfsFileOps, fault) == 64, "vfs_file_ops.fault offset");
 };
 
 // ===========================================================================
@@ -390,7 +465,6 @@ use crate::sysnet::SOCKETS;
 // wave; converted from `extern "C"` redeclarations to plain crate-path
 // items (identical signatures, same `crate::bindings::*` types this file
 // already imports).
-use crate::vfs::fdtable::vfs_fdtable_alloc_fd;
 use crate::vfs::fs::{vfs_inode_deref, vfs_inode_get_ref, vfs_inode_put_ref};
 use crate::vfs::inode::{vfs_ilock, vfs_itruncate, vfs_iunlock};
 use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_open};
@@ -610,9 +684,14 @@ fn file_alloc() -> *mut vfs_file {
     }
     // SAFETY: `slab_alloc` returned a fresh, exclusively-owned
     // `size_of::<vfs_file>()` allocation; zeroing then field-initializing
-    // it mirrors the C original's `memset` + explicit-field-init.
+    // it mirrors the C original's `memset` + explicit-field-init. `ops`
+    // is written explicitly: all-zero bytes are not a documented `None`
+    // for the `Option<&'static dyn FileOps>` fat pointer (P3-10a), so
+    // the raw `write` (a pure store — no read/drop of the zeroed bytes)
+    // establishes the field's validity before anyone loads it.
     unsafe {
         ptr::write_bytes(file, 0, 1);
+        ptr::addr_of_mut!((*file).ops).write(None);
         mutex_init(ptr::addr_of_mut!((*file).lock), c"vfs_file_lock".as_ptr() as *mut c_char);
         (*file).ref_count = 1;
     }
@@ -624,13 +703,15 @@ fn file_free(file: *mut vfs_file) {
         return;
     }
     // SAFETY: `file` is a live, exclusively-owned `vfs_file` about to be
-    // returned to the slab (every caller holds the last reference).
+    // returned to the slab (every caller holds the last reference);
+    // `release` is the driver's teardown hook with exactly that
+    // contract. A missing table (`None` ops) skips the call, and the
+    // trait's default `release` is `Ok(())` — both reproduce the old
+    // null-table/`None`-slot "silently skip" behavior.
     unsafe {
-        let ops = (*file).ops;
-        if let Some(release) = ops.as_ref().and_then(|o| o.release) {
-            let ret = release((*file).inode.inode, file);
-            if ret != 0 {
-                crate::kprintln!("__vfs_file_free: file ops release failed, errno={}", ret);
+        if let Some(ops) = (*file).ops {
+            if let Err(e) = ops.release((*file).inode.inode, file) {
+                crate::kprintln!("__vfs_file_free: file ops release failed, errno={}", e.neg());
             }
         }
     }
@@ -702,7 +783,7 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
             return Err(Errno::Raw(ret));
         }
         // SAFETY: non-null `file`.
-        if unsafe { !(*file).ops.is_null() } {
+        if unsafe { (*file).ops.is_some() } {
             // `open_file` took over: the VFS does not also store
             // `file->cdev` (the cdev manages its own refcount in that
             // case), matching the C original's comment exactly.
@@ -714,7 +795,7 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
     // SAFETY: non-null `file`.
     unsafe {
         (*file).pos.cdev = cdev;
-        (*file).ops = ptr::null_mut(); // Device files use direct device I/O.
+        (*file).ops = None; // Device files use direct device I/O.
     }
     Ok(())
 }
@@ -739,11 +820,11 @@ fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) {
         if is_err(blkdev) || blkdev.is_null() {
             // Device not found -- allow open for stat but not I/O.
             (*file).pos.blkdev = ptr::null_mut();
-            (*file).ops = ptr::null_mut();
+            (*file).ops = None;
             return;
         }
         (*file).pos.blkdev = blkdev;
-        (*file).ops = ptr::null_mut(); // Device files use direct device I/O.
+        (*file).ops = None; // Device files use direct device I/O.
     }
 }
 
@@ -831,7 +912,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
         return Err(Errno::Raw(ret));
     }
     // SAFETY: non-null `file`.
-    if unsafe { (*file).ops.is_null() } {
+    if unsafe { (*file).ops.is_none() } {
         vfs_iunlock(inode);
         vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
         file_free(file);
@@ -875,14 +956,16 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
     // Flush dirty pages before releasing the inode reference, so all
     // data is written to disk before the inode can be torn down (avoids
     // the flush worker racing with inode destruction).
-    // SAFETY: non-null `file`.
-    let ops = unsafe { (*file).ops };
-    if let Some(fflush) = unsafe { ops.as_ref() }.and_then(|o| o.fflush) {
-        // SAFETY: `file` is live; `fflush` is a filesystem driver
-        // callback with the documented "flush dirty data" contract.
-        let ret = unsafe { fflush(file) };
-        if ret != 0 && ret != neg(EAGAIN) {
-            crate::kprintln!("vfs_fput: fflush failed: {}", ret);
+    // SAFETY: non-null `file`; `fflush` is the driver's "flush dirty
+    // data" hook called with exactly its documented final-reference
+    // contract. The trait's default `fflush` is `Ok(())`, reproducing
+    // the old `None`-slot skip; `-EAGAIN` stays un-logged exactly as
+    // the old raw-`c_int` comparison had it.
+    if let Some(ops) = unsafe { (*file).ops } {
+        if let Err(e) = unsafe { ops.fflush(file) } {
+            if e.neg() != neg(EAGAIN) {
+                crate::kprintln!("vfs_fput: fflush failed: {}", e.neg());
+            }
         }
     }
 
@@ -958,12 +1041,12 @@ fn vfs_ioctl_inner(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> KResult<c
         let mode = unsafe { (*inode).mode };
         if is_blk(mode) || is_chr(mode) {
             // Prefer custom file ops (installed by cdev open_file, e.g.
-            // PTY master).
-            // SAFETY: non-null `file`.
-            let ops = unsafe { (*file).ops };
-            if let Some(ioctl) = unsafe { ops.as_ref() }.and_then(|o| o.ioctl) {
-                // SAFETY: `file` is live; `ioctl` is a driver callback.
-                return Ok(unsafe { ioctl(file, cmd, arg) });
+            // PTY master). `ioctl`'s `None` return means "op not
+            // provided" — fall through, exactly like the old `None`
+            // table slot.
+            // SAFETY: non-null `file` (live for the driver callback).
+            if let Some(ret) = unsafe { (*file).ops.and_then(|o| o.ioctl(file, cmd, arg)) } {
+                return Ok(ret);
             }
             // SAFETY: non-null `file`; the cdev pointer reinterprets as
             // `device_t*` because `device_t dev` is `cdev_t`'s first
@@ -977,11 +1060,9 @@ fn vfs_ioctl_inner(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> KResult<c
     }
 
     // Fallback: custom file descriptors (pipes, sockets, etc.).
-    // SAFETY: non-null `file`.
-    let ops = unsafe { (*file).ops };
-    if let Some(ioctl) = unsafe { ops.as_ref() }.and_then(|o| o.ioctl) {
-        // SAFETY: `file` is live; `ioctl` is a driver callback.
-        return Ok(unsafe { ioctl(file, cmd, arg) });
+    // SAFETY: non-null `file` (live for the driver callback).
+    if let Some(ret) = unsafe { (*file).ops.and_then(|o| o.ioctl(file, cmd, arg)) } {
+        return Ok(ret);
     }
 
     Err(Errno::NotTy)
@@ -1017,9 +1098,12 @@ fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_i
 
     // Handle pipe/socket read -- these don't have inodes.
     if inode.is_null() {
-        // SAFETY: non-null `file`.
-        let ops = unsafe { (*file).ops };
-        let Some(read) = unsafe { ops.as_ref() }.and_then(|o| o.read) else {
+        // SAFETY: non-null `file`. (`read` is a required trait method,
+        // so "table present but read slot missing" — which never
+        // occurred with the fn-pointer tables either, every implementor
+        // filled it — can no longer be expressed; only a missing table
+        // reaches the `BadF` arm, same outcomes as before.)
+        let Some(ops) = (unsafe { (*file).ops }) else {
             return Err(Errno::BadF); // Not a readable file object.
         };
         let _g = file_lock(file).lock();
@@ -1031,7 +1115,7 @@ fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_i
         // filesystem driver callback that may sleep, matching its
         // documented contract -- held under `file_lock` exactly as the
         // C original does for this path.
-        return Ok(unsafe { read(file, buf as *mut c_char, n, user as bool_) });
+        return unsafe { ops.read(file, buf as *mut c_char, n, user != 0) };
     }
 
     // Character device read: check access and call without holding the
@@ -1045,17 +1129,15 @@ fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_i
             return Err(Errno::BadF);
         }
         // SAFETY: non-null `file`.
-        let ops = unsafe { (*file).ops };
-        let ret = if let Some(read) = unsafe { ops.as_ref() }.and_then(|o| o.read) {
+        return if let Some(ops) = unsafe { (*file).ops } {
             // Custom file ops installed by cdev open_file (e.g. PTY master).
             // SAFETY: see the pipe/socket read call site above.
-            unsafe { read(file, buf as *mut c_char, n, user as bool_) }
+            unsafe { ops.read(file, buf as *mut c_char, n, user != 0) }
         } else {
             // SAFETY: non-null `file`.
             let cdev = unsafe { (*file).pos.cdev };
-            cdev_read(cdev, user as bool_, buf, n) as isize
+            Ok(cdev_read(cdev, user as bool_, buf, n) as isize)
         };
-        return Ok(ret);
     }
 
     let _g = file_lock(file).lock();
@@ -1082,14 +1164,15 @@ fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_i
         return Err(if is_dir(mode) { Errno::IsDir } else { Errno::Inval });
     }
     // SAFETY: non-null `file`.
-    let ops = unsafe { (*file).ops };
-    let Some(read) = unsafe { ops.as_ref() }.and_then(|o| o.read) else {
+    let Some(ops) = (unsafe { (*file).ops }) else {
         return Err(Errno::OpNotSupp);
     };
     // Pass the requested size to the driver; the driver handles EOF and
-    // size checks internally.
+    // size checks internally. A driver error propagates as `Err` (and,
+    // exactly like the old negative-`isize` return, skips the position
+    // bump).
     // SAFETY: see the pipe/socket read call site above.
-    let ret = unsafe { read(file, buf as *mut c_char, n, user as bool_) };
+    let ret = unsafe { ops.read(file, buf as *mut c_char, n, user != 0) }?;
     if ret > 0 {
         // SAFETY: non-null `file`.
         unsafe { (*file).pos.f_pos += ret as loff_t };
@@ -1124,7 +1207,7 @@ fn vfs_filestat_inner(file: *mut vfs_file, out: *mut stat) -> KResult<c_int> {
         // inode. Return a synthetic stat indicating a character device
         // so that isatty() works correctly.
         // SAFETY: non-null `file`/`out`.
-        if unsafe { !(*file).ops.is_null() } {
+        if unsafe { (*file).ops.is_some() } {
             unsafe {
                 ptr::write_bytes(out, 0, 1);
                 (*out).mode = S_IFCHR | 0o666;
@@ -1189,9 +1272,9 @@ fn vfs_filewrite_inner(
 
     // Handle pipe/socket write -- these don't have inodes.
     if inode.is_null() {
-        // SAFETY: non-null `file`.
-        let ops = unsafe { (*file).ops };
-        let Some(write) = unsafe { ops.as_ref() }.and_then(|o| o.write) else {
+        // SAFETY: non-null `file` (see `vfs_fileread_inner`'s identical
+        // required-method note).
+        let Some(ops) = (unsafe { (*file).ops }) else {
             return Err(Errno::BadF); // Not a writable file object.
         };
         let _g = file_lock(file).lock();
@@ -1201,7 +1284,7 @@ fn vfs_filewrite_inner(
         }
         // SAFETY: `file`/`buf` live for the call; `write` may sleep,
         // held under `file_lock` exactly as the C original does.
-        return Ok(unsafe { write(file, buf as *const c_char, n, user as bool_) });
+        return unsafe { ops.write(file, buf as *const c_char, n, user != 0) };
     }
 
     // Character device write: same no-file-lock-across-I/O rationale as
@@ -1214,16 +1297,14 @@ fn vfs_filewrite_inner(
             return Err(Errno::BadF);
         }
         // SAFETY: non-null `file`.
-        let ops = unsafe { (*file).ops };
-        let ret = if let Some(write) = unsafe { ops.as_ref() }.and_then(|o| o.write) {
+        return if let Some(ops) = unsafe { (*file).ops } {
             // SAFETY: see the pipe/socket write call site above.
-            unsafe { write(file, buf as *const c_char, n, user as bool_) }
+            unsafe { ops.write(file, buf as *const c_char, n, user != 0) }
         } else {
             // SAFETY: non-null `file`.
             let cdev = unsafe { (*file).pos.cdev };
-            cdev_write(cdev, user as bool_, buf, n) as isize
+            Ok(cdev_write(cdev, user as bool_, buf, n) as isize)
         };
-        return Ok(ret);
     }
 
     let _g = file_lock(file).lock();
@@ -1250,14 +1331,14 @@ fn vfs_filewrite_inner(
         return Err(if is_dir(mode) { Errno::IsDir } else { Errno::Inval });
     }
     // SAFETY: non-null `file`.
-    let ops = unsafe { (*file).ops };
-    let Some(write) = unsafe { ops.as_ref() }.and_then(|o| o.write) else {
+    let Some(ops) = (unsafe { (*file).ops }) else {
         return Err(Errno::OpNotSupp);
     };
     // The driver handles file extension, size updates, and truncation
-    // internally.
+    // internally. A driver error propagates as `Err` (and, exactly like
+    // the old negative-`isize` return, skips the position bump).
     // SAFETY: see the pipe/socket write call site above.
-    let ret = unsafe { write(file, buf as *const c_char, n, user as bool_) };
+    let ret = unsafe { ops.write(file, buf as *const c_char, n, user != 0) }?;
     if ret > 0 {
         // SAFETY: non-null `file`.
         unsafe { (*file).pos.f_pos += ret as loff_t };
@@ -1301,13 +1382,16 @@ fn vfs_filelseek_inner(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KR
     // Note: we do NOT lock the inode here -- the driver callback (e.g.
     // xv6fs_file_llseek) is responsible for acquiring it when needed
     // (e.g. for SEEK_END), matching the read/write design above.
-    // SAFETY: non-null `file`.
-    let ops = unsafe { (*file).ops };
-    let Some(llseek) = unsafe { ops.as_ref() }.and_then(|o| o.llseek) else {
+    // SAFETY: non-null `file`. (The trait's default `llseek` is
+    // `Err(Errno::SPipe)`, reproducing the old `None`-slot "not
+    // seekable" outcome; a missing table takes the same arm here.)
+    let Some(ops) = (unsafe { (*file).ops }) else {
         return Err(Errno::SPipe); // Not seekable.
     };
     // SAFETY: `file` is live; `llseek` is a filesystem driver callback.
-    let ret = unsafe { llseek(file, offset, whence) };
+    // A driver error propagates as `Err` (skipping the position store,
+    // exactly like the old negative-`loff_t` return).
+    let ret = unsafe { ops.llseek(file, offset, whence) }?;
     if ret >= 0 {
         // SAFETY: non-null `file`.
         unsafe { (*file).pos.f_pos = ret };
@@ -1437,57 +1521,19 @@ struct mbufq {
     tail: *mut c_void,
 }
 
-/// Allocate a `vfs_file` with caller-supplied ops and `private_data`,
-/// attach it to the global file table, install it into the current
-/// process's fd table, and return the fd number. Returns a negative
-/// errno on failure.
-/// Core logic behind [`vfs_custom_fd_alloc`], factored out as a private
-/// helper returning [`KResult`] (P3-CS6). `fd`'s sole failure mode (fd
-/// table exhaustion) becomes `Err(Errno::MFile)`; a successful fd passes
-/// through as `Ok`.
-fn vfs_custom_fd_alloc_inner(
-    ops: *mut vfs_file_ops,
-    private_data: *mut c_void,
-    flags: c_int,
-) -> KResult<c_int> {
-    let f = file_alloc();
-    if f.is_null() {
-        return Err(Errno::NoMem);
-    }
-
-    // SAFETY: non-null `f`.
-    unsafe {
-        (*f).f_flags = flags;
-        (*f).ops = ops;
-        (*f).private_data = private_data;
-    }
-    ftable_attach(f);
-
-    // SAFETY: `xv6_current_thread()` returns the live current thread.
-    let fdtable = unsafe { (*xv6_current_thread()).fdtable };
-    let fd = {
-        // SAFETY: non-null `fdtable` (every thread has one).
-        let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).lock();
-        vfs_fdtable_alloc_fd(fdtable, f)
-    };
-    vfs_fput(f); // Drop our ref; the fdtable now owns it.
-
-    if fd < 0 {
-        return Err(Errno::MFile);
-    }
-    Ok(fd)
-}
-
-pub(crate) extern "C" fn vfs_custom_fd_alloc(
-    ops: *mut vfs_file_ops,
-    private_data: *mut c_void,
-    flags: c_int,
-) -> c_int {
-    match vfs_custom_fd_alloc_inner(ops, private_data, flags) {
-        Ok(fd) => fd,
-        Err(e) => e.neg(),
-    }
-}
+// P3-10a: `vfs_custom_fd_alloc`/`vfs_custom_fd_alloc_inner` DELETED.
+// The pair ("allocate a vfs_file with caller-supplied ops table +
+// private_data, install into the current fd table") was a C-facing
+// convenience API with ZERO callers anywhere in the tree (Rust drivers
+// install their ops directly in their own open paths; the
+// `inc/vfs/file.h` prototype is vestigial — no C remains). Its `ops:
+// *mut vfs_file_ops` parameter was this family's last table-by-pointer
+// C-compatible interface; rather than carry a dead fn through the trait
+// conversion (`extern "C"` + a fat `Option<&'static dyn FileOps>` arg
+// would also trip `improper_ctypes_definitions`), it is removed per the
+// wave directive. Trivially reintroducible as
+// `fn(Option<&'static dyn FileOps>, *mut c_void, c_int) -> KResult<c_int>`
+// when a real caller (e.g. a future sysnet fd path) appears.
 
 /// Core logic behind [`vfs_sockalloc`], factored out as a private helper
 /// returning [`KResult`] (P3-CS6). The duplicate-tuple check is this
@@ -1536,7 +1582,7 @@ fn vfs_sockalloc_inner(
     unsafe {
         (*f).f_flags = O_RDWR;
         (*f).pos.sock = si as *mut crate::bindings::sock;
-        (*f).ops = ptr::null_mut(); // Sockets use direct socket I/O.
+        (*f).ops = None; // Sockets use direct socket I/O.
     }
     ftable_attach(f);
 

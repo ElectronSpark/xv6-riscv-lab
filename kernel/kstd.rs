@@ -241,6 +241,18 @@ pub enum Errno {
     /// `ESRCH`: no such process (added for P3-CS10, `proc/thread_group.rs`'s
     /// `get_thread_group` tgid-lookup-miss paths).
     Srch,
+    /// `EIO`: I/O error (added for P3-10a, the `vfs_file_ops` ->
+    /// `FileOps`-trait pilot — the xv6fs/tmpfs/pty file-op bodies'
+    /// inactive-pcache / torn-down-pair failure paths, now that those
+    /// implementors return [`KResult`] natively instead of a raw
+    /// negative `isize`).
+    Io,
+    /// `EFBIG`: file too large (added for P3-10a, the xv6fs/tmpfs
+    /// `FileOps::write` max-file-size checks).
+    FBig,
+    /// `ENOSPC`: no space left on device (added for P3-10a, the xv6fs
+    /// `FileOps::write` block-allocation-failure path).
+    NoSpc,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -297,6 +309,9 @@ impl Errno {
             Errno::Again => crate::bindings::EAGAIN as c_int,
             Errno::XDev => crate::bindings::EXDEV as c_int,
             Errno::Srch => crate::bindings::ESRCH as c_int,
+            Errno::Io => crate::bindings::EIO as c_int,
+            Errno::FBig => crate::bindings::EFBIG as c_int,
+            Errno::NoSpc => crate::bindings::ENOSPC as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`

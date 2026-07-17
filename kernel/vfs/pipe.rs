@@ -3,8 +3,9 @@
 //!
 //! Provides the pipe ring buffer (`pipe_alloc`/`pipe_close`,
 //! `pipe_read`/`pipe_write`, `pipe_set_flags`/`pipe_get_flags`) and the
-//! `vfs_file_ops` adapter (`pipe_open` installs it) that
-//! [`super::file`] dispatches through. `kernel/vfs/file.c` (this
+//! [`crate::vfs::file::FileOps`] adapter (`pipe_open` installs it;
+//! since wave P3-10a a trait implementor, not a `vfs_file_ops`
+//! fn-pointer table) that [`super::file`] dispatches through. `kernel/vfs/file.c` (this
 //! wave's sibling file) only calls the small public surface
 //! (`pipe_alloc`/`pipe_open`/`pipe_close`); the ring-buffer internals
 //! below are private to this file, same as the C original's `static`
@@ -79,11 +80,10 @@
 //! `kernel/tty/pty.rs`/`kernel/console.rs`'s pre-existing `pipe_read`/
 //! `pipe_write`/`pipe_alloc`/`pipe_close`/`pipe_set_flags` externs —
 //! this file's real definitions keep those exact signatures so the
-//! already-landed Wave 11/12 callers link and behave unchanged. Where
-//! this file *installs* a function into the bindgen `vfs_file_ops`
-//! vtable (`PIPE_FILE_OPS`), the real bindgen-generated field type
-//! (`bool_` = `c_uint`) is used instead, since that type is fixed by
-//! the struct definition, not by this file's own convention.
+//! already-landed Wave 11/12 callers link and behave unchanged. The
+//! `FileOps` adapter layer (`PIPE_FILE_OPS`, P3-10a) is pure Rust —
+//! `bool` and [`KResult`] — and converts to those C-conventioned
+//! signatures at its `pipe_read`/`pipe_write` calls.
 //!
 //! One pre-existing behavioral quirk found while porting (preserved
 //! 1:1, not fixed — see the code comment at [`clear_writable`]):
@@ -108,8 +108,8 @@ use core::ptr;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
-    bool_, pipe, slab_cache_t, thread, thread_state_THREAD_INTERRUPTIBLE, tq_t, vfs_file,
-    vfs_file_ops, vfs_inode, vm, EAGAIN, EINTR, SLAB_FLAG_STATIC,
+    pipe, slab_cache_t, thread, thread_state_THREAD_INTERRUPTIBLE, tq_t, vfs_file,
+    vfs_inode, vm, EAGAIN, EINTR, SLAB_FLAG_STATIC,
 };
 use crate::proc::proc_shims::xv6_current_thread;
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
@@ -841,25 +841,38 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
 // pipe_write above.
 // ===========================================================================
 
-extern "C" fn pipe_file_read(file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool_) -> isize {
+/// `pipe_read`/`pipe_write`'s raw `i64` ("bytes moved, or negative
+/// errno") -> [`KResult<isize>`], preserving the exact errno via
+/// [`Errno::Raw`] passthrough (`-EAGAIN`/`-EINTR` from the ring-buffer
+/// half are results this adapter layer doesn't own).
+#[inline]
+fn pipe_result(ret: i64) -> KResult<isize> {
+    if ret < 0 {
+        Err(Errno::Raw(ret as c_int))
+    } else {
+        Ok(ret as isize)
+    }
+}
+
+fn pipe_file_read(file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool) -> KResult<isize> {
     // SAFETY: non-null `file` (only reachable via `PIPE_FILE_OPS`
     // dispatch from `vfs/file.rs`, which already validated `file`).
     let pi = unsafe { (*file).pos.pipe };
-    pipe_read(pi, buf, count as u64, user as c_int) as isize
+    pipe_result(pipe_read(pi, buf, count as u64, user as c_int))
 }
 
-extern "C" fn pipe_file_write(
+fn pipe_file_write(
     file: *mut vfs_file,
     buf: *const c_char,
     count: usize,
-    user: bool_,
-) -> isize {
+    user: bool,
+) -> KResult<isize> {
     // SAFETY: see `pipe_file_read`.
     let pi = unsafe { (*file).pos.pipe };
-    pipe_write(pi, buf, count as u64, user as c_int) as isize
+    pipe_result(pipe_write(pi, buf, count as u64, user as c_int))
 }
 
-extern "C" fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
+fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
     // Pipes have no inode.
     // SAFETY: non-null `file`.
     let pi = unsafe { (*file).pos.pipe };
@@ -870,12 +883,12 @@ extern "C" fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> 
         // SAFETY: non-null `file`.
         unsafe { (*file).pos.pipe = ptr::null_mut() };
     }
-    0
+    Ok(())
 }
 
 /// Mirrors `__pipe_file_poll`: check pipe readiness for I/O without
 /// blocking. Returns the subset of `events` that are ready.
-extern "C" fn pipe_file_poll(file: *mut vfs_file, events: c_short) -> c_int {
+fn pipe_file_poll(file: *mut vfs_file, events: c_short) -> c_int {
     // SAFETY: non-null `file`.
     let pi = unsafe { (*file).pos.pipe };
     if pi.is_null() {
@@ -904,17 +917,38 @@ extern "C" fn pipe_file_poll(file: *mut vfs_file, events: c_short) -> c_int {
     revents as c_int
 }
 
-static PIPE_FILE_OPS: vfs_file_ops = vfs_file_ops {
-    read: Some(pipe_file_read),
-    write: Some(pipe_file_write),
-    llseek: None,
-    release: Some(pipe_file_release),
-    fsync: None,
-    fflush: None,
-    poll: Some(pipe_file_poll),
-    ioctl: None,
-    fault: None,
-};
+// P3-10a `FileOps` trait implementor (was the `struct vfs_file_ops`
+// fn-pointer table). The old table's `None` slots (`llseek`/`fsync`/
+// `fflush`/`ioctl`/`fault`) are not overridden: the trait defaults
+// reproduce the null-slot dispatch outcomes exactly (see
+// `vfs/file.rs`'s trait doc).
+
+/// Zero-sized `FileOps` implementor for anonymous-pipe files.
+struct PipeFileOps;
+
+/// The single shared instance `pipe_open` installs as
+/// `file.ops = Some(&PIPE_FILE_OPS)`.
+static PIPE_FILE_OPS: PipeFileOps = PipeFileOps;
+
+impl crate::vfs::file::FileOps for PipeFileOps {
+    unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        pipe_file_read(file, buf, count, user)
+    }
+
+    unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        pipe_file_write(file, buf, count, user)
+    }
+
+    unsafe fn release(&self, inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
+        pipe_file_release(inode, file)
+    }
+
+    unsafe fn poll(&self, file: *mut vfs_file, events: c_short) -> Option<c_int> {
+        Some(pipe_file_poll(file, events))
+    }
+}
 
 pub(crate) extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: c_int) {
     // SAFETY: `file` is a freshly allocated `vfs_file` (every caller's
@@ -922,7 +956,7 @@ pub(crate) extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: 
     unsafe {
         (*file).f_flags = f_flags;
         (*file).pos.pipe = pi;
-        (*file).ops = ptr::addr_of!(PIPE_FILE_OPS) as *mut vfs_file_ops;
+        (*file).ops = Some(&PIPE_FILE_OPS);
     }
 }
 

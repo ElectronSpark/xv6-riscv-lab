@@ -794,12 +794,10 @@ pub fn vfs_inode_pcache_ptr(p: *mut crate::bindings::vfs_inode) -> *mut crate::b
     unsafe { &raw mut (*p).i_data }
 }
 
-/// Read `file->ops` (may be null).
-#[inline(always)]
-pub fn vfs_file_ops(p: *mut crate::bindings::vfs_file) -> *mut crate::bindings::vfs_file_ops {
-    // SAFETY: caller verified non-null.
-    unsafe { (*p).ops as *mut crate::bindings::vfs_file_ops }
-}
+// P3-10a: the `vfs_file_ops(p)` accessor (read `file->ops` as a raw
+// table pointer) was deleted with the table type itself — `file.ops` is
+// `Option<&'static dyn crate::vfs::file::FileOps>` now and its (two)
+// dispatch sites read the field directly. The accessor had no callers.
 
 // ===========================================================================
 // `vma` field reads (cheap inline accessors)

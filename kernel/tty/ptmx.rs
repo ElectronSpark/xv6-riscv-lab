@@ -10,7 +10,7 @@
 //!   master side. The slave index is obtained via the `TIOCGPTN`
 //!   ioctl; the slave device appears at `/dev/pts/<index>`.
 //! - `/dev/pts/N` (major 136, minor N+1): a character device whose
-//!   `open_file` callback installs `vfs_file_ops` that forward to the
+//!   `open_file` callback installs `FileOps` that forward to the
 //!   PTY slave tty. Each open fd holds a pair ref.
 //!
 //! Lifecycle:
@@ -32,8 +32,15 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
-use crate::bindings::{cdev_ops_t, cdev_t, mode_t, slab_cache_t, spinlock_t, tty, vfs_file, vfs_file_ops, vfs_inode};
+use crate::bindings::{cdev_ops_t, cdev_t, mode_t, slab_cache_t, spinlock_t, tty, vfs_file, vfs_inode};
 use crate::sync::KSpinlock;
+
+// P3-10a: the file-ops tables are `FileOps` trait implementors now
+// (`&'static dyn` dispatch, see `vfs/file.rs`) — the former `static
+// mut vfs_file_ops` tables became plain (immutable, `Sync`) unit-struct
+// statics, and the read/write adapters return [`KResult`] natively.
+use crate::kstd::{Errno, KResult};
+use crate::vfs::file::FileOps;
 
 use super::tty::load_acquire_u32;
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signatures are
@@ -285,77 +292,92 @@ fn pts_name(out: &mut [u8], idx: i32) -> usize {
 }
 
 // ===========================================================================
-// `/dev/pts/N` -- slave `vfs_file_ops` (installed by `open_file`
-// callback).
+// `/dev/pts/N` -- slave `FileOps` implementor (installed by
+// `open_file` callback).
 // ===========================================================================
 
-unsafe extern "C" fn pts_fops_read(file: *mut vfs_file, buf: *mut c_char, count: usize, user: crate::bindings::bool_) -> isize {
-    // SAFETY: `file` is a live, open `vfs_file` (VFS contract); its
-    // `private_data` was set by `pts_open_file` below.
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return -(EIO as isize);
+/// `tty_read`/`tty_write`'s raw `i64` ("bytes moved, or negative
+/// errno") — and `pty_master_read`/`_write`'s equivalent `isize` — to
+/// [`KResult<isize>`], preserving the exact errno via [`Errno::Raw`]
+/// passthrough (results this adapter layer doesn't own).
+#[inline]
+fn count_result(ret: isize) -> KResult<isize> {
+    if ret < 0 {
+        Err(Errno::Raw(ret as c_int))
+    } else {
+        Ok(ret)
     }
-    unsafe { tty_read((*pair).slave, buf, count as u64, user as c_int) as isize }
 }
 
-unsafe extern "C" fn pts_fops_write(file: *mut vfs_file, buf: *const c_char, count: usize, user: crate::bindings::bool_) -> isize {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return -(EIO as isize);
-    }
-    unsafe { tty_write((*pair).slave, buf, count as u64, user as c_int) as isize }
-}
+/// Zero-sized `FileOps` implementor for `/dev/pts/N` slave fds
+/// (P3-10a; was the `static mut vfs_file_ops PTS_SLAVE_FILE_OPS`
+/// fn-pointer table — the old table's `None` slots `llseek`/`fsync`/
+/// `fflush`/`fault` are not overridden, the trait defaults reproduce
+/// their null-slot dispatch outcomes exactly).
+struct PtsSlaveFileOps;
 
-unsafe extern "C" fn pts_fops_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return -EIO;
-    }
-    unsafe { tty_ioctl((*pair).slave, cmd, arg) }
-}
+/// The single shared instance `pts_open_file` installs.
+static PTS_SLAVE_FILE_OPS: PtsSlaveFileOps = PtsSlaveFileOps;
 
-unsafe extern "C" fn pts_fops_poll(file: *mut vfs_file, events: c_short) -> c_int {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return 0;
-    }
-    unsafe { tty_poll((*pair).slave, events) }
-}
-
-unsafe extern "C" fn pts_fops_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() {
-        return 0;
-    }
-    unsafe {
-        (*file).private_data = core::ptr::null_mut();
-
-        // Drop the tty-level "open" ref taken in `pts_open_file`.
-        tty_close((*pair).slave);
-
-        // Drop the pair ref -- may destroy.
-        if pty_pair_put(pair) {
-            pty_pair_destroy(pair);
+impl FileOps for PtsSlaveFileOps {
+    unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        // SAFETY: `file` is a live, open `vfs_file` (VFS contract); its
+        // `private_data` was set by `pts_open_file` below.
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return Err(Errno::Io);
         }
+        count_result(unsafe { tty_read((*pair).slave, buf, count as u64, user as c_int) as isize })
     }
-    0
+
+    unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return Err(Errno::Io);
+        }
+        count_result(unsafe { tty_write((*pair).slave, buf, count as u64, user as c_int) as isize })
+    }
+
+    unsafe fn ioctl(&self, file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> Option<c_int> {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return Some(-EIO);
+        }
+        Some(unsafe { tty_ioctl((*pair).slave, cmd, arg) })
+    }
+
+    unsafe fn poll(&self, file: *mut vfs_file, events: c_short) -> Option<c_int> {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return Some(0);
+        }
+        Some(unsafe { tty_poll((*pair).slave, events) })
+    }
+
+    unsafe fn release(&self, _inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() {
+            return Ok(());
+        }
+        unsafe {
+            (*file).private_data = core::ptr::null_mut();
+
+            // Drop the tty-level "open" ref taken in `pts_open_file`.
+            tty_close((*pair).slave);
+
+            // Drop the pair ref -- may destroy.
+            if pty_pair_put(pair) {
+                pty_pair_destroy(pair);
+            }
+        }
+        Ok(())
+    }
 }
 
-static mut PTS_SLAVE_FILE_OPS: vfs_file_ops = vfs_file_ops {
-    read: Some(pts_fops_read),
-    write: Some(pts_fops_write),
-    llseek: None,
-    release: Some(pts_fops_release),
-    fsync: None,
-    fflush: None,
-    poll: Some(pts_fops_poll),
-    ioctl: Some(pts_fops_ioctl),
-    fault: None,
-};
-
 // ===========================================================================
-// `/dev/pts/N` -- cdev (`open_file` installs the `vfs_file_ops` above).
+// `/dev/pts/N` -- cdev (`open_file` installs the `FileOps` above).
 // ===========================================================================
 
 /// Called by `__vfs_open_cdev`. Installs the slave file ops on the
@@ -389,13 +411,13 @@ unsafe extern "C" fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_
     }
 
     unsafe {
-        (*file).ops = &raw mut PTS_SLAVE_FILE_OPS;
+        (*file).ops = Some(&PTS_SLAVE_FILE_OPS);
         (*file).private_data = pair as *mut c_void;
     }
     0
 }
 
-/// cdev open/release are no-ops; lifecycle is via `vfs_file_ops`.
+/// cdev open/release are no-ops; lifecycle is via `FileOps`.
 unsafe extern "C" fn pts_cdev_open(_cdev: *mut cdev_t) -> c_int {
     0
 }
@@ -404,29 +426,60 @@ unsafe extern "C" fn pts_cdev_release(_cdev: *mut cdev_t) -> c_int {
 }
 
 // ===========================================================================
-// PTY master -- `vfs_file_ops` (installed by `ptmx` `open_file`).
+// PTY master -- `FileOps` implementor (installed by `ptmx` `open_file`).
 // ===========================================================================
 
-unsafe extern "C" fn ptmx_fops_read(file: *mut vfs_file, buf: *mut c_char, count: usize, user: crate::bindings::bool_) -> isize {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return -(ENXIO as isize);
+/// Zero-sized `FileOps` implementor for `/dev/ptmx` master fds
+/// (P3-10a; was the `static mut vfs_file_ops PTMX_MASTER_FILE_OPS`
+/// fn-pointer table — the old table's `None` slots `llseek`/`fsync`/
+/// `fflush`/`fault` are not overridden, the trait defaults reproduce
+/// their null-slot dispatch outcomes exactly).
+struct PtmxMasterFileOps;
+
+/// The single shared instance `ptmx_open_file` installs.
+static PTMX_MASTER_FILE_OPS: PtmxMasterFileOps = PtmxMasterFileOps;
+
+impl FileOps for PtmxMasterFileOps {
+    unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return Err(Errno::NxIo);
+        }
+        count_result(unsafe {
+            pty_master_read((*pair).slave, buf, count, user as crate::bindings::bool_)
+        })
     }
-    unsafe { pty_master_read((*pair).slave, buf, count, user) }
+
+    unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return Err(Errno::NxIo);
+        }
+        count_result(unsafe {
+            pty_master_write((*pair).slave, buf, count, user as crate::bindings::bool_)
+        })
+    }
+
+    unsafe fn ioctl(&self, file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> Option<c_int> {
+        Some(ptmx_fops_ioctl(file, cmd, arg))
+    }
+
+    unsafe fn poll(&self, file: *mut vfs_file, events: c_short) -> Option<c_int> {
+        Some(ptmx_fops_poll(file, events))
+    }
+
+    unsafe fn release(&self, inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
+        ptmx_fops_release(inode, file);
+        Ok(())
+    }
 }
 
-unsafe extern "C" fn ptmx_fops_write(file: *mut vfs_file, buf: *const c_char, count: usize, user: crate::bindings::bool_) -> isize {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return -(ENXIO as isize);
-    }
-    unsafe { pty_master_write((*pair).slave, buf, count, user) }
-}
-
-unsafe extern "C" fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
+fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_file) {
     let pair = unsafe { (*file).private_data } as *mut PtyPair;
     if pair.is_null() {
-        return 0;
+        return;
     }
     unsafe { (*file).private_data = core::ptr::null_mut() };
 
@@ -450,7 +503,7 @@ unsafe extern "C" fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_fi
     // fds use `open_file` (no file holds a kobject ref), the kobject
     // drops to 0 immediately and `pts_cdev_release` fires (a no-op).
     // Existing slave fds continue to work because they use
-    // `vfs_file_ops` directly.
+    // `FileOps` directly.
     if do_unregister {
         unsafe { cdev_unregister(&raw mut (*pair).slave_cdev) };
     }
@@ -459,11 +512,9 @@ unsafe extern "C" fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_fi
     if unsafe { pty_pair_put(pair) } {
         unsafe { pty_pair_destroy(pair) };
     }
-
-    0
 }
 
-unsafe extern "C" fn ptmx_fops_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
+fn ptmx_fops_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
     let pair = unsafe { (*file).private_data } as *mut PtyPair;
     if pair.is_null() {
         return -ENXIO;
@@ -484,7 +535,7 @@ unsafe extern "C" fn ptmx_fops_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_
     -ENOTTY
 }
 
-unsafe extern "C" fn ptmx_fops_poll(file: *mut vfs_file, events: c_short) -> c_int {
+fn ptmx_fops_poll(file: *mut vfs_file, events: c_short) -> c_int {
     let pair = unsafe { (*file).private_data } as *mut PtyPair;
     if pair.is_null() || unsafe { (*pair).slave.is_null() } {
         return 0;
@@ -513,18 +564,6 @@ unsafe extern "C" fn ptmx_fops_poll(file: *mut vfs_file, events: c_short) -> c_i
 
     revents as c_int
 }
-
-static mut PTMX_MASTER_FILE_OPS: vfs_file_ops = vfs_file_ops {
-    read: Some(ptmx_fops_read),
-    write: Some(ptmx_fops_write),
-    llseek: None,
-    release: Some(ptmx_fops_release),
-    fsync: None,
-    fflush: None,
-    poll: Some(ptmx_fops_poll),
-    ioctl: Some(ptmx_fops_ioctl),
-    fault: None,
-};
 
 // ===========================================================================
 // `/dev/ptmx` -- character device (`open_file` allocates a PTY pair).
@@ -628,7 +667,7 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
 
     // Install master file ops on the opened file.
     unsafe {
-        (*file).ops = &raw mut PTMX_MASTER_FILE_OPS;
+        (*file).ops = Some(&PTMX_MASTER_FILE_OPS);
         (*file).private_data = pair as *mut c_void;
     }
 

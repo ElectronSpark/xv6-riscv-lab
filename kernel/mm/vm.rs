@@ -835,7 +835,7 @@ unsafe extern "C" {
 // identical (`*mut vfs_file`, same type this file already imports), so
 // these become plain crate-path re-exports instead of `extern "C"`
 // redeclarations.
-use crate::vfs::file::{vfs_fdup, vfs_fput};
+use crate::vfs::file::{vfs_fdup, vfs_fput, FileOps};
 pub(crate) use crate::mm::page::page_ref_inc;
 pub(crate) use crate::mm::slab::slab_free;
 pub(crate) use crate::mm::vm_pgtab::xv6_vm_panic;
@@ -3492,15 +3492,17 @@ pub(crate) fn xv6_vm_call_vma_fault(
 ) -> *mut c_void {
     if !file.is_null() {
         // SAFETY: `file` was just checked non-null and is a live
-        // `vfs_file`; `ops`, when non-null, is a live `vfs_file_ops`
-        // table, and `fault_fn` (an `unsafe extern "C" fn` pointer) is
-        // called with the same `(file, vma_ptr, va)` triple the C caller
-        // would have used.
+        // `vfs_file`; `ops` (P3-10a: `Option<&'static dyn FileOps>`)
+        // when present is a live trait object whose `fault` is called
+        // with the same `(file, vma_ptr, va)` triple the old fn-pointer
+        // slot received. `fault`'s `Some(page)` means the driver
+        // handled the fault (`page` may be null = driver failure,
+        // returned as-is); `None` — the trait default, mirroring the
+        // old `None` table slot — falls through to the generic loader.
         unsafe {
-            let ops = (*file).ops;
-            if !ops.is_null() {
-                if let Some(fault_fn) = (*ops).fault {
-                    return fault_fn(file, vma_ptr, va);
+            if let Some(ops) = (*file).ops {
+                if let Some(page) = ops.fault(file, vma_ptr, va) {
+                    return page;
                 }
             }
         }

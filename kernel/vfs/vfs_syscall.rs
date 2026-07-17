@@ -147,7 +147,7 @@ use crate::vfs::fdtable::{
 };
 use crate::vfs::file::{
     truncate, vfs_fileopen, vfs_fileread, vfs_filestat, vfs_filewrite, vfs_filelseek, vfs_fput,
-    vfs_ioctl, vfs_pipealloc, vfs_sockalloc,
+    vfs_ioctl, vfs_pipealloc, vfs_sockalloc, FileOps,
 };
 use crate::vfs::fs::{
     vfs_dump_inodes, vfs_dump_sb_inodes, vfs_get_dentry_inode, vfs_get_deferred_iput_wq,
@@ -2610,13 +2610,15 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
             continue;
         }
 
-        // SAFETY: non-null `f`.
+        // SAFETY: non-null `f`; `poll` is a driver callback (P3-10a:
+        // `FileOps::poll` returns `Some(revents)` when the driver
+        // implements polling, `None` — the default, mirroring the old
+        // `None` table slot — to select the fallback chain below).
         let ops = unsafe { (*f).ops };
-        let poll_cb = if !ops.is_null() { unsafe { (*ops).poll } } else { None };
+        let polled = ops.and_then(|o| unsafe { o.poll(f, pfd.events) });
 
-        if let Some(poll_fn) = poll_cb {
-            // SAFETY: `f` is live; `poll_fn` is a driver callback.
-            pfd.revents = unsafe { poll_fn(f, pfd.events) } as c_short;
+        if let Some(revents) = polled {
+            pfd.revents = revents as c_short;
         } else {
             // SAFETY: non-null `f`.
             let inode = unsafe { (*f).inode.inode };
@@ -2628,7 +2630,7 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
                 // original's own commented-out `sockpoll()` call).
                 // SAFETY: non-null `f`.
                 let sock = unsafe { (*f).pos.sock };
-                if ops.is_null() && !sock.is_null() {
+                if ops.is_none() && !sock.is_null() {
                     // pfd.revents = sockpoll(sock, pfd.events); // not implemented
                 } else {
                     // SAFETY: non-null `f`.

@@ -101,7 +101,9 @@ pub use crate::vfs::pipe::Pipe as pipe;
 pub use crate::vfs::fdtable::VfsFdtable as vfs_fdtable;
 pub use crate::vfs::fs::FsStruct as fs_struct;
 pub use crate::vfs::file::VfsFile as vfs_file;
-pub use crate::vfs::file::VfsFileOps as vfs_file_ops;
+// `vfs_file_ops` is GONE (P3-10a): the fn-pointer table became the
+// `crate::vfs::file::FileOps` trait (`&'static dyn` dispatch) — the
+// first ops family with no C-compatible spelling at all.
 pub use crate::vfs::fs::VfsFsType as vfs_fs_type;
 pub use crate::vfs::fs::VfsFsTypeOps as vfs_fs_type_ops;
 pub use crate::vfs::fs::VfsSuperblock as vfs_superblock;

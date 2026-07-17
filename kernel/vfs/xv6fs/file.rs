@@ -2,8 +2,10 @@
 //! (Phase 2 Wave 19, sub-wave B; see `super` module doc and
 //! `docs/rustify/phase2_plan.md`).
 //!
-//! Every `vfs_file_ops` callback and `struct vfs_file_ops xv6fs_file_ops`
-//! itself. Data goes through the per-inode pcache
+//! Every file-operation callback and the ops instance itself (since
+//! wave P3-10a a [`crate::vfs::file::FileOps`] trait implementor,
+//! [`XV6FS_FILE_OPS`], replacing the C-style `struct vfs_file_ops`
+//! fn-pointer table). Data goes through the per-inode pcache
 //! ([`super::superblock`]'s `xv6fs_inode_pcache_init`/`read_page`/
 //! `write_page`, wired up at mount and lazily at first open): user bytes
 //! are copied into pcache pages marked dirty, and the pcache flusher
@@ -38,10 +40,15 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use crate::bindings::{
-    bool_, loff_t, page_t, pcache, pcache_node, thread, vfs_file, vfs_file_ops, vfs_inode, vma, EFAULT, EFBIG, EINTR,
-    EINVAL, EIO, ENOMEM, ENOSPC,
-};
+use crate::bindings::{loff_t, page_t, pcache, pcache_node, thread, vfs_file, vma, EINTR};
+
+// P3-10a: the ops table is the `FileOps` trait now (`&'static dyn`
+// dispatch, see `vfs/file.rs`); this driver's callbacks return
+// [`KResult`] natively — the raw negative-`isize`/`c_int` encodings
+// (and the `bool_` C-bool parameter) exist only at real C boundaries,
+// which this family no longer has.
+use crate::kstd::{Errno, KResult};
+use crate::vfs::file::FileOps;
 
 use crate::proc::proc_shims::xv6_current_thread;
 
@@ -126,19 +133,19 @@ const BLK512_PER_BSIZE: u64 = super::BSIZE as u64 / 512;
 // File read
 // ===========================================================================
 
-extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, user: bool_) -> isize {
+fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     // SAFETY: `inode` is live.
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
 
     if !super::s_isreg(unsafe { (*inode).mode }) {
-        return neg(EINVAL) as isize;
+        return Err(Errno::Inval);
     }
 
     // SAFETY: `pc` is live.
     if unsafe { (*pc).flags.bits.active() } == 0 {
-        return neg(EIO) as isize;
+        return Err(Errno::Io);
     }
 
     // Acquire inode lock to safely read size and prevent truncation
@@ -153,7 +160,7 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     let size = unsafe { (*inode).size };
     if pos >= size {
         vfs_iunlock(inode);
-        return 0; // EOF.
+        return Ok(0); // EOF.
     }
     if pos + count as loff_t > size {
         count = (size - pos) as usize;
@@ -176,25 +183,25 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
         if page.is_null() {
             vfs_iunlock(inode);
             if bytes_read > 0 {
-                return bytes_read as isize;
+                return Ok(bytes_read as isize);
             }
-            return if signal_pending(current()) { neg(EINTR) as isize } else { neg(EIO) as isize };
+            return Err(if signal_pending(current()) { Errno::Intr } else { Errno::Io });
         }
         let ret = pcache_read_page(pc, page);
         if ret != 0 {
             pcache_put_page(pc, page);
             vfs_iunlock(inode);
             if bytes_read > 0 {
-                return bytes_read as isize;
+                return Ok(bytes_read as isize);
             }
-            return if ret == neg(EINTR) { neg(EINTR) as isize } else { neg(EIO) as isize };
+            return Err(if ret == neg(EINTR) { Errno::Intr } else { Errno::Io });
         }
         let pcn = xv6_page_pcache_get_node(page);
         let page_off = (bn % BSIZE_PER_PAGE) * super::BSIZE + off;
         // SAFETY: `pcn` is a live, just-populated pcache node; `page_off`
         // is within the page's `PGSIZE` bytes.
         let data = unsafe { ((*pcn).data as *mut u8).add(page_off as usize) };
-        if user != 0 {
+        if user {
             // SAFETY: `current()` is the live running thread; `buf +
             // bytes_read` is a user-space destination checked by
             // `vm_copyout` itself.
@@ -202,9 +209,9 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_read == 0 {
-                    return neg(EFAULT) as isize;
+                    return Err(Errno::Fault);
                 }
-                return bytes_read as isize;
+                return Ok(bytes_read as isize);
             }
         } else {
             // SAFETY: `buf + bytes_read` has at least `n` writable bytes
@@ -219,7 +226,7 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     }
 
     vfs_iunlock(inode);
-    bytes_read as isize
+    Ok(bytes_read as isize)
 }
 
 // ===========================================================================
@@ -234,7 +241,7 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
 // data blocks are NOT logged.
 // ===========================================================================
 
-extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, user: bool_) -> isize {
+fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     let ip = inode as *mut crate::bindings::xv6fs_inode;
@@ -243,11 +250,11 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
 
     if !super::s_isreg(unsafe { (*inode).mode }) {
-        return neg(EINVAL) as isize;
+        return Err(Errno::Inval);
     }
 
     if unsafe { (*pc).flags.bits.active() } == 0 {
-        return neg(EIO) as isize;
+        return Err(Errno::Io);
     }
 
     // SAFETY: `file` is live.
@@ -256,7 +263,7 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
 
     // Check file size limit.
     if end_pos > super::MAXFILE as loff_t * super::BSIZE as loff_t {
-        return neg(EFBIG) as isize;
+        return Err(Errno::FBig);
     }
 
     // Write in chunks to avoid exceeding log transaction size. Only
@@ -277,9 +284,11 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
         let begin_ret = xv6fs_begin_op(xv6_sb);
         if begin_ret != 0 {
             if bytes_written == 0 {
-                return begin_ret as isize;
+                // Cross-module already-negative `c_int` — passthrough
+                // (`Errno::Raw` round-trips it losslessly).
+                return Err(Errno::Raw(begin_ret));
             }
-            return bytes_written as isize;
+            return Ok(bytes_written as isize);
         }
 
         // Now acquire the inode lock to protect inode metadata during
@@ -309,9 +318,9 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if bytes_written == 0 {
-                    return neg(ENOSPC) as isize;
+                    return Err(Errno::NoSpc);
                 }
-                return bytes_written as isize;
+                return Ok(bytes_written as isize);
             }
 
             // Write data through the per-inode pcache.
@@ -321,9 +330,9 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if bytes_written > 0 {
-                    return bytes_written as isize;
+                    return Ok(bytes_written as isize);
                 }
-                return if signal_pending(current()) { neg(EINTR) as isize } else { neg(EIO) as isize };
+                return Err(if signal_pending(current()) { Errno::Intr } else { Errno::Io });
             }
             let ret = pcache_read_page(pc, page);
             if ret != 0 {
@@ -331,9 +340,9 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if bytes_written > 0 {
-                    return bytes_written as isize;
+                    return Ok(bytes_written as isize);
                 }
-                return if ret == neg(EINTR) { neg(EINTR) as isize } else { neg(EIO) as isize };
+                return Err(if ret == neg(EINTR) { Errno::Intr } else { Errno::Io });
             }
 
             let pcn = xv6_page_pcache_get_node(page);
@@ -341,7 +350,7 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
             // SAFETY: `pcn` is live; `page_off` is within `PGSIZE`.
             let data = unsafe { ((*pcn).data as *mut u8).add(page_off as usize) };
 
-            if user != 0 {
+            if user {
                 // SAFETY: `current()` is the live running thread.
                 if vm_copyin(
                     unsafe { (*current()).vm },
@@ -354,9 +363,9 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
                     vfs_iunlock(inode);
                     xv6fs_end_op(xv6_sb);
                     if bytes_written == 0 {
-                        return neg(EFAULT) as isize;
+                        return Err(Errno::Fault);
                     }
-                    return bytes_written as isize;
+                    return Ok(bytes_written as isize);
                 }
             } else {
                 // SAFETY: `buf + bytes_written + chunk_written` has at
@@ -387,14 +396,14 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
         bytes_written += chunk_written;
     }
 
-    bytes_written as isize
+    Ok(bytes_written as isize)
 }
 
 // ===========================================================================
 // File seek
 // ===========================================================================
 
-extern "C" fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
+fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
 
@@ -412,45 +421,58 @@ extern "C" fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c
             vfs_iunlock(inode);
             sz + offset
         }
-        _ => return neg(EINVAL) as loff_t,
+        _ => return Err(Errno::Inval),
     };
 
     if new_pos < 0 {
-        return neg(EINVAL) as loff_t;
+        return Err(Errno::Inval);
     }
 
-    new_pos
+    Ok(new_pos)
 }
 
 // ===========================================================================
 // File fsync/fflush -- flush (a range of) dirty pcache pages to disk
 // ===========================================================================
 
-extern "C" fn __xv6fs_file_fsync(file: *mut vfs_file, _start: loff_t, _len: loff_t) -> c_int {
+fn __xv6fs_file_fsync(file: *mut vfs_file, _start: loff_t, _len: loff_t) -> KResult<()> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
-        return 0;
+        return Ok(());
     }
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     if unsafe { (*pc).flags.bits.active() } == 0 {
-        return 0;
+        return Ok(());
     }
     // TODO: implement range-based flush (matches the C original's own TODO).
-    pcache_flush(pc)
+    pcache_result(pcache_flush(pc))
 }
 
-extern "C" fn __xv6fs_file_fflush(file: *mut vfs_file) -> c_int {
+fn __xv6fs_file_fflush(file: *mut vfs_file) -> KResult<()> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
-        return 0;
+        return Ok(());
     }
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     if unsafe { (*pc).flags.bits.active() } == 0 {
-        return 0;
+        return Ok(());
     }
-    pcache_flush(pc)
+    pcache_result(pcache_flush(pc))
+}
+
+/// `pcache_flush`'s raw "0 / negative errno" `c_int` -> [`KResult`],
+/// preserving the exact errno via [`Errno::Raw`] passthrough (a
+/// cross-module result this driver doesn't own — e.g. `-EAGAIN` from a
+/// full flush queue, which `vfs_fput` deliberately does not log).
+#[inline]
+fn pcache_result(ret: c_int) -> KResult<()> {
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(Errno::Raw(ret))
+    }
 }
 
 // ===========================================================================
@@ -469,7 +491,7 @@ extern "C" fn __xv6fs_file_fflush(file: *mut vfs_file) -> c_int {
 ///
 /// The inode lock is held while reading size and pcache data to prevent
 /// races with concurrent truncate or write.
-extern "C" fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c_void {
+fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c_void {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
@@ -547,17 +569,48 @@ extern "C" fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64
 }
 
 // ===========================================================================
-// VFS file operations structure
+// VFS file operations — P3-10a `FileOps` trait implementor (was the
+// `struct vfs_file_ops` fn-pointer table). The old table's `None` slots
+// (`release`/`poll`/`ioctl`) are simply not overridden: the trait's
+// defaults reproduce the null-slot dispatch outcomes exactly (see
+// `vfs/file.rs`'s trait doc).
 // ===========================================================================
 
-pub(crate) static XV6FS_FILE_OPS: vfs_file_ops = vfs_file_ops {
-    read: Some(__xv6fs_file_read),
-    write: Some(__xv6fs_file_write),
-    llseek: Some(__xv6fs_file_llseek),
-    release: None,
-    fsync: Some(__xv6fs_file_fsync),
-    fflush: Some(__xv6fs_file_fflush),
-    poll: None,
-    ioctl: None,
-    fault: Some(__xv6fs_file_fault),
-};
+/// Zero-sized `FileOps` implementor for xv6fs regular files.
+pub(crate) struct Xv6fsFileOps;
+
+/// The single shared instance `xv6fs_open` installs as
+/// `file.ops = Some(&XV6FS_FILE_OPS)`.
+pub(crate) static XV6FS_FILE_OPS: Xv6fsFileOps = Xv6fsFileOps;
+
+impl FileOps for Xv6fsFileOps {
+    unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        __xv6fs_file_read(file, buf, count, user)
+    }
+
+    unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        __xv6fs_file_write(file, buf, count, user)
+    }
+
+    unsafe fn llseek(&self, file: *mut vfs_file, offset: loff_t, whence: c_int)
+        -> KResult<loff_t> {
+        __xv6fs_file_llseek(file, offset, whence)
+    }
+
+    unsafe fn fsync(&self, file: *mut vfs_file, start: loff_t, len: loff_t) -> KResult<()> {
+        __xv6fs_file_fsync(file, start, len)
+    }
+
+    unsafe fn fflush(&self, file: *mut vfs_file) -> KResult<()> {
+        __xv6fs_file_fflush(file)
+    }
+
+    unsafe fn fault(&self, file: *mut vfs_file, vma: *mut vma, va: u64) -> Option<*mut c_void> {
+        // `Some(..)` = "this driver handles mmap faults"; the payload is
+        // the old callback's raw result (null on failure), returned to
+        // the faulting path as-is.
+        Some(__xv6fs_file_fault(file, vma, va))
+    }
+}

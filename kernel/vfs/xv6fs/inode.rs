@@ -1180,7 +1180,7 @@ pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
     if super::s_isreg(mode) {
         // SAFETY: `file` is live.
         unsafe {
-            (*file).ops = ptr::addr_of!(super::file::XV6FS_FILE_OPS) as *mut _;
+            (*file).ops = Some(&super::file::XV6FS_FILE_OPS);
             // Lazily initialise the per-inode page cache on first open.
             // VFS calls open with the inode locked, so this is race-free.
             if (*inode).i_data.flags.bits.active() == 0 {
@@ -1193,7 +1193,7 @@ pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
     if super::s_isdir(mode) {
         // Directories use dir_iter for reading.
         // SAFETY: `file` is live.
-        unsafe { (*file).ops = ptr::addr_of!(super::file::XV6FS_FILE_OPS) as *mut _ };
+        unsafe { (*file).ops = Some(&super::file::XV6FS_FILE_OPS) };
         return 0;
     }
 
@@ -1204,7 +1204,7 @@ pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
         // target). This is needed by programs like ls that want to
         // display symlink information.
         // SAFETY: `file` is live.
-        unsafe { (*file).ops = ptr::addr_of!(super::file::XV6FS_FILE_OPS) as *mut _ };
+        unsafe { (*file).ops = Some(&super::file::XV6FS_FILE_OPS) };
         return 0;
     }
 

@@ -3,8 +3,10 @@
 //! `docs/rustify/phase2_plan.md`).
 //!
 //! Implements the VFS file operations for tmpfs regular files, the
-//! per-inode pcache wiring, and `struct vfs_file_ops tmpfs_file_ops`
-//! itself.
+//! per-inode pcache wiring, and the ops instance itself (since wave
+//! P3-10a a [`crate::vfs::file::FileOps`] trait implementor,
+//! [`TMPFS_FILE_OPS`], replacing the C-style `struct vfs_file_ops`
+//! fn-pointer table).
 //!
 //! # Locking design: driver-managed inode locks
 //!
@@ -21,9 +23,16 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::bindings::{
-    loff_t, page_t, pcache, pcache_node, pcache_ops, thread, tmpfs_inode, vfs_file, vfs_file_ops,
-    vfs_inode, vma, EFAULT, EFBIG, EINVAL, EIO, ENOMEM,
+    loff_t, page_t, pcache, pcache_node, pcache_ops, thread, tmpfs_inode, vfs_file,
+    vfs_inode, vma, EINVAL,
 };
+
+// P3-10a: the ops table is the `FileOps` trait now (`&'static dyn`
+// dispatch, see `vfs/file.rs`); the file callbacks return [`KResult`]
+// natively. `EINVAL` (raw) survives only for `tmpfs_open` — an
+// *inode*-ops callback, outside this wave's family.
+use crate::kstd::{Errno, KResult};
+use crate::vfs::file::FileOps;
 
 use crate::proc::proc_shims::xv6_current_thread;
 
@@ -171,7 +180,7 @@ fn current() -> *mut thread {
     xv6_current_thread()
 }
 
-extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, user: crate::bindings::bool_) -> isize {
+fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     let ti = inode as *mut tmpfs_inode;
@@ -179,7 +188,7 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
 
     // SAFETY: `inode` is live.
     if !s_isreg(unsafe { (*inode).mode }) {
-        return neg(EINVAL) as isize;
+        return Err(Errno::Inval);
     }
 
     // Acquire inode lock to safely read size and data. The file
@@ -191,7 +200,7 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     let size = unsafe { (*inode).size };
     if pos >= size {
         vfs_iunlock(inode);
-        return 0; // EOF
+        return Ok(0); // EOF
     }
     if pos + count as loff_t > size {
         count = (size - pos) as usize;
@@ -206,23 +215,23 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
         }
         // SAFETY: `ti` is live and locked.
         let src = unsafe { super::inode::embedded_data(ti).add(pos as usize) };
-        if user != 0 {
+        if user {
             // SAFETY: `current()` is the live running thread.
             if vm_copyout(unsafe { (*current()).vm }, buf as u64, src as *const c_void, count as u64) < 0 {
                 vfs_iunlock(inode);
-                return neg(EFAULT) as isize;
+                return Err(Errno::Fault);
             }
         } else {
             unsafe { memmove(buf as *mut c_void, src as *const c_void, count) };
         }
         vfs_iunlock(inode);
-        return count as isize;
+        return Ok(count as isize);
     }
 
     // pcache-based read.
     if unsafe { (*pc).flags.bits.active() == 0 } {
         vfs_iunlock(inode);
-        return neg(EIO) as isize;
+        return Err(Errno::Io);
     }
 
     let mut bytes_read: usize = 0;
@@ -239,32 +248,32 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
         if page.is_null() {
             vfs_iunlock(inode);
             if bytes_read == 0 {
-                return neg(EIO) as isize;
+                return Err(Errno::Io);
             }
-            return bytes_read as isize;
+            return Ok(bytes_read as isize);
         }
         let ret = pcache_read_page(pc, page);
         if ret != 0 {
             pcache_put_page(pc, page);
             vfs_iunlock(inode);
             if bytes_read == 0 {
-                return neg(EIO) as isize;
+                return Err(Errno::Io);
             }
-            return bytes_read as isize;
+            return Ok(bytes_read as isize);
         }
         let pcn = xv6_page_pcache_get_node(page);
         // SAFETY: `pcn` is live; `block_off < PGSIZE`.
         let data = unsafe { ((*pcn).data as *mut u8).add(block_off) };
 
-        if user != 0 {
+        if user {
             // SAFETY: `current()` is the live running thread.
             if vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, chunk as u64) < 0 {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_read == 0 {
-                    return neg(EFAULT) as isize;
+                    return Err(Errno::Fault);
                 }
-                return bytes_read as isize;
+                return Ok(bytes_read as isize);
             }
         } else {
             unsafe { memmove(buf.add(bytes_read) as *mut c_void, data as *const c_void, chunk) };
@@ -276,10 +285,10 @@ extern "C" fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
     }
 
     vfs_iunlock(inode);
-    bytes_read as isize
+    Ok(bytes_read as isize)
 }
 
-extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, user: crate::bindings::bool_) -> isize {
+fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     let ti = inode as *mut tmpfs_inode;
@@ -288,7 +297,7 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
 
     // SAFETY: `inode` is live.
     if !s_isreg(unsafe { (*inode).mode }) {
-        return neg(EINVAL) as isize;
+        return Err(Errno::Inval);
     }
 
     // Acquire inode lock to protect size and data. The file reference
@@ -302,7 +311,7 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
     // Check for file size limits.
     if end_pos > TMPFS_MAX_FILE_SIZE as loff_t {
         vfs_iunlock(inode);
-        return neg(EFBIG) as isize;
+        return Err(Errno::FBig);
     }
 
     // Handle embedded data.
@@ -312,11 +321,11 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
             // Still fits in embedded storage.
             // SAFETY: `ti` is live and locked.
             let dst = unsafe { super::inode::embedded_data(ti).add(pos as usize) };
-            if user != 0 {
+            if user {
                 // SAFETY: `current()` is the live running thread.
                 if vm_copyin(unsafe { (*current()).vm }, dst as *mut c_void, buf as u64, count as u64) < 0 {
                     vfs_iunlock(inode);
-                    return neg(EFAULT) as isize;
+                    return Err(Errno::Fault);
                 }
             } else {
                 unsafe { memmove(dst as *mut c_void, buf as *const c_void, count) };
@@ -328,20 +337,22 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
                 }
             }
             vfs_iunlock(inode);
-            return count as isize;
+            return Ok(count as isize);
         }
         // Need to migrate to pcache storage.
         let ret = super::truncate::__tmpfs_migrate_to_allocated_blocks(ti);
         if ret != 0 {
             vfs_iunlock(inode);
-            return ret as isize;
+            // Sibling-module already-negative `c_int` — passthrough
+            // (`Errno::Raw` round-trips it losslessly).
+            return Err(Errno::Raw(ret));
         }
     }
 
     // pcache-based write.
     if unsafe { (*pc).flags.bits.active() == 0 } {
         vfs_iunlock(inode);
-        return neg(EIO) as isize;
+        return Err(Errno::Io);
     }
 
     // Mirrors the C original's `while` loop + `goto done` early exits:
@@ -363,32 +374,33 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
         if page.is_null() {
             vfs_iunlock(inode);
             if bytes_written == 0 {
-                return neg(ENOMEM) as isize;
+                return Err(Errno::NoMem);
             }
-            return bytes_written as isize;
+            return Ok(bytes_written as isize);
         }
         let ret = pcache_read_page(pc, page);
         if ret != 0 {
             pcache_put_page(pc, page);
             vfs_iunlock(inode);
             if bytes_written == 0 {
-                return ret as isize;
+                // Cross-module already-negative `c_int` — passthrough.
+                return Err(Errno::Raw(ret));
             }
-            return bytes_written as isize;
+            return Ok(bytes_written as isize);
         }
         let pcn = xv6_page_pcache_get_node(page);
         // SAFETY: `pcn` is live; `block_off < PGSIZE`.
         let data = unsafe { ((*pcn).data as *mut u8).add(block_off) };
 
-        if user != 0 {
+        if user {
             // SAFETY: `current()` is the live running thread.
             if vm_copyin(unsafe { (*current()).vm }, data as *mut c_void, unsafe { buf.add(bytes_written) } as u64, chunk as u64) < 0 {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_written == 0 {
-                    return neg(EFAULT) as isize;
+                    return Err(Errno::Fault);
                 }
-                return bytes_written as isize;
+                return Ok(bytes_written as isize);
             }
         } else {
             unsafe { memmove(data as *mut c_void, buf.add(bytes_written) as *const c_void, chunk) };
@@ -408,10 +420,10 @@ extern "C" fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_
         }
     }
     vfs_iunlock(inode);
-    bytes_written as isize
+    Ok(bytes_written as isize)
 }
 
-extern "C" fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
+fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
 
@@ -433,13 +445,13 @@ extern "C" fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c
             vfs_iunlock(inode);
             sz + offset
         }
-        _ => return neg(EINVAL) as loff_t,
+        _ => return Err(Errno::Inval),
     };
 
     if new_pos < 0 {
-        return neg(EINVAL) as loff_t;
+        return Err(Errno::Inval);
     }
-    new_pos
+    Ok(new_pos)
 }
 
 /// Demand-page a single page for a file-backed mapping.
@@ -450,7 +462,7 @@ extern "C" fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c
 ///
 /// The inode lock is held while reading size/data to prevent races with
 /// concurrent truncate or write.
-extern "C" fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c_void {
+fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c_void {
     // SAFETY: `file` is live (caller's contract).
     let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
@@ -560,17 +572,42 @@ extern "C" fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64
     pa
 }
 
-static TMPFS_FILE_OPS: vfs_file_ops = vfs_file_ops {
-    read: Some(__tmpfs_file_read),
-    write: Some(__tmpfs_file_write),
-    llseek: Some(__tmpfs_file_llseek),
-    release: None,
-    fsync: None,
-    fflush: None,
-    poll: None,
-    ioctl: None,
-    fault: Some(__tmpfs_file_fault),
-};
+// P3-10a `FileOps` trait implementor (was the `struct vfs_file_ops`
+// fn-pointer table). The old table's `None` slots (`release`/`fsync`/
+// `fflush`/`poll`/`ioctl`) are not overridden: the trait defaults
+// reproduce the null-slot dispatch outcomes exactly (see
+// `vfs/file.rs`'s trait doc).
+
+/// Zero-sized `FileOps` implementor for tmpfs files.
+struct TmpfsFileOps;
+
+/// The single shared instance `tmpfs_open` installs as
+/// `file.ops = Some(&TMPFS_FILE_OPS)`.
+static TMPFS_FILE_OPS: TmpfsFileOps = TmpfsFileOps;
+
+impl FileOps for TmpfsFileOps {
+    unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        __tmpfs_file_read(file, buf, count, user)
+    }
+
+    unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize> {
+        __tmpfs_file_write(file, buf, count, user)
+    }
+
+    unsafe fn llseek(&self, file: *mut vfs_file, offset: loff_t, whence: c_int)
+        -> KResult<loff_t> {
+        __tmpfs_file_llseek(file, offset, whence)
+    }
+
+    unsafe fn fault(&self, file: *mut vfs_file, vma: *mut vma, va: u64) -> Option<*mut c_void> {
+        // `Some(..)` = "this driver handles mmap faults"; the payload is
+        // the old callback's raw result (null on failure), returned to
+        // the faulting path as-is.
+        Some(__tmpfs_file_fault(file, vma, va))
+    }
+}
 
 /// Open callback for tmpfs inodes. Sets up file operations based on
 /// inode type.
@@ -588,13 +625,13 @@ pub(crate) extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
 
     if s_isreg(mode) {
         // SAFETY: `file` is live.
-        unsafe { (*file).ops = ptr::addr_of!(TMPFS_FILE_OPS) as *mut vfs_file_ops };
+        unsafe { (*file).ops = Some(&TMPFS_FILE_OPS) };
         return 0;
     }
 
     if s_isdir(mode) {
         // Directories don't need special file ops -- they use dir_iter.
-        unsafe { (*file).ops = ptr::addr_of!(TMPFS_FILE_OPS) as *mut vfs_file_ops };
+        unsafe { (*file).ops = Some(&TMPFS_FILE_OPS) };
         return 0;
     }
 
@@ -603,7 +640,7 @@ pub(crate) extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, 
         // that symlinks can be opened with O_NOFOLLOW to allow fstat()
         // on the symlink itself (not its target). This is needed by
         // programs like ls and symlinktest that want to stat symlink info.
-        unsafe { (*file).ops = ptr::addr_of!(TMPFS_FILE_OPS) as *mut vfs_file_ops };
+        unsafe { (*file).ops = Some(&TMPFS_FILE_OPS) };
         return 0;
     }
 
