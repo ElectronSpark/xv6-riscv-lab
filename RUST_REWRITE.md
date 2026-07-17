@@ -2822,6 +2822,45 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   as fn pointers). Each needs either a contained conversion or a
   documented "fn pointers are right here" verdict in a future wave.
 
+### Iteration 74 — 2026-07-17 — Phase-3 acceptance census (HEAD db76a3c vs baseline 4593c1a)
+
+Measured with the same crude-grep methodology as the baseline audit
+(counts include doc-comments; like-for-like).
+
+| Metric | Baseline 4593c1a | Now | Verdict |
+|---|---|---|---|
+| C files in kernel/ | 0 (since P3-2) | **0** | held |
+| `#[no_mangle]` exports | 1,438 | **22** | −98.5%, all mandated (13+2 libcall, 6 asm, 1 debugger) |
+| bindgen + wrapper.h | 1,900 lines machinery | **deleted** | hand-written 421-line bindings.rs; builds 2.5× faster |
+| bindgen-emitted structs | ~130 | **0** | 24 waves of natives, all layout-assert-pinned |
+| `unsafe extern "C"` decl lines | 1,679 imported fns | **368** | −78% |
+| `err_ptr(` fallible-return sites | ~200 | **3** | documented residual decodes (namei public domain) |
+| `KResult` sites | 51 | **452** | Result-native throughout |
+| boundary errno conversions | ad-hoc everywhere | **87** | one per C-ABI/syscall boundary, by design |
+| dyn-Trait ops dispatch sites | 0 | **34** | FileOps/InodeOps/SuperblockOps/FsTypeOps/Device/Cdev/BlkdevOps |
+| `Option<extern "C" fn>` table slots | ~200 (29 tables) | **103** | remaining = closed-set tables, documented open |
+| `unsafe` occurrences (crude) | 5,088 | **5,174** | ≈flat — see note |
+
+**The unsafe-count note (honest)**: the raw count did not drop. The
+nativization + trait waves *added* `unsafe fn` trait methods (with
+`# Safety` sections), native accessors, and probe gates, offsetting the
+mesh-removal wins. What changed is the *character*: unsafe is now
+confined to documented, assert-guarded sites instead of being implicit
+in 1,679 unchecked C-ABI declarations and ~130 unverifiable bindgen
+layouts. Genuine count *reduction* (the P3-8 guard-adoption tail,
+raw-pointer→reference params P3-7) remains open work.
+
+**Latent bugs found & fixed by the arcs** (the directive's real payoff):
+3 stale-ABI declarations (vm_dup/kthread_create/argint phantom
+returns/args), the pipe bindgen-vs-header layout divergence, the
+bindgen "struct X" derive-loss quirk (9 types silently affected), 2
+static-mut ops tables made immutable, 66+ dead exports, 1 orphan file.
+
+**Remaining open work** (tracked): closed-set table dispositions
+(P3-10 tail), P3-7 reference-ification, P3-8 guard tail, the 5
+documented pre-existing bugs (forkforkfork tq panic, diskfull hang,
+session baseline-ref leak, rm-dir EBUSY, sh redirect parser).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
