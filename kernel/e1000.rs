@@ -27,10 +27,12 @@
 //!
 //! # DMA descriptor layout (hardware ABI)
 //!
-//! [`tx_desc`]/[`rx_desc`] (`crate::bindings`, generated from
-//! `kernel/inc/dev/e1000_dev.h`, added to `build.rs`'s allowlist this
-//! wave, anchored `^tx_desc$|^rx_desc$` to avoid matching the unrelated
-//! `x1_tx_desc`/`x1_rx_desc`) are real `bindgen` types -- the e1000's DMA
+//! [`tx_desc`]/[`rx_desc`] resolve through the unchanged
+//! `crate::bindings` facade paths to the NATIVE [`TxDesc`]/[`RxDesc`]
+//! below (P3-4c; they were real `bindgen` types from
+//! `kernel/inc/dev/e1000_dev.h` when this port landed, anchored
+//! `^tx_desc$|^rx_desc$` to avoid matching the unrelated
+//! `x1_tx_desc`/`x1_rx_desc`) -- the e1000's DMA
 //! engine reads/writes these 16-byte entries directly, same rationale as
 //! every other hardware-ABI struct this wave. [`layout_asserts`] pins
 //! `size_of`/`offset_of` for both at compile time. [`TxRing`]/[`RxRing`]
@@ -164,7 +166,101 @@ const RX_RING_SIZE: usize = 16;
 const NETDEV_NAME_MAX: usize = 16;
 
 // ===========================================================================
-// DMA layout asserts (hardware ABI -- see module doc).
+// Native `tx_desc`/`rx_desc` — P3-4c nativization (user directive:
+// remove the C-compatible interfaces; DMA-exactness scrutiny class).
+// `TxDesc`/`RxDesc` are the canonical definitions of
+// `kernel/inc/dev/e1000_dev.h`'s `struct tx_desc`/`struct rx_desc`
+// ([E1000 3.3.3]/[E1000 3.2.3]): `build.rs` blocklists the bindgen
+// emissions (anchored `^tx_desc$|^rx_desc$`, matching the allowlist's
+// own spelling — must not swallow `x1_tx_desc`/`x1_rx_desc`) and
+// re-exports these types as `crate::bindings::tx_desc`/`rx_desc`
+// (facade `pub use`, N2 pattern), so this file's ring types
+// (`TxRing`/`RxRing`), `ZERO_*_DESC` field-literal constructors, and
+// every pointer site resolve right back here.
+//
+// *** DEVICE-READ DMA LAYOUT — HANDLE WITH P3-4 SCRUTINY *** The e1000
+// hardware itself walks these rings (TDBAL/RDBAL point at them); every
+// field offset is the E1000 manual's wire format. Any drift is silent
+// packet corruption. The driver's volatile/fence discipline (Wave-28
+// exactness) is UNTOUCHED — only the type-definition source changes.
+//
+// DERIVE DECISIONS (P3-4c): Copy + Clone on both, exactly as the
+// pre-nativization bindgen output derived (plain-int PODs).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native `struct tx_desc` (`kernel/inc/dev/e1000_dev.h`) — one e1000
+/// legacy transmit descriptor [E1000 3.3.3].
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TxDesc {
+    /// Buffer physical address.
+    pub addr: crate::bindings::uint64,
+    /// Buffer length.
+    pub length: crate::bindings::uint16,
+    /// Checksum offset.
+    pub cso: crate::bindings::uint8,
+    /// Command byte (`E1000_TXD_CMD_*`).
+    pub cmd: crate::bindings::uint8,
+    /// Status byte (`E1000_TXD_STAT_DD`).
+    pub status: crate::bindings::uint8,
+    /// Checksum start.
+    pub css: crate::bindings::uint8,
+    pub special: crate::bindings::uint16,
+}
+
+/// Native `struct rx_desc` (`kernel/inc/dev/e1000_dev.h`) — one e1000
+/// legacy receive descriptor [E1000 3.2.3].
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RxDesc {
+    /// Address of the descriptor's data buffer.
+    pub addr: crate::bindings::uint64,
+    /// Length of data DMAed into the data buffer.
+    pub length: crate::bindings::uint16,
+    /// Packet checksum.
+    pub csum: crate::bindings::uint16,
+    /// Descriptor status (`E1000_RXD_STAT_*`).
+    pub status: crate::bindings::uint8,
+    /// Descriptor errors.
+    pub errors: crate::bindings::uint8,
+    pub special: crate::bindings::uint16,
+}
+
+// P3-4c hardcoded layout proof — the e1000 wire format
+// (`kernel/inc/dev/e1000_dev.h`), every field. Values captured from
+// the pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the toolchain-gcc probe.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<TxDesc>() == 16, "tx_desc size (DEVICE-READ)");
+    assert!(align_of::<TxDesc>() == 8, "tx_desc alignment");
+    assert!(offset_of!(TxDesc, addr) == 0, "tx.addr offset (DEVICE-READ)");
+    assert!(offset_of!(TxDesc, length) == 8, "tx.length offset (DEVICE-READ)");
+    assert!(offset_of!(TxDesc, cso) == 10, "tx.cso offset (DEVICE-READ)");
+    assert!(offset_of!(TxDesc, cmd) == 11, "tx.cmd offset (DEVICE-READ)");
+    assert!(offset_of!(TxDesc, status) == 12, "tx.status offset (DEVICE-READ)");
+    assert!(offset_of!(TxDesc, css) == 13, "tx.css offset (DEVICE-READ)");
+    assert!(offset_of!(TxDesc, special) == 14, "tx.special offset (DEVICE-READ)");
+
+    assert!(size_of::<RxDesc>() == 16, "rx_desc size (DEVICE-READ)");
+    assert!(align_of::<RxDesc>() == 8, "rx_desc alignment");
+    assert!(offset_of!(RxDesc, addr) == 0, "rx.addr offset (DEVICE-READ)");
+    assert!(offset_of!(RxDesc, length) == 8, "rx.length offset (DEVICE-READ)");
+    assert!(offset_of!(RxDesc, csum) == 10, "rx.csum offset (DEVICE-READ)");
+    assert!(offset_of!(RxDesc, status) == 12, "rx.status offset (DEVICE-READ)");
+    assert!(offset_of!(RxDesc, errors) == 13, "rx.errors offset (DEVICE-READ)");
+    assert!(offset_of!(RxDesc, special) == 14, "rx.special offset (DEVICE-READ)");
+};
+
+// ===========================================================================
+// DMA layout asserts (hardware ABI -- see module doc). Kept verbatim
+// from the Wave-28 port (now redundant with the full P3-4c block above,
+// but they are the port's own documented invariants).
 // ===========================================================================
 #[allow(dead_code)]
 mod layout_asserts {

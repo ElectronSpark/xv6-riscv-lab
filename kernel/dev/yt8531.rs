@@ -51,6 +51,50 @@ use core::ptr;
 
 use crate::bindings::phy_state;
 
+// ===========================================================================
+// Native `phy_state` — P3-4c nativization (user directive: remove the
+// C-compatible interfaces). `PhyState` is the canonical definition of
+// `kernel/inc/dev/yt8531.h`'s `struct phy_state`: `build.rs` blocklists
+// the bindgen emission (anchored `^phy_state$` — must not be swallowed
+// by any other blocklist, and must not swallow `thread_state`) and
+// re-exports this type as `crate::bindings::phy_state` (facade
+// `pub use`, N2 pattern), so this file's `yt8531_poll_link`/
+// `yt8531_wait_link` out-params and `x1_emac.rs`'s embedded link-state
+// copy resolve right back here. Not device-visible (a software record
+// the MDIO poll fills in), but nativized with the same byte-exact
+// rigor as its x1_emac wave-mates.
+//
+// DERIVE DECISION (P3-4c): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (three plain ints).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree: 12/4, link_up@0,
+// speed@4, full_duplex@8.
+// ===========================================================================
+
+/// Native `struct phy_state` (`kernel/inc/dev/yt8531.h`) — PHY link
+/// state as read over MDIO.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PhyState {
+    /// Non-zero if the link is up.
+    pub link_up: c_int,
+    /// Link speed (10, 100, 1000).
+    pub speed: c_int,
+    /// Non-zero if full duplex.
+    pub full_duplex: c_int,
+}
+
+// P3-4c hardcoded layout proof — gate + probe agree (see above).
+const _: () = {
+    assert!(core::mem::size_of::<PhyState>() == 12, "phy_state size");
+    assert!(core::mem::align_of::<PhyState>() == 4, "phy_state alignment");
+    assert!(core::mem::offset_of!(PhyState, link_up) == 0, "phy_state.link_up offset");
+    assert!(core::mem::offset_of!(PhyState, speed) == 4, "phy_state.speed offset");
+    assert!(core::mem::offset_of!(PhyState, full_duplex) == 8, "phy_state.full_duplex offset");
+};
+
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block, matching this
 // crate's established convention (see `kernel/dev/bio.rs`,

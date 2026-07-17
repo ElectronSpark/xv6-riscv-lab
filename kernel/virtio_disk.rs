@@ -7,12 +7,14 @@
 //! # DMA layout (hardware ABI)
 //!
 //! [`virtq_desc`]/[`virtq_avail`]/[`virtq_used`]/[`virtio_blk_req`]
-//! (`crate::bindings`, generated from `kernel/inc/dev/virtio.h` -- added
-//! to `build.rs`'s allowlist this wave) are real `bindgen` types, not
-//! hand-rolled `#[repr(C)]` guesses: the qemu device reads/writes these
-//! structures directly over DMA, so getting the layout from the same
-//! header the spec citations are written against is the stronger
-//! guarantee (same rationale as Wave 25's `x1_rx_desc`/`x1_tx_desc`).
+//! resolve through the unchanged `crate::bindings` facade paths to the
+//! NATIVE [`VirtqDesc`]/[`VirtqAvail`]/[`VirtqUsed`]/[`VirtioBlkReq`]
+//! below (P3-4c; they were real `bindgen` types from
+//! `kernel/inc/dev/virtio.h` when this port landed): the qemu device
+//! reads/writes these structures directly over DMA, so the natives are
+//! pinned byte-exact to that header by hardcoded asserts + the
+//! toolchain-gcc probe (same rationale as Wave 25's
+//! `x1_rx_desc`/`x1_tx_desc`).
 //! [`layout_asserts`] pins `size_of`/`offset_of` for all four types at
 //! compile time. `struct disk`'s *own* layout (this file's private
 //! [`Disk`]) is **not** hardware ABI -- only the three ring pages
@@ -246,7 +248,158 @@ const S_IFBLK: u32 = 0o060_000;
 const THREAD_UNINTERRUPTIBLE: u32 = 6;
 
 // ===========================================================================
-// DMA layout asserts (hardware ABI -- see module doc).
+// Native virtqueue quintet — P3-4c nativization (user directive:
+// remove the C-compatible interfaces; THE DMA-exactness scrutiny
+// class, nativized LAST — block I/O is the filesystem's lifeline).
+// `VirtqDesc`/`VirtqAvail`/`VirtqUsedElem`/`VirtqUsed`/`VirtioBlkReq`
+// are the canonical definitions of `kernel/inc/dev/virtio.h`'s
+// `struct virtq_desc`/`virtq_avail`/`virtq_used_elem`/`virtq_used`/
+// `virtio_blk_req` (the virtio 1.x spec's split-virtqueue layout +
+// the §5.2 block-request header): `build.rs` blocklists the bindgen
+// emissions and re-exports these types under their C names (facade
+// `pub use`, N2 pattern), so this file's ring pointers, `Disk::ops`
+// embedded request headers, and every `.ring[..]`/`.idx` access
+// resolve right back here.
+//
+// *** DEVICE-READ/WRITTEN DMA LAYOUT — HANDLE WITH P3-4 SCRUTINY ***
+// The virtio-blk DEVICE dereferences these structures in guest RAM:
+// QUEUE_DESC/DRIVER/DEVICE registers are programmed with their
+// physical addresses, the device follows `desc.next` chains, reads
+// `avail.idx`/`ring`, and writes `used.ring`/`idx`. EVERY disk block
+// (including this kernel's own fs) moves through them — any drift is
+// silent disk corruption or a hang at the first read. The driver's
+// volatile/fence discipline (Wave-28 exactness) is UNTOUCHED — only
+// the type-definition source changes. The ring lengths are tied to
+// the same `NUM` const the driver indexes with (`% NUM`), so the
+// const and the layout can never drift apart. No packed/align
+// attributes: the pre-nativization bindgen emissions were plain
+// `#[repr(C)]` (natural alignment), reproduced verbatim —
+// `virtq_avail` is 134/2 with its trailing `unused` u16 (the
+// avail-event slot) explicit, exactly as the header spells it.
+//
+// DERIVE DECISIONS (P3-4c): Copy + Clone on all five, exactly as the
+// pre-nativization bindgen output derived (plain-int PODs;
+// `VirtqUsed` embeds `[VirtqUsedElem; NUM]` by value).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native `struct virtq_desc` (`kernel/inc/dev/virtio.h`) — a single
+/// descriptor, from the virtio spec.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqDesc {
+    /// Buffer physical address.
+    pub addr: crate::bindings::uint64,
+    /// Buffer length.
+    pub len: crate::bindings::uint32,
+    /// `VRING_DESC_F_NEXT` / `VRING_DESC_F_WRITE`.
+    pub flags: crate::bindings::uint16,
+    /// Next descriptor index (if `VRING_DESC_F_NEXT`).
+    pub next: crate::bindings::uint16,
+}
+
+/// Native `struct virtq_avail` (`kernel/inc/dev/virtio.h`) — the
+/// (entire) avail ring, from the virtio spec.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqAvail {
+    /// Always zero.
+    pub flags: crate::bindings::uint16,
+    /// Driver will write `ring[idx]` next.
+    pub idx: crate::bindings::uint16,
+    /// Descriptor numbers of chain heads.
+    pub ring: [crate::bindings::uint16; NUM],
+    /// Trailing avail-event slot (unused).
+    pub unused: crate::bindings::uint16,
+}
+
+/// Native `struct virtq_used_elem` (`kernel/inc/dev/virtio.h`) — one
+/// entry in the used ring: the device tells the driver about a
+/// completed request.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqUsedElem {
+    /// Index of start of completed descriptor chain.
+    pub id: crate::bindings::uint32,
+    /// Bytes written.
+    pub len: crate::bindings::uint32,
+}
+
+/// Native `struct virtq_used` (`kernel/inc/dev/virtio.h`) — the
+/// (entire) used ring.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqUsed {
+    /// Always zero.
+    pub flags: crate::bindings::uint16,
+    /// Device increments when it adds a `ring[]` entry.
+    pub idx: crate::bindings::uint16,
+    /// Completed chains.
+    pub ring: [VirtqUsedElem; NUM],
+}
+
+/// Native `struct virtio_blk_req` (`kernel/inc/dev/virtio.h`) — the
+/// first descriptor of a disk request (virtio spec §5.2), followed by
+/// the block and a one-byte status.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtioBlkReq {
+    /// `VIRTIO_BLK_T_IN` or `VIRTIO_BLK_T_OUT` (C field `type`).
+    pub type_: crate::bindings::uint32,
+    /// Reserved (zero).
+    pub reserved: crate::bindings::uint32,
+    /// Sector number (512-byte units).
+    pub sector: crate::bindings::uint64,
+}
+
+// P3-4c hardcoded layout proof — the virtio 1.x split-virtqueue byte
+// contract (`kernel/inc/dev/virtio.h`), every field of all five
+// records. Values captured from the pre-nativization bindgen output
+// via the temporary in-tree `offset_of!` gate and cross-checked by the
+// toolchain-gcc probe.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<VirtqDesc>() == 16, "virtq_desc size (DEVICE-READ)");
+    assert!(align_of::<VirtqDesc>() == 8, "virtq_desc alignment");
+    assert!(offset_of!(VirtqDesc, addr) == 0, "vd.addr offset (DEVICE-READ)");
+    assert!(offset_of!(VirtqDesc, len) == 8, "vd.len offset (DEVICE-READ)");
+    assert!(offset_of!(VirtqDesc, flags) == 12, "vd.flags offset (DEVICE-READ)");
+    assert!(offset_of!(VirtqDesc, next) == 14, "vd.next offset (DEVICE-READ)");
+
+    assert!(size_of::<VirtqAvail>() == 134, "virtq_avail size (DEVICE-READ)");
+    assert!(align_of::<VirtqAvail>() == 2, "virtq_avail alignment");
+    assert!(offset_of!(VirtqAvail, flags) == 0, "va.flags offset (DEVICE-READ)");
+    assert!(offset_of!(VirtqAvail, idx) == 2, "va.idx offset (DEVICE-READ)");
+    assert!(offset_of!(VirtqAvail, ring) == 4, "va.ring offset (DEVICE-READ)");
+    assert!(offset_of!(VirtqAvail, unused) == 132, "va.unused offset");
+    assert!(NUM == 64, "ring lengths == NUM (DEVICE-READ)");
+
+    assert!(size_of::<VirtqUsedElem>() == 8, "virtq_used_elem size (DEVICE-WRITTEN)");
+    assert!(align_of::<VirtqUsedElem>() == 4, "virtq_used_elem alignment");
+    assert!(offset_of!(VirtqUsedElem, id) == 0, "vue.id offset (DEVICE-WRITTEN)");
+    assert!(offset_of!(VirtqUsedElem, len) == 4, "vue.len offset (DEVICE-WRITTEN)");
+
+    assert!(size_of::<VirtqUsed>() == 516, "virtq_used size (DEVICE-WRITTEN)");
+    assert!(align_of::<VirtqUsed>() == 4, "virtq_used alignment");
+    assert!(offset_of!(VirtqUsed, flags) == 0, "vu.flags offset (DEVICE-WRITTEN)");
+    assert!(offset_of!(VirtqUsed, idx) == 2, "vu.idx offset (DEVICE-WRITTEN)");
+    assert!(offset_of!(VirtqUsed, ring) == 4, "vu.ring offset (DEVICE-WRITTEN)");
+
+    assert!(size_of::<VirtioBlkReq>() == 16, "virtio_blk_req size (DEVICE-READ)");
+    assert!(align_of::<VirtioBlkReq>() == 8, "virtio_blk_req alignment");
+    assert!(offset_of!(VirtioBlkReq, type_) == 0, "br.type offset (DEVICE-READ)");
+    assert!(offset_of!(VirtioBlkReq, reserved) == 4, "br.reserved offset (DEVICE-READ)");
+    assert!(offset_of!(VirtioBlkReq, sector) == 8, "br.sector offset (DEVICE-READ)");
+};
+
+// ===========================================================================
+// DMA layout asserts (hardware ABI -- see module doc). Kept verbatim
+// from the Wave-28 port (now redundant with the full P3-4c block above,
+// but they are the port's own documented invariants).
 // ===========================================================================
 #[allow(dead_code)]
 mod layout_asserts {

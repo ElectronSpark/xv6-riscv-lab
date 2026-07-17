@@ -2405,6 +2405,114 @@ C-layout fn-pointer ops tables (P3-10 dyn-Trait next).
   own-copy-small (derive fidelity), name-types-camel, doc-all-public.
   6 files, ~+500/−32.
 
+### Iteration 69 — 2026-07-17 — Wave P3-4c: DMA/hardware + exec-format + platform types nativized (the FINAL type wave — bindgen struct emission now ZERO)
+
+- **The device-dereferenced layouts go native — and the emission hits
+  zero.** 19 structs + 1 union + 8 anonymous shells, the entire
+  remaining bindgen type emission, in four boot-gated sub-families:
+  (1) **exec-format** `elfhdr` 64/8 + `proghdr` 56/8 (kernel/inc/elf.h
+  → kernel/exec.rs `Elfhdr`/`Proghdr`; the FIXED ELF64 file layouts
+  `kexec` `vfs_fileread`s by value from every executable — `type_`
+  keeps bindgen's reserved-word rename) and **platform** `platform_info`
+  816/8 + 3 anon shells (dev/fdt.h → kernel/dev/fdt.rs `PlatformInfo` +
+  `PlatformPcieReg` 24/8 / `PlatformEmac` 48/8 / `PlatformSdhci` 48/8;
+  array lengths tied to `PCIE_REG_MAX`/`EMAC_MAX`/`SDHCI_MAX` bindings
+  consts + `platform_info_mem_regions()==8` assert; joins its P3-N6
+  `MemRegion`, whose Copy=Yes entry the `[mem_region; 8]` embed relies
+  on). (2) **pci** `pci_common_confspace_header` 64/4 (dev/pci.h →
+  kernel/pci.rs `PciCommonConfspaceHeader`): the anon bitfield struct
+  (`revision_id:8|class_code:24`, bindgen's `__bindgen_anon_1`
+  `__BindgenBitfieldUnit`) became the plain `rev_class: uint32` word
+  (bit layout documented from bindgen's own `get(0,8)`/`get(8,24)`
+  LSB-first accessors; ZERO consumers used the accessors — verified),
+  and the anon union became the NAMED `type_spec: PciHeaderTypeSpec`
+  (arms `PciHeaderTypeCommon` 48/1, `PciHeaderType0`/`Type1` 48/4) with
+  pci.rs's five volatile BAR-probe sites — the union's only consumers
+  crate-wide — re-pointed `__bindgen_anon_2` → `type_spec` in place;
+  plus **net** `mbuf` 2072/8 (buf@20 == the NIC DMA backing store,
+  length tied to `MBUF_SIZE`; kernel/net.rs `Mbuf`) and `netdev_ops`
+  8/8 (kernel/dev/netdev.rs `NetdevOps`, joining P3-N4's `Netdev`).
+  (3) **NIC DMA descriptors** e1000 `tx_desc`/`rx_desc` 16/8
+  (kernel/e1000.rs `TxDesc`/`RxDesc`; the E1000 manual's wire format
+  the device walks via TDBAL/RDBAL) + x1 `x1_rx_desc`/`x1_tx_desc` 64/4
+  (kernel/dev/x1_emac.rs `X1RxDesc`/`X1TxDesc`; cache-line-padded
+  chained descriptors, `__pad` name kept from bindgen) + `phy_state`
+  12/4 (kernel/dev/yt8531.rs `PhyState`). (4) **virtio quintet LAST**
+  (block I/O = the fs's lifeline): `virtq_desc` 16/8, `virtq_avail`
+  134/2 (trailing `unused`@132 explicit — plain `#[repr(C)]`, NO packed
+  attr, exactly as bindgen emitted), `virtq_used_elem` 8/4,
+  `virtq_used` 516/4, `virtio_blk_req` 16/8 (dev/virtio.h →
+  kernel/virtio_disk.rs `VirtqDesc`/`VirtqAvail`/`VirtqUsedElem`/
+  `VirtqUsed`/`VirtioBlkReq`; ring lengths tied to the same `NUM` the
+  driver indexes `% NUM` with). EVERY field of every type
+  hardcode-asserted with `(DEVICE-READ)`/`(MMIO)`/`(ELF)` markers.
+  Driver volatile/fence/cache-maintenance code UNTOUCHED everywhere
+  (pci's 2 fences, virtio's 7-barrier protocol, x1's cbo.clean/inval —
+  only the type-definition source changed; the Wave-25/28
+  `layout_asserts` modules kept verbatim as the ports' own documented
+  invariants).
+- **Layout evidence (both legs PASS).** Toolchain-gcc `_Static_assert`
+  probe (scratchpad p3_4c_dma_probe.c: ~200 asserts covering every
+  field/size/align of all 27 types/shells + `MAX_MEM_REGIONS`/
+  `PCIE_REG_MAX`/`EMAC_MAX`/`SDHCI_MAX`/`MBUF_SIZE`/`NUM` macro pins,
+  compiled rv64gc/lp64d `-ffreestanding -nostdinc`-style with the GCC
+  14.2 toolchain: **TARGET PROBE PASS** first compile) + temporary
+  in-tree `offset_of!` gate on the live pre-nativization bindgen forms
+  (appended to lib.rs, full-crate rebuild verified by rlib mtime,
+  removed via `git checkout`): both agree on every value now hardcoded.
+  Host leg deliberately N/A (unlike P3-4a): no host tool compiles any
+  of these headers — mkfs includes only types/ondisk/param.h.
+- **build.rs**: anchored blocklists (`^elfhdr$|^proghdr$`,
+  `^platform_info(__bindgen_ty_[123])?$`, `^mbuf$|^netdev_ops$` — bare
+  `mbuf` must not swallow `mbufq`,
+  `^pci_common_confspace_header(__bindgen_ty_.*)?$`,
+  `^tx_desc$|^rx_desc$|^x1_rx_desc$|^x1_tx_desc$|^phy_state$` matching
+  the allowlist's own anchored spelling,
+  `^virtq_desc$|^virtq_avail$|^virtq_used_elem$|^virtq_used$|^virtio_blk_req$`)
+  + 14 facade `pub use` re-exports under the C names (anon shells swept
+  facade-less, thread/tmpfs precedent). Derive-fidelity gate: all 24
+  named types answered Copy=Yes in `NativeTypeCallbacks` (each derived
+  Copy/Clone in the pre-nativization output; per-family notes verify
+  zero still-bindgen by-value embedders remain — the emitted `extern`
+  `platform` static resolves through the facade). **FINAL EMISSION: 0
+  bindgen structs/unions.** The only `pub struct` left in
+  kernel_bindings.rs is the raw_line-INJECTED `__IncompleteArrayField`
+  helper (native `Bio`/`TmpfsDentry` use it); `__BindgenBitfieldUnit`
+  vanished with pci's bitfield. Residue for P3-6 (the
+  machinery-deletion wave, deliberately untouched): 133 facade
+  re-exports, 53 typedefs, 52 extern fns, 1 extern static, consts —
+  wrapper.h/build.rs bindgen plumbing intact per the wave brief.
+- Verified (worker; cache-checked before/after — the stale system-GCC
+  13.2 cache found at wave start was reconfigured to the toolchain GCC
+  14.2 + `Lab: fs` BEFORE any baseline): 0-warning FULL-CLEAN rebuild
+  (rust target dir deleted, bindgen re-run: zero warnings); **boot ×5**
+  (one per sub-family + one on the final clean-rebuilt artifact), each
+  exactly ONE `init: starting sh`, each on fresh `--target fs_img`
+  images (boot itself = virtio DMA through the native rings + fdt
+  platform parse + ELF exec of init/sh through the natives); PCI
+  enumeration correct through the native header (qemu host bridge
+  1b36:0008 read via volatile MMIO; no e1000 device on this qemu
+  config, so NIC TX/RX untestable here — honestly out of scope, the
+  descriptors are pinned by probe+asserts); **stressfs ×2** to full
+  write+read completion (all stressfs* files 10240); **usertests
+  createdelete OK**; **bigfile wrote 65803 blocks, done; ok** (double-
+  indirect through the native virtio path); **usertests forkfork OK**
+  (exec-heavy, every fork+exec re-parses ELF natively); **testsig
+  21/21**; **mmaptest 16/16 all passed**; `cat /nonexistent` → ENOENT;
+  `cat README.md | wc` → **714 3365 26018** byte identity on the final
+  artifact; corruption-marker grep over all five logs: ZERO (`freeing
+  free block`/`incorrect blockno`/`balloc: out`/`bad inode`); zero
+  panics except **forkforkfork** → the IDENTICAL pre-existing
+  kerneltrap storm (`In thread ... at 0x0000000080c34000`, scause=0xd,
+  stval=0xfffffffffffffff1 — the Iteration 63 A/B-confirmed baseline;
+  single-test `lost some free pages` trailers likewise documented
+  pre-existing). All C headers untouched (`git status`: build.rs + 9
+  owner .rs files + this file). rust-skills applied: unsafe-* (no new
+  unsafe beyond the pre-existing volatile sites, which moved not at
+  all), mem-assert-type-size (the const gates), own-copy-small/
+  api-common-traits (derive fidelity), name-types-camel,
+  doc-all-public. 11 files, ~+1100/−40.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

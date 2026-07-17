@@ -81,6 +81,61 @@ use crate::sysnet::sockrecvudp;
 
 const MBUF_SIZE: c_uint = 2048;
 const MBUF_DEFAULT_HEADROOM: c_uint = 128;
+
+// ===========================================================================
+// Native `mbuf` — P3-4c nativization (user directive: remove the
+// C-compatible interfaces; net scrutiny class). `Mbuf` is the canonical
+// definition of `kernel/inc/dev/net.h`'s `struct mbuf`: `build.rs`
+// blocklists the bindgen emission and re-exports this type as
+// `crate::bindings::mbuf` (facade `pub use`, N2 pattern) — this file's
+// own `mbuf` import above and every other consumer (`sysnet.rs`,
+// `e1000.rs`, `dev/x1_emac.rs`, `dev/netdev.rs`'s `netdev_ops.transmit`
+// signature) resolve right back here.
+//
+// *** DMA-ADJACENT LAYOUT — HANDLE WITH P3-4 SCRUTINY *** `buf` is the
+// backing store both NIC drivers hand to their DMA engines
+// (`e1000.rs` programs `rx_desc.addr`/`tx_desc.addr` with `m.head`,
+// which points into `buf`; x1_emac likewise) — the byte-exact asserts
+// below pin `buf`'s offset and `MBUF_SIZE` extent. The array length is
+// tied to the same `MBUF_SIZE` const the push/pull/put/trim ops below
+// bound-check against, so the const and the layout can never drift
+// apart.
+//
+// DERIVE DECISION (P3-4c): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (pointer/int/array POD).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native `struct mbuf` (`kernel/inc/dev/net.h`) — one packet buffer.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Mbuf {
+    /// The next mbuf in the chain.
+    pub next: *mut Mbuf,
+    /// The current start position of the buffer (points into `buf`).
+    pub head: *mut c_char,
+    /// The length of the buffer.
+    pub len: c_uint,
+    /// The backing store (`MBUF_SIZE`).
+    pub buf: [c_char; MBUF_SIZE as usize],
+}
+
+// P3-4c hardcoded layout proof — every field. Values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the toolchain-gcc probe.
+const _: () = {
+    assert!(core::mem::size_of::<Mbuf>() == 2072, "mbuf size");
+    assert!(core::mem::align_of::<Mbuf>() == 8, "mbuf alignment");
+    assert!(core::mem::offset_of!(Mbuf, next) == 0, "mbuf.next offset");
+    assert!(core::mem::offset_of!(Mbuf, head) == 8, "mbuf.head offset");
+    assert!(core::mem::offset_of!(Mbuf, len) == 16, "mbuf.len offset");
+    assert!(core::mem::offset_of!(Mbuf, buf) == 20, "mbuf.buf offset (DMA backing store)");
+    assert!(MBUF_SIZE == 2048, "mbuf.buf length == MBUF_SIZE");
+};
 const ETHADDR_LEN: usize = 6;
 const ETHTYPE_IP: u16 = 0x0800;
 const ETHTYPE_ARP: u16 = 0x0806;

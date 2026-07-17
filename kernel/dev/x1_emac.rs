@@ -36,9 +36,12 @@
 //!
 //! # DMA descriptor layout (hardware ABI)
 //!
-//! [`x1_tx_desc`]/[`x1_rx_desc`] are real `bindgen` types generated from
-//! `kernel/inc/dev/x1_emac.h` (added to `wrapper.h` this wave) rather
-//! than a hand-rolled `#[repr(C)]` mirror -- the DMA engine reads/writes
+//! [`x1_tx_desc`]/[`x1_rx_desc`] resolve through the unchanged
+//! `crate::bindings` facade paths to the NATIVE [`X1TxDesc`]/
+//! [`X1RxDesc`] below (P3-4c; they were real `bindgen` types generated
+//! from `kernel/inc/dev/x1_emac.h` when this port landed, pinned
+//! byte-exact by the hardcoded asserts + the toolchain-gcc probe)
+//! -- the DMA engine reads/writes
 //! these 64-byte, cache-line-padded structures directly, so getting the
 //! layout from the same header the hardware's register map is documented
 //! against (instead of retyping it by hand and hoping) is the stronger
@@ -279,8 +282,96 @@ const MAX_EMAC_INSTANCES: usize = 2;
 const KERNEL_STACK_ORDER: c_int = 2;
 
 // ===========================================================================
+// Native `x1_rx_desc`/`x1_tx_desc` — P3-4c nativization (user
+// directive: remove the C-compatible interfaces; DMA-exactness
+// scrutiny class). `X1RxDesc`/`X1TxDesc` are the canonical definitions
+// of `kernel/inc/dev/x1_emac.h`'s `struct x1_rx_desc`/
+// `struct x1_tx_desc`: `build.rs` blocklists the bindgen emissions
+// (anchored `^x1_rx_desc$|^x1_tx_desc$`) and re-exports these types as
+// `crate::bindings::x1_rx_desc`/`x1_tx_desc` (facade `pub use`, N2
+// pattern), so this file's ring pointers, `kalloc`-sized ring setup,
+// and `dma_cache_clean`/`dma_cache_inval` extents resolve right back
+// here.
+//
+// *** DEVICE-READ DMA LAYOUT — HANDLE WITH P3-4 SCRUTINY *** The X1
+// EMAC DMA engine walks these 64-byte, cache-line-padded chained
+// descriptors directly (word0 OWN bit hand-off). Any drift is silent
+// packet corruption. The driver's volatile/fence/cache-maintenance
+// discipline is UNTOUCHED — only the type-definition source changes.
+// The `__pad` field name reproduces bindgen's emission verbatim.
+//
+// DERIVE DECISIONS (P3-4c): Copy + Clone on both, exactly as the
+// pre-nativization bindgen output derived (plain-u32 PODs).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native `struct x1_rx_desc` (`kernel/inc/dev/x1_emac.h`) — one X1
+/// EMAC receive descriptor, padded to a 64-byte cache line.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct X1RxDesc {
+    /// Frame length + status + OWN.
+    pub word0: crate::bindings::uint32,
+    /// Buffer size + flags (incl. chained/end-ring).
+    pub word1: crate::bindings::uint32,
+    /// Buffer physical address (32-bit).
+    pub buf_addr: crate::bindings::uint32,
+    /// Next descriptor address (chained mode).
+    pub buf_addr2: crate::bindings::uint32,
+    /// Pad to 64 bytes (one cache line).
+    pub __pad: [crate::bindings::uint32; 12],
+}
+
+/// Native `struct x1_tx_desc` (`kernel/inc/dev/x1_emac.h`) — one X1
+/// EMAC transmit descriptor, padded to a 64-byte cache line.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct X1TxDesc {
+    /// Status + OWN.
+    pub word0: crate::bindings::uint32,
+    /// Size + flags (incl. chained/end-ring/first/last/IOC).
+    pub word1: crate::bindings::uint32,
+    /// Buffer physical address.
+    pub buf_addr: crate::bindings::uint32,
+    /// Next descriptor address (chained mode).
+    pub buf_addr2: crate::bindings::uint32,
+    /// Pad to 64 bytes (one cache line).
+    pub __pad: [crate::bindings::uint32; 12],
+}
+
+// P3-4c hardcoded layout proof — the X1 EMAC wire format
+// (`kernel/inc/dev/x1_emac.h`), every field of both descriptors.
+// Values captured from the pre-nativization bindgen output via the
+// temporary in-tree `offset_of!` gate and cross-checked by the
+// toolchain-gcc probe.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<X1RxDesc>() == 64, "x1_rx_desc size (DEVICE-READ, cache line)");
+    assert!(align_of::<X1RxDesc>() == 4, "x1_rx_desc alignment");
+    assert!(offset_of!(X1RxDesc, word0) == 0, "x1rx.word0 offset (DEVICE-READ)");
+    assert!(offset_of!(X1RxDesc, word1) == 4, "x1rx.word1 offset (DEVICE-READ)");
+    assert!(offset_of!(X1RxDesc, buf_addr) == 8, "x1rx.buf_addr offset (DEVICE-READ)");
+    assert!(offset_of!(X1RxDesc, buf_addr2) == 12, "x1rx.buf_addr2 offset (DEVICE-READ)");
+    assert!(offset_of!(X1RxDesc, __pad) == 16, "x1rx.__pad offset");
+
+    assert!(size_of::<X1TxDesc>() == 64, "x1_tx_desc size (DEVICE-READ, cache line)");
+    assert!(align_of::<X1TxDesc>() == 4, "x1_tx_desc alignment");
+    assert!(offset_of!(X1TxDesc, word0) == 0, "x1tx.word0 offset (DEVICE-READ)");
+    assert!(offset_of!(X1TxDesc, word1) == 4, "x1tx.word1 offset (DEVICE-READ)");
+    assert!(offset_of!(X1TxDesc, buf_addr) == 8, "x1tx.buf_addr offset (DEVICE-READ)");
+    assert!(offset_of!(X1TxDesc, buf_addr2) == 12, "x1tx.buf_addr2 offset (DEVICE-READ)");
+    assert!(offset_of!(X1TxDesc, __pad) == 16, "x1tx.__pad offset");
+};
+
+// ===========================================================================
 // DMA descriptor / phy_state layout asserts (hardware ABI). See module
-// doc's "DMA descriptor layout" section.
+// doc's "DMA descriptor layout" section. Kept verbatim from the Wave-25
+// port (now redundant with the full P3-4c block above, but they are the
+// port's own documented invariants).
 // ===========================================================================
 mod layout_asserts {
     use super::{phy_state, x1_rx_desc, x1_tx_desc};

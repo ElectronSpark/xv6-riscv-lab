@@ -102,6 +102,46 @@ const _: () = {
     assert!(core::mem::offset_of!(Netdev, link_cb) == 72, "netdev.link_cb offset");
 };
 
+// ===========================================================================
+// Native `netdev_ops` — P3-4c nativization (user directive: remove the
+// C-compatible interfaces; net scrutiny class). `NetdevOps` is the
+// canonical definition of `kernel/inc/dev/netdev.h`'s
+// `struct netdev_ops` (it stayed bindgen-emitted when `Netdev` above
+// nativized in P3-N4): `build.rs` blocklists the bindgen emission and
+// re-exports this type as `crate::bindings::netdev_ops` (facade
+// `pub use`, N2 pattern), so `Netdev::ops` above and the two by-value
+// constructors (`e1000.rs`'s `E1000_NETDEV_OPS`, `x1_emac.rs`'s
+// `X1_EMAC_NETDEV_OPS` — field-literal `netdev_ops { transmit:
+// Some(..) }` spellings, unchanged) resolve right back here. The
+// `transmit` fn-pointer signature reproduces bindgen's emission
+// verbatim (`*mut netdev`/`*mut mbuf` through the facade paths).
+//
+// DERIVE DECISION (P3-4c): Copy + Clone, exactly as the
+// pre-nativization bindgen output derived (single fn-pointer Option).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen form + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree: 8/8, transmit@0.
+// ===========================================================================
+
+/// Native `struct netdev_ops` (`kernel/inc/dev/netdev.h`) — the ops
+/// table each NIC driver provides.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NetdevOps {
+    /// Transmit one packet on `dev`; returns 0 on success.
+    pub transmit: ::core::option::Option<
+        unsafe extern "C" fn(dev: *mut crate::bindings::netdev, m: *mut crate::bindings::mbuf) -> c_int,
+    >,
+}
+
+// P3-4c hardcoded layout proof — gate + probe agree (see above).
+const _: () = {
+    assert!(core::mem::size_of::<NetdevOps>() == 8, "netdev_ops size");
+    assert!(core::mem::align_of::<NetdevOps>() == 8, "netdev_ops alignment");
+    assert!(core::mem::offset_of!(NetdevOps, transmit) == 0, "netdev_ops.transmit offset");
+};
+
 // ---------------------------------------------------------------------------
 // External C symbols.
 // ---------------------------------------------------------------------------

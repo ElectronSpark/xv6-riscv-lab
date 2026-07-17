@@ -358,6 +358,96 @@ impl bindgen::callbacks::ParseCallbacks for NativeTypeCallbacks {
             "stack",
             "struct stack",
             "stack_t",
+            // kernel/exec.rs (P3-4c, exec-format pair from
+            // kernel/inc/elf.h — FIXED ELF64 input-parsing layouts read
+            // by value from every executable). Both derived Copy/Clone
+            // in the pre-nativization bindgen output (plain-int PODs);
+            // the natives keep both. Nothing still-bindgen embeds
+            // either by value (verified: zero mentions remain in the
+            // emission). Tag-prefixed forms included (no typedefs).
+            "elfhdr",
+            "struct elfhdr",
+            "proghdr",
+            "struct proghdr",
+            // kernel/dev/fdt.rs (P3-4c, boot-critical platform record
+            // + its three anonymous-struct shells). All four derived
+            // Copy/Clone in the pre-nativization bindgen output (POD
+            // scalars/pointers; the embedded `[mem_region; 8]` answers
+            // Yes via the P3-N6 entry above). The only remaining
+            // emission mention is the `extern` `platform` static, which
+            // resolves through the facade — nothing still-bindgen
+            // embeds any of them by value (verified). Tag-prefixed +
+            // bindgen-shell forms included (no typedefs).
+            "platform_info",
+            "struct platform_info",
+            "platform_info__bindgen_ty_1",
+            "platform_info__bindgen_ty_2",
+            "platform_info__bindgen_ty_3",
+            // kernel/net.rs (`Mbuf`) + kernel/dev/netdev.rs
+            // (`NetdevOps`) (P3-4c, net pair). Both derived Copy/Clone
+            // in the pre-nativization bindgen output (pointer/int/array
+            // POD; single fn-pointer Option). Nothing still-bindgen
+            // embeds either by value (verified: `netdev_ops.transmit`'s
+            // `*mut mbuf` parameter was the only remaining mention,
+            // native in the same wave). Tag-prefixed forms included (no
+            // typedefs).
+            "mbuf",
+            "struct mbuf",
+            "netdev_ops",
+            "struct netdev_ops",
+            // kernel/pci.rs (P3-4c, the PCI-E config-space header + its
+            // named union/arms). All five derived Copy/Clone in the
+            // pre-nativization bindgen output (POD scalars/arrays; the
+            // union's arms must be Copy for the Rust union anyway).
+            // Nothing still-bindgen embeds any of them by value
+            // (verified: zero mentions remain in the emission).
+            // Tag-prefixed + bindgen-shell forms included (no typedefs).
+            "pci_common_confspace_header",
+            "struct pci_common_confspace_header",
+            "pci_common_confspace_header__bindgen_ty_1",
+            "pci_common_confspace_header__bindgen_ty_2",
+            "pci_common_confspace_header__bindgen_ty_2__bindgen_ty_1",
+            "pci_common_confspace_header__bindgen_ty_2__bindgen_ty_2",
+            "pci_common_confspace_header__bindgen_ty_2__bindgen_ty_3",
+            // kernel/e1000.rs (`TxDesc`/`RxDesc`) + kernel/dev/
+            // x1_emac.rs (`X1RxDesc`/`X1TxDesc`) + kernel/dev/
+            // yt8531.rs (`PhyState`) (P3-4c, NIC DMA descriptors + PHY
+            // link record). All five derived Copy/Clone in the
+            // pre-nativization bindgen output (plain-int PODs; e1000's
+            // `ZERO_*_DESC` ring initializers construct them by value,
+            // x1_emac's softc embeds `phy_state` by value — both
+            // native). Nothing still-bindgen embeds any of them by
+            // value (verified: zero mentions remain in the emission).
+            // Tag-prefixed forms included (no typedefs).
+            "tx_desc",
+            "struct tx_desc",
+            "rx_desc",
+            "struct rx_desc",
+            "x1_rx_desc",
+            "struct x1_rx_desc",
+            "x1_tx_desc",
+            "struct x1_tx_desc",
+            "phy_state",
+            "struct phy_state",
+            // kernel/virtio_disk.rs (P3-4c closer, the virtqueue
+            // quintet — THE device-dereferenced DMA rings every disk
+            // block moves through). All five derived Copy/Clone in the
+            // pre-nativization bindgen output (plain-int PODs; the
+            // native `VirtqUsed` embeds `[VirtqUsedElem; NUM]` and the
+            // native `Disk::ops` embeds `[VirtioBlkReq; NUM]` by
+            // value). Nothing still-bindgen embeds any of them by
+            // value (verified: zero mentions remain in the emission).
+            // Tag-prefixed forms included (no typedefs).
+            "virtq_desc",
+            "struct virtq_desc",
+            "virtq_avail",
+            "struct virtq_avail",
+            "virtq_used_elem",
+            "struct virtq_used_elem",
+            "virtq_used",
+            "struct virtq_used",
+            "virtio_blk_req",
+            "struct virtio_blk_req",
         ];
         // P3-N2: natives whose hand-written definitions deliberately do
         // NOT derive Copy/Clone (matching the pre-nativization bindgen
@@ -1302,6 +1392,85 @@ fn main() {
         .raw_line("pub use crate::proc::signal::SigVal as sigval;")
         .raw_line("pub use crate::proc::signal::SigInfo as siginfo;")
         .raw_line("pub use crate::proc::signal::SigStack as stack;")
+        // P3-4c (exec-format scrutiny class): kernel/inc/elf.h
+        // `struct elfhdr`/`struct proghdr` -> kernel/exec.rs
+        // (`Elfhdr`/`Proghdr`) — the FIXED ELF64 file layouts `kexec`
+        // reads by value from every executable. Anchored: bare
+        // `elfhdr`/`proghdr` must not swallow any future *hdr name.
+        .blocklist_type("^elfhdr$|^proghdr$")
+        .raw_line("pub use crate::exec::Elfhdr as elfhdr;")
+        .raw_line("pub use crate::exec::Proghdr as proghdr;")
+        // P3-4c (platform scrutiny class): kernel/inc/dev/fdt.h
+        // `struct platform_info` (+ its three anonymous structs) ->
+        // kernel/dev/fdt.rs (`PlatformInfo` + `PlatformPcieReg`/
+        // `PlatformEmac`/`PlatformSdhci`). The `__bindgen_ty_[123]`
+        // shells are swept with the parent (thread/tmpfs precedent —
+        // no facade: consumers only ever reach them through
+        // `platform.pcie_reg[i].base`-style field access, never by
+        // shell type name). The emitted `extern` `platform` static
+        // (allowlist_var) resolves through the facade unchanged.
+        // Anchored: bare `platform_info` must not swallow
+        // `platform_info_mem_regions` (a fn, not a type, but keep the
+        // allowlist/blocklist spelling symmetric).
+        .blocklist_type("^platform_info(__bindgen_ty_[123])?$")
+        .raw_line("pub use crate::dev::fdt::PlatformInfo as platform_info;")
+        // P3-4c (net scrutiny class): kernel/inc/dev/net.h `struct mbuf`
+        // -> kernel/net.rs (`Mbuf`, the packet buffer whose `buf` array
+        // both NIC DMA engines target); kernel/inc/dev/netdev.h
+        // `struct netdev_ops` -> kernel/dev/netdev.rs (`NetdevOps`,
+        // joining its P3-N4 `Netdev`). Anchored: bare `mbuf` must not
+        // swallow `mbufq` (native in net.rs, never emitted).
+        .blocklist_type("^mbuf$|^netdev_ops$")
+        .raw_line("pub use crate::net::Mbuf as mbuf;")
+        .raw_line("pub use crate::dev::netdev::NetdevOps as netdev_ops;")
+        // P3-4c (MMIO scrutiny class): kernel/inc/dev/pci.h
+        // `struct pci_common_confspace_header` -> kernel/pci.rs
+        // (`PciCommonConfspaceHeader`; the PCI-E spec ECAM overlay). The
+        // `__bindgen_ty_*` shells (the anonymous revision/class bitfield
+        // word — now the plain `rev_class` field — and the anonymous
+        // header-type union + its three arms, now the NAMED
+        // `PciHeaderTypeSpec`/`PciHeaderTypeCommon`/`PciHeaderType0`/
+        // `PciHeaderType1`) are swept with the parent, no facades:
+        // pci.rs's five BAR-probe sites, the only consumers crate-wide,
+        // are re-pointed to `.type_spec` in the same wave.
+        .blocklist_type("^pci_common_confspace_header(__bindgen_ty_.*)?$")
+        .raw_line("pub use crate::pci::PciCommonConfspaceHeader as pci_common_confspace_header;")
+        // P3-4c (DMA-exactness scrutiny class): kernel/inc/dev/
+        // e1000_dev.h `struct tx_desc`/`struct rx_desc` ->
+        // kernel/e1000.rs (`TxDesc`/`RxDesc`); kernel/inc/dev/x1_emac.h
+        // `struct x1_rx_desc`/`struct x1_tx_desc` ->
+        // kernel/dev/x1_emac.rs (`X1RxDesc`/`X1TxDesc`);
+        // kernel/inc/dev/yt8531.h `struct phy_state` ->
+        // kernel/dev/yt8531.rs (`PhyState`). The NIC DMA engines walk
+        // the descriptor rings directly — natives pinned byte-exact by
+        // hardcoded asserts + the toolchain-gcc probe; driver volatile/
+        // fence/cache-maintenance code untouched. Anchored exactly like
+        // the allowlist's own `^tx_desc$|^rx_desc$` spelling (bare
+        // `tx_desc` must not swallow `x1_tx_desc`; `phy_state` must not
+        // swallow `thread_state`-style names).
+        .blocklist_type("^tx_desc$|^rx_desc$|^x1_rx_desc$|^x1_tx_desc$|^phy_state$")
+        .raw_line("pub use crate::e1000::TxDesc as tx_desc;")
+        .raw_line("pub use crate::e1000::RxDesc as rx_desc;")
+        .raw_line("pub use crate::dev::x1_emac::X1RxDesc as x1_rx_desc;")
+        .raw_line("pub use crate::dev::x1_emac::X1TxDesc as x1_tx_desc;")
+        .raw_line("pub use crate::dev::yt8531::PhyState as phy_state;")
+        // P3-4c closer (THE DMA-exactness scrutiny class, nativized
+        // LAST — block I/O is the fs's lifeline): kernel/inc/dev/
+        // virtio.h's virtqueue quintet -> kernel/virtio_disk.rs
+        // (`VirtqDesc`/`VirtqAvail`/`VirtqUsedElem`/`VirtqUsed`/
+        // `VirtioBlkReq`). The virtio-blk DEVICE dereferences these in
+        // guest RAM (QUEUE_DESC/DRIVER/DEVICE point at them) — natives
+        // pinned byte-exact by hardcoded asserts + the toolchain-gcc
+        // probe; the driver's 7-barrier volatile/fence protocol
+        // untouched. Anchored: bare `virtq_used` must not swallow
+        // `virtq_used_elem` (its own entry precedes it in the
+        // alternation, but anchor anyway per P3-4a convention).
+        .blocklist_type("^virtq_desc$|^virtq_avail$|^virtq_used_elem$|^virtq_used$|^virtio_blk_req$")
+        .raw_line("pub use crate::virtio_disk::VirtqDesc as virtq_desc;")
+        .raw_line("pub use crate::virtio_disk::VirtqAvail as virtq_avail;")
+        .raw_line("pub use crate::virtio_disk::VirtqUsedElem as virtq_used_elem;")
+        .raw_line("pub use crate::virtio_disk::VirtqUsed as virtq_used;")
+        .raw_line("pub use crate::virtio_disk::VirtioBlkReq as virtio_blk_req;")
         // `__IncompleteArrayField` used to be bindgen-emitted because
         // (only) the `tmpfs_dentry` emission spelled its C flexible
         // array member with it; with `tmpfs_dentry` blocklisted, bindgen

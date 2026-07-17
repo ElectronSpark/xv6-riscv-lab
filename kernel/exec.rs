@@ -98,7 +98,7 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 use core::ffi::{c_char, c_int, c_void};
-use core::mem::{size_of, MaybeUninit};
+use core::mem::{align_of, offset_of, size_of, MaybeUninit};
 use core::ptr;
 
 use crate::bindings::{
@@ -201,12 +201,134 @@ const O_RDONLY: c_int = 0o0;
 const SEEK_SET: c_int = 0;
 
 // `kernel/inc/elf.h` — hand-copied plain `#define`s (no bindgen var; the
-// structs `elfhdr`/`proghdr` are real bindgen layouts, see wrapper.h).
+// structs `elfhdr`/`proghdr` are the NATIVE `Elfhdr`/`Proghdr` below
+// since P3-4c).
 const ELF_MAGIC: u32 = 0x464C457F;
 const ELF_PROG_LOAD: u32 = 1;
 const ELF_PROG_FLAG_EXEC: u32 = 1;
 const ELF_PROG_FLAG_WRITE: u32 = 2;
 const ELF_PROG_FLAG_READ: u32 = 4;
+
+// ===========================================================================
+// Native `elfhdr`/`proghdr` — P3-4c nativization (user directive:
+// remove the C-compatible interfaces; exec-format scrutiny class).
+// `Elfhdr`/`Proghdr` are the canonical definitions of
+// `kernel/inc/elf.h`'s `struct elfhdr`/`struct proghdr`: `build.rs`
+// blocklists the bindgen emissions and re-exports these types as
+// `crate::bindings::elfhdr`/`proghdr` (facade `pub use`, N2 pattern).
+//
+// *** INPUT-PARSING LAYOUT — HANDLE WITH P3-4 SCRUTINY *** These mirror
+// the FIXED ELF64 file format: `kexec` below `vfs_fileread`s the first
+// `size_of::<elfhdr>()` bytes of every executable straight into an
+// `Elfhdr` and each program header into a `Proghdr` — the on-disk ELF
+// bytes written by the ld that linked userspace. Any layout drift means
+// every `exec()` misparses entry/phoff/vaddr and userspace dies at
+// boot. `type_` reproduces bindgen's rename of the C field `type`
+// (reserved word) in both structs.
+//
+// DERIVE DECISIONS (P3-4c): Copy + Clone on both, exactly as the
+// pre-nativization bindgen output derived (plain-int PODs).
+//
+// Layout evidence: temporary in-tree `offset_of!` gate on the live
+// bindgen forms + toolchain-gcc `_Static_assert` probe (rv64gc/lp64d —
+// scratchpad p3_4c_dma_probe.c); both agree on every value asserted
+// below.
+// ===========================================================================
+
+/// Native `struct elfhdr` (`kernel/inc/elf.h`) — the ELF64 file header
+/// at byte 0 of every executable.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Elfhdr {
+    /// Must equal `ELF_MAGIC` (`"\x7FELF"` little-endian).
+    pub magic: crate::bindings::uint,
+    /// Remaining identification bytes (class/data/version/padding).
+    pub elf: [crate::bindings::uchar; 12],
+    /// Object file type (C field `type`).
+    pub type_: crate::bindings::ushort,
+    /// Machine architecture.
+    pub machine: crate::bindings::ushort,
+    /// Object file version.
+    pub version: crate::bindings::uint,
+    /// Entry point virtual address.
+    pub entry: crate::bindings::uint64,
+    /// Program header table file offset.
+    pub phoff: crate::bindings::uint64,
+    /// Section header table file offset.
+    pub shoff: crate::bindings::uint64,
+    /// Processor-specific flags.
+    pub flags: crate::bindings::uint,
+    /// ELF header size (bytes).
+    pub ehsize: crate::bindings::ushort,
+    /// Program header table entry size.
+    pub phentsize: crate::bindings::ushort,
+    /// Program header table entry count.
+    pub phnum: crate::bindings::ushort,
+    /// Section header table entry size.
+    pub shentsize: crate::bindings::ushort,
+    /// Section header table entry count.
+    pub shnum: crate::bindings::ushort,
+    /// Section name string table index.
+    pub shstrndx: crate::bindings::ushort,
+}
+
+/// Native `struct proghdr` (`kernel/inc/elf.h`) — one ELF64 program
+/// (segment) header.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Proghdr {
+    /// Segment type (`ELF_PROG_LOAD` = loadable — C field `type`).
+    pub type_: crate::bindings::uint32,
+    /// Segment flags (`ELF_PROG_FLAG_{EXEC,WRITE,READ}`).
+    pub flags: crate::bindings::uint32,
+    /// Segment file offset.
+    pub off: crate::bindings::uint64,
+    /// Segment virtual address.
+    pub vaddr: crate::bindings::uint64,
+    /// Segment physical address (unused).
+    pub paddr: crate::bindings::uint64,
+    /// Segment size in the file (bytes).
+    pub filesz: crate::bindings::uint64,
+    /// Segment size in memory (bytes, `>= filesz`).
+    pub memsz: crate::bindings::uint64,
+    /// Segment alignment.
+    pub align: crate::bindings::uint64,
+}
+
+// P3-4c hardcoded layout proof — the FIXED ELF64 byte contract
+// (`kernel/inc/elf.h`), every field. Values captured from the
+// pre-nativization bindgen output via the temporary in-tree
+// `offset_of!` gate and cross-checked by the toolchain-gcc probe.
+const _: () = {
+    assert!(size_of::<Elfhdr>() == 64, "elfhdr size (ELF64 e_ehsize)");
+    assert!(align_of::<Elfhdr>() == 8, "elfhdr alignment");
+    assert!(offset_of!(Elfhdr, magic) == 0, "eh.magic offset (ELF)");
+    assert!(offset_of!(Elfhdr, elf) == 4, "eh.elf offset (ELF)");
+    assert!(offset_of!(Elfhdr, type_) == 16, "eh.type offset (ELF)");
+    assert!(offset_of!(Elfhdr, machine) == 18, "eh.machine offset (ELF)");
+    assert!(offset_of!(Elfhdr, version) == 20, "eh.version offset (ELF)");
+    assert!(offset_of!(Elfhdr, entry) == 24, "eh.entry offset (ELF)");
+    assert!(offset_of!(Elfhdr, phoff) == 32, "eh.phoff offset (ELF)");
+    assert!(offset_of!(Elfhdr, shoff) == 40, "eh.shoff offset (ELF)");
+    assert!(offset_of!(Elfhdr, flags) == 48, "eh.flags offset (ELF)");
+    assert!(offset_of!(Elfhdr, ehsize) == 52, "eh.ehsize offset (ELF)");
+    assert!(offset_of!(Elfhdr, phentsize) == 54, "eh.phentsize offset (ELF)");
+    assert!(offset_of!(Elfhdr, phnum) == 56, "eh.phnum offset (ELF)");
+    assert!(offset_of!(Elfhdr, shentsize) == 58, "eh.shentsize offset (ELF)");
+    assert!(offset_of!(Elfhdr, shnum) == 60, "eh.shnum offset (ELF)");
+    assert!(offset_of!(Elfhdr, shstrndx) == 62, "eh.shstrndx offset (ELF)");
+
+    assert!(size_of::<Proghdr>() == 56, "proghdr size (ELF64 e_phentsize)");
+    assert!(align_of::<Proghdr>() == 8, "proghdr alignment");
+    assert!(offset_of!(Proghdr, type_) == 0, "ph.type offset (ELF)");
+    assert!(offset_of!(Proghdr, flags) == 4, "ph.flags offset (ELF)");
+    assert!(offset_of!(Proghdr, off) == 8, "ph.off offset (ELF)");
+    assert!(offset_of!(Proghdr, vaddr) == 16, "ph.vaddr offset (ELF)");
+    assert!(offset_of!(Proghdr, paddr) == 24, "ph.paddr offset (ELF)");
+    assert!(offset_of!(Proghdr, filesz) == 32, "ph.filesz offset (ELF)");
+    assert!(offset_of!(Proghdr, memsz) == 40, "ph.memsz offset (ELF)");
+    assert!(offset_of!(Proghdr, align) == 48, "ph.align offset (ELF)");
+};
 
 // `is_err`/`is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
 // centralization).
