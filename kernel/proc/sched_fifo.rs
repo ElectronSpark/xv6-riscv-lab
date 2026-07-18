@@ -65,9 +65,9 @@ fn subqueue(fifo_rq: *mut FifoRq, minor_prio: c_int) -> *mut FifoSubqueue {
 // ---------------------------------------------------------------------------
 // sched_class callbacks
 // ---------------------------------------------------------------------------
-extern "C" fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
+pub(crate) unsafe fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     let fifo_rq = rq as *mut FifoRq;
-    let mask = unsafe { (*fifo_rq).ready_mask };
+    let mask = (*fifo_rq).ready_mask;
     if mask == 0 {
         return null_mut();
     }
@@ -77,44 +77,58 @@ extern "C" fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     // `list_entry` is the first member of SchedEntity's leading union, so
     // a `list_node_t*` taken from `sq->head` casts directly back to a
     // `*mut SchedEntity` (LIST_FIRST_NODE expanded).
-    unsafe { cffi::list_first(&raw const (*sq).head) as *mut SchedEntity }
+    cffi::list_first(&raw const (*sq).head) as *mut SchedEntity
 }
 
-extern "C" fn fifo_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(crate) unsafe fn fifo_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
-    unsafe { cffi::list_push_back(&raw mut (*sq).head, SchedEntity::list_entry_ptr(se)); (*sq).count += 1; (*fifo_rq).ready_mask |= 1u8 << idx; }
+    cffi::list_push_back(&raw mut (*sq).head, SchedEntity::list_entry_ptr(se));
+    (*sq).count += 1;
+    (*fifo_rq).ready_mask |= 1u8 << idx;
 }
 
-extern "C" fn fifo_dequeue_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(crate) unsafe fn fifo_dequeue_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
-    unsafe { cffi::list_detach(SchedEntity::list_entry_ptr(se)); (*sq).count -= 1; if (*sq).count == 0 { (*fifo_rq).ready_mask &= !(1u8 << idx); } }
+    cffi::list_detach(SchedEntity::list_entry_ptr(se));
+    (*sq).count -= 1;
+    if (*sq).count == 0 {
+        (*fifo_rq).ready_mask &= !(1u8 << idx);
+    }
 }
 
-extern "C" fn fifo_put_prev_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(crate) unsafe fn fifo_put_prev_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
-    unsafe { cffi::list_push_back(&raw mut (*sq).head, SchedEntity::list_entry_ptr(se)); (*fifo_rq).ready_mask |= 1u8 << idx; cffi::rq_set_ready((*rq).class_id, (*rq).cpu_id); }
+    cffi::list_push_back(&raw mut (*sq).head, SchedEntity::list_entry_ptr(se));
+    (*fifo_rq).ready_mask |= 1u8 << idx;
+    cffi::rq_set_ready((*rq).class_id, (*rq).cpu_id);
 }
 
-extern "C" fn fifo_set_next_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(crate) unsafe fn fifo_set_next_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
-    unsafe { cffi::list_detach(SchedEntity::list_entry_ptr(se)); if (*sq).count == 1 { (*fifo_rq).ready_mask &= !(1u8 << idx); } if (*rq).task_count == 1 { cffi::rq_clear_ready((*rq).class_id, (*rq).cpu_id); } }
+    cffi::list_detach(SchedEntity::list_entry_ptr(se));
+    if (*sq).count == 1 {
+        (*fifo_rq).ready_mask &= !(1u8 << idx);
+    }
+    if (*rq).task_count == 1 {
+        cffi::rq_clear_ready((*rq).class_id, (*rq).cpu_id);
+    }
 }
 
-extern "C" fn fifo_select_task_rq(
+pub(crate) unsafe fn fifo_select_task_rq(
     _prev_rq: *mut Rq,
     se: *mut SchedEntity,
     mut cpumask: cpumask_t,
 ) -> *mut Rq {
-    let major_prio = unsafe { major_priority((*se).priority) };
-    let minor_prio = unsafe { minor_priority((*se).priority) };
+    let major_prio = major_priority((*se).priority);
+    let minor_prio = minor_priority((*se).priority);
 
     if cpumask == 0 {
         cpumask = (1u64 << NCPU) - 1;
@@ -169,18 +183,10 @@ extern "C" fn fifo_select_task_rq(
     best_rq
 }
 
-static FIFO_SCHED_CLASS: SyncCell<SchedClass> = SyncCell::new(SchedClass {
-    enqueue_task:   Some(fifo_enqueue_task),
-    dequeue_task:   Some(fifo_dequeue_task),
-    select_task_rq: Some(fifo_select_task_rq),
-    pick_next_task: Some(fifo_pick_next_task),
-    put_prev_task:  Some(fifo_put_prev_task),
-    set_next_task:  Some(fifo_set_next_task),
-    task_tick:      None,
-    task_fork:      None,
-    task_dead:      None,
-    yield_task:     None,
-});
+// P3-10e: the `FIFO_SCHED_CLASS` static fn-pointer table is gone — the
+// FIFO policy is now the `SchedClass::Fifo` enum variant, and its six
+// implemented callbacks above are dispatched from `SchedClass`'s methods
+// (`sched.rs`). The formerly-`None` slots need no representation.
 
 // ---------------------------------------------------------------------------
 // init helpers
@@ -226,7 +232,7 @@ fn alloc_fifo_rqs_for_cls(cls_id: c_int) {
 pub(crate) extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
     let mut cls = start_cls_id;
     while cls < end_cls_id {
-        unsafe { cffi::sched_class_register(cls, FIFO_SCHED_CLASS.get()) };
+        cffi::sched_class_register(cls, SchedClass::Fifo);
         alloc_fifo_rqs_for_cls(cls);
         cls += 1;
     }

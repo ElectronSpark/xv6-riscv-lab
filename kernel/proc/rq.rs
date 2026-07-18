@@ -13,11 +13,15 @@ use core::mem::{size_of, MaybeUninit};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
-use crate::bindings::{cpu_local, rq, rq_percpu, sched_attr, sched_class, sched_entity, thread};
+use crate::bindings::{cpu_local, rq, rq_percpu, sched_attr, sched_entity, thread};
+// P3-10e: the scheduling policy is the closed-set `SchedClass` enum
+// (static dispatch); the layout-pinned `Rq`/`SchedEntity` `sched_class`
+// fields and the `rqg` table hold `Option<SchedClass>` (`None` == unset).
+use crate::proc::sched::SchedClass;
 use crate::machine::{cpuid, intr_get, intr_off, PreemptGuard};
 use crate::proc::access::{
     is_err_or_null,
-    RqPercpuRef, RqRef, SchedAttrConstRef, SchedAttrRef, SchedClassRef, SchedEntityRef,
+    RqPercpuRef, RqRef, SchedAttrConstRef, SchedAttrRef, SchedEntityRef,
     ThreadAccess, sched_entity_llist_push_head,
 };
 use crate::kstd::{result_to_errptr, Errno, KResult};
@@ -148,7 +152,12 @@ use crate::bindings::{context, list_node_t, rb_node, spinlock_t};
 #[repr(C, align(64))]
 #[derive(Copy, Clone)]
 pub struct Rq {
-    pub sched_class: *mut sched_class,
+    // P3-10e: was `*mut sched_class` (8 bytes); now the 1-byte
+    // `Option<SchedClass>` enum. The 7 freed bytes become padding so
+    // `class_id`/`task_count`/`cpu_id` keep their exact offsets (8/12/16)
+    // and `Rq` stays 64/64 — layout byte-identical, asserts unchanged.
+    pub sched_class: Option<SchedClass>,
+    _pad_sched_class: [u8; 7],
     pub class_id: c_int,
     pub task_count: c_int,
     pub cpu_id: c_int,
@@ -193,10 +202,13 @@ pub struct SchedEntity {
     pub rq: *mut Rq,
     pub priority: c_int,
     pub thread: *mut thread,
-    pub sched_class: *mut sched_class,
-    // Explicit padding reproduction (bindgen `__bindgen_padding_0`):
-    // the cacheline-aligned `spinlock_t` typedef places `pi_lock` at 64.
-    _pad0: u64,
+    // P3-10e: was `*mut sched_class` (8 bytes); now the 1-byte
+    // `Option<SchedClass>` enum. The 7 freed bytes merge into the original
+    // bindgen `__bindgen_padding_0` (`spinlock_t` places `pi_lock` at 64),
+    // so `pi_lock` and the whole tail — through `context`@192, size 320 —
+    // stay byte-identical and the kernel-stack arrangement is unchanged.
+    pub sched_class: Option<SchedClass>,
+    _pad0: [u8; 15],
     pub pi_lock: spinlock_t,
     pub on_rq: c_int,
     pub on_cpu: c_int,
@@ -323,7 +335,7 @@ struct RqGlobal {
     // other CPU is concurrently touching `RqGlobal` while these fields
     // are live-written or -read that way.
     percpu: *mut rq_percpu,
-    sched_class: [*mut sched_class; PRIORITY_MAINLEVELS],
+    sched_class: [Option<SchedClass>; PRIORITY_MAINLEVELS],
     // Cross-CPU-shared field: `rq_cpu_activate` OR's in a bit from each
     // CPU's independent bring-up path (see `idle_thread_init`), and
     // `rq_select_task_rq` reads it from any CPU with no
@@ -346,7 +358,7 @@ struct RqGlobalCell(UnsafeCell<RqGlobal>);
 
 static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
     percpu: ptr::null_mut(),
-    sched_class: [ptr::null_mut(); PRIORITY_MAINLEVELS],
+    sched_class: [None; PRIORITY_MAINLEVELS],
     active_cpu_mask: AtomicU64::new(0),
 }));
 
@@ -359,8 +371,8 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 // `rqg_active_mask_atomic`).
 #[inline] fn rqg_ref<'a>() -> &'a mut RqGlobal { unsafe { &mut *rqg() } }
 #[inline] fn rqg_percpu_base() -> *mut rq_percpu { rqg_ref().percpu }
-#[inline] fn rqg_sched_class(cls_id: c_int) -> *mut sched_class { rqg_ref().sched_class[cls_id as usize] }
-#[inline] fn rqg_set_sched_class(cls_id: usize, cls: *mut sched_class) { rqg_ref().sched_class[cls_id] = cls; }
+#[inline] fn rqg_sched_class(cls_id: c_int) -> Option<SchedClass> { rqg_ref().sched_class[cls_id as usize] }
+#[inline] fn rqg_set_sched_class(cls_id: usize, cls: Option<SchedClass>) { rqg_ref().sched_class[cls_id] = cls; }
 
 /// Shared reference to just the `active_cpu_mask` field, obtained without
 /// ever materializing `&mut RqGlobal`. `AtomicU64` is `Sync`, so handing
@@ -430,7 +442,7 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
     // scheduling entity.
     unsafe { SchedEntityRef::assume(se) }
 }
-#[inline] fn sched_class_of(cls_id: c_int) -> *mut sched_class {
+#[inline] fn sched_class_of(cls_id: c_int) -> Option<SchedClass> {
     rqg_sched_class(cls_id)
 }
 #[inline] fn get_rq(cls_id: c_int, cpu_id: c_int) -> *mut rq {
@@ -522,7 +534,7 @@ pub(crate) fn rq_global_init() {
         }
     }
     for i in 0..PRIORITY_MAINLEVELS {
-        rqg_set_sched_class(i, ptr::null_mut());
+        rqg_set_sched_class(i, None);
     }
     unsafe {
         init_idle_rq();
@@ -551,7 +563,7 @@ pub(crate) fn rq_register(r: *mut rq, cls_id: c_int, cpu_id: c_int) {
     rr.set_class_id(cls_id);
     rr.set_cpu_id(cpu_id);
     rr.set_sched_class(cls);
-    kassert!(!rr.sched_class_ptr().is_null(), "rq_register: sched_class is NULL");
+    kassert!(rr.sched_class().is_some(), "rq_register: sched_class is NULL");
     pc.set_rq_at(cls_id as usize, r);
 }
 
@@ -561,7 +573,7 @@ pub(crate) fn sched_entity_init(se: *mut sched_entity, p: *mut thread) {
     let sr = se_ref(se);
     sr.set_rq(ptr::null_mut());
     sr.set_priority(DEFAULT_PRIORITY);
-    sr.set_sched_class(ptr::null_mut());
+    sr.set_sched_class(None);
     sr.pi_lock_ref().init(c"se_pi_lock".as_ptr() as *mut c_char);
     sr.set_on_rq_plain(0);
     sr.set_on_cpu_plain(0);
@@ -574,18 +586,15 @@ pub(crate) fn sched_entity_init(se: *mut sched_entity, p: *mut thread) {
 }
 
 // ---- sched_class_register ----
-pub(crate) fn sched_class_register(id: c_int, cls: *mut sched_class) {
+// P3-10e: `cls` is the closed-set `SchedClass` enum by value. The old
+// runtime guards on `cls` (non-null; has a `pick_next_task` slot) are now
+// static: an enum value is never null, and both variants implement
+// `pick_next_task` — so those `kpanic!`s (which never fired) are gone.
+pub(crate) fn sched_class_register(id: c_int, cls: SchedClass) {
     if id < 0 || id >= PRIORITY_MAINLEVELS as c_int {
         kpanic!("sched_class_register: invalid id");
     }
-    if cls.is_null() {
-        kpanic!("sched_class_register: cls is NULL");
-    }
-    // SAFETY: `cls` is proven non-null by the diverging `kpanic!` immediately above.
-    if !unsafe { SchedClassRef::assume(cls) }.has_pick_next_task() {
-        kpanic!("sched_class_register: no pick_next_task");
-    }
-    rqg_set_sched_class(id as usize, cls);
+    rqg_set_sched_class(id as usize, Some(cls));
 }
 
 // ---- rq_lock / unlock / trylock / current variants ----
@@ -685,18 +694,15 @@ fn rq_select_task_rq_inner(se: *mut sched_entity, cpumask: cpumask_t) -> KResult
     if major_prio < 0 || major_prio >= PRIORITY_MAINLEVELS as c_int {
         return Err(Errno::Inval);
     }
-    let cls = sched_class_of(major_prio);
-    if cls.is_null() { return Err(Errno::Inval); }
+    let Some(cls) = sched_class_of(major_prio) else { return Err(Errno::Inval); };
 
     let active = rqg_active_mask();
     let mut effective_mask = cpumask & active;
     if effective_mask == 0 { effective_mask = active; }
 
-    // SAFETY: `cls` is checked non-null immediately above (`if cls.is_null() { return
-    // Err(Errno::Inval); }`).
-    if let Some(selected) = unsafe { SchedClassRef::assume(cls) }
-        .select_task_rq(sr.rq_ptr(), se, effective_mask)
-    {
+    // P3-10e: static dispatch — idle's policy returns `None` (its slot was
+    // NULL), so we fall through to the CPU search exactly as before.
+    if let Some(selected) = cls.select_task_rq(sr.rq_ptr(), se, effective_mask) {
         return Ok(selected);
     }
 
@@ -739,7 +745,7 @@ pub(crate) fn rq_enqueue_task(r: *mut rq, se: *mut sched_entity) {
     sr.set_rq(r);
     sr.cpu_id_store_release(rr.cpu_id());
     sr.on_rq_store_release(1);
-    sr.set_sched_class(rr.sched_class_ptr());
+    sr.set_sched_class(rr.sched_class());
     rr.inc_task_count();
     rq_set_ready(rr.class_id(), rr.cpu_id());
 }
@@ -750,10 +756,10 @@ pub(crate) fn rq_dequeue_task(r: *mut rq, se: *mut sched_entity) {
     kassert!(rq_lock_held(rr.cpu_id()), "rq_dequeue_task: rq lock not held");
     kassert!(sr.rq_ptr() == r, "rq_dequeue_task: se->rq mismatch");
     kassert!(rr.task_count() > 0, "rq_dequeue_task: task_count == 0");
-    kassert!(sr.sched_class_ptr() == rq_ref(sr.rq_ptr()).sched_class_ptr(), "rq_dequeue_task: sched_class mismatch");
+    kassert!(sr.sched_class() == rq_ref(sr.rq_ptr()).sched_class(), "rq_dequeue_task: sched_class mismatch");
     rr.dequeue_task(se);
     sr.set_rq(ptr::null_mut());
-    sr.set_sched_class(ptr::null_mut());
+    sr.set_sched_class(None);
     sr.on_rq_store_release(0);
     rr.dec_task_count();
     if rr.task_count() == 0 {
@@ -774,7 +780,7 @@ pub(crate) fn rq_put_prev_task(se: *mut sched_entity) {
     let rr = rq_ref(r);
     kassert!(rq_lock_held(rr.cpu_id()), "rq_put_prev_task: rq lock not held");
     kassert!(rr.task_count() > 0, "rq_put_prev_task: task_count == 0");
-    kassert!(sr.sched_class_ptr() == rr.sched_class_ptr(), "rq_put_prev_task: sched_class mismatch");
+    kassert!(sr.sched_class() == rr.sched_class(), "rq_put_prev_task: sched_class mismatch");
     rr.put_prev_task(se);
 }
 
@@ -785,7 +791,7 @@ pub(crate) fn rq_set_next_task(se: *mut sched_entity) {
     let rr = rq_ref(r);
     kassert!(rq_lock_held(rr.cpu_id()), "rq_set_next_task: rq lock not held");
     kassert!(rr.task_count() > 0, "rq_set_next_task: task_count == 0");
-    kassert!(sr.sched_class_ptr() == rr.sched_class_ptr(), "rq_set_next_task: sched_class mismatch");
+    kassert!(sr.sched_class() == rr.sched_class(), "rq_set_next_task: sched_class mismatch");
     rqpc_ref(rr.cpu_id()).current_se_store_release(se);
     rr.set_next_task(se);
 }
@@ -798,30 +804,30 @@ pub(crate) fn rq_task_fork(se: *mut sched_entity) {
     // wide invariant: always non-null while executing kernel code on behalf of
     // a thread.
     let cur = unsafe { ThreadAccess::assume(xv6_current_thread()) }.sched_entity_ptr();
-    let cur_cls = se_ref(cur).sched_class_ptr();
-    if !cur_cls.is_null()
-        // SAFETY: `cur_cls` is proven non-null by the short-circuiting `&&`
-        // (`!cur_cls.is_null() && ...`).
-        && unsafe { SchedClassRef::assume(cur_cls) }.task_fork(sr.rq_ptr(), se)
-    {
-        return;
+    // P3-10e: static dispatch. `task_fork` is a no-op (returns `false`) for
+    // both policies today, so — exactly as before — the running thread's
+    // class never short-circuits and the default class's `task_fork` runs
+    // too; both are no-ops. The `Some`/`None` guards mirror the old
+    // NULL-pointer checks.
+    if let Some(cur_cls) = se_ref(cur).sched_class() {
+        if cur_cls.task_fork(sr.rq_ptr(), se) {
+            return;
+        }
     }
-    let def_cls = sched_class_of(DEFAULT_MAJOR_PRIORITY);
-    if !def_cls.is_null() {
-        // SAFETY: `def_cls` is checked non-null immediately above.
-        unsafe { SchedClassRef::assume(def_cls) }.task_fork(sr.rq_ptr(), se);
+    if let Some(def_cls) = sched_class_of(DEFAULT_MAJOR_PRIORITY) {
+        def_cls.task_fork(sr.rq_ptr(), se);
     }
 }
 
 pub(crate) fn rq_task_dead(se: *mut sched_entity) {
     let sr = se_ref(se);
-    if !sr.rq_ptr().is_null() && !sr.sched_class_ptr().is_null() {
+    if !sr.rq_ptr().is_null() && sr.sched_class().is_some() {
         sr.call_sched_class_task_dead();
     }
     if !sr.rq_ptr().is_null() {
         rq_dequeue_task(sr.rq_ptr(), se);
     }
-    sr.set_sched_class(ptr::null_mut());
+    sr.set_sched_class(None);
 }
 
 // ---- wake list (LLIST) ----

@@ -3287,6 +3287,89 @@ table type + 6 dead slots + 1 facade alias deleted.
   touched (`kernel/vfs/vfs_syscall.rs`); all signatures unchanged;
   `kernel/vfs/fs.rs` untouched.
 
+### Iteration 79 — 2026-07-17 — Wave P3-10e (DANGER ZONE, scheduler): `sched_class` fn-pointer vtable → `enum SchedClass` static dispatch — the last multi-implementor ops table, the ops arc fully closed
+
+- **The final ops-table conversion**, DEFERRED from P3-10d (`46c2c89`)
+  because `sched_class` is layout-embedded (`Rq.sched_class`@0,
+  `SchedEntity.sched_class`@48, the `rqg[PRIORITY_MAINLEVELS]` table) and
+  needed the mandatory forkforkfork A/B. User directive: fully adapt Rust
+  style. The `struct sched_class` fn-pointer ops table (10 slots) became a
+  **closed-set `#[repr(u8)] enum SchedClass { Idle = 1, Fifo = 2 }`** with
+  inherent `match`-dispatch methods — enum static dispatch, strictly faster
+  than `dyn` here (`trait-dyn-vs-generic`) and impossible to mis-null.
+
+- **LAYOUT SAFETY (verified first)**: `grep` over every `.S` and
+  `asm-offsets.h` found **no** `sched_class`/`sched_entity` offset consumed
+  by asm (the one `THREAD_SCHED_ENTITY 80` define is explicitly documented
+  "no .S file consumes THREAD_*", and `thread` holds a *pointer* to its
+  stack-resident `SchedEntity`, placed via `size_of::<sched_entity>()` —
+  dynamic). So this crate owns the layout. **Chosen approach: byte-identical
+  layout** — the field shrank `*mut sched_class` (8B) → `Option<SchedClass>`
+  (1B) and 7 bytes of padding absorb the difference, so `Rq` (64/64) and
+  `SchedEntity` (320/64) keep **every offset and size**, and the
+  kernel-stack arrangement is unchanged. All pre-existing `offset_of!`
+  asserts (`Rq.sched_class`@0/`class_id`@8; `SchedEntity.sched_class`@48/
+  `pi_lock`@64/`context`@192) **still hold, unmodified**.
+
+- **Per-slot conversion** (slot autopsy, P3-10d method): `enqueue_task`/
+  `dequeue_task`/`pick_next_task` — both policies real → match both arms;
+  `select_task_rq`/`put_prev_task`/`set_next_task` — idle's slot was NULL →
+  idle arm is `None`/no-op (byte-identical to the old `if let Some(fp)`
+  fallback); `task_fork`/`task_dead` — never populated by either policy but
+  still *dispatched* → kept as no-op arms (`false`/`{}`) so the fork/dead
+  control flow is structurally unchanged; `task_tick`/`yield_task` — never
+  populated AND never dispatched (the `RqRef` wrappers had **zero** call
+  sites) → **deleted outright** (matches P3-10d's never-populated-never-
+  dispatched autopsy).
+
+- **`Option<SchedClass>` niche pinned**: the fields are zero-initialised
+  (`write_bytes(0)` / zeroed kernel-stack / the `[None; _]` static) exactly
+  where the old `*mut sched_class` was NULL. Explicit discriminants
+  (`Idle=1`/`Fifo=2`) free value 0 for the niche, and a `const _` proof
+  (`transmute::<Option<SchedClass>, u8>(None) == 0`) statically guarantees a
+  zero byte reads back as `None` — byte-identical to the old NULL sentinel,
+  no read-before-init hazard.
+
+- **Deleted**: the two static fn-pointer tables (`IDLE_SCHED_CLASS`,
+  `FIFO_SCHED_CLASS`) + `struct sched_class` itself + the whole
+  `SchedClassRef` access wrapper (its `select_task_rq`/`task_fork`/
+  `has_pick_next_task` are now inherent enum methods) + the two dead `RqRef`
+  dispatch wrappers (`task_tick`/`yield_task`). The idle/fifo policy bodies
+  survive verbatim as `pub(crate) unsafe fn`, routed to by the enum's
+  `match` arms. `sched_class_register`/`rqg` init/`sched_class_of` now carry
+  `Option<SchedClass>`; the never-firing `null`/`no-pick_next_task`
+  registration `kpanic!`s became static guarantees and were removed. `cffi`
+  registration wrapper passes the variant by value (no pointer, no cast).
+
+- **rust-skills applied**: `type-enum-states` (mutually-exclusive policies →
+  enum, the wave's core), `trait-dyn-vs-generic`/`perf-*` (enum static
+  dispatch over `dyn`/fn-pointers, faster on this hot path),
+  `type-option-nullable` (`Option<SchedClass>` for the unset state),
+  `pat-exhaustive-enum` (every `match` exhaustive, no `_`),
+  `unsafe-safety-comment`/`unsafe-minimize-scope` (each dispatch method's
+  `unsafe` block scoped to the raw-ptr call with a SAFETY note; the redundant
+  inner `unsafe{}` in the fifo bodies hoisted out once they became
+  `unsafe fn`), `num-nonzero`-style niche reasoning (explicit discriminants +
+  `const` transmute proof), `name-variants-camel`. Edition 2021 respected.
+
+- **Verified (orchestrator recipe, cache-first — BUILD_TYPE empty, toolchain
+  gcc, Lab: fs, before+after)**: **0-warning** full-crate recompile (`cargo`
+  fingerprint dropped → clean rebuild); const asserts (niche proof + all
+  layout offsets) pass. Boot ×4, each **exactly one** `init: starting sh`,
+  zero panics. Battery: **usertests preempt OK** (the scheduler crux —
+  `kill... wait... OK`), **forkfork/forktest/twochildren/reparent OK**,
+  **testsig 21/21**, **stressfs OK** (multiprocess), concurrent shell jobs
+  (`A & B & C & wait` → `ALLDONE`), ENOENT (`exec … failed`, `cat: cannot
+  open`). The single-test `FAILED -- lost some free pages` is the standard
+  usertests end-of-run accounting artifact (every individual test still
+  reports OK), not a regression. **forkforkfork A/B (MANDATORY)**: pre-change
+  HEAD and post-change build produce the **IDENTICAL** signature — same
+  trigger, same user addr `0x80c34000`, same `scause=0xd(Load page fault)`,
+  same `stval=0xfffffffffffffff1`, same faulting fn **`print_backtrace`**
+  (sepc `0x80229cb0`→`0x80229bea`, a benign symbol-relocation shift from the
+  edits), same infinite kerneltrap loop until timeout. No scheduler
+  regression. 6 files, +300/−230 (net +70; code shrank, doc grew).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

@@ -32,7 +32,7 @@ static IDLE_RQS: SyncCell<*mut IdleRq> = SyncCell::new(null_mut());
 // ---------------------------------------------------------------------------
 // sched_class callbacks
 // ---------------------------------------------------------------------------
-unsafe extern "C" fn idle_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
+pub(crate) unsafe fn idle_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     // `rq` is the first field of `IdleRq` → container_of is a no-op cast.
     let idle = rq as *mut IdleRq;
     let thread = (*idle).idle_thread;
@@ -46,7 +46,7 @@ unsafe extern "C" fn idle_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     thread_sched_entity(thread)
 }
 
-unsafe extern "C" fn idle_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(crate) unsafe fn idle_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
     let idle = rq as *mut IdleRq;
     if !(*idle).idle_thread.is_null() {
         cffi::panic_proc(b"idle_enqueue_task: idle rq already has a thread\0");
@@ -58,26 +58,14 @@ unsafe extern "C" fn idle_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
         | PRIORITY_SUBLEVEL_MASK as i32;
 }
 
-unsafe extern "C" fn idle_dequeue_task(_rq: *mut Rq, _se: *mut SchedEntity) {
+pub(crate) unsafe fn idle_dequeue_task(_rq: *mut Rq, _se: *mut SchedEntity) {
     cffi::panic_proc(b"idle_dequeue_task: trying to dequeue task from idle rq\0");
 }
 
-// ---------------------------------------------------------------------------
-// sched_class instance. Lives in static storage; `sched_class_register`
-// only stores the pointer.
-// ---------------------------------------------------------------------------
-static IDLE_SCHED_CLASS: SyncCell<SchedClass> = SyncCell::new(SchedClass {
-    enqueue_task:   Some(idle_enqueue_task),
-    dequeue_task:   Some(idle_dequeue_task),
-    select_task_rq: None,
-    pick_next_task: Some(idle_pick_next_task),
-    put_prev_task:  None,
-    set_next_task:  None,
-    task_tick:      None,
-    task_fork:      None,
-    task_dead:      None,
-    yield_task:     None,
-});
+// P3-10e: the `IDLE_SCHED_CLASS` static fn-pointer table is gone — the
+// idle policy is now the `SchedClass::Idle` enum variant, and the three
+// implemented callbacks above are dispatched from `SchedClass`'s methods
+// (`sched.rs`). The formerly-`None` slots need no representation.
 
 // ---------------------------------------------------------------------------
 // Helper exported from `proc/proc_shims.rs`: returns `thread->sched_entity`.
@@ -111,7 +99,7 @@ unsafe fn alloc_idle_rqs() {
 // P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
 pub(crate) unsafe extern "C" fn init_idle_rq() {
-    cffi::sched_class_register(IDLE_MAJOR_PRIORITY, IDLE_SCHED_CLASS.get());
+    cffi::sched_class_register(IDLE_MAJOR_PRIORITY, SchedClass::Idle);
     alloc_idle_rqs();
 }
 

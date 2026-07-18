@@ -100,13 +100,14 @@ pub mod raw {
 
     // P3-D2a: the run-queue glue entry points are ordinary Rust fns in
     // `kernel/proc/rq.rs`; the former `extern "C"` redeclarations are
-    // gone. The two integer-only fns are plain re-exports; the pointer-
-    // taking ones keep this file's layout-pinned mirror types (`Rq`/
-    // `SchedClass`) at the call sites via thin cast adapters -- both
-    // mirrors describe the exact same C objects as their
-    // `crate::bindings` counterparts (`rq`/`sched_class` from
+    // gone. The two integer-only fns are plain re-exports; the `rq`-
+    // taking ones keep this file's layout-pinned mirror type `Rq` at the
+    // call sites via thin cast adapters -- the mirror describes the exact
+    // same object as its `crate::bindings::rq` counterpart (from
     // `inc/proc/rq_types.h`; see the compile-time layout asserts at the
     // bottom of this file), so the pointer casts are ABI-identity.
+    // (P3-10e: `sched_class` is no longer a pointer — `SchedClass` is a
+    // closed-set enum passed by value, no cast needed.)
     pub(crate) use crate::proc::{rq_clear_ready, rq_set_ready};
 
     #[inline]
@@ -123,9 +124,12 @@ pub mod raw {
         crate::proc::rq_register(rq as *mut crate::bindings::rq, cls_id, cpu_id)
     }
 
+    // P3-10e: `SchedClass` is a closed-set enum now (`SchedClass::Idle`/
+    // `SchedClass::Fifo`), so registration passes the variant by value —
+    // no pointer, no cast.
     #[inline]
-    pub fn sched_class_register(id: c_int, cls: *mut SchedClass) {
-        crate::proc::sched_class_register(id, cls as *mut crate::bindings::sched_class)
+    pub fn sched_class_register(id: c_int, cls: SchedClass) {
+        crate::proc::sched_class_register(id, cls)
     }
 }
 

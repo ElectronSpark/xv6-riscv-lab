@@ -50,49 +50,163 @@ use crate::timer::sched_timer::__do_timer_tick;
 use crate::ipi::ipi_send_single;
 
 // ===========================================================================
-// Native scheduler-policy types — P3-N7 nativization (user directive:
-// remove the C-compatible interfaces). `SchedClass`/`SchedAttr` are the
-// canonical native definitions of `kernel/inc/proc/rq_types.h`'s
-// `struct sched_class`/`struct sched_attr`: `build.rs` blocklists the
-// bindgen emissions and re-exports them as
-// `crate::bindings::sched_class`/`sched_attr` (facade `pub use`, N2
-// pattern); `kernel/proc/cffi.rs`'s layout-pinned mirror `SchedClass`
-// is promoted to a re-export of this definition. The C header stays
-// unchanged (no C consumers remain — the kernel tree has zero `.c`
-// files).
+// Native scheduler-policy dispatch — P3-10e (user directive: fully adapt
+// Rust style / remove the C interfaces). `SchedClass` was the fn-pointer
+// ops table of `kernel/inc/proc/rq_types.h`'s `struct sched_class`
+// (`build.rs` blocklists the bindgen emission and re-exports it as
+// `crate::bindings::sched_class`, facade `pub use`, N2 pattern). This
+// wave — DEFERRED from P3-10d because the field is layout-embedded — turns
+// it into a **closed-set enum with static dispatch**: the ops arc closes.
 //
-// `SchedClass` reproduces bindgen's `Option<unsafe extern "C" fn ...>`
-// forms verbatim — trait-ification of the ops table is P3-10's job,
-// not this wave's.
+// There are exactly two implementors, forever: the idle policy
+// (`sched_idle.rs`, one run-queue per CPU at `IDLE_MAJOR_PRIORITY`) and
+// the FIFO policy (`sched_fifo.rs`, every other priority). Every old ops
+// slot is a method that `match`es the variant and routes to the policy
+// body; a slot a class left `NULL` becomes that variant's no-op / `None`
+// match arm — byte-identical to the old `if let Some(fp)` fallback:
+//   * `select_task_rq`/`put_prev_task`/`set_next_task`: idle = no-op/None.
+//   * `enqueue_task`/`dequeue_task`/`pick_next_task`: both real.
+//   * `task_fork`/`task_dead`: never populated by either class today
+//     (always no-op), but still dispatched — kept as no-op arms so the
+//     fork/dead control flow stays structurally identical.
+//   * `task_tick`/`yield_task`: never populated AND never dispatched (the
+//     `RqRef` wrappers had zero call sites) — deleted outright, matching
+//     P3-10d's never-populated-never-dispatched autopsy.
 //
-// DERIVE DECISION (P3-N7): Copy + Clone on both, faithfully
-// reproducing the pre-nativization bindgen emissions (plain fn-pointer
-// table / plain-integer POD; neither ever embedded a blocklisted type,
-// so both kept their derives through every previous wave).
+// SchedAttr stays a plain `#[repr(C)]` POD (its N7 layout note below).
 //
-// Layout evidence: temporary in-tree `offset_of!` gate on the live
-// bindgen forms + cross-compiler `_Static_assert` probe (toolchain
-// gcc, rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both
-// agree on every value asserted below.
+// LAYOUT SAFETY (P3-10e): the two `*mut sched_class` holders (`Rq`@0,
+// `SchedEntity`@48) and the `rqg` table are NOT asm-consumed — `grep`
+// over every `.S`/`asm-offsets.h` finds no `sched_class`/`sched_entity`
+// offset (asm-offsets.h itself records "no .S file consumes THREAD_*"),
+// and `thread` holds a *pointer* to its stack-resident `SchedEntity`
+// (placed via `size_of::<sched_entity>()`, dynamic) rather than embedding
+// it. So this crate owns the layout. The holders keep their exact byte
+// image regardless: the field shrinks 8 -> 1 byte and 7 bytes of padding
+// absorb the difference, so `Rq`/`SchedEntity` offsets, sizes (64 / 320)
+// and the kernel-stack arrangement are all unchanged (see rq.rs asserts).
 // ===========================================================================
 
-/// Native `struct sched_class` (`kernel/inc/proc/rq_types.h`) — the
-/// scheduling-policy ops table.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct SchedClass {
-    pub enqueue_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub dequeue_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub select_task_rq: Option<
-        unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity, cpumask: cpumask_t) -> *mut rq,
-    >,
-    pub pick_next_task: Option<unsafe extern "C" fn(rq: *mut rq) -> *mut sched_entity>,
-    pub put_prev_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub set_next_task: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub task_tick: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub task_fork: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub task_dead: Option<unsafe extern "C" fn(rq: *mut rq, se: *mut sched_entity)>,
-    pub yield_task: Option<unsafe extern "C" fn(rq: *mut rq)>,
+/// Native scheduling policy (`kernel/inc/proc/rq_types.h`'s
+/// `struct sched_class`, formerly a fn-pointer ops table) — a closed set
+/// of exactly two policies, dispatched statically via `match`.
+///
+/// Stored in the layout-pinned `Rq`/`SchedEntity` `sched_class` fields and
+/// the `rqg` table as `Option<SchedClass>` (`None` == the old NULL/unset
+/// sentinel). The explicit discriminants pin the `Option` niche so a
+/// zeroed byte reads back as `None`, byte-identical to a zeroed
+/// `*mut sched_class` (`write_bytes(0)` / zeroed kernel-stack storage) —
+/// see the `const _` niche proof below.
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SchedClass {
+    /// Idle policy — `sched_idle.rs`.
+    Idle = 1,
+    /// FIFO policy — `sched_fifo.rs`.
+    Fifo = 2,
+}
+
+impl SchedClass {
+    /// `enqueue_task` — both policies implement it.
+    #[inline]
+    pub(crate) fn enqueue_task(self, r: *mut rq, se: *mut sched_entity) {
+        // SAFETY: `r`/`se` are the caller's locked run-queue and a valid
+        // scheduling entity (rq lock held, both non-null) — the exact
+        // contract the fn-pointer callbacks demanded.
+        unsafe {
+            match self {
+                SchedClass::Idle => super::sched_idle::idle_enqueue_task(r, se),
+                SchedClass::Fifo => super::sched_fifo::fifo_enqueue_task(r, se),
+            }
+        }
+    }
+
+    /// `dequeue_task` — both policies implement it (idle's body panics,
+    /// exactly as before: the idle rq is never dequeued from).
+    #[inline]
+    pub(crate) fn dequeue_task(self, r: *mut rq, se: *mut sched_entity) {
+        // SAFETY: see `enqueue_task`.
+        unsafe {
+            match self {
+                SchedClass::Idle => super::sched_idle::idle_dequeue_task(r, se),
+                SchedClass::Fifo => super::sched_fifo::fifo_dequeue_task(r, se),
+            }
+        }
+    }
+
+    /// `select_task_rq` — `None` for idle (slot was NULL), so callers fall
+    /// through to their default CPU search exactly as before.
+    #[inline]
+    pub(crate) fn select_task_rq(
+        self,
+        current_rq: *mut rq,
+        se: *mut sched_entity,
+        mask: cpumask_t,
+    ) -> Option<*mut rq> {
+        // SAFETY: see `enqueue_task`; `current_rq` may be null (fifo's body
+        // ignores it), matching the old fn-pointer call.
+        unsafe {
+            match self {
+                SchedClass::Idle => None,
+                SchedClass::Fifo => Some(super::sched_fifo::fifo_select_task_rq(current_rq, se, mask)),
+            }
+        }
+    }
+
+    /// `pick_next_task` — both policies implement it.
+    #[inline]
+    pub(crate) fn pick_next_task(self, r: *mut rq) -> *mut sched_entity {
+        // SAFETY: see `enqueue_task`.
+        unsafe {
+            match self {
+                SchedClass::Idle => super::sched_idle::idle_pick_next_task(r),
+                SchedClass::Fifo => super::sched_fifo::fifo_pick_next_task(r),
+            }
+        }
+    }
+
+    /// `put_prev_task` — no-op for idle (slot was NULL).
+    #[inline]
+    pub(crate) fn put_prev_task(self, r: *mut rq, se: *mut sched_entity) {
+        // SAFETY: see `enqueue_task`.
+        unsafe {
+            match self {
+                SchedClass::Idle => {}
+                SchedClass::Fifo => super::sched_fifo::fifo_put_prev_task(r, se),
+            }
+        }
+    }
+
+    /// `set_next_task` — no-op for idle (slot was NULL).
+    #[inline]
+    pub(crate) fn set_next_task(self, r: *mut rq, se: *mut sched_entity) {
+        // SAFETY: see `enqueue_task`.
+        unsafe {
+            match self {
+                SchedClass::Idle => {}
+                SchedClass::Fifo => super::sched_fifo::fifo_set_next_task(r, se),
+            }
+        }
+    }
+
+    /// `task_fork` — never populated by either policy today (both slots
+    /// were NULL); returns `false` so `rq_task_fork`'s
+    /// current-then-default fallback runs exactly as before.
+    #[inline]
+    pub(crate) fn task_fork(self, _r: *mut rq, _se: *mut sched_entity) -> bool {
+        match self {
+            SchedClass::Idle | SchedClass::Fifo => false,
+        }
+    }
+
+    /// `task_dead` — never populated by either policy today (both slots
+    /// were NULL); a no-op, matching the old `if let Some(fp)` fallback.
+    #[inline]
+    pub(crate) fn task_dead(self, _r: *mut rq, _se: *mut sched_entity) {
+        match self {
+            SchedClass::Idle | SchedClass::Fifo => {}
+        }
+    }
 }
 
 /// Native `struct sched_attr` (`kernel/inc/proc/rq_types.h`) — task
@@ -112,18 +226,17 @@ pub struct SchedAttr {
 // `offset_of!` gate and cross-checked by the gcc `_Static_assert`
 // probe (see the module note above).
 const _: () = {
-    assert!(core::mem::size_of::<SchedClass>() == 80, "sched_class size");
-    assert!(core::mem::align_of::<SchedClass>() == 8, "sched_class alignment");
-    assert!(core::mem::offset_of!(SchedClass, enqueue_task) == 0, "sched_class.enqueue_task offset");
-    assert!(core::mem::offset_of!(SchedClass, dequeue_task) == 8, "sched_class.dequeue_task offset");
-    assert!(core::mem::offset_of!(SchedClass, select_task_rq) == 16, "sched_class.select_task_rq offset");
-    assert!(core::mem::offset_of!(SchedClass, pick_next_task) == 24, "sched_class.pick_next_task offset");
-    assert!(core::mem::offset_of!(SchedClass, put_prev_task) == 32, "sched_class.put_prev_task offset");
-    assert!(core::mem::offset_of!(SchedClass, set_next_task) == 40, "sched_class.set_next_task offset");
-    assert!(core::mem::offset_of!(SchedClass, task_tick) == 48, "sched_class.task_tick offset");
-    assert!(core::mem::offset_of!(SchedClass, task_fork) == 56, "sched_class.task_fork offset");
-    assert!(core::mem::offset_of!(SchedClass, task_dead) == 64, "sched_class.task_dead offset");
-    assert!(core::mem::offset_of!(SchedClass, yield_task) == 72, "sched_class.yield_task offset");
+    // P3-10e niche proof: the `sched_class` fields (`Rq`, `SchedEntity`,
+    // the `rqg` table) are `Option<SchedClass>` and are zero-initialised
+    // (`write_bytes(0)` / zeroed kernel-stack storage / the `[None; _]`
+    // static) precisely where the old `*mut sched_class` fields were NULL.
+    // Pin the niche so a zero byte reads back as `None`, byte-identical to
+    // the old NULL sentinel — the explicit `Idle = 1`/`Fifo = 2`
+    // discriminants free value 0 for the niche, and this asserts Rust
+    // actually lands `None` there.
+    assert!(core::mem::size_of::<Option<SchedClass>>() == 1, "Option<SchedClass> must be one byte");
+    let none_byte: u8 = unsafe { core::mem::transmute::<Option<SchedClass>, u8>(None) };
+    assert!(none_byte == 0, "Option<SchedClass> None must be the zero byte");
 
     assert!(core::mem::size_of::<SchedAttr>() == 32, "sched_attr size");
     assert!(core::mem::align_of::<SchedAttr>() == 8, "sched_attr alignment");

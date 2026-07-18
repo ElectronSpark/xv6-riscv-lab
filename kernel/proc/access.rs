@@ -38,9 +38,12 @@ use core::sync::atomic::{fence, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Orde
 
 use crate::bindings::{
     context, cpu_local, hlist_entry_t, ksiginfo, pgroup, rq, rq_percpu, sched_attr,
-    sched_class, sched_entity, session, sigaction as sigaction_t, spinlock_t, thread, thread_group,
+    sched_entity, session, sigaction as sigaction_t, spinlock_t, thread, thread_group,
     thread_state,
 };
+// P3-10e: the scheduling policy is the closed-set `SchedClass` enum
+// (static dispatch), no longer a `*mut sched_class` fn-pointer table.
+use crate::proc::sched::SchedClass;
 use crate::proc::proc_shims;
 // Wave P3-3D native mirrors (owning-module definitions, layout-asserted
 // directly against the bindgen types in `workqueue.rs`/`thread_queue.rs`).
@@ -889,8 +892,8 @@ impl<'a> SchedEntityRef<'a> {
     #[inline] pub fn set_rq(&self, r: *mut rq) { raw_set!(self, rq, r) }
     #[inline] pub fn priority(&self) -> c_int { raw_get!(self, priority) }
     #[inline] pub fn set_priority(&self, v: c_int) { raw_set!(self, priority, v) }
-    #[inline] pub fn sched_class_ptr(&self) -> *mut sched_class { raw_get!(self, sched_class) }
-    #[inline] pub fn set_sched_class(&self, cls: *mut sched_class) { raw_set!(self, sched_class, cls) }
+    #[inline] pub fn sched_class(&self) -> Option<SchedClass> { raw_get!(self, sched_class) }
+    #[inline] pub fn set_sched_class(&self, cls: Option<SchedClass>) { raw_set!(self, sched_class, cls) }
     #[inline] pub fn affinity_mask(&self) -> u64 { raw_get!(self, affinity_mask) }
     #[inline] pub fn set_affinity_mask(&self, mask: u64) { raw_set!(self, affinity_mask, mask) }
     #[inline] pub fn set_start_time(&self, v: u64) { raw_set!(self, start_time, v) }
@@ -959,70 +962,19 @@ impl<'a> SchedEntityRef<'a> {
 
     #[inline]
     pub fn call_sched_class_task_dead(&self) {
-        let cls = self.sched_class_ptr();
-        if cls.is_null() { return; }
-        unsafe {
-            if let Some(fp) = (*cls).task_dead { fp(self.rq_ptr(), self.raw.as_ptr()); }
+        // P3-10e: `task_dead` is a no-op for both policies today; the
+        // dispatch is preserved so the dead-path control flow is unchanged.
+        if let Some(cls) = self.sched_class() {
+            cls.task_dead(self.rq_ptr(), self.raw.as_ptr());
         }
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct SchedClassRef<'a> {
-    raw: NonNull<sched_class>,
-    _m: PhantomData<&'a mut sched_class>,
-}
-
-impl<'a> SchedClassRef<'a> {
-    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
-    ///
-    /// # Safety
-    ///
-    /// If `p` is non-null, it must point to a live, properly
-    /// initialized `sched_class` for as long as the returned handle (and
-    /// anything derived from it) is used — see the module-level
-    /// `# Safety` note at the top of this file.
-    #[inline(always)]
-    pub unsafe fn from_raw(p: *mut sched_class) -> Option<Self> {
-        NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
-    }
-    #[inline(always)]
-    pub fn from_ptr(p: *mut sched_class) -> Option<Self> {
-        // SAFETY: same contract as `from_raw` (module-level note);
-        // this wrapper only adds the null check.
-        unsafe { Self::from_raw(p) }
-    }
-    /// Wraps `p` in `Self` without the null check.
-    ///
-    /// # Safety
-    ///
-    /// `p` must be non-null and point to a live, properly initialized
-    /// `sched_class` (same contract as [`from_raw`](Self::from_raw), minus
-    /// the null case, which is UB here instead of `None`).
-    #[inline(always)]
-    pub unsafe fn assume(p: *mut sched_class) -> Self {
-        // SAFETY: caller upholds this fn's `# Safety` contract, so
-        // `from_raw` returns `Some`.
-        unsafe { Self::from_raw(p).unwrap_unchecked() }
-    }
-    #[inline(always)] pub fn as_ptr(&self) -> *mut sched_class { self.raw.as_ptr() }
-    #[inline] pub fn has_pick_next_task(&self) -> bool { unsafe { (*self.raw.as_ptr()).pick_next_task.is_some() } }
-    #[inline]
-    pub fn select_task_rq(&self, current_rq: *mut rq, se: *mut sched_entity, mask: u64) -> Option<*mut rq> {
-        unsafe { (*self.raw.as_ptr()).select_task_rq.map(|fp| fp(current_rq, se, mask)) }
-    }
-    #[inline]
-    pub fn task_fork(&self, r: *mut rq, se: *mut sched_entity) -> bool {
-        unsafe {
-            if let Some(fp) = (*self.raw.as_ptr()).task_fork {
-                fp(r, se);
-                true
-            } else {
-                false
-            }
-        }
-    }
-}
+// P3-10e: `SchedClassRef` is deleted — the scheduling policy is the
+// closed-set `SchedClass` enum (static dispatch) rather than a
+// `*mut sched_class` fn-pointer table, so its former methods
+// (`select_task_rq`/`task_fork`/`has_pick_next_task`) are now inherent
+// methods on the enum, called on the value directly.
 
 #[derive(Clone, Copy)]
 pub struct RqRef<'a> {
@@ -1071,29 +1023,30 @@ impl<'a> RqRef<'a> {
     #[inline] pub fn set_task_count(&self, v: c_int) { raw_set!(self, task_count, v) }
     #[inline] pub fn inc_task_count(&self) { raw_add_assign!(self, task_count, 1) }
     #[inline] pub fn dec_task_count(&self) { raw_sub_assign!(self, task_count, 1) }
-    #[inline] pub fn sched_class_ptr(&self) -> *mut sched_class { raw_get!(self, sched_class) }
-    #[inline] pub fn set_sched_class(&self, cls: *mut sched_class) { raw_set!(self, sched_class, cls) }
+    #[inline] pub fn sched_class(&self) -> Option<SchedClass> { raw_get!(self, sched_class) }
+    #[inline] pub fn set_sched_class(&self, cls: Option<SchedClass>) { raw_set!(self, sched_class, cls) }
 
+    // P3-10e: dispatch through the closed-set `SchedClass` enum. A
+    // registered `rq` always carries a class (`Some`), so these route to
+    // the policy body exactly as the old `if let Some(fp)` did; the `None`
+    // arm preserves the old behaviour without the NULL-deref UB the raw
+    // fn-pointer path risked. `task_tick`/`yield_task` are gone — both
+    // slots were forever `None` AND had zero call sites (never dispatched).
     #[inline] pub fn enqueue_task(&self, se: *mut sched_entity) {
-        unsafe { if let Some(fp) = (*self.sched_class_ptr()).enqueue_task { fp(self.raw.as_ptr(), se); } }
+        if let Some(cls) = self.sched_class() { cls.enqueue_task(self.raw.as_ptr(), se); }
     }
     #[inline] pub fn dequeue_task(&self, se: *mut sched_entity) {
-        unsafe { if let Some(fp) = (*self.sched_class_ptr()).dequeue_task { fp(self.raw.as_ptr(), se); } }
+        if let Some(cls) = self.sched_class() { cls.dequeue_task(self.raw.as_ptr(), se); }
     }
     #[inline] pub fn pick_next_task(&self) -> *mut sched_entity {
-        unsafe { (*self.sched_class_ptr()).pick_next_task.map_or(core::ptr::null_mut(), |fp| fp(self.raw.as_ptr())) }
+        self.sched_class()
+            .map_or(core::ptr::null_mut(), |cls| cls.pick_next_task(self.raw.as_ptr()))
     }
     #[inline] pub fn put_prev_task(&self, se: *mut sched_entity) {
-        unsafe { if let Some(fp) = (*self.sched_class_ptr()).put_prev_task { fp(self.raw.as_ptr(), se); } }
+        if let Some(cls) = self.sched_class() { cls.put_prev_task(self.raw.as_ptr(), se); }
     }
     #[inline] pub fn set_next_task(&self, se: *mut sched_entity) {
-        unsafe { if let Some(fp) = (*self.sched_class_ptr()).set_next_task { fp(self.raw.as_ptr(), se); } }
-    }
-    #[inline] pub fn task_tick(&self, se: *mut sched_entity) {
-        unsafe { if let Some(fp) = (*self.sched_class_ptr()).task_tick { fp(self.raw.as_ptr(), se); } }
-    }
-    #[inline] pub fn yield_task(&self) {
-        unsafe { if let Some(fp) = (*self.sched_class_ptr()).yield_task { fp(self.raw.as_ptr()); } }
+        if let Some(cls) = self.sched_class() { cls.set_next_task(self.raw.as_ptr(), se); }
     }
 }
 
