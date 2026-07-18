@@ -193,6 +193,19 @@ pub(crate) extern "C" fn proctab_proc_add(p: *mut Thread) {
     }
     xv6_proctab_dmplist_add(p);
     xv6_proctab_registered_inc();
+    // N-R6d-1: register in the generational `THREAD_TABLE` (parallel to the
+    // hlist above; the hlist stays the pid-lookup index until the last
+    // sub-step). Same `pid_wlock` already asserted at the top of this fn. The
+    // registry is sized to `NR_THREAD`, so `None` (table full) is impossible
+    // here — panic in the "should not happen" style if it ever occurs rather
+    // than leave a thread whose children could not resolve their parent edge.
+    if crate::proc::thread::thread_table_insert(
+        p as *mut c_void as *mut crate::bindings::thread,
+    )
+    .is_none()
+    {
+        panic_pid("thread_table_insert: registry full (should not happen)");
+    }
 }
 
 pub(crate) fn get_pid_thread(pid: i32) -> *mut Thread {
@@ -214,6 +227,12 @@ pub(crate) extern "C" fn proctab_proc_remove(p: *mut Thread) {
     let existing = xv6_proctab_pop_rcu(p);
     xv6_proctab_dmplist_del(p);
     xv6_proctab_registered_dec();
+    // N-R6d-1: deregister from the generational `THREAD_TABLE`, bumping the
+    // slot generation so any outstanding `Tid` to this thread (e.g. a child's
+    // `parent` edge) goes stale → resolves to null. Same `pid_wlock` asserted
+    // above; runs before the thread object is freed (`thread_destroy`), so no
+    // live `Tid` can dereference a freed thread.
+    crate::proc::thread::thread_table_remove(p as *mut c_void as *mut crate::bindings::thread);
     if !existing.is_null() && existing != p {
         panic_pid("thread_destroy called with a different proc");
     }

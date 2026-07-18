@@ -377,7 +377,14 @@ pub(crate) fn t_sid(p: *mut thread) -> c_int { field_get!(p, sid) }
 pub(crate) fn t_set_pid(p: *mut thread, pid: c_int) { field_set!(p, pid, pid) }
 pub(crate) fn t_set_pgid(p: *mut thread, v: c_int) { field_set!(p, pgid, v) }
 
-pub(crate) fn t_parent(p: *mut thread) -> *mut thread { field_get!(p, parent) }
+// N-R6d-1: `thread.parent` is now a generational `Tid`, not a `*mut thread`.
+// The get/set shims resolve it through `THREAD_TABLE`; a stale `Tid` (parent
+// exited) resolves to null — the existing "parent gone" semantics callers
+// already null-check. Signatures are unchanged, so `ThreadAccess::parent_ptr`/
+// `set_parent`, `clone.rs`, `pgroup.rs`, `exit.rs` are all untouched.
+pub(crate) fn t_parent(p: *mut thread) -> *mut thread {
+    crate::proc::thread::thread_parent_resolve(p)
+}
 pub(crate) fn t_pgroup(p: *mut thread) -> *mut pgroup { field_get!(p, pgroup) }
 pub(crate) fn t_session(p: *mut thread) -> *mut session { field_get!(p, session) }
 pub(crate) fn t_thread_group(p: *mut thread) -> *mut thread_group {
@@ -395,7 +402,9 @@ pub(crate) fn t_set_vm(p: *mut thread, v: *mut crate::bindings::vm_t) { field_se
 pub(crate) fn t_set_fdtable(p: *mut thread, v: *mut crate::bindings::vfs_fdtable) { field_set!(p, fdtable, v) }
 pub(crate) fn t_set_sigacts(p: *mut thread, v: *mut crate::bindings::sigacts_t) { field_set!(p, sigacts, v) }
 pub(crate) fn t_set_trapframe(p: *mut thread, v: *mut crate::bindings::utrapframe) { field_set!(p, trapframe, v) }
-pub(crate) fn t_set_parent(p: *mut thread, par: *mut thread) { field_set!(p, parent, par) }
+pub(crate) fn t_set_parent(p: *mut thread, par: *mut thread) {
+    crate::proc::thread::thread_parent_store(p, par)
+}
 pub(crate) fn t_set_thread_group(p: *mut thread, tg: *mut thread_group) { field_set!(p, thread_group, tg) }
 pub(crate) fn t_set_session(p: *mut thread, s: *mut session) { field_set!(p, session, s) }
 pub(crate) fn t_set_tgid(p: *mut thread, v: c_int) { field_set!(p, tgid, v) }
@@ -826,7 +835,9 @@ pub(crate) fn xv6_t_set_tgid(t: *mut thread, tgid: c_int) {
     field_set!(t, tgid, tgid)
 }
 pub(crate) fn xv6_t_set_parent(t: *mut thread, p: *mut thread) {
-    field_set!(t, parent, p)
+    // N-R6d-1: parent edge is a generational `Tid` — store `p`'s key (see
+    // `t_set_parent`). Same behaviour, now generation-checked on read-back.
+    crate::proc::thread::thread_parent_store(t, p)
 }
 pub(crate) fn xv6_t_set_thread_group(t: *mut thread, tg: *mut thread_group) {
     field_set!(t, thread_group, tg)
@@ -2102,8 +2113,11 @@ pub(crate) fn xv6_procdump_one(p: *mut thread) -> c_int {
         let pgid_v = (*p).pgid;
         let sid_v = (*p).sid;
         safestr(&mut name, t_name_ptr(p));
-        if !(*p).parent.is_null() {
-            safestr(&mut pname, t_name_ptr((*p).parent));
+        // N-R6d-1: `parent` is a generational `Tid` — resolve through the
+        // registry (stale → null) instead of reading the field as a pointer.
+        let parent = t_parent(p);
+        if !parent.is_null() {
+            safestr(&mut pname, t_name_ptr(parent));
         } else {
             pname[..4].copy_from_slice(b"N/A\0");
         }

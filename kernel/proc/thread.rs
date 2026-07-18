@@ -29,7 +29,8 @@ use crate::proc::access::{
     is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
     SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
 };
-use crate::kstd::{result_to_errptr, Errno, KResult};
+use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
+use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
 use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
@@ -135,6 +136,31 @@ fn __proctab_set_initproc(p: *mut thread) {
 // kernel-stack head arranged by `kstack_arrange` below).
 // ===========================================================================
 
+// ===========================================================================
+// `Tid` / `TID_TAG` — the thread family's generational key  [N-R6d-1]
+// ===========================================================================
+//
+// The internal generational handle for a thread, registered in
+// [`THREAD_TABLE`] (see below). `TID_TAG` is a distinct compile-time family
+// discriminator from `SID_TAG` (the session pilot, N-R6a), so a `Tid` and a
+// `Sid` are non-interchangeable types even though they share the one
+// [`GenTable`] implementation. `Tid` is *not* the userspace identity — `pid`
+// (the `Thread::pid` field) stays exactly that, unchanged; `Tid` is the
+// kernel-internal, generation-checked "is this thread still the same live
+// object?" handle that replaces raw `*mut Thread` relationship edges.
+
+/// Family tag for thread keys — an ASCII marker distinct from `SID_TAG`
+/// (`b"SESSION\0"`); only its distinctness matters (it makes [`Tid`] a
+/// different, non-interchangeable type from `Sid`/any future family key).
+pub(crate) const TID_TAG: u64 = u64::from_le_bytes(*b"THREAD\0\0");
+
+/// Typed generational handle to a live thread in [`THREAD_TABLE`], distinct
+/// from the userspace numeric `pid`. A stale `Tid` (its thread exited and was
+/// removed from the table) resolves to `None`/null. The `NONE` sentinel
+/// (`generation == 0`) is the in-struct "no thread" edge — see the `parent`
+/// field, which stores a bare `Tid` (8 bytes, generation-0 == "no parent").
+pub(crate) type Tid = GenKey<TID_TAG>;
+
 /// Native `struct thread` (`kernel/inc/proc/thread_types.h`) — the
 /// per-thread control block, laid out at the top of its kernel stack.
 #[repr(C, align(64))]
@@ -173,7 +199,19 @@ pub struct Thread {
     _pad1: [u64; 2],
     // ===== Cache line 3+: family tree (fork/exit/wait) =====
     pub sigacts: *mut sigacts_t,
-    pub parent: *mut Thread,
+    // N-R6d-1: the FIRST relationship edge converted off `*mut Thread` to a
+    // generational key. Stored as a bare [`Tid`] (8 bytes, same span the
+    // `*mut Thread` occupied — `GenKey{index:u32, generation:u32}` is 8
+    // bytes/align 4, so offset 264 and every following offset are unchanged;
+    // the layout asserts below prove it). `Tid::NONE` (`generation == 0`) is
+    // the "no parent" edge (init and detached children). Resolved to a
+    // `*mut thread` through [`THREAD_TABLE`] by the `parent` accessors
+    // (`ThreadAccess::parent_ptr`/`set_parent` → `proc_shims::t_parent`/
+    // `t_set_parent` → `thread_parent_resolve`/`thread_parent_store`); a
+    // stale `Tid` (parent freed) resolves to null — the existing "parent
+    // gone" semantics reparent/wait already handle. `vfork_parent` below
+    // stays `*mut Thread` (later sub-step).
+    pub parent: Tid,
     pub vfork_parent: *mut Thread,
     pub thread_group: *mut thread_group,
     pub pgroup: *mut pgroup,
@@ -240,6 +278,13 @@ const _: () = {
         "thread.rcu_read_lock_nesting offset"
     );
     assert!(core::mem::offset_of!(Thread, sigacts) == 256, "thread.sigacts offset");
+    // N-R6d-1: `parent` is now a `Tid` (`GenKey`), not a `*mut Thread`. A
+    // `GenKey{index:u32, generation:u32}` is exactly 8 bytes (align 4) — the
+    // same span the pointer (8 bytes, align 8) occupied — so this offset and
+    // every subsequent field offset are unchanged (the pointer's align-8 was
+    // not needed to keep offset 264 8-aligned; 264 is already a multiple of
+    // 8). The struct `size == 1152` assert above independently guards the tail.
+    assert!(core::mem::size_of::<Tid>() == 8, "Tid must be 8 bytes to preserve thread.parent span");
     assert!(core::mem::offset_of!(Thread, parent) == 264, "thread.parent offset");
     assert!(core::mem::offset_of!(Thread, vfork_parent) == 272, "thread.vfork_parent offset");
     assert!(core::mem::offset_of!(Thread, thread_group) == 280, "thread.thread_group offset");
@@ -268,6 +313,138 @@ const _: () = {
     assert!(core::mem::offset_of!(Thread, signal) == 488, "thread.signal offset");
     assert!(core::mem::offset_of!(Thread, rcu_head) == 1072, "thread.rcu_head offset");
 };
+
+// ===========================================================================
+// `THREAD_TABLE` — the thread generational registry  [N-R6d-1]
+// ===========================================================================
+//
+// A [`GenTable`] holding a stable `NonNull<Thread>` for every live thread,
+// registered alongside the proc-table hlist (`proctab_proc_add`) and
+// deregistered alongside it (`proctab_proc_remove`) — both already run under
+// `pid_wlock`, so the registry stays in lock-step with the hlist without a
+// new lock. The thread keeps its slab/kstack allocation (the table stores a
+// pointer, never the object by value → nothing moves → the asm-adjacent
+// `current`/`cpu_local.proc` raw `*mut Thread` stays valid, untouched here).
+//
+// Registration point (why `proctab_proc_add`, not the literal
+// `thread_create`): the table is a shared registry; every mutation must be
+// serialized. `proctab_proc_add`/`proctab_proc_remove` are the exact
+// "thread joins / leaves the process registry" lifecycle points and are
+// guaranteed under `pid_wlock` (they `panic` otherwise). `thread_create`
+// runs *unlocked* and is also invoked on error paths for threads that never
+// join the registry (`kthread_create` cleanup) — inserting there would race
+// and would leave orphan entries. Registering with the hlist is the
+// lock-correct realization of the §5c "register at creation" intent.
+//
+// Freeze/`noalias` screening (memory `freeze-noalias-hazard`): `GenTable` is
+// `Freeze`, but mutators form `&mut` only under `pid_wlock` (exclusive) and
+// the resolve/store helpers do a single, non-looping generation-checked
+// lookup — never a `&Freeze` field read hoisted out of a spin/wait loop. The
+// table hands out only raw `NonNull`/`*mut` (never `&Thread`), so no
+// `&Freeze` of a concurrently-mutated pointee is formed either.
+
+/// Registry capacity — `NR_THREAD` (`kernel/inc/param.h`, the kernel's hard
+/// cap on live threads), the true upper bound, so [`GenTable::insert`] can
+/// never return `None` where a thread was successfully created (no capacity
+/// regression). All-`None`/zero at rest → BSS, not data-segment.
+const NR_THREAD: usize = 10_000;
+
+/// `UnsafeCell` + `unsafe impl Sync` newtype so the registry can be a
+/// file-scope `static`, exactly like `proc_shims`'s `PROC_TABLE` and the
+/// session pilot's `SESSION_TABLE`. The `GenTable` is **not** internally
+/// synchronized; all access is serialized by `pid_lock` — `pid_wlock` for the
+/// `&mut self` mutators (`insert`/`remove_ptr`), `pid_lock` (read, or a held
+/// write lock) for the `&self` resolver (`get`/`key_of`).
+struct ThreadTableCell(core::cell::UnsafeCell<GenTable<Thread, NR_THREAD, TID_TAG>>);
+// SAFETY: every access below is taken while holding `pid_lock` at the
+// required strength (mutators assert `pid_wlock`); the raw `UnsafeCell`
+// access is thus race-free, same discipline as `SESSION_TABLE`.
+unsafe impl Sync for ThreadTableCell {}
+
+static THREAD_TABLE: ThreadTableCell =
+    ThreadTableCell(core::cell::UnsafeCell::new(GenTable::new()));
+
+/// Register `p` in [`THREAD_TABLE`], returning its fresh [`Tid`] (discarded
+/// by callers, which address threads by their stable pointer for this
+/// sub-step). `None` only if the table is full — impossible given
+/// [`NR_THREAD`]'s sizing. Called from `proctab_proc_add` under `pid_wlock`.
+pub(crate) fn thread_table_insert(p: *mut thread) -> Option<Tid> {
+    pid_assert_wholding();
+    let nn = NonNull::new(p)?;
+    // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
+    // registry is exclusive — no other hart holds a reference into the table
+    // (resolvers need `pid_lock`, excluded by our write lock).
+    let table = unsafe { &mut *THREAD_TABLE.0.get() };
+    table.insert(nn)
+}
+
+/// Deregister `p` from [`THREAD_TABLE`] (by its stable pointer — the thread
+/// caches no key), bumping the slot generation so any outstanding [`Tid`] to
+/// it (e.g. a child's `parent` edge) goes stale → resolves to null. A no-op
+/// if `p` was never registered. Called from `proctab_proc_remove` under
+/// `pid_wlock`.
+pub(crate) fn thread_table_remove(p: *mut thread) {
+    pid_assert_wholding();
+    let Some(nn) = NonNull::new(p) else { return };
+    // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
+    let table = unsafe { &mut *THREAD_TABLE.0.get() };
+    table.remove_ptr(nn);
+}
+
+/// Resolve thread `p`'s stored `parent` [`Tid`] to a live `*mut thread`, or
+/// null if it is [`Tid::NONE`] ("no parent" — init / a detached child) or
+/// stale (the parent exited and was removed → the correct "parent gone"
+/// answer reparent/wait already handle). The backing read for
+/// `ThreadAccess::parent_ptr` / `proc_shims::t_parent`.
+///
+/// Caller holds `pid_lock` where the edge is walked under it (attach/detach/
+/// reparent); the few pre-existing lock-free readers (e.g. `sys_getppid`)
+/// inherit exactly their prior best-effort profile — a single, non-looping
+/// generation-checked lookup (no freeze-hoist loop), and a *live* thread's
+/// parent slot is never concurrently removed (a parent with a live child is
+/// never reaped), so the resolved pointer is stable for them.
+pub(crate) fn thread_parent_resolve(p: *mut thread) -> *mut thread {
+    // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its
+    // own `parent` `Tid` field is a plain aligned word read.
+    let tid: Tid = unsafe { (*p).parent };
+    if tid.is_none() {
+        return ptr::null_mut();
+    }
+    // SAFETY: shared `&self` into the registry; excludes every `&mut self`
+    // mutator (they hold `pid_wlock`). No `&Thread` is formed — the raw
+    // pointer is handed straight back (freeze note above).
+    let table = unsafe { &*THREAD_TABLE.0.get() };
+    match table.get(tid) {
+        Some(nn) => nn.as_ptr(),
+        None => ptr::null_mut(),
+    }
+}
+
+/// Store `par` as thread `p`'s `parent` edge: `par == null` → [`Tid::NONE`]
+/// ("no parent"), otherwise `par`'s current [`Tid`] (reverse-looked-up in the
+/// registry). The backing write for `ThreadAccess::set_parent` /
+/// `proc_shims::t_set_parent`. If `par` is somehow unregistered it stores
+/// `NONE` (resolves to null) — the same "no reachable parent" outcome a
+/// dangling raw pointer would have been null-checked into.
+///
+/// Caller holds `pid_wlock` (every `set_parent` site — attach/detach/clone —
+/// does; the registry read is race-free under it).
+pub(crate) fn thread_parent_store(p: *mut thread, par: *mut thread) {
+    let tid = match NonNull::new(par) {
+        None => Tid::NONE,
+        Some(nn) => {
+            // SAFETY: shared `&self` into the registry under the caller's
+            // `pid_wlock` (exclusive vs other mutators). Reverse lookup only.
+            let table = unsafe { &*THREAD_TABLE.0.get() };
+            table.key_of(nn).unwrap_or(Tid::NONE)
+        }
+    };
+    // SAFETY: `p` is a live `*mut thread`; writing its own `parent` field
+    // under the caller's `pid_wlock` (exclusive) is race-free.
+    unsafe {
+        (*p).parent = tid;
+    }
+}
 
 // ---------------- constants ----------------------------------------------
 const PAGE_SHIFT: u32 = 12;

@@ -517,6 +517,27 @@ pub struct GenKey<const TAG: u64> {
 }
 
 impl<const TAG: u64> GenKey<TAG> {
+    /// The reserved "no object" sentinel key — `generation == 0`.
+    ///
+    /// [`GenTable::insert`] advances a slot's generation with
+    /// `wrapping_add(1)` **before** stamping the returned key, so a live key
+    /// always carries `generation >= 1`; generation `0` is never handed out
+    /// (it would take `2^32` reuse cycles of one slot to wrap back to it —
+    /// unreachable at kernel scale, see the module doc). This makes `NONE` a
+    /// niche value usable as an in-struct "no handle" marker without an
+    /// `Option` discriminant word: a relationship field can store a bare
+    /// `GenKey` (8 bytes) and use `NONE`/[`is_none`](Self::is_none) for the
+    /// null edge, and [`GenTable::get`] resolves `NONE` to `None` regardless
+    /// (an empty slot 0 also reads generation `0`, whose `ptr` is `None`).
+    pub const NONE: Self = GenKey { index: 0, generation: 0 };
+
+    /// True iff this is the [`NONE`](Self::NONE) sentinel (a stored "no
+    /// object" edge), i.e. `generation == 0`.
+    #[inline]
+    pub const fn is_none(self) -> bool {
+        self.generation == 0
+    }
+
     /// The slot index this key refers to.
     #[inline]
     pub const fn index(self) -> u32 {
@@ -678,6 +699,28 @@ impl<T, const CAP: usize, const TAG: u64> GenTable<T, CAP, TAG> {
     #[inline]
     pub fn contains(&self, k: GenKey<TAG>) -> bool {
         self.get(k).is_some()
+    }
+
+    /// Reverse lookup: return the current key of whichever slot holds
+    /// pointer `p` (linear scan), or `None` if `p` is not registered. Unlike
+    /// [`remove_ptr`](Self::remove_ptr) this does **not** mutate the table —
+    /// it reads back the live generation so a caller that holds an object as
+    /// a bare `*mut T`/`NonNull<T>` can obtain the generational handle to
+    /// store as a relationship edge (e.g. the thread `parent` edge stamps the
+    /// parent's key without the parent having to cache its own key).
+    ///
+    /// Requires `&self` (owning lock held at least for read). Rare-path
+    /// (edge writes happen at fork/reparent, not in any hot loop).
+    pub fn key_of(&self, p: NonNull<T>) -> Option<GenKey<TAG>> {
+        for (i, slot) in self.slots.iter().enumerate() {
+            if slot.ptr == Some(p) {
+                return Some(GenKey {
+                    index: i as u32,
+                    generation: slot.generation,
+                });
+            }
+        }
+        None
     }
 
     /// Visit every live object's stable pointer, in ascending slot order.

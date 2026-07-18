@@ -3894,6 +3894,120 @@ proven end-to-end on a real subsystem registry with zero behaviour change.
 Ready for N-R6b (pgroup → `Pgid`). The thread/proc core (N-R6d) remains gated
 on the user checkpoint.
 
+### Iteration 86 — 2026-07-18 — Wave N-R6d-1 (FOUNDATION sub-step of the thread/proc core): `THREAD_TABLE` registration + the FIRST relationship edge (`thread.parent`) converted `*mut Thread` → generational `Tid`
+
+**Goal (`RUST_NATIVE_REDESIGN.md` §3a / §5c 6d-1):** register every live
+thread in a `GenTable` and convert the first `*mut Thread` relationship edge
+(`thread.parent`) to a generation-checked key, exercising the table end-to-end
+while keeping everything else (`pgroup`/`session`/`thread_group` edges,
+`vfork_parent`, the proc-table hlist, run/wait queues, `get_pid_thread`,
+`current`/`cpu_local.proc`) raw `*mut`. Behaviour-preserving; small,
+boot-gated; the highest-risk area of the kernel.
+
+**(1) `GenTable` niche + reverse lookup — `kernel/kstd.rs`:**
+- `GenKey::NONE` (`const`, `generation == 0`) + `is_none()`. `insert` bumps a
+  slot's generation with `wrapping_add(1)` **before** stamping the key, so a
+  live key always has `generation >= 1` and `0` is never handed out — making
+  `NONE` a niche the parent edge stores in-struct (8 bytes, no `Option`
+  discriminant word). `get(NONE)` resolves to `None` regardless.
+- `GenTable::key_of(&self, NonNull<T>) -> Option<GenKey>` — non-mutating
+  pointer→key reverse scan (the read-only twin of `remove_ptr`), so a thread
+  that holds its parent only as `*mut` can stamp the parent's current key
+  without the parent caching its own key. No thread struct field added → no
+  layout change beyond the `parent` field itself.
+
+**(2) `Tid` + `THREAD_TABLE` — `kernel/proc/thread.rs`:**
+- `TID_TAG = b"THREAD\0\0"` (distinct from the pilot's `SID_TAG = b"SESSION\0"`
+  → `Tid` and `Sid` are non-interchangeable types); `type Tid =
+  GenKey<TID_TAG>`. `pid` stays the userspace identity, unchanged.
+- `static THREAD_TABLE: GenTable<Thread, NR_THREAD=10_000, TID_TAG>` in the
+  `UnsafeCell` + `unsafe impl Sync` `PROC_TABLE`/`SESSION_TABLE` idiom. Cap =
+  `NR_THREAD` (the true upper bound → `insert` never `None` in practice).
+  Threads keep their kstack/slab allocation — the table stores a stable
+  `NonNull<Thread>`, so nothing moves and the asm-adjacent `current` stays a
+  raw `*mut Thread`, untouched.
+- `thread_table_insert`/`thread_table_remove` (both `pid_assert_wholding`),
+  `thread_parent_resolve` (read the stored `Tid`, `get` → ptr/null),
+  `thread_parent_store` (`par == null` → `NONE`, else `key_of(par)`).
+
+**(3) Registration points — `kernel/proc/pid.rs`:** hooked
+`thread_table_insert` into `proctab_proc_add` and `thread_table_remove` into
+`proctab_proc_remove` — the exact "thread joins/leaves the process registry"
+lifecycle points, both already guaranteed under `pid_wlock` (they `panic`
+otherwise). **Deviation from the literal §5c "register at `thread_create`",
+and why:** `thread_create` runs *unlocked* and is also called on error paths
+for threads that never join the registry (`kthread_create` cleanup) —
+registering there would race the shared table and leave orphan entries.
+Binding to the hlist add/remove is the lock-correct realization of the
+"register on creation / invalidate on destruction" intent (removal happens
+before the thread object is freed by `thread_destroy`, so no live `Tid` ever
+dereferences freed memory). Covers all 5 sites (userinit / kthread_create /
+fork add; exit-reap / thread-group self-reap remove) via 2 edit points.
+
+**(4) The `parent` edge — `kernel/proc/thread.rs` + `proc_shims.rs`:**
+- Field `pub parent: *mut Thread` → `pub parent: Tid` (offset 264). `GenKey`
+  is 8 bytes / align 4 vs the pointer's 8 bytes / align 8 — 264 is already
+  8-aligned, so **offset 264 and every following field offset are unchanged**
+  (all 30 `offset_of!` asserts + `size == 1152` + `align == 64` pass at
+  compile time; added `size_of::<Tid>() == 8`).
+- Accessor resolution concentrated in the shims (`access.rs` untouched):
+  `proc_shims::t_parent` → `thread_parent_resolve`, `t_set_parent` /
+  `xv6_t_set_parent` → `thread_parent_store`. `parent_ptr()`/`set_parent()`
+  signatures unchanged, so `attach_child`/`detach_child`/`clone.rs`/`pgroup.rs`/
+  `exit.rs`/`sys_getppid` compile and behave identically. Fixed the one direct
+  field read in `procdump` (`(*p).parent.is_null()` → `t_parent(p)`).
+- **Semantics preserved:** a fresh (zeroed) thread has `parent == NONE`
+  (== the old null pointer); `set_parent(null)` (detach) stores `NONE`;
+  `parent_ptr()` on a live thread returns its live parent (a parent with a
+  live child is never reaped, so its slot is never concurrently removed); a
+  stale `Tid` (parent exited/freed) resolves to null — the exact "parent gone"
+  case reparent/wait already null-check.
+
+**No `.S`/asm consumes `THREAD_PARENT`** (grep over `kernel/**/*.S`: none; the
+thread block note's P3-N9 finding re-verified). No C reads `thread->parent`
+(zero C files). **Boundary kept `*mut` (this sub-step's stop line):**
+`vfork_parent`, `pgroup`/`session`/`thread_group` edges, proc-table hlist,
+run/wait queues, `get_pid_thread`, `current`/`cpu_local.proc` — all later
+sub-steps.
+
+**Freeze/`noalias` screening (memory `freeze-noalias-hazard`):** `GenTable`
+is `Freeze`, but `&mut` is formed only under `pid_wlock` (exclusive) and
+resolve/store do a single non-looping generation-checked lookup — never a
+`&Freeze` field read hoisted out of a spin/wait loop. The table hands out only
+raw `NonNull`/`*mut`, never `&Thread`. No `*mut → &` of a concurrently-mutated
+Freeze type. The few pre-existing lock-free readers (`sys_getppid`) inherit
+exactly their prior best-effort raw-read profile.
+
+**rust-skills rules applied:** `api-newtype-safety` + `type-newtype-ids`
+(`TID_TAG`-parameterized `Tid`, distinct from `Sid`), `num-nonzero`-spirit
+(the `generation == 0` niche → no `Option` discriminant word on the edge),
+`const-fn`/`const-block` (`GenKey::NONE`, compile-time layout asserts),
+`mem-assert-type-size` (`size_of::<Tid>() == 8` + the 30 offset asserts),
+`unsafe-safety-comment` + `unsafe-minimize-scope` (every `unsafe`/table access
+is a one-line block with a `// SAFETY:` tying it to the held lock),
+`own-*`/`conc-*` (the Freeze-aliasing screening), `pat-let-else`
+(`let Some(nn) = … else { return }`), `doc-all-public`. Crate is **edition
+2021** (no Rust-2024 syntax introduced).
+
+**Verification (orchestrator recipe, `TOOLPREFIX` + `LAB=fs`; cache clean
+before+after — `CMAKE_BUILD_TYPE` empty, `C_COMPILER` = toolchain
+`riscv64-unknown-elf-gcc`):** `cargo clean` + full crate recompile **0
+warnings**; kernel + `fs_img` built; all compile-time layout asserts passed
+(so no thread offset shifted). Boot gate: **exactly one** `init: starting sh`
+across **3 boots**. **`usertests reparent` OK** (the parent-edge crux —
+reparent-on-exit walks `thread.parent`), **forkfork OK**, **forkforkfork OK**
+(P3-BUG1 intact — prints OK), **testsig ALL TESTS PASSED (21/21)**, **usertests
+exitwait / killstatus / twochildren OK**, **mmaptest all tests passed**,
+stressfs ran clean, `cat /nonexistent` → cannot-open (ENOENT). Zero
+`panic`/`ASSERTION`/non-positive/double-free/UAF across all runs. The `FAILED
+-- lost some free pages` trailer is the pre-existing accounting artefact (Known
+issues), not a regression. **NOT committed.**
+
+**Outcome: full success** — the thread generational registry is live and the
+first relationship edge (`parent`) is generation-checked with zero behaviour
+change and zero layout disruption. Ready for 6d-2 (pgroup/session/thread_group
+edges → keys).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
