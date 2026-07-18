@@ -3185,6 +3185,108 @@ table type + 6 dead slots + 1 facade alias deleted.
   `balloc`/`bad inode`/`panic`) across every run. No new faults. LOC: 1
   file (`kernel/vfs/inode.rs`), signatures unchanged.
 
+### Iteration 78 — 2026-07-17 — Wave P3-7d (fs core + syscall layer): reference-ification of `vfs/fs.rs` + `vfs/vfs_syscall.rs` — and the architectural ceiling that split them
+
+- **The fs-core + syscall-marshalling slice of the reference-ification
+  arc** (user directive: fully adapt Rust style / reduce unsafe),
+  extending the `file.rs` **P3-7b (`92f53e6`)** / `inode.rs` **P3-7c
+  (`2fafbe3`)** hoist pattern. The two target files turned out to have
+  **opposite unsafe architectures**, and honesty (correctness over metric)
+  demanded treating them differently.
+- **`vfs/fs.rs` — NOT converted, a deliberate no-op (documented
+  finding).** Unlike `inode.rs`/`file.rs` (which were mostly-safe fns with
+  *scattered* inline `unsafe { (*x).field }` derefs that a single boundary
+  `&mut` collapses), **every** `fs.rs` fn wraps its *entire body* in one
+  `unsafe { … }` block, and each is **saturated with genuinely-raw
+  operations** that stay raw under the P3-7b/7c honesty rules: **bitfield
+  flag accessors** (`(*sb).flags.valid()`/`.set_mount()`/`.registered()`…,
+  pervasive), **lock place-projections** (`&raw mut (*sb).lock`/
+  `.spinlock`/`.mutex`), **list/hlist splices** (`ln_push_back`/`ln_detach`/
+  `hlist_*` on `siblings`/`orphan_list`/`inodes`), **`dev_mnt` union**
+  writes, **atomic-reinterpret** refcount helpers (`sb_refcount_atomic`
+  etc.), and **slab alloc/free**. Because the body is a *single* block,
+  hoisting a boundary reference (`unsafe { &mut *sb }` is itself an
+  `unsafe` block) and converting the residual plain-field reads to safe
+  **cannot remove that block** — the raw bitfield/lock/list/union/atomic
+  sites keep it — so the `grep -cE "unsafe \{"` metric is **flat (~0%
+  honest ceiling)**, and splitting whole-body blocks to chase it would
+  *increase* the count while churning the mount/refcount/eviction code the
+  corruption battery is most sensitive to. Same disposition class as
+  P3-7b's "`FileOps` trait deliberately NOT converted — would reduce ZERO
+  unsafe + add risk." **Metric: `fs.rs` 112 → 112 (unchanged).**
+- **`vfs/vfs_syscall.rs` — converted (the file with the collapsible
+  pattern).** It is mostly *safe* Rust with **scattered inline** `unsafe {
+  (*x).field }` derefs; the wins come from two honest sub-patterns:
+  - **Boundary reference hoist** (the P3-7b/7c pattern): `link_inner`'s
+    three separate `unsafe { (*src).mode/.sb/.ino }` reads collapse to one
+    audited `let src_ref = unsafe { &*src };` (`src` is refcount-held
+    through the last read; `vfs_nameiparent` between reads resolves a
+    *different* path and does not mutate it; the borrow ends before
+    `vfs_iput(src)`). `chdir_inner`'s cwd swap takes one `&mut *fs` **under
+    `fs_lock`** (genuinely exclusive) for the read+write of the plain
+    `.cwd` `vfs_inode_ref`.
+  - **Read-a-stable-field-once** (`unsafe-minimize-scope`): `pipe_inner`
+    reads `(*p).vm` once for both copyouts; `vfs_mount_path` reads
+    `(*target_dir).sb` once for the wlock + matching unlock; `vfs_umount_path`
+    reads `(*child_sb).mountpoint` once (split the `A || B` null-check into
+    two sequential checks, identical `EINVAL`+`vfs_iput` bodies) and the
+    parent `(*target_dir).sb` once for the wlock + both unlock arms —
+    caching also *guarantees* the lock/unlock name the same superblock,
+    which `vfs_unmount` (frees the child sb + mounted_root, never the
+    parent mountpoint's `.sb`) leaves stable.
+- **Kept raw in `vfs_syscall.rs`** (per the brief's "user pointers STAY
+  raw" + the union/place rules): every **user-space buffer pointer**
+  (`path[..]=0`, `strlen(path.as_ptr())`, `vm_copyout`/`either_copyout`
+  destinations, `memmove`), the `(*f).pos.dir_iter` **union** reads/writes
+  in `getdents_inner`, the `ptr::addr_of_mut!((*fdtable).lock)` /
+  `((*fs).cwd/.rooti)` **lock/ref place-projections**, `IRef::from_raw`,
+  `core::mem::zeroed()`, and the reassigned-`inode` **symlink-resolution
+  loops** (`open_inner`/`stat_inner`/`readlink_inner`: the local is
+  re-pointed with `vfs_iput` between reads, so no single reference spans
+  them). Whole-body-unsafe helpers here too (`vfs_inode_stat_fallback`,
+  `fcntl_inner`'s `F_SETFL` arm) were **left alone** — same flat-metric /
+  aliasing-risk reasoning as `fs.rs` (fcntl's `F_DUPFD` arm *stores* the
+  shared `f` into the fdtable, so a `&mut *f` overlapping that would be
+  dishonest).
+- **rust-skills applied**: `unsafe-minimize-scope` (each hoist/cache
+  narrows a field cluster or repeated read to a single audited site),
+  `unsafe-safety-comment` (a `SAFETY:`/`P3-7d` note at every conversion),
+  `own-borrow-over-clone` (`&*src`/`&mut *fs`, no record copies),
+  `mem-take-replace`-adjacent honesty on the cwd swap (plain `Copy` of the
+  small `vfs_inode_ref`, unchanged). Aliasing caveat: same documented
+  layout-frozen approximation as P3-7a/7b/7c (a `dup`-shared fd or a
+  lock-serialized object may be viewed through both a reference and the
+  raw pointer; serialized by the relevant lock, invisible to each frame's
+  codegen).
+- **Metric**: `grep -cE "unsafe \{"` — `vfs_syscall.rs` **117 → 109**
+  (−8, **6.8%**); `fs.rs` **112 → 112** (0%, the documented architectural
+  ceiling above). Combined file pair **229 → 221** (−8, 3.5%) — a modest,
+  honest drop concentrated entirely in the file that structurally admits
+  it, exactly the brief's "expect a modest drop; do NOT force user-pointer
+  conversions" outcome.
+- **Verification** (worker, cache-first): `cargo clean` + full cmake
+  rebuild → **0 warnings 0 errors**; cache discipline verified before AND
+  after (`CMAKE_BUILD_TYPE` empty, toolchain `riscv64-unknown-elf-gcc`,
+  `Lab: fs`). Boot ×3 on **fresh pristine images**, each exactly ONE
+  `init: starting sh` + stable `/ $`; fs.rs mount lines all present
+  (`xv6fs: mounted at /root` + `chroot … successful`, `tmpfs: mounted at
+  /tmp`, `devtmpfs: mounted at /dev`). Full corruption battery: `mkdir d1`
+  twice → second `mkdir: d1 failed to create` (EEXIST); `ln /README.md rr`
+  then `wc rr` = **714 3365 26018**; `cat README.md | wc` = **714 3365 26018**
+  (the syscall read path this wave touches); **symlinktest** both parts
+  `ok`; `cat nonexistentfile` → ENOENT (`cannot open`); `usertests
+  createdelete`/`linktest`/`unlinkread`/`bigdir` each **OK** (the "lost
+  some free pages ~193004" trailer is the documented **pre-existing**
+  single-test artifact, confirmed identical in P3-7c's A/B baseline —
+  NOT a regression); **stressfs ×2** (concurrent read/write storm, shell
+  alive, no corruption); **testsig ALL TESTS PASSED (21/21)**; **mmaptest:
+  all tests passed** (incl. `test_mmap_fork`); `forkforkfork` → `exec
+  forkforkfork failed` (the invariant baseline signature — the binary is
+  not built into the image; only `forktest`/`vforktest` exist). **ZERO**
+  `panic`/`corrupt`/`fault` markers across all three runs. LOC: 1 file
+  touched (`kernel/vfs/vfs_syscall.rs`); all signatures unchanged;
+  `kernel/vfs/fs.rs` untouched.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

@@ -1431,7 +1431,16 @@ fn link_inner() -> KResult<c_int> {
         return Err(Errno::NoEnt);
     }
 
-    if is_dir(unsafe { (*src).mode }) {
+    // P3-7d reference-ification: `src` is a live, referenced inode (the
+    // refcount `vfs_namei` returned is held through the last read below);
+    // one audited shared borrow replaces the three separate
+    // raw `(*src).*` field reads (`mode`/`sb`/`ino`). The borrow
+    // ends before the `vfs_iput(src)` teardown; the intervening
+    // `vfs_nameiparent` resolves a different path and does not mutate
+    // `src`. SAFETY: non-null `src` (checked above).
+    let src_ref = unsafe { &*src };
+
+    if is_dir(src_ref.mode) {
         vfs_iput(src);
         return Err(Errno::Perm);
     }
@@ -1449,8 +1458,8 @@ fn link_inner() -> KResult<c_int> {
     let name_len = unsafe { strlen(name.as_ptr()) };
 
     let mut old_dentry: vfs_dentry = unsafe { core::mem::zeroed() };
-    old_dentry.sb = unsafe { (*src).sb };
-    old_dentry.ino = unsafe { (*src).ino };
+    old_dentry.sb = src_ref.sb;
+    old_dentry.ino = src_ref.ino;
 
     let ret = vfs_link(&mut old_dentry, parent, name.as_ptr(), name_len);
 
@@ -1659,9 +1668,14 @@ fn chdir_inner() -> KResult<()> {
     let mut old_cwd: vfs_inode_ref;
     {
         let _g = fs_lock(fs);
-        // SAFETY: `fs` is live; `.cwd` is a plain embedded field.
-        old_cwd = unsafe { (*fs).cwd };
-        unsafe { (*fs).cwd = new_cwd_ref };
+        // P3-7d: a single audited `&mut` hoist (taken under `fs_lock`, so
+        // the swap is genuinely exclusive) replaces the separate
+        // read/write raw `(*fs).cwd` deref blocks; `.cwd` is a plain
+        // embedded `vfs_inode_ref`.
+        // SAFETY: `fs` is live; the borrow is scoped to the locked block.
+        let fs_ref = unsafe { &mut *fs };
+        old_cwd = fs_ref.cwd;
+        fs_ref.cwd = new_cwd_ref;
     }
 
     vfs_inode_put_ref(&mut old_cwd);
@@ -1823,9 +1837,13 @@ fn pipe_inner(fdarray: u64) -> KResult<()> {
     // vm_copyout may sleep (acquires rwsem), so it must run outside the
     // spinlock.
     let p = current();
-    if vm_copyout(unsafe { (*p).vm }, fdarray, &fd0 as *const c_int as *const c_void, core::mem::size_of::<c_int>() as u64) < 0
+    // P3-7d: read `p->vm` once (was deref'd twice for the two copyouts);
+    // the running thread's address space is stable across this call.
+    // SAFETY: `p` is the live running thread; `.vm` is a plain field.
+    let vm = unsafe { (*p).vm };
+    if vm_copyout(vm, fdarray, &fd0 as *const c_int as *const c_void, core::mem::size_of::<c_int>() as u64) < 0
         || vm_copyout(
-            unsafe { (*p).vm },
+            vm,
             fdarray + core::mem::size_of::<c_int>() as u64,
             &fd1 as *const c_int as *const c_void,
             core::mem::size_of::<c_int>() as u64,
@@ -2123,10 +2141,16 @@ pub(crate) extern "C" fn vfs_mount_path(
         }
     }
 
+    // P3-7d: read `target_dir->sb` once (was deref'd twice, for the wlock
+    // and the matching unlock). `vfs_mount` does not change the mountpoint
+    // inode's `.sb`, so caching it also guarantees the lock/unlock name
+    // the same superblock. SAFETY: non-null `target_dir` (checked above).
+    let target_sb = unsafe { (*target_dir).sb };
+
     // Acquire the locks vfs_mount() requires: mount mutex, superblock write
     // lock, mountpoint inode lock.
     vfs_mount_lock();
-    vfs_superblock_wlock(unsafe { (*target_dir).sb });
+    vfs_superblock_wlock(target_sb);
     vfs_ilock(target_dir);
 
     let ret = vfs_mount(fstype, target_dir, source_inode, 0, ptr::null());
@@ -2135,7 +2159,7 @@ pub(crate) extern "C" fn vfs_mount_path(
     // released them.
     if ret == 0 {
         vfs_iunlock(target_dir);
-        vfs_superblock_unlock(unsafe { (*target_dir).sb });
+        vfs_superblock_unlock(target_sb);
     }
     vfs_mount_unlock();
 
@@ -2197,25 +2221,36 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
 
     // SAFETY: non-null `mounted_root`.
     let child_sb = unsafe { (*mounted_root).sb };
-    // SAFETY: non-null `child_sb` checked next line.
-    if child_sb.is_null() || unsafe { (*child_sb).mountpoint }.is_null() {
+    if child_sb.is_null() {
         vfs_iput(mounted_root);
-        return neg(EINVAL); // Not mounted, or no mountpoint.
+        return neg(EINVAL); // Not mounted.
     }
-
+    // P3-7d: read `child_sb->mountpoint` once (was deref'd twice — the
+    // null check and the `target_dir` bind); the value is stable here.
     // SAFETY: `child_sb` checked non-null above.
     let target_dir = unsafe { (*child_sb).mountpoint };
+    if target_dir.is_null() {
+        vfs_iput(mounted_root);
+        return neg(EINVAL); // No mountpoint.
+    }
     // SAFETY: non-null `target_dir`.
     if unsafe { (*target_dir).flags.mount() } == 0 {
         vfs_iput(mounted_root);
         return neg(EINVAL); // Mountpoint not marked as a mount.
     }
 
+    // P3-7d: read the parent superblock `target_dir->sb` once (was deref'd
+    // three times — the wlock and both unlock arms). `vfs_unmount` frees
+    // the child sb and mounted_root, never the parent mountpoint's `.sb`,
+    // so caching it is stable and keeps the lock/unlock symmetric.
+    // SAFETY: non-null `target_dir` (checked above).
+    let parent_sb = unsafe { (*target_dir).sb };
+
     // Acquire the locks vfs_unmount() requires: mount mutex, parent
     // superblock write lock, child superblock write lock, mountpoint inode
     // lock, mounted-root inode lock.
     vfs_mount_lock();
-    vfs_superblock_wlock(unsafe { (*target_dir).sb });
+    vfs_superblock_wlock(parent_sb);
     vfs_superblock_wlock(child_sb);
     vfs_ilock(target_dir);
     vfs_ilock(mounted_root);
@@ -2228,7 +2263,7 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
         vfs_iunlock(mounted_root);
         vfs_iunlock(target_dir);
         vfs_superblock_unlock(child_sb);
-        vfs_superblock_unlock(unsafe { (*target_dir).sb });
+        vfs_superblock_unlock(parent_sb);
         vfs_mount_unlock();
         vfs_iput(mounted_root);
         return ret;
@@ -2237,7 +2272,7 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     // On success, vfs_unmount() has already unlocked and freed
     // mounted_root/child_sb; only release what's left.
     vfs_iunlock(target_dir);
-    vfs_superblock_unlock(unsafe { (*target_dir).sb });
+    vfs_superblock_unlock(parent_sb);
     vfs_mount_unlock();
 
     0
