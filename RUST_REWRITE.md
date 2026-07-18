@@ -3690,6 +3690,86 @@ table type + 6 dead slots + 1 facade alias deleted.
   ENOSPC` path was confirmed correct, not touched). Crate is **edition
   2021**.
 
+### Iteration 84 — 2026-07-18 — Wave N-R1 (PILOT of the full-Rust-native redesign): lock-primitive family typed-reference conversion — BLOCKED by the `Copy`/`UnsafeCell` floor; delivered the sound whole-body-`u!` collapse + the blocker finding
+
+**Goal (per `RUST_NATIVE_REDESIGN.md` §3e / §5 N-R1):** convert the
+lock-primitive family (`completion`/`mutex`/`rwsem`/`semaphore`) from
+C-transliteration `*mut foo_t` signatures to idiomatic typed references
+(`&RawFoo`), collapsing the whole-body `u!{}` + `as_native` per fn — proving
+the 3e mechanical `*mut T`→`&T` subset end-to-end on a self-contained
+subsystem.
+
+**KEY FINDING — the 3e typed-reference subset does NOT apply to this family;
+3d (UnsafeCell / lock-owns-data) must land first.** I implemented the full
+`&RawCompletion`/`&RawSemaphore` conversion (all entry points except the
+self-referential `*_init`), including the boundary hoist at all ~26
+completion + ~11 semaphore call sites (pcache/virtio/ramdisk/bufcache/
+superblock/x1_sdhci/sync). It built 0-warning clean — **and hung at boot**
+(reproduced: kernel reaches "pcache flusher thread started" then never prints
+"init: starting sh"; `echo HELLO` gets no reply; HEAD boots fine on the same
+tree). Root cause: `RawCompletion`/`RawSemaphore`/`RawMutex`/`RawRwsem` are
+`#[derive(Copy)]` with **no `UnsafeCell`** (they are embedded *by value* in
+bindgen structs — `bio.io_completion`, `pcache.flush_completion`,
+`tty.completion`, ... — that require the `Copy`), so they are `Freeze`. A
+`&RawCompletion` parameter therefore gets LLVM `readonly` + `noalias`, and the
+**release** optimiser hoists the `done`/`value` read out of the
+`while !try_wait_for_completion_locked(c)` wait loop → infinite spin once a
+sleeping waiter's field is mutated by another hart's `complete()` → boot
+hang. `&mut` does not help (still `noalias` → same hoist); the *only* sound
+signatures are raw `*mut` (status quo) **or** `&RawFoo` with the interior
+behind `UnsafeCell` — but `UnsafeCell` is `!Copy`, which breaks every
+by-value embedder. That `Copy`→`UnsafeCell` restructuring IS the wave-3d
+lock-owns-data work the plan sequences AFTER 3e; the pilot's job was to find
+exactly this, and it did. **Recommendation for the orchestrator: reorder —
+the lock family cannot take typed references until 3d converts these four
+types to `UnsafeCell`-interior `!Copy` lock types (which also requires
+migrating every by-value embedder off `Copy`). 3e should proceed on leaf
+subsystems whose types are genuinely exclusive/non-shared (N-R2), not on
+shared-mutable lock primitives.**
+
+**What was actually delivered (sound, behaviour-preserving, raw sigs KEPT):**
+the redundant whole-body `u!{}` wrappers were removed from every public entry
+point in all four files. These wrapped only calls to already-safe helpers
+(the audited `unsafe` lives in the small field accessors + the `zeroed()`/
+`from_raw` sites, all untouched); the `u!` macro's own doc prescribes
+removing such pure pass-through wrappers. Because `unsafe {}` is a
+compile-time-only permission marker, the generated machine code is
+**byte-identical** — zero behaviour/codegen change. Signatures, `as_native`,
+null checks, and ALL call sites are unchanged (no cascade into fs/inode/vm).
+A `// N-R1 NOTE` block at the top of each file's public API records the
+finding + why raw is kept.
+
+**Per-file metrics (before → after):**
+- `completion.rs`: `u!{` 32 → 23; raw-ptr `pub(crate) fn` 9 → 9 (kept); `as_native` 10 → 10 (kept); audited `unsafe{`/helper blocks unchanged.
+- `semaphore.rs`: `u!{` 29 → 22; raw-ptr fn 7 → 7; `as_native` 7 → 7.
+- `mutex.rs`: `u!{` 25 → 18; raw-ptr fn 7 → 7; `as_native` 8 → 8.
+- `rwsem.rs`: `u!{` 39 → 28; raw-ptr fn 11 → 11; `as_native` 12 → 12.
+- Total: **−34 whole-body `unsafe` wrappers** removed across the family; net raw-pointer-`fn` and audited-`unsafe`-block counts deliberately unchanged (the honest floor for this wave).
+
+**rust-skills rules applied:** `unsafe-minimize-scope` (removed blanket
+whole-fn `unsafe`, leaving unsafe only on the genuinely-unsafe field
+projections / reborrows), `unsafe-safety-comment` (every retained `unsafe`
+already carries `// SAFETY:`; the removed wrappers were the documented
+"pure pass-through" exception), `conc-atomic-ordering` (no atomics touched —
+mutex holder/sem value orderings untouched), `own-*` (the aborted `&`
+conversion was reverted precisely because it violated the aliasing model —
+`Freeze` shared refs are `readonly`), `name-*`/`pat-*` (unchanged). Crate is
+**edition 2021** (kept `#[no_mangle]`/`u!` forms; no Rust-2024 syntax).
+
+**Verification (orchestrator recipe, TOOLPREFIX+LAB=fs; cache clean
+before+after — `CMAKE_BUILD_TYPE` empty, `C_COMPILER` = toolchain
+`riscv64-unknown-elf-gcc`):** `cargo clean` + full rebuild **0 warnings**
+(default + all in-kernel-test features); kernel + fs_img built. Boot gate:
+exactly one `init: starting sh` + stable `/ $`, `echo` round-trips.
+`cat README.md | wc` = **714 3365 26018**; `cat nonexistent` → cannot-open
+(ENOENT). `usertests forkforkfork` **OK** (P3-BUG1 completion/log path intact,
+no panic). `usertests createdelete` **OK**; `usertests forkfork` **OK** +
+`ALL TESTS PASSED`. `stressfs` ×2 ran clean (the block-I/O `completion` wait
+path) — no panic/reentry/hang. `mmaptest` **16/16** all passed. `testsig`
+**ALL TESTS PASSED (21/21)**. Zero `panic`/`reentry`/`kerneltrap` across all
+runs. The `FAILED -- lost some free pages` trailer is the pre-existing
+accounting artefact (see Known issues), not a regression. **NOT committed.**
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

@@ -249,7 +249,18 @@ extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 // Public API
 // ---------------------------------------------------------------------------
 
-pub(crate) fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
+// N-R1 NOTE — signatures KEPT RAW `*mut mutex_t` (same finding as
+// `completion.rs`, plus a scope constraint): `RawMutex` is `#[derive(Copy)]`
+// + no `UnsafeCell`, so a `&RawMutex` parameter would `readonly`/`noalias`-
+// miscompile the `while get_holder != pid` wait loop (hang); the sound
+// typed-reference conversion needs the wave-3d `UnsafeCell` work first. The
+// direct call sites also live in out-of-scope corruption-sensitive VFS/mm
+// code (`vfs/fs.rs`, `vfs/inode.rs`, `bufcache.rs`), owned by later waves.
+// What DID change: the redundant whole-body `u!` wrappers are removed from
+// the public entry points (all inner operations are already-safe helper
+// calls; the audited `unsafe` stays in the field accessors + `zeroed()`/
+// `from_raw`).
+pub(crate) fn mutex_init(m: *mut mutex_t, name: *mut c_char) {
     let m = as_native(m);
     spin_init(lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
     tq_init(wq_ptr(m),
@@ -257,9 +268,9 @@ pub(crate) fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
             lk_ptr(m));
     set_name(m, name);
     set_holder(m, -1);
-}}
+}
 
-pub(crate) fn mutex_lock(m: *mut mutex_t) { u! {
+pub(crate) fn mutex_lock(m: *mut mutex_t) {
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -273,31 +284,31 @@ pub(crate) fn mutex_lock(m: *mut mutex_t) { u! {
         machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
         let _ = tq_wait(wq_ptr(m), lk_ptr(m), null_mut());
     }
-}}
+}
 
-pub(crate) fn mutex_unlock(m: *mut mutex_t) { u! {
+pub(crate) fn mutex_unlock(m: *mut mutex_t) {
     let m = as_native(m);
     let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
     do_wakeup(m);
-}}
+}
 
-pub(crate) fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
+pub(crate) fn holding_mutex(m: *mut mutex_t) -> c_int {
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
     if cur.is_null() { return 0; }
     // SeqCst load to match `__atomic_load_n(..., SEQ_CST)` in C.
     let h = holder_atomic(m).load(Ordering::SeqCst);
     if h == machine::thread_pid(cur) { 1 } else { 0 }
-}}
+}
 
-pub(crate) fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
+pub(crate) fn mutex_trylock(m: *mut mutex_t) -> c_int {
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     if try_set_holder(m, pid) { 1 } else { 0 }
-}}
+}
 
-pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
+pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int {
     if m.is_null() { return -(EINVAL as c_int); }
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
@@ -317,9 +328,9 @@ pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
         }
     }
     0
-}}
+}
 
-pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
     if m.is_null() { return -(EINVAL as c_int); }
     let m = as_native(m);
     let cur = machine::current_thread_ptr();
@@ -363,7 +374,7 @@ pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
         }
     }
     0
-}}
+}
 
 // ===========================================================================
 // Rust-native typed handle

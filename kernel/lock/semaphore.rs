@@ -266,7 +266,15 @@ fn sem_do_post(s: *mut RawSemaphore) -> c_int {
 // Public API
 // ---------------------------------------------------------------------------
 
-pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int  { u! {
+// N-R1 NOTE — signatures KEPT RAW `*mut sem_t` (same finding as
+// `completion.rs`): `RawSemaphore` is `#[derive(Copy)]` + no `UnsafeCell`
+// (embedded by value + required `Copy`), hence `Freeze`; a `&RawSemaphore`
+// parameter would get LLVM `readonly`/`noalias` and the release optimiser
+// would hoist the `value`/`done` reads out of the wait loops → hang. The
+// sound typed-reference conversion needs the `UnsafeCell` (lock-owns-data)
+// work deferred to wave 3d/N-R7. What DID change: the redundant whole-body
+// `u!` wrappers are removed from the public entry points.
+pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int) -> c_int {
     if s.is_null() { return -(EINVAL as c_int); }
     if value < 0 { return -(EINVAL as c_int); }
     let s = as_native(s);
@@ -281,9 +289,9 @@ pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int
             b"semaphore wait queue\0".as_ptr() as *const c_char,
             lk_ptr(s));
     0
-}}
+}
 
-pub(crate) fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_trywait(s: *mut sem_t) -> c_int {
     if s.is_null() { return -(EINVAL as c_int); }
     let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
@@ -292,9 +300,9 @@ pub(crate) fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
         return 0;
     }
     -(EAGAIN as c_int)
-}}
+}
 
-pub(crate) fn sem_wait(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_wait(s: *mut sem_t) -> c_int {
     if s.is_null() { return -(EINVAL as c_int); }
     let s = as_native(s);
     let cur = machine::current_thread_ptr();
@@ -315,9 +323,9 @@ pub(crate) fn sem_wait(s: *mut sem_t)-> c_int  { u! {
         }
     }
     ret
-}}
+}
 
-pub(crate) fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_wait_interruptible(s: *mut sem_t) -> c_int {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     loop {
@@ -327,9 +335,9 @@ pub(crate) fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
         if signal_pending(cur) { return -(EINTR as c_int); }
         sleep_ms(1);
     }
-}}
+}
 
-pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -381,18 +389,18 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
         }
     }
     ret
-}}
+}
 
-pub(crate) fn sem_post(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_post(s: *mut sem_t) -> c_int {
     if s.is_null() { return -(EINVAL as c_int); }
     let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) == SEM_VALUE_MAX { return -(EOVERFLOW as c_int); }
     let ret = sem_do_post(s);
     if ret == -(ENOENT as c_int) { 0 } else { ret }
-}}
+}
 
-pub(crate) fn sem_getvalue(s: *mut sem_t, value: *mut c_int)-> c_int  { u! {
+pub(crate) fn sem_getvalue(s: *mut sem_t, value: *mut c_int) -> c_int {
     if s.is_null() || value.is_null() { return -(EINVAL as c_int); }
     let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
@@ -400,7 +408,7 @@ pub(crate) fn sem_getvalue(s: *mut sem_t, value: *mut c_int)-> c_int  { u! {
     // SAFETY: caller-supplied out-pointer.
     u! { *value = v; }
     0
-}}
+}
 
 // ===========================================================================
 // Rust-native typed handle

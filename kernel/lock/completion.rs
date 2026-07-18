@@ -248,7 +248,22 @@ extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
 // Public API
 // ---------------------------------------------------------------------------
 
-pub(crate) fn completion_init(c: *mut completion_t) { u! {
+// N-R1 NOTE — signatures KEPT RAW `*mut completion_t` (see the module-level
+// finding): a typed-reference conversion of this shared-mutable primitive is
+// UNSOUND without wrapping the interior in `UnsafeCell`. `RawCompletion` is
+// `#[derive(Copy)]` + no `UnsafeCell` (it is embedded by value in bio /
+// pcache / tty bindgen structs that require `Copy`), so it is `Freeze`; a
+// `&RawCompletion` parameter gets LLVM `readonly`/`noalias` and the release
+// optimiser hoists the `done` read out of the `while !try_wait…` wait loop →
+// infinite spin → boot hang (empirically reproduced this wave). Adding
+// `UnsafeCell` breaks the `Copy` those embedders need — that is the
+// lock-owns-data / Cell restructuring the plan defers to wave 3d/N-R7, which
+// must land BEFORE the lock family can take typed references. What DID change
+// here: the redundant whole-body `u!` wrappers are removed from the public
+// entry points (every operation inside is a call to an already-safe helper;
+// the audited `unsafe` lives in the field accessors + the `zeroed()`/
+// `from_raw` sites), as the `u!` macro's own doc prescribes.
+pub(crate) fn completion_init(c: *mut completion_t) {
     if c.is_null() { return; }
     let c = as_native(c);
     done_set(c, 0);
@@ -256,22 +271,22 @@ pub(crate) fn completion_init(c: *mut completion_t) { u! {
     tq_init(queue_ptr(c),
             b"completion_queue\0".as_ptr() as *const c_char,
             lock_ptr(c));
-}}
+}
 
-pub(crate) fn completion_reinit(c: *mut completion_t) { u! {
+pub(crate) fn completion_reinit(c: *mut completion_t) {
     if c.is_null() { return; }
     let c = as_native(c);
     done_set(c, 0);
-}}
+}
 
-pub(crate) fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
+pub(crate) fn try_wait_for_completion(c: *mut completion_t) -> bool {
     if c.is_null() { return false; }
     let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     try_wait_for_completion_locked(c)
-}}
+}
 
-pub(crate) fn wait_for_completion(c: *mut completion_t) { u! {
+pub(crate) fn wait_for_completion(c: *mut completion_t) {
     if c.is_null() { return; }
     let c = as_native(c);
     let cur = machine::current_thread_ptr();
@@ -283,9 +298,9 @@ pub(crate) fn wait_for_completion(c: *mut completion_t) { u! {
     if done_get(c) > 0 {
         completion_do_wake(c);
     }
-}}
+}
 
-pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t)-> c_int  { u! {
+pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int {
     if c.is_null() { return -(EINVAL as c_int); }
     let c = as_native(c);
     let cur = machine::current_thread_ptr();
@@ -306,10 +321,10 @@ pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t)-> c_int  {
         completion_do_wake(c);
     }
     0
-}}
+}
 
 pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
-                                                   timeout_ms: u64)-> c_int  { u! {
+                                        timeout_ms: u64) -> c_int {
     if c.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -371,9 +386,9 @@ pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
         completion_do_wake(c);
     }
     0
-}}
+}
 
-pub(crate) fn complete(c: *mut completion_t) { u! {
+pub(crate) fn complete(c: *mut completion_t) {
     if c.is_null() { return; }
     let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
@@ -382,9 +397,9 @@ pub(crate) fn complete(c: *mut completion_t) { u! {
         done_set(c, d + 1);
     }
     completion_do_wake(c);
-}}
+}
 
-pub(crate) fn complete_all(c: *mut completion_t) { u! {
+pub(crate) fn complete_all(c: *mut completion_t) {
     if c.is_null() { return; }
     let c = as_native(c);
 
@@ -411,14 +426,14 @@ pub(crate) fn complete_all(c: *mut completion_t) { u! {
             tq_wakeup_all(&mut temp_queue as *mut tq_t, 0, 0);
         }
     }
-}}
+}
 
-pub(crate) fn completion_done(c: *mut completion_t)-> bool  { u! {
+pub(crate) fn completion_done(c: *mut completion_t) -> bool {
     if c.is_null() { return false; }
     let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     tq_size(queue_ptr(c)) == 0
-}}
+}
 
 // ===========================================================================
 // Rust-native typed handle

@@ -279,7 +279,16 @@ extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 // Public API
 // ---------------------------------------------------------------------------
 
-pub(crate) fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)-> c_int  { u! {
+// N-R1 NOTE — signatures KEPT RAW `*mut rwsem_t` (same finding as
+// `completion.rs`, plus a scope constraint): `RawRwsem` is `#[derive(Copy)]`
+// + no `UnsafeCell`, so a `&RawRwsem` parameter would `readonly`/`noalias`-
+// miscompile the `while reader_should_wait`/`writer_should_wait` loops
+// (hang); the sound typed-reference conversion needs the wave-3d
+// `UnsafeCell` work first. The direct call sites also live in out-of-scope
+// code (`vfs/fs.rs` ~30, `mm/vm.rs`), owned by later waves. What DID change:
+// the redundant whole-body `u!` wrappers are removed from the public entry
+// points.
+pub(crate) fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char) -> c_int {
     if l.is_null() || name.is_null() { return -1; }
     let l = as_native(l);
     spin_init(lk_ptr(l), b"rwsem spinlock\0".as_ptr() as *const c_char);
@@ -289,9 +298,9 @@ pub(crate) fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)-> c_i
     set_name_flags(l, name, flags);
     set_holder(l, -1);
     0
-}}
+}
 
-pub(crate) fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_read(l: *mut rwsem_t) -> c_int {
     if l.is_null() { return -1; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -303,9 +312,9 @@ pub(crate) fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     }
     set_readers(l, get_readers(l) + 1);
     0
-}}
+}
 
-pub(crate) fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_try_acquire_read(l: *mut rwsem_t) -> c_int {
     if l.is_null() { return -(EINVAL as c_int); }
     let l = as_native(l);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -315,9 +324,9 @@ pub(crate) fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     } else {
         -(EAGAIN as c_int)
     }
-}}
+}
 
-pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t) -> c_int {
     if l.is_null() { return -(EINVAL as c_int); }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -330,9 +339,9 @@ pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     }
     set_readers(l, get_readers(l) + 1);
     0
-}}
+}
 
-pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_int {
     if l.is_null() { return -(EINVAL as c_int); }
     if timeout_ms == 0 {
         return if rwsem_try_acquire_read(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
@@ -369,9 +378,9 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int
     }
     set_readers(l, get_readers(l) + 1);
     0
-}}
+}
 
-pub(crate) fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_write(l: *mut rwsem_t) -> c_int {
     if l.is_null() { return -1; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -384,9 +393,9 @@ pub(crate) fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     }
     set_holder(l, pid);
     0
-}}
+}
 
-pub(crate) fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_try_acquire_write(l: *mut rwsem_t) -> c_int {
     if l.is_null() { return -(EINVAL as c_int); }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -399,9 +408,9 @@ pub(crate) fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     } else {
         -(EAGAIN as c_int)
     }
-}}
+}
 
-pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t) -> c_int {
     if l.is_null() { return -(EINVAL as c_int); }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -416,9 +425,9 @@ pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     }
     set_holder(l, pid);
     0
-}}
+}
 
-pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_int {
     if l.is_null() { return -(EINVAL as c_int); }
     if timeout_ms == 0 {
         return if rwsem_try_acquire_write(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
@@ -457,9 +466,9 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_in
     }
     set_holder(l, pid);
     0
-}}
+}
 
-pub(crate) fn rwsem_release(l: *mut rwsem_t) { u! {
+pub(crate) fn rwsem_release(l: *mut rwsem_t) {
     if l.is_null() { return; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -477,9 +486,9 @@ pub(crate) fn rwsem_release(l: *mut rwsem_t) { u! {
             }
         }
     }
-}}
+}
 
-pub(crate) fn rwsem_is_write_holding(l: *mut rwsem_t)-> bool  { u! {
+pub(crate) fn rwsem_is_write_holding(l: *mut rwsem_t) -> bool {
     if l.is_null() { return false; }
     let l = as_native(l);
     let cur = machine::current_thread_ptr();
@@ -487,7 +496,7 @@ pub(crate) fn rwsem_is_write_holding(l: *mut rwsem_t)-> bool  { u! {
     let pid = machine::thread_pid(cur);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     get_holder(l) == pid
-}}
+}
 
 // ===========================================================================
 // Rust-native typed handle
