@@ -219,6 +219,30 @@ struct into `Tid`-keyed side-tables (3g), retiring the intrusive queues.
   index, run/wait queues → `Tid` side-tables. `current`/`cpu_local.proc` stays
   a raw `*mut Thread` (asm boundary). forkforkfork A/B + full scheduler battery.
 
+## 5c. N-R6d core execution: internal sub-staging (user chose full core 2026-07-18)
+
+Executed as small, individually boot-gated sub-steps (revert-on-regression),
+NOT big-bang. `pid` stays the userspace identity (getpid/kill/wait unchanged);
+threads gain an internal generational `Tid` + `GenTable<Thread>` registration;
+the intrusive proc-table hlist stays for pid-lookup until the LAST sub-step.
+- **6d-1 (foundation):** add `Tid = GenKey<TID_TAG>` + `static THREAD_TABLE:
+  GenTable<Thread, NPROC, TID_TAG>`; register at `thread_create`, remove at
+  `thread_destroy` (bumps generation). Convert the FIRST relationship edge
+  `thread.parent: *mut Thread` → `Option<Tid>` (resolved via the table) to
+  exercise it. Everything else stays `*mut`. Gate: reparent/wait + forkfork.
+- **6d-2:** convert `thread.pgroup`/`thread.session`/`thread.thread_group`
+  edges → keys (Pgid/Sid/Tgid via their tables); wire `session.fg_pgrp` and
+  `pgroup.session` (deferred from the pilot) to keys.
+- **6d-3:** pgroup + thread_group **membership** (intrusive thread lists) →
+  `Tid`-keyed side-tables; retire those `container_of` sites.
+- **6d-4:** scheduler **run/wait** queues → `Tid` side-tables / key-carrying
+  nodes (the tq_t stays, but carries `Tid` not raw thread ptr). forkforkfork
+  A/B + full scheduler battery mandatory.
+- **6d-5:** migrate `get_pid_thread`/pid-lookup off the intrusive hlist (pid
+  stored in Thread + a pid→Tid resolution or table scan) and **retire the
+  proc-table hlist** (`Thread.proctab_entry`). `current`/`cpu_local.proc`
+  stays raw `*mut Thread` (asm boundary — the irreducible floor).
+
 ## 6. Risk tiers & discipline
 - **Low (mechanical, compiler-proven):** N-R1/N-R2/N-R8 signature & unsafe-scope work.
 - **Medium:** N-R3/N-R4 (new abstractions, wide but local edits).
