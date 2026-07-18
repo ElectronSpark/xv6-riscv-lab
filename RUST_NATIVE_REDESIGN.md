@@ -86,12 +86,25 @@ lock-ordering hazard a compile error**. Source: Redox `Mutex<L,T>`+`ordered-lock
 R4L `Lock<T,B>`/`Guard`/`LockedBy`. **High friction** (relocating data into
 locks) — stage after 3e/pointer work simplifies the call graph.
 
-### 3e. Signatures → typed references  [DO FIRST — cascades]
+### 3e. Signatures → typed references  [cascades, but see the Freeze hazard]
 The always-valid-exclusive `*mut T`→`&mut T`/`&T` subset (Option<&T> for
 nullable). Mechanical, compiler-proven, and each conversion *deletes* a reason
 for `unsafe` and auto-shrinks 3c/3d/whole-body-unsafe. User memory stays a
 typed non-derefable wrapper (`UserPtr`/`UserSlice`, direction in the type).
 Source: all three reports rank this #1 by surface÷risk.
+
+**CRITICAL CONSTRAINT (proven by the N-R1 pilot, 2026-07-18):** `&T` / `&mut T`
+must NOT be used for a type that is (a) plain-data `Freeze` (no `UnsafeCell`
+interior — e.g. our `#[derive(Copy)]` `Raw*` lock bodies) AND (b) mutated
+concurrently by another hart while a reference is held. A `&Freeze` param gets
+LLVM `readonly`+`noalias`, so the optimizer legally hoists a field read out of
+a spin/wait loop → the loop never re-observes another hart's write → **boot
+hang / lost wakeup**. `&mut` doesn't help (still `noalias`). Such a type can
+only take `&` AFTER it gains `UnsafeCell` interior mutability (which is `!Copy`
+and forces migrating every by-value embedder) — i.e. **3d must precede 3e for
+shared-mutable concurrently-accessed types.** 3e applies directly only to
+*genuinely exclusive / non-concurrently-shared* leaf types. The lock-primitive
+family therefore moves to 3d, not 3e.
 
 ### 3f. MMIO / reinterpret shims → `MappedPages`-style owned wrapper + typed regs
 One audited kstd module: owned mapped-region type with lifetime-bound,
@@ -122,12 +135,19 @@ gate: 0-warning clean build, boot ×3, testsig 21/21, mmaptest 16/16, fs
 battery + stressfs where fs-touching, forkforkfork OK (post-BUG1), cache
 discipline, commit green.
 
-- **N-R1 (pilot, LOW risk):** typed references for the **lock-primitive family**
-  (`completion`/`mutex`/`rwsem`/`semaphore` — the family the user flagged).
-  `*mut foo_t`→`&Foo`/`&mut Foo`, collapse `u!{}`+`as_native` per fn. Proves
-  the 3e pattern end-to-end on a self-contained, well-tested subsystem.
-- **N-R2:** roll 3e typed-references through the rest of the leaf subsystems
-  (dev, tty, ipc, timer) — the mechanical always-valid-exclusive subset.
+- **N-R1 (pilot, DONE — commit 5a0edad):** piloted 3e on the lock family and
+  **discovered the Freeze/`noalias`-hoist hazard** (see §3e CRITICAL
+  CONSTRAINT): `&`-conversion of these shared-mutable `Copy` types hangs at
+  boot. Reverted the conversion; delivered the sound subset (34 redundant
+  whole-body `u!{}` wrappers removed, byte-identical codegen). Lock family
+  reassigned to 3d. Net lesson: 3e requires the target type be exclusive OR
+  already `UnsafeCell`-interior.
+- **N-R2 (revised):** roll 3e typed-references through **genuinely-exclusive /
+  non-concurrently-shared leaf types** only (per-call transient objects,
+  owned-by-caller args, single-hart-local structs) — screen each candidate
+  against the Freeze hazard (is the type `Freeze` AND mutated by another hart
+  during the borrow? if yes, defer to 3d). Start where a subsystem's args are
+  provably exclusive; leave shared-mutable types for their lock-owns-data wave.
 - **N-R3:** 3f — the `MappedPages`-style MMIO/reinterpret kstd wrapper +
   `#[repr(transparent)]` register types; migrate virtio/uart/plic/e1000.
 - **N-R4:** 3c — unify refcounts into `KArc` + `AlwaysRefCounted`/`ARef`;
@@ -138,8 +158,12 @@ discipline, commit green.
   keys, one subsystem at a time (pgroup/session before thread/proc), pushing
   run/wait membership to side-tables (3g). forkforkfork A/B + scheduler
   battery mandatory. **Checkpoint with the user before the thread/proc core.**
-- **N-R7:** 3d — lock-owns-data crate-wide + optional lock levels; 3g cleanup
-  of any residual `container_of`.
+- **N-R7:** 3d — lock-owns-data crate-wide + optional lock levels; **includes
+  the lock-primitive family reassigned from N-R1** (give `Raw*` lock bodies
+  `UnsafeCell` interior — necessarily `!Copy` — and migrate the by-value
+  embedders `bio.io_completion`/`pcache.flush_completion`/`tty.completion`/…
+  to hold the lock-owning type; only then can they take `&` params safely);
+  3g cleanup of any residual `container_of`.
 - **N-R8:** de-smear remaining whole-body `unsafe` to audited blocks; final
   census vs this baseline (target: unsafe floor at asm/PTE/MMIO/DMA only).
 
