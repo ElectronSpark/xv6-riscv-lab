@@ -3461,6 +3461,86 @@ table type + 6 dead slots + 1 facade alias deleted.
   (per brief). `SpinLock<T>` now on **7** globals (ramdisk, ptmx, bufcache,
   e1000, sockets, devtmpfs, +ftable).
 
+### Iteration 81 — 2026-07-17 — P3-BUG1: `forkforkfork` tq interrupted-waiter panic FIXED (wake-under-the-lock in both `tq_bulk_move` callers)
+
+- **Bug** (the standing known-failure since Wave 26, 2026-07-13): under
+  fork-bomb pressure `usertests forkforkfork` panics
+  `"Failed to remove interrupted waiter from queue"`
+  (`kernel/proc/thread_queue.rs`, `tq_wait_cb_impl`'s self-removal), then
+  IPI_REASON_CRASH on both harts. Confirmed pre-existing on the C baseline.
+
+- **Root cause (confirmed independently)**: a `tq_t` has *no internal
+  lock* — it is protected entirely by the caller's lock L passed to
+  `tq_wait`. `tq_wait_cb_impl` sleeps by pushing a stack `waiter` onto
+  queue `q`, yielding, then on wake (under L) doing
+  `if waiter.is_enqueued() { tq_remove_impl(q, waiter) }`, which panics if
+  the waiter's current queue ≠ `q`. The two `tq_bulk_move` callers —
+  `xv6fs_end_op` (`vfs/xv6fs/log.rs`) and `complete_all`
+  (`lock/completion.rs`) — used a "drain waiters into a stack-local
+  `temp_queue` under L, release L, `tq_wakeup_all(temp_queue)` **outside**
+  L" pattern. **Race**: committer B, under L, migrates waiter A into
+  `temp_queue` (`A.list.queue = temp_queue`) and releases L; if a signal
+  (`scheduler_wakeup`, which does not pop the waiter) wakes A in the window
+  before B's out-of-lock `tq_wakeup_all` pops A, A's wake path re-acquires
+  L, sees `is_enqueued()==true`, and calls `tq_remove_impl(q, A)` with
+  `q ≠ temp_queue` → -EINVAL → panic (and A's self-removal from the
+  lockless `temp_queue` also data-races B's concurrent drain).
+  - **Two-caller + lock-L assumption verified**: `grep tq_bulk_move`
+    → exactly log.rs:475 and completion.rs:402. All log waiters pass
+    `(*log).lock` to `tq_wait` (log.rs:387,399), committer holds `(*log).lock`
+    around the move — same L. All completion waiters pass `lock_ptr(c)`
+    (completion.rs:281,297,355), committer holds the `lock_ptr(c)` guard —
+    same L. Assumption holds for both.
+
+- **Fix (minimal, classic-xv6 wake-under-the-lock)**: relocate
+  `tq_wakeup_all(temp_queue, …)` to run **inside the same lock-L critical
+  section** as the `tq_bulk_move`, in both callers (kept the
+  `counter > 0` guard). Now when A's interrupted-wake path holds L, either
+  the migration hasn't happened (A still in `q` → remove succeeds) or B's
+  `tq_wakeup_all` already popped A (`is_enqueued()==false` → no remove).
+  A can never observe itself on `temp_queue` under L; the panic and the
+  `temp_queue` data-race both vanish.
+  - **log.rs**: moved `tq_wakeup_all` above `spin_unlock((*log).lock)`;
+    rewrote the module-doc "wake-outside-lock pattern" section and the
+    inline comment to document the interrupted-waiter race (replacing the
+    buggy "avoid lock convoy" rationale).
+  - **completion.rs**: moved `tq_wakeup_all` inside the `{ let _g =
+    KSpinlock…lock() }` scope so the guard still covers it; rewrote the
+    comment likewise.
+  - **Defense-in-depth: deliberately SKIPPED.** Making `tq_wait_cb_impl`
+    remove from the waiter's *current* queue instead of `q` adds no safety
+    post-fix (`cur_q == q` is now provable under L) and would introduce a
+    "remove from a queue whose lock you may not hold" pattern into the
+    generic primitive — a net regression in lock reasoning. Per the brief's
+    "skip if unsure".
+
+- **rust-skills applied**: `conc-atomic-ordering` (the SeqCst fences in
+  `tq_push`/`tq_remove` are the queue's publication points — left intact;
+  the fix is purely a critical-section boundary move, no ordering change);
+  `anti-panic-expected` / `err-result-over-panic` (the fix removes the
+  spurious panic by making the invariant `cur_q == q` hold, rather than
+  papering over it); no new `unsafe` introduced (both edits stay within the
+  existing `unsafe`/`u!` blocks and only relocate a call). Matched the
+  surrounding idiom per site (raw `spin_lock`/`spin_unlock` in log.rs, the
+  `KSpinlock` guard scope in completion.rs).
+
+- **Verified** (cache-first — BUILD_TYPE empty, toolchain
+  `riscv64-unknown-elf-gcc`): **0-warning** clean rebuild (`cargo clean`
+  of the rust target-dir + full `cmake --build`; only the pre-existing
+  `initcode.out` RWX linker note). **PRIMARY — the repro flipped**:
+  baseline (pre-change) reproduced `"Failed to remove interrupted waiter
+  from queue"` on forkforkfork run 1; post-fix **`test forkforkfork: OK`
+  ×3** (no panic on any run). Boot: exactly one `init: starting sh` on
+  every run (≥3 clean boots). Regression battery (all green, no
+  panic/corruption markers): **testsig ALL TESTS PASSED (21/21)**;
+  **mmaptest 16/16 (all tests passed)**; **stressfs ×2** (log-commit /
+  `tq_bulk_move` path — write+read phases, prompt returned); usertests
+  **forktest / preempt / reparent / forkfork** all OK; **createdelete OK**,
+  **bigdir OK**; ENOENT (`cat: cannot open nonexistentfile`). The
+  `lost some free pages` single-test trailer is the documented pre-existing
+  accounting artifact, not a regression. 2 files, comment+relocation only.
+  Do NOT commit (per brief).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
@@ -3620,17 +3700,27 @@ table type + 6 dead slots + 1 facade alias deleted.
     documented. `execout`/`diskfull`/`outofinodes` are in the separate
     slow-test list, not `quicktests`, so `-q` never reaches them.
 
-- `usertests forkforkfork` (fork-bomb stress, 3-deep nesting) panics the
+- ~~`usertests forkforkfork` (fork-bomb stress, 3-deep nesting) panics the
   kernel: `"Failed to remove interrupted waiter from queue"`
-  (`kernel/proc/thread_queue.rs:600` as of 2026-07-15; the line drifts as
-  the file is edited — the site is the tq interrupted-wait removal path)
-  under fork-exhaustion pressure, followed by IPI_REASON_CRASH on both
-  harts. **Confirmed pre-existing**: reproduces identically on the
-  unmodified pre-Wave-26 C baseline (074323c worktree, same
-  toolchain/env). Never reachable before (sits after copyinstr2 in -q;
-  no prior wave ran it individually). First observed 2026-07-13 (Wave 26
-  post-copyinstr2 singles sweep). Needs a dedicated proc/tq
-  investigation.
+  (`kernel/proc/thread_queue.rs` tq interrupted-wait removal path) under
+  fork-exhaustion pressure, followed by IPI_REASON_CRASH on both harts.
+  **Confirmed pre-existing**: reproduces identically on the unmodified
+  pre-Wave-26 C baseline (074323c worktree, same toolchain/env). First
+  observed 2026-07-13 (Wave 26 post-copyinstr2 singles sweep).~~ **FIXED
+  in Iteration 81 (P3-BUG1)** (2026-07-17) — see that wave's log entry.
+  Root cause was a wake-outside-lock race in the two `tq_bulk_move`
+  callers (`xv6fs_end_op` in `vfs/xv6fs/log.rs`, `complete_all` in
+  `lock/completion.rs`): a waiter migrated into the stack-local
+  `temp_queue` under lock L, then woken by a signal in the window before
+  `tq_wakeup_all` (which ran *after* releasing L) popped it, would observe
+  itself enqueued on `temp_queue` (not the queue it slept on) and panic in
+  `tq_wait_cb`'s self-removal — while also racing the committer's lock-free
+  `temp_queue` drain. Fix: move `tq_wakeup_all` *inside* the same lock-L
+  critical section as the `tq_bulk_move` in both callers, serializing the
+  migrate+wake against the interrupted waiter's under-L self-removal.
+  Verified: `forkforkfork` → `OK` ×3 post-fix (baseline reproduced the
+  panic on run 1). The `lost some free pages` single-test trailer is a
+  separate pre-existing accounting artifact, unaffected.
 
 - `usertests execout` (memory-exhaustion exec stress, 15 rounds of
   sbrk-all-of-RAM) does not complete within 360s wall-clock under QEMU

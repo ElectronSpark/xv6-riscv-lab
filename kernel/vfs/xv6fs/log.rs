@@ -24,16 +24,21 @@
 //! superblock write lock should be aware this can block file I/O
 //! operations that need the same log.
 //!
-//! # `end_op`'s wake-outside-lock pattern
+//! # `end_op`'s drain-and-wake pattern (wake under the lock)
 //!
 //! [`xv6fs_end_op`] uses `tq_bulk_move` to drain every waiter into a
-//! stack-local temp queue *while holding `log->lock`*, then calls
-//! `tq_wakeup_all` on the temp queue *after releasing* `log->lock` — this
-//! avoids a lock convoy where every woken thread immediately piles up
-//! trying to reacquire `log->lock` before it's even been released.
-//! Ported exactly, including the `temp_queue.counter > 0` guard before
-//! bothering to wake (an empty temp queue after an uncontended commit is
-//! the common case).
+//! stack-local temp queue and then calls `tq_wakeup_all` on it — both
+//! steps *while holding `log->lock`*. The wake stays inside the critical
+//! section on purpose: a waiter's `tq_wait` uses `log->lock` as its guard,
+//! so an interrupted (signal-woken) waiter re-checks `is_enqueued()` under
+//! that same lock. If the wake ran *after* releasing `log->lock`, a signal
+//! could wake a waiter in the window after it was migrated to `temp_queue`
+//! but before `tq_wakeup_all` popped it; the waiter would then find itself
+//! enqueued on `temp_queue` rather than `log->wait_queue` and panic while
+//! self-removing (and race the committer's lock-free `temp_queue` drain).
+//! Keeping the wake under the lock serializes the two, closing the race.
+//! The `temp_queue.counter > 0` guard is retained (an empty temp queue
+//! after an uncontended commit is the common case).
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -464,21 +469,31 @@ pub(crate) extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
         if do_commit {
             __xv6fs_commit(log);
 
-            // Collect waiters while holding lock, then wake outside lock
-            // to avoid lock convoy (woken threads try to reacquire
-            // log->lock) -- see the module doc.
+            // Drain waiters into a stack-local queue and wake them, all
+            // under `log->lock`. The wake MUST happen inside the same
+            // critical section as the `tq_bulk_move`: a waiter's `tq_wait`
+            // takes `log->lock` as its guard, so a signal-interrupted
+            // waiter re-checks `is_enqueued()` under that same lock. Waking
+            // outside the lock opened a window where a signal could wake a
+            // waiter after it had been migrated to `temp_queue` but before
+            // `tq_wakeup_all` popped it: the waiter would then observe
+            // itself enqueued on `temp_queue` (not `log->wait_queue`) and
+            // panic in `tq_wait_cb`'s self-removal ("Failed to remove
+            // interrupted waiter from queue"), while also racing the
+            // committer's lock-free drain of `temp_queue`. Waking under the
+            // lock serializes both: the waiter either still sits in
+            // `log->wait_queue` (migration not yet done) or has already
+            // been popped by `tq_wakeup_all` (is_enqueued() == false).
             let mut temp_queue: tq_t = core::mem::zeroed();
             tq_init(ptr::addr_of_mut!(temp_queue), c"xv6fs_log_temp".as_ptr(), ptr::null_mut());
 
             spin_lock(ptr::addr_of_mut!((*log).lock));
             (*log).committing = 0;
             tq_bulk_move(ptr::addr_of_mut!(temp_queue), ptr::addr_of_mut!((*log).wait_queue));
-            spin_unlock(ptr::addr_of_mut!((*log).lock));
-
-            // Wake all outside the lock.
             if temp_queue.counter > 0 {
                 tq_wakeup_all(ptr::addr_of_mut!(temp_queue), 0, 0);
             }
+            spin_unlock(ptr::addr_of_mut!((*log).lock));
         }
     }
 }

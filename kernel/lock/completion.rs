@@ -388,9 +388,16 @@ pub(crate) fn complete_all(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let c = as_native(c);
 
-    // Local temporary queue: collect waiters, release the completion
-    // lock, then wake them outside the lock. Avoids a lock convoy on
-    // re-acquisition inside the scheduler. Matches C `complete_all`.
+    // Local temporary queue: drain the waiters into it and wake them, all
+    // under the completion lock. The wake MUST stay inside the same
+    // critical section as `tq_bulk_move`: a waiter's `tq_wait`/`tq_wait_cb`
+    // uses this completion lock as its guard, so a signal-interrupted
+    // waiter re-checks `is_enqueued()` under that same lock. Waking outside
+    // the lock would open a window where a signal wakes a waiter after it
+    // was migrated to `temp_queue` but before `tq_wakeup_all` popped it:
+    // the waiter would observe itself on `temp_queue` (not the completion
+    // queue) and panic while self-removing, while also racing this
+    // lock-free `temp_queue` drain. Waking under the lock serializes both.
     let mut temp_queue: tq_t = u! { core::mem::zeroed() };
     tq_init(&mut temp_queue as *mut tq_t,
             b"completion_temp\0".as_ptr() as *const c_char,
@@ -400,10 +407,9 @@ pub(crate) fn complete_all(c: *mut completion_t) { u! {
         let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
         done_set(c, MAX_COMPLETIONS);
         tq_bulk_move(&mut temp_queue as *mut tq_t, queue_ptr(c));
-    }
-
-    if tq_counter(&mut temp_queue as *mut tq_t) > 0 {
-        tq_wakeup_all(&mut temp_queue as *mut tq_t, 0, 0);
+        if tq_counter(&mut temp_queue as *mut tq_t) > 0 {
+            tq_wakeup_all(&mut temp_queue as *mut tq_t, 0, 0);
+        }
     }
 }}
 
