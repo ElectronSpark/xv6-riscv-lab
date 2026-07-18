@@ -111,6 +111,33 @@
 //! [`NOFILE`] before use, matching the C's `fd < 0 || fd >= NOFILE`
 //! guard at each entry point.
 //!
+//! # Reference-ification (P3-7a)
+//!
+//! Kernel-object parameters of the file-internal helpers are Rust
+//! references now (`&mut VfsFdtable`), not raw pointers: the null-check
+//! plus the single `unsafe { &mut *p }` conversion happen exactly once,
+//! at each `pub(crate) extern "C"` entry point (the outermost frame that
+//! genuinely receives a raw pointer), so the interior logic is ordinary
+//! safe field access. Deliberate exclusions (lifetime honesty):
+//! [`vfs_fdtable_put`] keeps its raw parameter (it drops the reference
+//! that keeps the table alive — a `&mut` parameter would assert validity
+//! past the point the object may be freed; the exclusive-teardown loop
+//! *after* winning the final decrement converts locally, where
+//! exclusivity is real), [`fdtable_free`] keeps raw (frees), and
+//! [`clone_locked`]'s `src` keeps raw (the `CLONE_FILES` path *returns*
+//! the shared pointer — the object's lifetime intentionally escapes the
+//! call). Aliasing caveat, documented approximation (same class as the
+//! crate's `__ATOMIC_CONSUME` -> `Acquire` mapping): while a locked
+//! writer holds `&mut VfsFdtable`, concurrent RCU readers still perform
+//! atomic loads on `files[]` slots and atomic RMWs on
+//! `ref_count`/`fd_count` through their own raw provenance. Those
+//! accesses are data-race-free (atomics on both sides) and invisible to
+//! this function's codegen, but are foreign accesses inside a `&mut`'s
+//! range under a strict Stacked/Tree-Borrows reading; making this exact
+//! requires wrapping the shared fields (`files[]` as `AtomicPtr`,
+//! counters as `AtomicI32`) — a follow-up nativization wave, out of this
+//! wave's layout-frozen scope.
+//!
 //! # Result-over-ERR_PTR (P3-CS3)
 //!
 //! This file is the first contained proof-of-concept for the standing
@@ -451,30 +478,32 @@ fn fdtable_free(fdtable: *mut vfs_fdtable) {
 ///
 /// LOCKING: caller MUST hold `fdtable.lock` (same contract as
 /// [`vfs_fdtable_alloc_fd_from`]).
+///
+/// P3-7a: `fdtable` is a reference now (validity established once at the
+/// entry-point boundary); `file` stays raw — it goes straight into the
+/// `vfs_fdup` refcount machinery (and into the table, outliving the
+/// call), which a borrow could not honestly express.
 fn alloc_fd_from_locked(
-    fdtable: *mut vfs_fdtable,
+    fdtable: &mut VfsFdtable,
     file: *mut vfs_file,
     start_fd: c_int,
 ) -> KResult<usize> {
-    if fdtable.is_null() || file.is_null() {
+    if file.is_null() {
         return Err(Errno::Inval);
     }
     if start_fd < 0 || start_fd as usize >= NOFILE {
         return Err(Errno::Inval);
     }
     kassert!(
-        // SAFETY: non-null `fdtable` (checked above); only the lock's
-        // address is taken.
-        KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
+        KSpinlock::from_bindings(ptr::addr_of_mut!(fdtable.lock)).holding(),
         "vfs_fdtable_alloc_fd_from: fdtable lock not held"
     );
-    // SAFETY: non-null `fdtable`; lock held (asserted above), so this
-    // plain field read cannot race a concurrent writer.
-    if unsafe { (*fdtable).fd_count } as usize >= NOFILE {
+    // Lock held (asserted above), so these plain field reads cannot race
+    // a concurrent writer.
+    if fdtable.fd_count as usize >= NOFILE {
         return Err(Errno::MFile); // Too many open files
     }
-    // SAFETY: non-null `fdtable`; lock held.
-    let word = unsafe { (*fdtable).files_bitmap[0] };
+    let word = fdtable.files_bitmap[0];
     let fd = first_clear_bit_from(word, start_fd as usize);
     if fd < 0 || fd as usize >= NOFILE {
         return Err(Errno::MFile); // No free file descriptor
@@ -485,12 +514,12 @@ fn alloc_fd_from_locked(
         return Err(Errno::NoMem); // Failed to duplicate file reference
     }
 
-    // SAFETY: non-null `fdtable`; `fd` in `[0, NOFILE)`; lock held.
-    unsafe {
-        (*fdtable).files_bitmap[0] |= 1u64 << fd;
-        (*fdtable).cloexec_bitmap[0] &= !(1u64 << fd);
-        rcu_assign_file(ptr::addr_of_mut!((*fdtable).files[fd]), file);
-    }
+    fdtable.files_bitmap[0] |= 1u64 << fd;
+    fdtable.cloexec_bitmap[0] &= !(1u64 << fd);
+    // SAFETY: `files[fd]` is a live slot of a live fdtable (reference
+    // param); publication must be a `Release` store because concurrent
+    // RCU readers load this slot without the lock.
+    unsafe { rcu_assign_file(ptr::addr_of_mut!(fdtable.files[fd]), file) };
     fd_count_atomic(fdtable).fetch_add(1, Ordering::SeqCst);
     Ok(fd)
 }
@@ -511,6 +540,14 @@ pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
     file: *mut vfs_file,
     start_fd: c_int,
 ) -> c_int {
+    if fdtable.is_null() {
+        return Errno::Inval.neg(); // Same errno the old null check produced.
+    }
+    // SAFETY: non-null (just checked); the caller holds `fdtable.lock`
+    // (asserted inside) and a live reference to the table, so it stays
+    // valid for the call. P3-7a boundary conversion — see the module
+    // doc's aliasing caveat for the concurrent-RCU-reader approximation.
+    let fdtable = unsafe { &mut *fdtable };
     match alloc_fd_from_locked(fdtable, file, start_fd) {
         Ok(fd) => fd as c_int,
         Err(e) => e.neg(),
@@ -565,14 +602,17 @@ fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vf
         return Ok(src_nn);
     }
 
-    let dest_nn = match fdtable_alloc_init() {
+    let mut dest_nn = match fdtable_alloc_init() {
         Ok(nn) => nn,
         Err(e) => {
             rcu_read_unlock();
             return Err(e); // Allocation failed
         }
     };
-    let dest = dest_nn.as_ptr();
+    // SAFETY: `dest` is freshly allocated and not yet published to any
+    // other thread — genuinely exclusive, so a `&mut` view is honest
+    // (P3-7a).
+    let dest = unsafe { dest_nn.as_mut() };
     // NOTE: `dest` is freshly allocated & fully zeroed by
     // `fdtable_alloc_init`; the C original's `dest->fd_count = 0` plus
     // `memset` of `files`/`files_bitmap`/`cloexec_bitmap` here is
@@ -587,19 +627,17 @@ fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vf
         if is_fd(src_file) {
             let dst_file = vfs_fdup(src_file);
             if !is_err_or_null(dst_file) {
-                // SAFETY: `dest` is exclusively owned (not yet published
-                // to any other thread); `i` is in `[0, NOFILE)`.
-                unsafe {
-                    (*dest).files[i] = dst_file;
-                    (*dest).fd_count += 1;
-                    (*dest).files_bitmap[0] |= 1u64 << i;
-                    if (*src).cloexec_bitmap[0] & (1u64 << i) != 0 {
-                        (*dest).cloexec_bitmap[0] |= 1u64 << i;
-                    }
+                dest.files[i] = dst_file;
+                dest.fd_count += 1;
+                dest.files_bitmap[0] |= 1u64 << i;
+                // SAFETY: non-null `src` (checked at entry); a plain read
+                // of the source cloexec word, exactly as the C original
+                // (unsynchronized-by-design under the RCU section).
+                if unsafe { (*src).cloexec_bitmap[0] } & (1u64 << i) != 0 {
+                    dest.cloexec_bitmap[0] |= 1u64 << i;
                 }
             } else {
-                // SAFETY: see above.
-                unsafe { (*dest).files[i] = ptr::null_mut() };
+                dest.files[i] = ptr::null_mut();
             }
         }
     }
@@ -643,28 +681,24 @@ pub(crate) extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
     }
 
     // No need to hold the lock here since no other references exist.
+    // SAFETY: the final reference was just dropped above, so this thread
+    // has genuinely exclusive access — an honest `&mut` (P3-7a). Plain
+    // (non-RCU, non-atomic) field access below matches the C original
+    // exactly (it does not use rcu_dereference/rcu_assign_pointer here
+    // either). The borrow ends before `fdtable_free` consumes the raw
+    // pointer.
+    let ft = unsafe { &mut *fdtable };
     // First, close all open files in the range [0, NOFILE).
     for i in 0..NOFILE {
-        // SAFETY: exclusive access (last reference just dropped above);
-        // plain (non-RCU, non-atomic) field access, matching the C
-        // original exactly (it does not use rcu_dereference/
-        // rcu_assign_pointer here either).
-        let file = unsafe { (*fdtable).files[i] };
+        let file = ft.files[i];
         if is_fd(file) {
             vfs_fput(file);
-            // SAFETY: see above.
-            unsafe {
-                (*fdtable).files[i] = ptr::null_mut();
-                (*fdtable).fd_count -= 1;
-            }
+            ft.files[i] = ptr::null_mut();
+            ft.fd_count -= 1;
         }
     }
 
-    kassert!(
-        // SAFETY: exclusive access, plain field read.
-        unsafe { (*fdtable).fd_count } >= 0,
-        "vfs_fdtable_destroy: fd_count negative"
-    );
+    kassert!(ft.fd_count >= 0, "vfs_fdtable_destroy: fd_count negative");
     fdtable_free(fdtable);
 }
 
