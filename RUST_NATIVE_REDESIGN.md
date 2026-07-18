@@ -167,6 +167,51 @@ discipline, commit green.
 - **N-R8:** de-smear remaining whole-body `unsafe` to audited blocks; final
   census vs this baseline (target: unsafe floor at asm/PTE/MMIO/DMA only).
 
+## 5b. N-R6 design detail (proc/thread slotmap) — decided 2026-07-18
+
+Constraints found in the current kernel:
+- **Objects must NOT move.** `current` = `cpu_local.proc` (`CPU_LOCAL_PROC`
+  offset 0, read via `tp`) is a raw `*mut Thread` that asm/kernel dereferences;
+  Thread also owns a kstack and is context-switched. A `Vec`-backed `slotmap`
+  moves values on growth → forbidden for these objects.
+- **No external crates** (kernel has zero deps since bindgen was deleted; keep
+  it that way) → **hand-roll** the primitive, don't pull `slotmap`.
+- Relationship access is mediated by the `access.rs` accessor layer
+  (`raw_get!`/`raw_set!`, `ThreadAccess`/`SessionAccess`/…), NOT scattered
+  field reads — so conversion is concentrated in the accessors.
+- The proc table is today an **intrusive hlist** (Thread embeds
+  `proctab_entry` @448, pid→bucket→thread) — both a `container_of` site and
+  the central index; convert it LAST, not in the pilot.
+
+**The primitive: `kstd::GenTable<T, K>` (hand-rolled, #![no_std], fixed cap).**
+A fixed-capacity `[Slot; N]` where `Slot = { generation: u32, ptr:
+Option<NonNull<T>> }`. Objects keep their existing stable slab/page allocation;
+the table stores a **stable pointer**, never the object by value (so nothing
+moves — asm-safe). A typed key `K = { index: u32, generation: u32 }` (newtypes
+`Tid`/`Pid`/`Sid`/`Pgid`). `insert(ptr) -> K` takes a free slot, bumps its
+generation; `get(k) -> Option<NonNull<T>>` returns `None` if `slot.generation
+!= k.generation` (use-after-free → checked `None`, not UB); `remove(k)` frees
+the slot and bumps generation so all outstanding keys go stale. Relationship
+fields change `*mut Thread` → `Option<Tid>`; following an edge is a
+generation-checked `table.get`. Run/wait/scheduler membership leaves the Thread
+struct into `Tid`-keyed side-tables (3g), retiring the intrusive queues.
+
+**Staging (safest → riskiest; each battery-gated; CHECKPOINT before the core):**
+- **N-R6a (pilot):** build `GenTable<T,K>` in kstd (+ compile-time asserts, doc,
+  the generation-check semantics) and prove it end-to-end on the **session**
+  family (leaf, job-control, bounded consumers, well-understood from P3-BUG3):
+  session storage → a `GenTable<Session, Sid>`; `*mut session` handles that
+  cross subsystem edges → `Sid` keys with generation-checked lookup; keep
+  thread/proc/pgroup UNTOUCHED. Proves the primitive + the refcount-liveness
+  replacement (a stale `Sid` returns `None`, the generational analogue of the
+  P3-BUG3 baseline-drop) on a contained subsystem.
+- **N-R6b:** pgroup family → `Pgid` keys.
+- **N-R6c:** thread_group → key.
+- **N-R6d (CHECKPOINT with user, HIGH risk):** thread/proc core — Thread
+  relationship fields → `Tid`, the intrusive proc-table hlist → a `GenTable`
+  index, run/wait queues → `Tid` side-tables. `current`/`cpu_local.proc` stays
+  a raw `*mut Thread` (asm boundary). forkforkfork A/B + full scheduler battery.
+
 ## 6. Risk tiers & discipline
 - **Low (mechanical, compiler-proven):** N-R1/N-R2/N-R8 signature & unsafe-scope work.
 - **Medium:** N-R3/N-R4 (new abstractions, wide but local edits).
