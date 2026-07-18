@@ -2986,6 +2986,104 @@ untouched (no forkforkfork A/B needed).
 LOC: 4 files, tty family only. 4 extern "C" callbacks + 1 C-shaped
 table type + 6 dead slots + 1 facade alias deleted.
 
+### Iteration 76 — 2026-07-17 — Wave P3-7 (file layer): reference-ification of `vfs/file.rs`'s internal fns — raw-pointer params → `&mut VfsFile`
+
+- **The file-layer slice of the reference-ification arc** (user
+  directive: fully adapt Rust style / reduce unsafe). `fdtable.rs`
+  already landed separately as **P3-7a (`37ef76d`)**; this is the
+  `vfs/file.rs` follow-up. Every kernel-object `*mut vfs_file` parameter
+  of a file-internal function became `&mut VfsFile`: the null-check plus
+  the single `unsafe { &mut *file }` conversion now happen exactly **once**
+  at each `extern "C"` boundary (the outermost frame that genuinely
+  receives a raw pointer), after which the interior plain-field logic
+  (`f_flags`, `ops`, `inode`) is ordinary **safe** field access.
+- **Converted** (signature `*mut vfs_file` → `&mut VfsFile`, boundary
+  conversion hoisted to the `extern "C"` wrapper): `vfs_ioctl_inner`,
+  `vfs_fileread_inner`, `vfs_filewrite_inner`, `vfs_filestat_inner`,
+  `vfs_filelseek_inner`, `truncate_inner`, and `open_cdev`. Two
+  additionally converted **in place** (raw `extern "C"`/local signature
+  kept, `&mut` hoisted interior after exclusivity is established, mirroring
+  `fdtable.rs`'s `vfs_fdtable_put`): `vfs_fput`'s last-reference teardown
+  (the `&mut` is taken only *after* `atomic_dec_unless` proves refcount==1
+  ⇒ genuinely exclusive, and ends before `file_free` consumes the raw
+  pointer) and `vfs_fileopen_inner`'s freshly-`file_alloc`ed local (the
+  `&mut` reborrows `&raw mut *f` for `file_free`/callbacks and every error
+  path `return`s immediately, so the borrow never outlives the free).
+- **Deliberately kept raw** (lifetime honesty — correctness over metric):
+  the `pos` **union** — every union field read/write is `unsafe` in Rust
+  regardless of how the container is borrowed; the [`FileOps`] trait
+  dispatch (`ops.read`/`write`/`llseek`/`ioctl`/`fflush`) — its `file`
+  param keeps the raw-pointer signature (cross-module trait boundary,
+  explicitly a "keep raw" site), reached by reborrowing `&raw mut *file`
+  for the synchronous call; and `file_alloc`/`file_free` (alloc from /
+  free to the slab), `ftable_attach`/`ftable_detach` (list-node splice),
+  `refcount_atomic`/`file_lock` (the deliberate atomic-reinterpret / lock-
+  address helpers), and `open_blkdev` (converting would *split* one
+  union-write `unsafe` block into two — a net increase).
+- **FileOps trait NOT converted** — deliberate, and consistent with the
+  wave's own "keep raw at trait dispatch" rule. Finding: all four
+  implementors (`xv6fs`/`tmpfs`/`file.rs`, `pipe.rs`, `ptmx.rs`) are
+  **thin forwarders** — `unsafe fn read(&self, file: *mut vfs_file, …)`
+  bodies just call an internal `__xv6fs_file_read(file, …)` /
+  `pipe_file_read(file, …)` that itself takes a raw pointer. The real
+  `(*file).x` accesses live in those internal driver fns, **out of the
+  file.rs+trait scope**. Converting the trait's `file` param to `&mut`
+  would therefore reduce **zero** unsafe in the implementor bodies (they
+  would just reborrow `&raw mut *file` to call the still-raw internal fn),
+  net-shuffle unsafe between files for a ~2-block file.rs gain while adding
+  cross-driver (pty/pipe/fs) risk — a poor trade. The trait stays the
+  honest cross-module raw boundary; a genuine trait-ref conversion is
+  gated on first ref-ifying the `__*_file_*` driver internals (a later
+  wave).
+- **rust-skills applied**: `unsafe-minimize-scope` (each hoisted `&mut`
+  narrows the following field cluster to safe access; the residual
+  `unsafe` marks only the union member or the raw-`buf`/`file` callback),
+  `unsafe-safety-comment` + `doc-safety-section` (SAFETY: at every
+  boundary conversion, union access, and reborrow; new module-doc
+  "Reference-ification (P3-7b)" section documenting the exclusions and the
+  aliasing approximation), `type-option-nullable` (nullable `file`
+  expressed as the null-check-then-reference boundary; `ops` stays
+  `Option<&'static dyn FileOps>`), `own-borrow-over-clone` (references, no
+  copies of the 256-byte record). Aliasing caveat documented as the same
+  approximation class as `fdtable.rs`'s P3-7a note and the crate's
+  `__ATOMIC_CONSUME`→`Acquire` mapping: a `dup`-shared descriptor can be
+  operated on by two threads at once, so two `&mut VfsFile` views may
+  transiently exist — serialized by `file_lock` on the fields that matter,
+  invisible to each frame's codegen, but a foreign `&mut` overlap under a
+  strict Stacked/Tree-Borrows reading (the layout-frozen approximation the
+  arc accepts crate-wide).
+- **Metric**: `grep -cE "unsafe \{" kernel/vfs/file.rs` **102 → 75**
+  (−27, **26.5%** drop). Short of the 30% target: the honest ceiling for
+  *this* file — the remainder is genuinely-raw union `pos` access (every
+  device/pipe/socket file touches it), slab alloc/free, list splices, the
+  atomic-reinterpret refcount helpers, and the raw-`buf`/`file` trait/C-ABI
+  callbacks; closing the last ~4 blocks would require either union-field
+  or driver-internal ref-ification (out of scope) or dishonest `&mut`
+  over freed/published objects (the rule forbids it). clippy
+  `not_unsafe_ptr_arg_deref` on `vfs/file.rs`: **0 → 0** (the deref-ing
+  `*_inner` fns were private — the lint only fires on `pub` fns; the
+  `extern "C"` wrappers forward, and clippy does not flag their boundary
+  `&mut *file`). The 64 crate-wide findings are all pre-existing
+  (`proc/access.rs`, `irq/trap.rs`, `vfs/fs.rs`, `lock/rwlock.rs`),
+  untouched.
+- **Verification** (worker, cache-first): `cargo clean` + full cmake
+  rebuild → **0 warnings 0 errors** (`release` profile); cache discipline
+  verified before AND after (`CMAKE_BUILD_TYPE` empty, toolchain gcc).
+  Boot ×3, each exactly ONE `init: starting sh` + stable `/ $`. Battery:
+  `cat README.md | wc` = **714 3365 26018**; `ls /dev` (crw null — the
+  `ops == None` direct-device-I/O route); shell `echo`; `cat
+  /nonexistent` → ENOENT (`cannot open`); `usertests` **pipe1** /
+  **createdelete** / **linktest** / **unlinkread** each OK (the
+  "lost some free pages" trailers are the documented pre-existing
+  single-test artifact); **stressfs ×2** (4-proc write/read storm, shell
+  alive after); **testsig 21/21**; **mmaptest 16/16** (file-backed mmap →
+  the `FileOps::fault` dispatch path); **symlinktest** both parts ok;
+  `usertests forkforkfork` → the **IDENTICAL** pre-existing panic
+  signature ("Failed to remove interrupted waiter from queue" → IPI crash
+  → `kerneltrap` Load-page-fault storm at `sepc=0x80229c7e`, documented
+  since ~Iteration 25, in the waiter-queue path this wave never touches).
+  No new faults. LOC: 1 file (`kernel/vfs/file.rs`), signatures internal.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
