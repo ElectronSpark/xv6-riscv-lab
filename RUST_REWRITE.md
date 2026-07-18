@@ -3605,6 +3605,87 @@ table type + 6 dead slots + 1 facade alias deleted.
   comments). Crate is **edition 2021** — no Rust-2024-only forms
   introduced. Do NOT commit (per brief).
 
+### Iteration 83 — 2026-07-18 — P3-BUG2: `usertests diskfull` intermittent `spin_lock reentry` crash FIXED (pcache eviction re-enters `new_page`'s buddy lock)
+
+- **Two-part symptom, one real bug.** The reported `diskfull` "hang"
+  (prints `test diskfull:` then nothing for 55 s, no `OK`/`FAILED`, no
+  panic) turned out to be two independent effects: (1) `diskfull` is
+  legitimately **slow** — it fills the whole ~200 MB fs (`FSSIZE 200000`,
+  ~197 k data blocks) one `BSIZE` block per `write()`, each its own
+  `begin_op`/`bmap`(logs bitmap+zeroed block)/`read_page`(bio read)/
+  `mark_dirty`/`end_op`(sync log commit) transaction, so a full run takes
+  **~3–4 min** wall on `-smp` QEMU, far past a 55 s wait; and (2) an
+  **intermittent kernel crash** — a `spin_lock reentry` panic on a
+  `page_t` lock (→ crash-IPI cascade, then a secondary fault loop in the
+  panic-path `print_backtrace`). A clean long run reproduced the crash;
+  shorter runs just timed out mid-fill. The classic dirty-page/full-disk
+  writeback-deadlock hypothesis was **REFUTED** by instrumentation: the
+  pcache flush/eviction cycle works (`getpage_wait → flusher cleans 4096
+  → getpage_wake, dirty=0`), `balloc` returns 0 gracefully on a full disk,
+  and the wedge point advanced every run (progress, not deadlock).
+
+- **Root cause (localized, in `kernel/mm/pcache.rs::pcache_get_page`).**
+  On a cache miss with the per-inode pcache at `max_pages`, `pcache_get_page`
+  allocates `new_page`, takes **`new_page`'s page lock**, then loops
+  evicting LRU victims. Each victim is freed with `pcache_page_put(victim)`
+  → `__page_ref_dec` → (refcount 0) `buddy_put` → `buddy_merge_and_insert`
+  → `Page::lock_get_buddy`, which does `lock_pair(victim, buddy)` — it
+  **locks the victim's physically-adjacent buddy before checking whether
+  it is free** (`page.rs:1059`, the `BUDDY_STATE_FREE` test is at 1064).
+  When that buddy *is* `new_page`, the same hart re-acquires `new_page`'s
+  already-held page lock → `spin_lock reentry`. **Intermittent** because it
+  requires the evicted victim and the freshly-allocated `new_page` to be
+  buddies (a specific physical adjacency, allocation-order dependent);
+  **`diskfull`-specific** because it is the workload that most heavily
+  drives per-inode pcache eviction (allocate-new + evict-victim in one op).
+  Full reproduced chain (stack-scan → `addr2line`): `usertrap →
+  sys_vfs_write → Xv6fsFileOps::write → pcache_get_page → __page_ref_dec →
+  buddy_merge_and_insert → (reentry)`, on thread "usertests".
+
+- **The fix (3 lines, semantics-preserving).** In the eviction loop's
+  victim-free branch, **release `new_page`'s page lock across
+  `pcache_page_put(victim)` and re-acquire it after** — exactly mirroring
+  the existing `drop(new_page_guard)…lock_pcache_page(new_page)` dance
+  already used around the eviction `sleep_on_chan` a few lines below.
+  `new_page` is unpublished (not in the rb-tree, not attached) so nobody
+  else can reach it while its lock is momentarily dropped, and it stays
+  allocated (`ref_count ≥ 1`, `buddy_state ≠ FREE`, off every free list),
+  so the buddy allocator's `lock_get_buddy` now cleanly locks → inspects →
+  **declines to merge** it. The common (cache-not-full) hot path never
+  enters this branch and is byte-for-byte unchanged.
+
+- **Diagnosis method.** Runtime instrumentation (a hang needs observation):
+  `kprintln!` markers at every write→dirty→flush→balloc wait/retry site;
+  then a `spin_acquire`-reentry hook printing the lock name (`page_t`) and
+  a **manual bounds-checked stack scan** for `.text` return addresses
+  (frame-pointer walking was unreliable and the panic-path auto-backtrace
+  itself faults). The crash is a Heisenbug — heavy `kprintln` perturbs
+  timing and hides it — so it was caught by hammering fresh-image runs in
+  parallel under `-smp 4` (higher contention). All instrumentation removed;
+  the stashed debug diff is not applied.
+
+- **Verification.** Pre-fix: `spin_lock reentry` reproduced on multiple
+  independent runs (≈25 % per fresh-image run). Post-fix: **`usertests
+  diskfull` → `test diskfull: OK`** on every run (fresh `fs_img` each time)
+  with **zero** `reentry`/panic across a parallel-hammer sweep. No
+  regression: **testsig 21/21**, **mmaptest 16/16**, **stressfs ×2**,
+  `usertests createdelete`/`bigfile`/`bigdir` all **OK**, **forkforkfork
+  OK** (P3-BUG1 not regressed), boot gate = one `init: starting sh`, `ls`
+  of a missing file → ENOENT. The `FAILED -- lost some free pages` trailer
+  on single-test runs is the documented pre-existing free-page accounting
+  artifact, unrelated. Final `cargo clean` + full rebuild is **0-warning**.
+  Do NOT commit (per brief).
+
+- **rust-skills applied**: `unsafe-minimize-scope` / `unsafe-safety-comment`
+  (no new `unsafe`; the change is two `PcPageGuard` RAII drop/re-acquire
+  calls plus a prose comment explaining the buddy-lock reentry invariant),
+  `conc-atomic-ordering` (no atomics touched; relies only on the existing
+  page-lock ordering pcache↦page↦buddy-pool), `own-*`/`mem-drop-order`
+  (guard lifetime narrowed to exclude the victim-free window),
+  `err-result-over-panic` context (the surrounding graceful `balloc==0 →
+  ENOSPC` path was confirmed correct, not touched). Crate is **edition
+  2021**.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
@@ -3676,17 +3757,23 @@ table type + 6 dead slots + 1 facade alias deleted.
 - ~~`cat /dev/tty` panics ("pid lock not held")~~ FIXED in Wave 22
   (pid_wlock around session_get_ctrl_tty; cat blocks correctly, ^C works).
 
-- `usertests diskfull` hangs (never prints its `OK`/`FAILED` result).
-  **Confirmed pre-existing**: reproduces identically on an unmodified C
-  baseline (git worktree at this session's starting commit, before any
-  Wave 19 xv6fs changes). Not exercised by any prior wave's test battery
-  (root filesystem block-exhaustion path was never stress-tested before
-  Wave 19). Root cause not investigated further (out of Wave 19's touch
-  scope — the hang reproduces in code this wave never modified). Flagged
-  for a dedicated investigation; likely somewhere in the disk-full
-  interaction between the log's wait-for-space path and block allocation,
-  or in `kernel/bio.c`'s buffer cache under sustained write pressure with
-  zero free blocks.
+- ~~`usertests diskfull` hangs (never prints its `OK`/`FAILED` result).~~
+  **FIXED in Iteration 83 (P3-BUG2)** (2026-07-18) — the observed "hang"
+  was two things: `diskfull` is genuinely **slow** (~3–4 min to fill the
+  whole fs, one logged transaction per `BSIZE` block, well past a 55 s
+  wait), **and** an intermittent `spin_lock reentry` crash on a `page_t`
+  lock. Root cause: `pcache_get_page`'s eviction loop held the freshly
+  allocated `new_page`'s page lock while freeing an LRU victim; when the
+  victim's physical **buddy** was `new_page`, the buddy allocator's
+  `lock_get_buddy` (`page.rs`) locks the buddy before its free-state check,
+  re-entering `new_page`'s already-held lock. Fix: release/re-acquire
+  `new_page`'s page lock around the victim free (3 lines,
+  `kernel/mm/pcache.rs`). Post-fix `diskfull → OK` on every fresh-image run
+  with zero reentry; full no-regression battery green. See that iteration's
+  log entry for the reproduced call chain, diagnosis method, and
+  verification. The earlier "reproduces on the unmodified C baseline"
+  note reflected the *slowness* (55 s timeout) — the crash is timing-
+  dependent and was not isolated at the time.
 - Rare `writebig` block-read-back-as-zero: observed exactly once during
   P3-1C and initially misattributed to RUST_FORCE_UNDEFINED pruning — a
   dedicated investigation (2026-07-14) proved the pruned link

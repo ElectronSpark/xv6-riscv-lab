@@ -2750,7 +2750,23 @@ pub(crate) fn pcache_get_page(p: *mut Pcache, blkno: u64)-> *mut Page  {
             while xv6_pcache_page_count(p) as u64 >= xv6_pcache_max_pages(p) {
                 let victim = pcache_evict_lru(p);
                 if !victim.is_null() {
+                    // Release `new_page`'s page lock across the victim
+                    // free. Dropping the victim's last reference can free
+                    // it back to the buddy allocator, whose merge step
+                    // (`buddy_merge_and_insert` -> `lock_get_buddy`) locks
+                    // the victim's physically-adjacent buddy to inspect it
+                    // -- and that buddy may *be* `new_page`. Holding
+                    // `new_page`'s lock here would then re-enter it on the
+                    // same hart ("spin_lock reentry"). `new_page` is not
+                    // published anywhere yet (not in the tree, not
+                    // attached), so releasing its lock momentarily is safe;
+                    // it stays allocated (refcount >= 1, off the free
+                    // list), so the buddy allocator inspects and correctly
+                    // declines to merge it. Mirrors the existing
+                    // drop/re-acquire around the sleep below.
+                    drop(new_page_guard);
                     pcache_page_put(victim);
+                    new_page_guard = lock_pcache_page(new_page);
                     continue;
                 }
                 if xv6_pcache_dirty_count(p) > 0 {
