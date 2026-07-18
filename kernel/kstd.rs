@@ -89,6 +89,7 @@
 #![allow(dead_code)]
 
 use core::ffi::{c_char, c_int};
+use core::ptr::NonNull;
 
 // ===========================================================================
 // `ERR_PTR` family — TRANSITIONAL C-ABI/storage-boundary shim.
@@ -429,6 +430,276 @@ macro_rules! kassert {
             )
         }
     };
+}
+
+// ===========================================================================
+// `GenTable<T, CAP, TAG>` — hand-rolled generational slotmap  [N-R6a pilot]
+// ===========================================================================
+//
+// The reusable primitive of the full-Rust-native proc/thread redesign
+// (`RUST_NATIVE_REDESIGN.md` §3a/§5b). A fixed-capacity, `#![no_std]`,
+// **zero-dependency** (the kernel has no external crates and keeps it that
+// way) generational table that turns the C-transliteration "raw `*mut T`
+// handle you hope is still live" pattern into a checked lookup:
+//
+// * Objects are stored as a **stable pointer** ([`NonNull<T>`]) — the table
+//   never holds `T` by value, so the pointee keeps its existing slab/page
+//   allocation and **never moves**. This is mandatory for the asm-adjacent
+//   proc/thread objects (`current` = a raw `*mut Thread` the context switch
+//   dereferences); a `Vec`-backed slotmap that relocates on growth is
+//   forbidden for them. Session (this pilot's consumer) has the same
+//   property for free.
+// * A handle is a `Copy` typed key [`GenKey<TAG>`] = `{ index, generation }`,
+//   **not** a pointer. The `TAG` const parameter makes keys of different
+//   families (`Sid` vs a future `Pid`/`Tid`/`Pgid`) distinct incompatible
+//   types even though they share this one implementation — a stale `Sid`
+//   can never be silently used where a `Pid` is expected.
+// * **Liveness = generation check.** [`insert`](GenTable::insert) bumps the
+//   chosen slot's generation and stamps it into the returned key;
+//   [`remove`](GenTable::remove) frees the slot and bumps its generation
+//   again, so **every outstanding key to that object instantly goes stale**.
+//   A subsequent [`get`](GenTable::get) with a stale key sees
+//   `slot.generation != key.generation` and returns `None`. A
+//   use-after-free that would be undefined behaviour through a raw `*mut T`
+//   becomes a checked `None` — exactly the class of silent UB the whole
+//   Rust-native effort exists to eliminate.
+//
+// # Generation wrap
+//
+// `generation` is a `u32` advanced with `wrapping_add`. A stale key could
+// only alias a live slot after the *same slot index* is inserted-then-
+// removed `2^32` times (≈4.3 billion reuse cycles) with that one stale key
+// retained the whole time. At kernel scale (a session/pid is created on
+// the order of once per `setsid`/`fork`) this is unreachable; the wrap is
+// documented rather than defended, matching every production slotmap.
+//
+// # Synchronisation — NONE; the table is *not* internally synchronized
+//
+// `GenTable` has no interior locking. It is designed to live **behind the
+// subsystem's existing lock**: mutators ([`insert`](GenTable::insert)/
+// [`remove`](GenTable::remove)/[`remove_ptr`](GenTable::remove_ptr)) require
+// exclusive access (`&mut self`), readers ([`get`](GenTable::get)/
+// [`contains`](GenTable::contains)/[`for_each`](GenTable::for_each)) require
+// shared access (`&self`). A `static` instance therefore lives in an
+// `UnsafeCell` + `unsafe impl Sync` newtype (exactly like `proc_shims`'s
+// `PROC_TABLE`), and every access is taken while holding the owning
+// subsystem lock — for the session pilot that is `pid_lock` (write for
+// mutation, read for scan), the identical discipline that protected the
+// `session_list` this table replaces.
+//
+// ## Freeze / `noalias` note (memory `freeze-noalias-hazard`)
+//
+// `GenTable` is `Freeze` (its `Slot`s are plain `{ u32, Option<NonNull<T>> }`
+// — no `UnsafeCell` interior). The N-R1 pilot proved that taking `&T` to a
+// `Freeze` value that *another hart mutates during the borrow* lets LLVM
+// hoist a field read out of a loop (lost wakeup / boot hang). That hazard
+// does **not** apply here because the owning rwlock makes access exclusive:
+// a `&self` scan runs under `pid_rlock`, which excludes every `&mut self`
+// mutator (they hold `pid_wlock`), so no other hart writes the table while a
+// shared reference into it is live. The reference and the writer are never
+// simultaneously live — the precondition for the hazard is absent. The
+// table also only ever hands out raw `NonNull<T>` (never `&T`/`&Session`)
+// to its stored objects, so it introduces no new `&Freeze`-into-a-loop of
+// the *pointee* either.
+
+/// A typed, `Copy` generational handle into a [`GenTable`] of the same
+/// `TAG`. `index` selects the slot; `generation` is checked against the
+/// slot's live generation on every lookup so a handle to a removed (and
+/// possibly recycled) object resolves to `None` instead of dangling.
+///
+/// The `TAG` const parameter is a compile-time family discriminator: a
+/// `type Sid = GenKey<SID_TAG>` is a different, non-interchangeable type
+/// from any other family's key, so keys cannot be crossed between tables.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GenKey<const TAG: u64> {
+    index: u32,
+    generation: u32,
+}
+
+impl<const TAG: u64> GenKey<TAG> {
+    /// The slot index this key refers to.
+    #[inline]
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+    /// The generation this key was stamped with (matched against the
+    /// slot's live generation by [`GenTable::get`]).
+    #[inline]
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+}
+
+/// One table slot: the live `generation` plus the stored stable pointer
+/// (`None` when the slot is free). Kept private — callers only ever see
+/// [`GenKey`]s and [`NonNull<T>`]s.
+struct Slot<T> {
+    generation: u32,
+    ptr: Option<NonNull<T>>,
+}
+
+impl<T> Slot<T> {
+    /// A free slot at generation 0. Used as the array-repeat initializer in
+    /// [`GenTable::new`]; being an associated `const` (not a runtime value)
+    /// lets `[Slot::<T>::EMPTY; CAP]` build a const array without requiring
+    /// `Slot<T>: Copy`.
+    const EMPTY: Self = Slot { generation: 0, ptr: None };
+}
+
+/// A fixed-capacity generational slotmap of stable `NonNull<T>` pointers.
+/// See the module section doc above for the full design, semantics, and
+/// synchronisation contract (the table is **not** internally synchronized —
+/// it lives behind the owning subsystem's lock).
+pub struct GenTable<T, const CAP: usize, const TAG: u64> {
+    slots: [Slot<T>; CAP],
+}
+
+impl<T, const CAP: usize, const TAG: u64> GenTable<T, CAP, TAG> {
+    /// Compile-time layout guards, forced to evaluate by [`new`](Self::new)
+    /// at every monomorphization: the key must be exactly two `u32`s, the
+    /// slot must be niche-optimized to pointer-plus-generation (so a stored
+    /// `Option<NonNull<T>>` costs no discriminant word), and `CAP` must fit
+    /// the `u32` index space.
+    const LAYOUT_OK: () = {
+        assert!(
+            core::mem::size_of::<GenKey<TAG>>() == 8,
+            "GenKey must be exactly two u32 fields (8 bytes)"
+        );
+        assert!(
+            core::mem::align_of::<GenKey<TAG>>() == 4,
+            "GenKey must be u32-aligned"
+        );
+        assert!(
+            core::mem::size_of::<Slot<T>>() <= 2 * core::mem::size_of::<usize>(),
+            "Slot<T> must be niche-optimized (pointer + generation, no Option discriminant)"
+        );
+        assert!(
+            CAP <= u32::MAX as usize,
+            "GenTable capacity must fit the u32 index space"
+        );
+    };
+
+    /// Construct an empty table. `const` so it can initialize a `static`
+    /// (all slots free at generation 0 → the array is all-zero/`None` and
+    /// lands in BSS, no data-segment cost).
+    pub const fn new() -> Self {
+        // Force the compile-time layout guards for this monomorphization.
+        let _: () = Self::LAYOUT_OK;
+        GenTable {
+            slots: [Slot::<T>::EMPTY; CAP],
+        }
+    }
+
+    /// Insert `p`, returning its fresh key, or `None` if the table is full.
+    ///
+    /// Takes the first free slot (linear scan — inserts are rare at kernel
+    /// scale), bumps that slot's generation, and stamps the new generation
+    /// into the returned key so it is distinct from every key previously
+    /// handed out for the same slot index.
+    ///
+    /// Requires `&mut self`: the caller must hold the owning subsystem lock
+    /// exclusively (the session pilot: `pid_wlock`).
+    pub fn insert(&mut self, p: NonNull<T>) -> Option<GenKey<TAG>> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.ptr.is_none() {
+                slot.generation = slot.generation.wrapping_add(1);
+                slot.ptr = Some(p);
+                return Some(GenKey {
+                    index: i as u32,
+                    generation: slot.generation,
+                });
+            }
+        }
+        None
+    }
+
+    /// Resolve `k` to its stored pointer, or `None` if the key is stale
+    /// (the slot's generation has moved on because the object was removed,
+    /// possibly and its slot reused) or the slot is empty / the index is
+    /// out of range. This is the use-after-free → checked-`None` conversion.
+    #[inline]
+    pub fn get(&self, k: GenKey<TAG>) -> Option<NonNull<T>> {
+        let slot = self.slots.get(k.index as usize)?;
+        if slot.generation == k.generation {
+            // On a generation match the slot is occupied by construction
+            // (removal always bumps the generation away from any live key);
+            // returning `slot.ptr` is `None`-safe regardless.
+            slot.ptr
+        } else {
+            None
+        }
+    }
+
+    /// Remove the object `k` refers to, freeing its slot and bumping the
+    /// slot generation so **all** outstanding keys to it go stale. Returns
+    /// the removed pointer, or `None` if `k` was already stale / empty /
+    /// out of range (idempotent double-remove is a safe no-op returning
+    /// `None`, never a double-free).
+    ///
+    /// Requires `&mut self` (owning lock held exclusively).
+    pub fn remove(&mut self, k: GenKey<TAG>) -> Option<NonNull<T>> {
+        let slot = self.slots.get_mut(k.index as usize)?;
+        if slot.generation != k.generation || slot.ptr.is_none() {
+            return None;
+        }
+        let p = slot.ptr.take();
+        slot.generation = slot.generation.wrapping_add(1);
+        p
+    }
+
+    /// Remove whichever slot currently holds pointer `p` (linear scan),
+    /// bumping its generation so outstanding keys go stale. Returns the
+    /// now-invalidated key, or `None` if `p` is not present.
+    ///
+    /// This is the pointer-keyed teardown path for consumers that hold the
+    /// object as a bare `*mut T`/`NonNull<T>` (not its `GenKey`) at free
+    /// time — e.g. the session pilot, whose `Session` struct is a
+    /// layout-frozen `#[repr(C)]` type with no room to cache its own key,
+    /// so `session_unref`'s free branch removes by the pointer it already
+    /// holds. `remove(key)` above is the key-keyed twin.
+    ///
+    /// Requires `&mut self` (owning lock held exclusively).
+    pub fn remove_ptr(&mut self, p: NonNull<T>) -> Option<GenKey<TAG>> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.ptr == Some(p) {
+                let stale = GenKey {
+                    index: i as u32,
+                    generation: slot.generation,
+                };
+                slot.ptr = None;
+                slot.generation = slot.generation.wrapping_add(1);
+                return Some(stale);
+            }
+        }
+        None
+    }
+
+    /// True iff `k` currently resolves to a live object.
+    #[inline]
+    pub fn contains(&self, k: GenKey<TAG>) -> bool {
+        self.get(k).is_some()
+    }
+
+    /// Visit every live object's stable pointer, in ascending slot order.
+    /// Hands out raw `NonNull<T>` (never `&T`) so the callback decides how
+    /// to dereference under the caller's lock — no `&Freeze` into the loop
+    /// (see the module section's freeze note).
+    ///
+    /// Requires `&self` (owning lock held at least for read).
+    pub fn for_each(&self, mut f: impl FnMut(NonNull<T>)) {
+        for slot in self.slots.iter() {
+            if let Some(p) = slot.ptr {
+                f(p);
+            }
+        }
+    }
+}
+
+impl<T, const CAP: usize, const TAG: u64> Default for GenTable<T, CAP, TAG> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ===========================================================================

@@ -3770,6 +3770,130 @@ path) — no panic/reentry/hang. `mmaptest` **16/16** all passed. `testsig`
 runs. The `FAILED -- lost some free pages` trailer is the pre-existing
 accounting artefact (see Known issues), not a regression. **NOT committed.**
 
+### Iteration 85 — 2026-07-18 — Wave N-R6a (PILOT of the proc/thread slotmap redesign): the reusable `GenTable` generational-slotmap primitive + proven end-to-end on the session registry
+
+**Goal (per `RUST_NATIVE_REDESIGN.md` §3a / §5b N-R6a):** build the reusable
+hand-rolled generational slotmap `GenTable<T, CAP, TAG>` (the flagship
+proc/thread-family primitive) and prove it end-to-end on the safest leaf —
+the **session** family — by making a `GenTable` the session registry in place
+of the C-shaped intrusive `session_list`, without touching thread/proc/pgroup
+internals (those are gated N-R6b..d, behind a user checkpoint).
+
+**(1) The primitive — `kernel/kstd.rs` (zero external crates, `#![no_std]`):**
+- `GenKey<const TAG: u64> { index: u32, generation: u32 }` — a `Copy` typed
+  key; `TAG` is a compile-time family discriminator so `Sid` is a distinct,
+  non-interchangeable type from any future `Pid`/`Tid`/`Pgid` key.
+- `Slot<T> { generation: u32, ptr: Option<NonNull<T>> }` (private,
+  niche-optimized to 16 bytes) and
+  `GenTable<T, const CAP: usize, const TAG: u64> { slots: [Slot<T>; CAP] }`.
+- API: `const fn new()` (const-constructible `static`, all-`None` → BSS),
+  `insert(NonNull<T>) -> Option<GenKey>` (linear-scan free slot, bumps gen,
+  `None` if full), `get(k) -> Option<NonNull<T>>` (generation-checked; stale
+  key → `None`, the use-after-free→checked-`None` conversion), `remove(k)`,
+  `remove_ptr(NonNull<T>) -> Option<GenKey>` (pointer-keyed teardown for
+  consumers with no room to cache their key), `contains(k)`, `for_each(&self,
+  FnMut(NonNull<T>))`. Compile-time layout asserts (`GenKey` == 8B & 4-aligned,
+  `Slot<T>` niche-optimized ≤ 2 words, `CAP` ≤ `u32::MAX`), forced per
+  monomorphization. Objects are stored as **stable `NonNull<T>` pointers** —
+  the table never holds `T` by value, so pointees keep their slab/page
+  allocation and never move (mandatory for the asm-adjacent proc/thread
+  objects this primitive targets next). **Generation wrap** (`u32`,
+  `wrapping_add`) documented as unreachable at kernel scale, not defended.
+  **Not internally synchronized** (documented): lives behind the subsystem
+  lock, `&mut self` mutators under the write lock / `&self` readers under the
+  read lock.
+
+**(2) Session pilot — `kernel/tty/session.rs` + `kernel/proc/proc_shims.rs`:**
+- **Retired** the global `static mut session_list: list_node_t` intrusive
+  registry (and its `ll_push_back`/`ll_detach`/`list_foreach_safe::<session>`
+  walk). New registry: `static SESSION_TABLE: GenTable<Session, NSESSION,
+  SID_TAG>` in an `UnsafeCell` + `unsafe impl Sync` newtype (exactly the
+  `PROC_TABLE` idiom). `NSESSION = 10_000 = NR_THREAD` — the true upper bound
+  (every live session has ≥1 member thread, baseline dropped on empty per
+  P3-BUG3), so `insert` can never return `None` in practice → **no capacity
+  regression** (`session_alloc` cannot start failing where it succeeded).
+- `type Sid = GenKey<SID_TAG>` (distinct from the numeric `Session::sid`,
+  which stays, still returned by `getsid`). New generation-checked
+  `session_lookup(Sid) -> Option<*mut session>` — the safe replacement for raw
+  `*mut session` traversal (composes with, does not yet replace, `SRef`).
+- **Converted paths:** `session_alloc` (insert, replacing the list push;
+  defensive slab-free + null-return on the impossible full case),
+  `session_init` (dropped the `session_list` head init — the `GenTable` is
+  const-initialized), `session_unref`'s free branch (`session_table_remove`
+  by pointer, replacing the `session_list` unlink — bumps the slot generation
+  so any outstanding `Sid` goes stale = the generational liveness proof),
+  `session_setsid`'s `pgroup_alloc`-failure teardown comment, and
+  `proc_shims::session_for_each_all` (now walks the table via
+  `session::session_for_each`).
+- **Left raw `*mut session` (documented boundary):** the cross-subsystem
+  back-edges `thread.session` / `pgroup.session` / `tty.session` / `fg_pgrp`.
+  Converting them to `Sid` cascades into thread/proc/pgroup, which is exactly
+  what the pilot must NOT touch (N-R6b..d). The session is
+  findable/validatable through the table today; the edge conversion is later.
+- **Layout untouched:** `Session` is the layout-frozen `#[repr(C)]`
+  kernel-wide definition (size 96, asserted offsets) — no field added/removed.
+  `global_entry` stays (still self-linked by `__session_alloc` + referenced by
+  the offset assert, so no dead-code warning); it is simply no longer linked
+  into any global list.
+
+**Freeze/`noalias`-hazard screening (memory `freeze-noalias-hazard`, the
+N-R1 finding):** `GenTable` is `Freeze` (plain `Slot`s, no `UnsafeCell`), but
+the hazard is absent here because the owning `pid_lock` rwlock makes access
+exclusive — a `&self` scan runs under `pid_rlock`, which excludes every
+`&mut self` mutator (they hold `pid_wlock`), so no other hart writes the table
+while a shared reference into it is live (the reference and the writer are
+never simultaneously live). The table also only ever hands out raw
+`NonNull`/`*mut` (never `&Session`) to stored objects, so it introduces no
+`&Freeze`-into-a-loop of the pointee either. No `*mut → &` conversion of any
+concurrently-mutated Freeze type was performed.
+
+**`pid_wlock` discipline:** `session_table_insert`/`session_table_remove` both
+`pid_assert_wholding()` (verified: all `session_alloc` sites —
+`session_init`/kthread-hierarchy at boot, `session_setsid` — and all
+`session_unref`-to-zero sites run under `pid_wlock`); the boot ×N runs
+validate the asserts never fire.
+
+**rust-skills rules applied:** `api-newtype-safety` + `type-newtype-ids`
+(the `TAG`-parameterized `GenKey`/`Sid` typed key), `const-fn` + `const-generics`
+(`const fn new`, `<const CAP>/<const TAG>`), `mem-assert-type-size` (the
+compile-time `GenKey`/`Slot` layout guards), `num-nonzero`-spirit (`NonNull`
+niche → no discriminant word), `unsafe-safety-comment` + `unsafe-minimize-scope`
+(every `unsafe { &*/&mut * SESSION_TABLE...}` is a one-line block with a
+`// SAFETY:` tying it to the held lock), `own-*`/`conc-*` (the Freeze-aliasing
+screening above), `doc-module-inner`/`doc-all-public` (thorough module +
+item docs), `pat-let-else` (`let Some(nn) = ... else { return }`), `name-*`.
+Crate is **edition 2021** (kept `#[no_mangle]`/`u!` forms; no Rust-2024 syntax).
+
+**Before → after (session registry):** global registry: intrusive
+`list_node_t session_list` + `ll_push_back`/`ll_detach`/`list_foreach_safe`
+walk (a `container_of`-class site) **→** `GenTable<Session, NR_THREAD, SID_TAG>`
+with generation-checked `get`/`for_each` (the `container_of` list walk retired,
+one fewer intrusive-list registry). Raw `*mut session` traversal for liveness
+**→** typed `Sid` + `session_lookup` (generation-checked; stale → `None`).
+Cross-subsystem back-edges: still `*mut session` (deliberate pilot boundary).
+
+**Verification (orchestrator recipe, `TOOLPREFIX` + `LAB=fs`; cache clean
+before+after — `CMAKE_BUILD_TYPE` empty, `C_COMPILER` = toolchain
+`riscv64-unknown-elf-gcc`):** full crate recompile **0 warnings**; kernel +
+fs_img built. Boot gate: **exactly one** `init: starting sh` + stable `/ $`
+across **6 boots**. **`testsig` ALL TESTS PASSED (21/21) ×2** (Test 15 =
+setsid/getsid — session create/destroy through the table, the pilot's crux;
+run twice in one session = the leak non-regression). No `session_unref:
+reference count would go non-positive`, no double-free, no UAF, no
+`panic`/`ASSERTION` across any run. `usertests reparent` **OK**, `usertests
+killstatus` **OK**, `usertests forkforkfork` **OK** (P3-BUG1 intact).
+`stressfs` ran clean. `cat|wc` pipe works (`0 0 0` on empty input). `cat
+/nonexistent` → cannot-open (ENOENT). **Ctrl-C** interrupted a running
+`sleep 1000` and the shell regained its prompt (controlling-tty → session →
+fg_pgroup signal delivery, which routes through the session the table now
+holds). The `FAILED -- lost some free pages` trailer is the pre-existing
+accounting artefact (Known issues), not a regression. **NOT committed.**
+
+**Outcome: full pilot success** — the `GenTable` primitive is built and
+proven end-to-end on a real subsystem registry with zero behaviour change.
+Ready for N-R6b (pgroup → `Pgid`). The thread/proc core (N-R6d) remains gated
+on the user checkpoint.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

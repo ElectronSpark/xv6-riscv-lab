@@ -22,13 +22,27 @@
 //! is held -- see [`session_set_ctrl_tty`]'s doc for why this file now
 //! does that.
 //!
-//! `session_list` (the global list of live sessions) is a plain
-//! non-atomic `list_node_t`, exactly as the C original declared it --
-//! every mutation site holds `pid_wlock`, matching the module doc above;
-//! it is `#[no_mangle] pub static mut` because `kernel/proc/pid.rs`'s
-//! `xv6_dump_session`-adjacent `session_for_each_all` (in
-//! `kernel/proc/proc_shims.rs`) still reaches it via its own `extern
-//! "C" { static mut session_list: list_node_t; }` declaration.
+//! # Registry: `SESSION_TABLE` (a `GenTable`) — N-R6a pilot
+//!
+//! The global registry of live sessions is a [`GenTable`] (the hand-rolled
+//! generational slotmap built in `kernel/kstd.rs` for the full-Rust-native
+//! proc/thread redesign — `RUST_NATIVE_REDESIGN.md` §3a/§5b), replacing the
+//! C-shaped `session_list` intrusive `list_node_t` the C original declared.
+//! Sessions still keep their slab allocation — the table stores a stable
+//! `NonNull<Session>`, so nothing moves — but liveness is now a *generation
+//! check*: a [`Sid`] handed out for a session that later exits and is freed
+//! goes stale, and [`session_lookup`] returns `None` instead of dangling.
+//! The registry is not internally synchronized; every mutation holds
+//! `pid_wlock` and every scan holds `pid_lock` (read or write), matching the
+//! module doc's lock discipline exactly as `session_list` did. The process-
+//! hierarchy dump (`kernel/proc/proc_shims.rs::session_for_each_all`) walks
+//! it through [`session_for_each`]. See the [`SESSION_TABLE`] section below.
+//!
+//! Cross-subsystem back-edges (`thread.session`, `pgroup.session`,
+//! `tty.session`, `fg_pgrp`) remain raw `*mut session` for this pilot — the
+//! session is *findable/validatable* through the table (a `Sid` +
+//! [`session_lookup`]), but converting those edges to `Sid` keys would
+//! cascade into thread/proc/pgroup and is deferred to the later N-R6 stages.
 //!
 //! # SIGINT delivery fix (mandated, Wave 12)
 //!
@@ -243,7 +257,7 @@ const SIGCONT: c_int = 18;
 // P3-CS14: `get_session` now builds a `KResult<*mut session>` internally
 // and encodes it to the ABI-fixed `ERR_PTR` exactly once at the `extern "C"`
 // boundary via `result_to_errptr`; only the error-return encoding changed.
-use crate::kstd::{is_err, result_to_errptr, Errno, KResult};
+use crate::kstd::{is_err, result_to_errptr, Errno, GenKey, GenTable, KResult};
 
 // ===========================================================================
 // Panic helper -- replicates the C `assert(expr, fmt, ...)` macro
@@ -392,14 +406,133 @@ impl<T> SyncCell<T> {
 
 static SESSION_CACHE: SyncCell<slab_cache_t> = SyncCell::uninit();
 
-/// Global session list (`kernel/inc/tty/session.h`'s `extern list_node_t
-/// session_list;`). Protected by `pid_lock` (module doc); every access
-/// in this file holds `pid_wlock`. Initialized to a self-linked empty
-/// head by [`session_init`] at boot, exactly like the C original's
-/// `list_entry_init(&session_list)` (the `{0}`-style zero value below is
-/// never itself treated as a valid empty-list sentinel -- nothing reads
-/// `session_list` before `session_init` runs).
-pub(crate) static mut session_list: list_node_t = list_node_t { prev: ptr::null_mut(), next: ptr::null_mut() };
+// ===========================================================================
+// Session registry — a `GenTable` (N-R6a pilot of the proc/thread slotmap).
+//
+// This replaces the C-shaped `session_list` intrusive `list_node_t` that
+// used to be the global registry of live sessions. Sessions still keep
+// their slab allocation (the table stores a stable `NonNull<Session>`, never
+// the object by value — nothing moves); what changes is that liveness is now
+// a *generation check*, not a raw-pointer walk. A [`Sid`] handed out for a
+// session that later exits and is freed goes stale: [`session_lookup`]
+// returns `None` instead of dangling — the generational analogue of the
+// P3-BUG3 "the freed session must stop being reachable" property, now
+// enforced by the type/table rather than by discipline alone.
+//
+// The `global_entry` `ListNode` field stays in the (layout-frozen,
+// `#[repr(C)]`, offset-asserted) `Session` struct — the struct is the
+// kernel-wide definition of `struct session` and its size/offsets are fixed
+// by the C ABI, so no field is added or removed. `global_entry` is simply no
+// longer linked into a global list; `__session_alloc` still self-links it
+// (harmless, keeps the field initialized).
+// ===========================================================================
+
+/// Family tag for session keys — an ASCII marker, only its distinctness
+/// matters (it makes [`Sid`] a different type from any future `Pid`/`Tid`/
+/// `Pgid` key so handles can't be crossed between tables).
+pub(crate) const SID_TAG: u64 = u64::from_le_bytes(*b"SESSION\0");
+
+/// Typed generational handle to a live session in [`SESSION_TABLE`],
+/// distinct from the userspace numeric session id (which stays as the
+/// `Session::sid` field, still returned by `getsid`). A stale `Sid` (its
+/// session exited and was freed) resolves to `None` through
+/// [`session_lookup`].
+pub(crate) type Sid = GenKey<SID_TAG>;
+
+/// Registry capacity. Sized to `NR_THREAD` (the kernel's hard cap on live
+/// threads, `kernel/inc/param.h`): every live session has at least one
+/// member thread (the baseline reference is dropped the instant a session
+/// empties — P3-BUG3), so the number of concurrent sessions can never exceed
+/// the number of live threads. Sizing the table at that true upper bound
+/// guarantees [`GenTable::insert`] never returns `None` in practice, so
+/// `session_alloc` cannot start failing where it previously succeeded — no
+/// capacity regression. The `[Slot; NSESSION]` is all-`None`/zero at rest, so
+/// it costs BSS, not data-segment, space.
+const NSESSION: usize = 10_000;
+
+/// `UnsafeCell` + `unsafe impl Sync` newtype so the registry can be a
+/// file-scope `static`, exactly like `proc_shims`'s `PROC_TABLE`. The
+/// `GenTable` is **not** internally synchronized (see its doc); all access
+/// is serialized by `pid_lock` — `pid_wlock` for the `&mut self` mutators
+/// (`insert`/`remove_ptr`), `pid_rlock` (or a held `pid_wlock`) for the
+/// `&self` readers (`get`/`for_each`) — the identical discipline that
+/// protected the retired `session_list`.
+struct SessionTableCell(core::cell::UnsafeCell<GenTable<Session, NSESSION, SID_TAG>>);
+// SAFETY: every access below is taken while holding `pid_lock` at the
+// required strength, which serializes all mutation and excludes any writer
+// during a read — so the raw `UnsafeCell` access is race-free (see the
+// module doc's lock-ordering note and each helper's own comment).
+unsafe impl Sync for SessionTableCell {}
+
+static SESSION_TABLE: SessionTableCell =
+    SessionTableCell(core::cell::UnsafeCell::new(GenTable::new()));
+
+/// Insert `s` into the registry, returning its generational key (discarded
+/// by `session_alloc`, which addresses the session by its stable pointer for
+/// this pilot). `None` only if the table is full — impossible given
+/// [`NSESSION`]'s sizing, handled defensively by the caller.
+///
+/// Caller must hold `pid_wlock` (matches every `session_alloc` site:
+/// `session_init`/kthread-hierarchy at boot and `session_setsid`).
+fn session_table_insert(s: *mut session) -> Option<Sid> {
+    pid_assert_wholding();
+    let nn = NonNull::new(s)?;
+    // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
+    // registry is exclusive — no other hart holds a reference into the table
+    // (readers need `pid_rlock`, excluded by our write lock).
+    let table = unsafe { &mut *SESSION_TABLE.0.get() };
+    table.insert(nn)
+}
+
+/// Remove `s` from the registry (by its stable pointer — `Session` has no
+/// room to cache its own `Sid`), bumping the slot generation so any
+/// outstanding [`Sid`] to it goes stale. A no-op if `s` was never inserted.
+///
+/// Caller must hold `pid_wlock` (the session teardown/free path — matches
+/// where the old code unlinked `session_list`).
+fn session_table_remove(s: *mut session) {
+    pid_assert_wholding();
+    let Some(nn) = NonNull::new(s) else { return };
+    // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`, as in
+    // `session_table_insert`.
+    let table = unsafe { &mut *SESSION_TABLE.0.get() };
+    table.remove_ptr(nn);
+}
+
+/// Generation-checked lookup: resolve a [`Sid`] to a live session pointer,
+/// or `None` if the session it named has been freed (stale key) — the safe
+/// replacement for a raw `*mut session` traversal. This composes with (does
+/// not yet replace) the `SRef` refcount: `SRef` keeps a *known* session
+/// pinned, while a `Sid` answers "is this session still alive at all?"
+/// precisely where a raw pointer could not. Full `SRef` elimination is a
+/// later wave.
+///
+/// Caller must hold `pid_lock` (reader or writer); the returned pointer is
+/// only stable under that same protection.
+#[allow(dead_code)]
+pub(crate) fn session_lookup(sid: Sid) -> Option<*mut session> {
+    // SAFETY: the caller holds `pid_lock` (read or write), which excludes
+    // every `&mut self` mutator (they hold the write lock) — so this shared
+    // reference into the registry is race-free for its (short, non-looping
+    // over shared-mutable-state) lifetime. No `&Session` is formed here; the
+    // raw pointer is handed straight back (freeze-hazard note in the
+    // `GenTable` doc).
+    let table = unsafe { &*SESSION_TABLE.0.get() };
+    table.get(sid).map(|nn| nn.as_ptr())
+}
+
+/// Visit every live session in the registry, passing each as a raw
+/// `*mut session`. The `GenTable` replacement for walking `session_list`;
+/// used by `proc/proc_shims.rs::session_for_each_all` (process-hierarchy
+/// dump). Caller must hold `pid_lock` (reader or writer).
+pub(crate) fn session_for_each(mut f: impl FnMut(*mut session)) {
+    // SAFETY: caller holds `pid_lock` (read or write) — excludes all
+    // writers, so this shared reference into the registry is race-free; the
+    // scan hands the callback raw `NonNull`/`*mut` pointers, never `&Session`
+    // (freeze-hazard note in the `GenTable` doc).
+    let table = unsafe { &*SESSION_TABLE.0.get() };
+    table.for_each(|nn| f(nn.as_ptr()));
+}
 
 // ===========================================================================
 // Boot-time initialisation.
@@ -410,11 +543,11 @@ pub(crate) static mut session_list: list_node_t = list_node_t { prev: ptr::null_
 /// `pgroup` (mirrors the C original's unconditional derefs).
 pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
     // SAFETY: see fn doc; this runs once at boot before any other
-    // `session_*` entry point, so `session_list` and `SESSION_CACHE` are
-    // exclusively ours to initialize.
+    // `session_*` entry point, so `SESSION_CACHE` is exclusively ours to
+    // initialize. (The registry `SESSION_TABLE` is a const-initialized empty
+    // `GenTable` — no runtime init needed, unlike the retired `session_list`
+    // head this used to self-link here.)
     unsafe {
-        ll_init(&raw mut session_list);
-
         let ret = slab_cache_init(
             SESSION_CACHE.get(),
             c"session_cache".as_ptr() as *mut c_char,
@@ -483,7 +616,7 @@ unsafe fn __session_alloc() -> *mut session {
 
 pub(crate) extern "C" fn session_alloc(sid: pid_t) -> *mut session {
     // SAFETY: `s`, once non-null, is exclusively ours (just allocated by
-    // `__session_alloc`) until it is linked into `session_list` and
+    // `__session_alloc`) until it is registered in `SESSION_TABLE` and
     // returned to the caller.
     unsafe {
         let s = __session_alloc();
@@ -496,7 +629,16 @@ pub(crate) extern "C" fn session_alloc(sid: pid_t) -> *mut session {
         (*s).ref_cnt = 1;
         (*s).t_cnt = 0;
         (*s).pg_cnt = 0;
-        ll_push_back(&raw mut session_list, &raw mut (*s).global_entry);
+        // Register in the generational session table (N-R6a) — the
+        // replacement for `ll_push_back(&session_list, ...)`. On the
+        // impossible "table full" case (see `NSESSION`'s sizing) fail the
+        // alloc cleanly: free the slab object and return null, exactly the
+        // contract `session_alloc` already has for allocation failure,
+        // rather than hand back an unregistered session.
+        if session_table_insert(s).is_none() {
+            slab_free(s as *mut c_void);
+            return ptr::null_mut();
+        }
         s
     }
 }
@@ -601,9 +743,14 @@ pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
             // under the off-by-one bug; now the live path the last
             // dropped reference actually takes).
             __session_detach_ctrl_tty(s);
-            if !ll_is_detached(&raw mut (*s).global_entry) {
-                ll_detach(&raw mut (*s).global_entry);
-            }
+            // Deregister from the generational session table (N-R6a) — the
+            // replacement for the `session_list` unlink. This bumps the
+            // slot's generation, so any outstanding `Sid` to this session
+            // now resolves to `None` (the generational liveness guarantee);
+            // `session_table_remove` asserts `pid_wlock` is held, exactly as
+            // this free branch already required for the `session_list` unlink
+            // and slab free.
+            session_table_remove(s);
             slab_free(s as *mut c_void);
         }
     }
@@ -1192,27 +1339,25 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
         let pg = pgroup_alloc(tgid, tg);
         if pg.is_null() {
             // Deliberate fix (Wave 12): the C original called
-            // `slab_free(s)` directly here, bypassing the
-            // `session_list` unlink that `session_unref` performs.
-            // `session_alloc` (above) already linked `s` into the
-            // global `session_list`, so that direct free left a
-            // dangling node in the list -- a use-after-free the next
-            // time anything walks `session_list` (e.g.
-            // `session_for_each_all`). `s->ref_cnt == 1` here (nothing
+            // `slab_free(s)` directly here, bypassing the registry
+            // deregistration that `session_unref` performs.
+            // `session_alloc` (above) already registered `s` in the
+            // global `SESSION_TABLE` (N-R6a; formerly `session_list`), so a
+            // direct free would leave a dangling `NonNull<Session>` in the
+            // table -- a use-after-free the next time anything scans it
+            // (e.g. `session_for_each`). `s->ref_cnt == 1` here (nothing
             // else has referenced `s` yet), so dropping `s` (-> the
             // sole owner's `session_unref`) is exactly the "sole owner
-            // drops its reference" case and correctly unlinks before
-            // freeing (mirrors this wave's "handle clearing on session
-            // teardown" mandate for `session_set_ctrl_tty`, applied to
-            // this other teardown path found while porting the same
-            // file). P3-9e: with the `session_unref` off-by-one fixed
-            // (see that fn's doc), this drop now actually frees `s`
-            // instead of leaking it -- explicit `drop(s)` here (not a
-            // plain scope-end `Drop`) so the free/unlink runs *before*
-            // `pid_wunlock()`, preserving the original code's lock
-            // ordering (`session_list`/`session_unref`'s finalization
-            // branch require `pid_wlock` held, same as every other
-            // mutation site -- module doc).
+            // drops its reference" case and correctly deregisters (via
+            // `session_table_remove`, bumping the slot generation so any
+            // stray `Sid` goes stale) before freeing. P3-9e: with the
+            // `session_unref` off-by-one fixed (see that fn's doc), this
+            // drop now actually frees `s` instead of leaking it -- explicit
+            // `drop(s)` here (not a plain scope-end `Drop`) so the
+            // free/deregister runs *before* `pid_wunlock()`, preserving the
+            // original code's lock ordering (`SESSION_TABLE`/`session_unref`'s
+            // finalization branch require `pid_wlock` held, same as every
+            // other mutation site -- module doc).
             drop(s);
             pid_wunlock();
             return -ENOMEM;

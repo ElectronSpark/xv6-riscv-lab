@@ -970,26 +970,21 @@ pub(crate) fn xv6_ptr_err(p: *const c_void) -> i64 {
 // declared in kernel/inc/tty/session.h.
 // ===========================================================================
 
-// P3-1C mesh sweep: tty/session.rs is in scope for this wave, so
-// `session_list` becomes a plain crate-path import instead of an
-// `extern "C"` redeclaration (identical `list_node_t` type).
-use crate::tty::session::session_list;
-
+// N-R6a: the global session registry is now `SESSION_TABLE` (a `GenTable`)
+// in `kernel/tty/session.rs`, not the retired `session_list` intrusive
+// `list_node_t`. Walk it via that module's `session_for_each` scan, which
+// yields each live session's stable pointer (generation-checked occupancy).
 pub(crate) fn session_for_each_all(
     fn_cb: Option<unsafe extern "C" fn(*mut session, *mut c_void)>,
     arg: *mut c_void,
 ) {
     let Some(cb) = fn_cb else { return };
-    let off = core::mem::offset_of!(session, global_entry);
-    // SAFETY: see `pg_for_each_tg`. `session_list` is the kernel-global
-    // sentinel `list_node_t` (declared in the `unsafe extern "C"` block
-    // above), valid for `'static`; `off` is a genuine `offset_of!` for
-    // `session::global_entry`.
-    u! {
-        list_foreach_safe::<session>(&raw mut session_list, off, |s| {
-            cb(s, arg);
-        })
-    }
+    // SAFETY: called under `pid_rlock` (see `pid.rs::procdump_sessions*`),
+    // which `session_for_each` requires (it excludes every `pid_wlock`
+    // writer, so the registry scan is race-free); `cb` is the caller's
+    // C-ABI dump callback, invoked once per live session pointer exactly as
+    // the old `session_list` walk did.
+    crate::tty::session::session_for_each(|s| unsafe { cb(s, arg) });
 }
 
 // ===========================================================================
