@@ -3370,6 +3370,97 @@ table type + 6 dead slots + 1 facade alias deleted.
   edits), same infinite kerneltrap loop until timeout. No scheduler
   regression. 6 files, +300/−230 (net +70; code shrank, doc grew).
 
+### Iteration 80 — 2026-07-17 — Wave P3-8f (data-carrying lock guards): `vfs/file.rs` open-file table → `SpinLock<list_node_t>`; console left raw (condvar holdout)
+
+- **Goal** (user directive "reduce unsafe / fully adapt Rust style"):
+  convert the remaining clean data-owning `static mut spinlock_t` globals
+  to `sync::SpinLock<T>` so the lock owns its data and access requires the
+  guard (compile-enforced lock-data coupling — the genuine win, not a
+  count metric). **Survey** (`grep -rE 'static (mut )?[A-Z_]+:
+  (spinlock_t|RawSpinlock)'`) found exactly 5 raw static spinlocks:
+  `uart.rs` UART_TX/RX_LOCK + `printf.rs` PR_LOCK/PANIC_BT_LOCK (the
+  panic/print path — excluded, guard Drop/Deref is unsafe on the panic
+  printer), `console.rs` CONS_LOCK, and `vfs/file.rs` `__VFS_FTABLE_LOCK`.
+
+- **CONVERTED — `vfs/file.rs` open-file table → `SpinLock<list_node_t>`**:
+  the bare `__VFS_FTABLE_LOCK` (`spinlock_t`) + the separate
+  `static mut __VFS_FTABLE` (`list_node_t` head), previously bridged by a
+  `ftable_lock() -> KSpinlock::from_bindings(&mut __VFS_FTABLE_LOCK)`
+  handle, collapsed into ONE lock-owns-data `static __VFS_FTABLE:
+  SpinLock<list_node_t>` (byte-identical P3-8b/8d precedent to
+  `devtmpfs/superblock.rs`'s `SpinLock<list_node_t>`). Data protected:
+  the intrusive open-file list head; `__VFS_OPEN_FILE_COUNT` stays a
+  separate `AtomicI32` (bumped inside the section, already atomic).
+  - **Lock/unlock → guard-scope mapping** (3 sites, all lexical single
+    critical sections — no split lock/unlock): `ftable_attach` (`_g =
+    ftable_lock().lock()` → `let mut g = __VFS_FTABLE.lock()`, `ln_push_back`
+    reaches the head via `&raw mut *g` instead of `addr_of_mut!(static)`,
+    `drop(g)` at the same point the old `drop(_g)` released — the
+    `kassert!` still runs OUTSIDE the section); `ftable_detach` (same
+    shape, `ln_detach` operates on the file's own node); `__vfs_file_init`
+    (the one-time self-reference fixup `next=prev=&head` moved from a
+    `spin_init` + raw `static mut` write to a guarded write through
+    `&raw mut *head` — the `SpinLock::new` `const fn` already put the lock
+    in its initialised state, so the separate `spin_init` disappeared; the
+    fixup is now briefly UNDER the lock, a strict improvement).
+  - **Cleanup**: `ftable_lock()` fn + the `KSpinlock` import deleted;
+    `spinlock_t`/`spin_init`/`c_char` all KEPT (still used by the file's
+    `struct sock` mirror + `vfs_sockalloc` init at the C boundary).
+
+- **NOT CONVERTED — `console.rs` CONS_LOCK (condvar holdout, left raw +
+  reported)**: although CONS_LOCK cleanly owns its data (the raw fallback
+  input ring `CONS_BUF`/`CONS_R`/`CONS_W`/`CONS_E`), its `consoleread`
+  fallback calls `sleep_on_chan((&raw mut CONS_R) as *mut c_void, &raw mut
+  CONS_LOCK)` — a **sleep-while-holding condvar wait** that hands the raw
+  `*mut spinlock_t` to the sleep primitive so it can ATOMICALLY release
+  the lock as it enqueues on the wait channel (lost-wakeup-safe), then
+  reacquire before returning. This is the exact split-lock-across-a-call
+  case the wave's hard rules say to leave raw: `SpinLock<T>` deliberately
+  does not expose its inner `*mut spinlock_t`, so replicating the atomic
+  release-and-sleep would require either a raw-lock accessor (a footgun on
+  the shared primitive) or a bespoke `SpinLockGuard::sleep_on` condvar
+  method (std `Mutex`+`Condvar` shape) added to `sync/sync.rs` — scope
+  beyond "wrap the buffer+indices", and touching the shared primitive for
+  one caller. **Matches the primitive author's own explicit holdout** in
+  `1f3c92d` ("console/virtio — sleep-while-holding condvar wait").
+  Compounding it: the read loop drops+reacquires the lock around the
+  userspace `either_copyout` and has a `killed()` early-return that
+  unlocks-then-returns, which map to a scoped guard only via
+  `Option<Guard>` gymnastics; and **the fallback path is unverifiable via
+  the boot gate** — once `consoledevinit` allocates the console TTY, every
+  `consoleintr`/`consoleread` takes the TTY (`tty_inbuf`) path, so
+  CONS_LOCK is only ever hit in the narrow pre-TTY early-boot window. A
+  restructure the verification battery cannot exercise is a boot-gate-
+  discipline red flag → deliberately deferred (a `sleep_on` guard method
+  is the clean future primitive extension if the condvar holdouts —
+  console + virtio — are to migrate as a set).
+
+- **rust-skills applied** (read `SKILL.md`, edition 2021 respected):
+  `own-mutex-interior` (the wave's core — lock owns its data, `Mutex<T>`
+  shape); `unsafe-minimize-scope` (each surviving `unsafe` block scoped to
+  the raw `ln_push_back`/`ln_detach`/self-ref-write that genuinely needs
+  it — field access through the guard is now safe); `unsafe-safety-comment`
+  (every block re-annotated: the guard's existence, not a `static mut`,
+  is now the SAFETY basis); `const-fn` (`SpinLock::new` const-inits the
+  lock, no runtime `spin_init`); `conc-atomic-ordering` (count stays
+  `AtomicI32` SeqCst, unchanged); `name-consts-screaming`. Deliberate
+  deviation: console left raw per `err`/semantics-first judgment above.
+
+- **Verified** (cache-first — BUILD_TYPE empty, toolchain
+  `riscv64-unknown-elf-gcc`, before+after): **0-warning** clean rebuild
+  (`cmake --build build --target clean` then full recompile; only the
+  pre-existing `initcode.out` RWX linker warning). Boot: **exactly one**
+  `init: starting sh`, stable `/ $` prompt, no panic/deadlock/hang.
+  Battery (FTABLE exercised on every open/close/fork): interactive `echo
+  hello-ftable` echoes; **`cat README.md | wc` = `714 3365 26018`**
+  (exact); ENOENT (`ls: cannot open nonexistent-xyz`); **usertests pipe1
+  OK**, **createdelete OK** (fd churn), **forkfork OK** (ftable clone
+  across fork); **stressfs** ran; **testsig ALL TESTS PASSED (21/21)**.
+  1 file, +59/−39; net −1 `unsafe` block (75→74) — the payoff is the
+  compile-enforced lock-data coupling, not the count. Do NOT commit
+  (per brief). `SpinLock<T>` now on **7** globals (ramdisk, ptmx, bufcache,
+  e1000, sockets, devtmpfs, +ftable).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

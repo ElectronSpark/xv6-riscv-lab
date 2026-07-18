@@ -25,9 +25,13 @@
 //! — `file->ops->read`/`write`/`llseek` — are documented at each call
 //! site as sleep-safe), so unlike `vfs/inode.rs`'s `vfs_iput` this is a
 //! clean RAII fit: [`crate::sync::KMutex`] via [`file_lock`]. The
-//! global open-file table (`__vfs_ftable_lock`, a `spinlock_t`) is
-//! likewise a single lexically-scoped critical section and uses
-//! [`crate::sync::KSpinlock`] RAII. [`crate::sysnet::SOCKETS`] (owned by
+//! global open-file table (`__vfs_ftable_lock` + the list head in the C
+//! original) is likewise a single lexically-scoped critical section
+//! and, as of Wave P3-8f, is a [`crate::sync::SpinLock`] that owns the
+//! `list_node_t` head it protects directly (the two former
+//! independently-paired globals collapsed into one lock-owns-data value,
+//! same P3-8b/8d precedent as `ramdisk.rs`/`devtmpfs/superblock.rs`).
+//! [`crate::sysnet::SOCKETS`] (owned by
 //! `sysnet.rs`) is locked in one straight-line block inside
 //! [`vfs_sockalloc`] with no early return while held — Wave P3-8d
 //! upgraded it from a `KSpinlock::from_bindings` handle onto a raw
@@ -127,7 +131,7 @@ use crate::bindings::{
     spinlock_t, stat, vfs_file, vfs_inode, vfs_inode_ref,
     EAGAIN, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
-use crate::sync::{KMutex, KSpinlock};
+use crate::sync::{KMutex, SpinLock};
 
 // ===========================================================================
 // Native uabi `struct stat` — P3-4b nativization (user directive: remove
@@ -661,20 +665,27 @@ fn vfs_file_slab() -> *mut slab_cache_t {
     __VFS_FILE_SLAB.0.get() as *mut slab_cache_t
 }
 
-static mut __VFS_FTABLE_LOCK: spinlock_t = spinlock_t {
-    locked: 0,
-    name: core::ptr::null_mut(),
-    cpu: core::ptr::null_mut(),
-};
-static mut __VFS_FTABLE: list_node_t =
-    list_node_t { prev: core::ptr::null_mut(), next: core::ptr::null_mut() };
+/// Wave P3-8f: `__vfs_ftable_lock` (a bare `spinlock_t`) + the global
+/// open-file list head used to be two independently-paired globals (a
+/// `KSpinlock::from_bindings` handle plus a separate `static mut
+/// list_node_t`). Now the lock owns the list head directly
+/// ([`crate::sync::SpinLock`], same P3-8b/8d precedent as `ramdisk.rs`/
+/// `devtmpfs/superblock.rs`): `.lock()` returns a guard that `DerefMut`s
+/// straight to the `list_node_t` head, so `ftable_attach`/`ftable_detach`
+/// stop reaching through a raw `static mut`. The head is self-referential
+/// once initialised (`next == prev == &head`, the `LIST_ENTRY_INITIALIZED`
+/// idiom) — that self-reference can't be written in a `const` initializer
+/// (the static's own address isn't knowable inside its own initializer),
+/// so the lock starts life wrapping a null-pointered placeholder and
+/// [`__vfs_file_init`] completes the one-time fixup through the guard
+/// (now briefly under the lock — a strict improvement; it was a
+/// `spin_init` on a separate `spinlock_t` plus a raw write to a separate
+/// `static mut` before).
+static __VFS_FTABLE: SpinLock<list_node_t> = SpinLock::new(
+    c"vfs_file_table_lock",
+    list_node_t { prev: core::ptr::null_mut(), next: core::ptr::null_mut() },
+);
 static __VFS_OPEN_FILE_COUNT: AtomicI32 = AtomicI32::new(0);
-
-fn ftable_lock() -> KSpinlock {
-    // SAFETY: `__VFS_FTABLE_LOCK` is a `'static` mut whose address is
-    // stable for the process lifetime; only its address is taken here.
-    KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!(__VFS_FTABLE_LOCK) })
-}
 
 fn file_lock(file: *mut vfs_file) -> KMutex {
     // SAFETY: `file` is a live, aligned `vfs_file` (every call site's
@@ -683,26 +694,28 @@ fn file_lock(file: *mut vfs_file) -> KMutex {
 }
 
 fn ftable_attach(file: *mut vfs_file) {
-    let _g = ftable_lock().lock();
-    // SAFETY: `__VFS_FTABLE` is the live global open-file list head
-    // (initialized once by `__vfs_file_init` before any attach/detach
-    // can race in); `file->list_entry` is not yet linked anywhere
-    // (every caller passes a freshly allocated file).
+    let mut g = __VFS_FTABLE.lock();
+    // SAFETY: `g` proves the lock is held; `&raw mut *g` is the live
+    // global open-file list head (initialized once by `__vfs_file_init`
+    // before any attach/detach can race in); `file->list_entry` is not
+    // yet linked anywhere (every caller passes a freshly allocated file).
     unsafe {
-        ln_push_back(ptr::addr_of_mut!(__VFS_FTABLE), ptr::addr_of_mut!((*file).list_entry));
+        ln_push_back(&raw mut *g, ptr::addr_of_mut!((*file).list_entry));
     }
     let count = __VFS_OPEN_FILE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    drop(_g);
+    drop(g);
     kassert!(count > 0, "vfs file open count overflow");
 }
 
 fn ftable_detach(file: *mut vfs_file) {
-    let _g = ftable_lock().lock();
-    // SAFETY: `file->list_entry` is linked into `__VFS_FTABLE` (every
-    // caller passes a file that went through `ftable_attach`).
+    let g = __VFS_FTABLE.lock();
+    // SAFETY: `g` proves the lock is held (the critical section the head
+    // and every linked node share); `file->list_entry` is linked into
+    // `__VFS_FTABLE` (every caller passes a file that went through
+    // `ftable_attach`), so `ln_detach` only relinks its own neighbours.
     unsafe { ln_detach(ptr::addr_of_mut!((*file).list_entry)) };
     let count = __VFS_OPEN_FILE_COUNT.fetch_sub(1, Ordering::SeqCst) - 1;
-    drop(_g);
+    drop(g);
     kassert!(count >= 0, "vfs file open count underflow");
 }
 
@@ -755,17 +768,24 @@ pub(crate) extern "C" fn __vfs_file_init() {
         (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
     );
     kassert!(ret == 0, "Failed to initialize vfs_file_cache slab cache");
-    // SAFETY: called exactly once, at boot, before any other thread can
-    // observe `__VFS_FTABLE_LOCK`/`__VFS_FTABLE` (matches the C
-    // original's single `vfs_init()` call site).
-    unsafe {
-        spin_init(
-            ptr::addr_of_mut!(__VFS_FTABLE_LOCK),
-            c"vfs_file_table_lock".as_ptr() as *mut c_char,
-        );
-        let head = ptr::addr_of_mut!(__VFS_FTABLE);
-        (*head).prev = head;
-        (*head).next = head;
+    // Complete the one-time list-head self-reference fixup through the
+    // guard (Wave P3-8f: `__VFS_FTABLE` owns its lock now, so the head is
+    // reached via `.lock()` rather than a `spin_init` on a separate
+    // `spinlock_t` plus a raw write to a separate `static mut` — the
+    // `SpinLock::new` `const fn` already put the lock in its initialised
+    // state). Called exactly once, at boot, before any other thread can
+    // observe `__VFS_FTABLE` (matches the C original's single
+    // `vfs_init()` call site).
+    {
+        let mut head = __VFS_FTABLE.lock();
+        let addr: *mut list_node_t = &raw mut *head;
+        // SAFETY: `addr` is the live, stable address of the list head the
+        // guard owns; writing its own address into `next`/`prev` is the
+        // `LIST_ENTRY_INITIALIZED` self-reference idiom.
+        unsafe {
+            (*addr).prev = addr;
+            (*addr).next = addr;
+        }
     }
     __VFS_OPEN_FILE_COUNT.store(0, Ordering::SeqCst);
 }
