@@ -205,8 +205,15 @@ struct into `Tid`-keyed side-tables (3g), retiring the intrusive queues.
   thread/proc/pgroup UNTOUCHED. Proves the primitive + the refcount-liveness
   replacement (a stale `Sid` returns `None`, the generational analogue of the
   P3-BUG3 baseline-drop) on a contained subsystem.
-- **N-R6b:** pgroup family → `Pgid` keys.
-- **N-R6c:** thread_group → key.
+- **N-R6b/c (FOLDED INTO N-R6d — finding 2026-07-18):** pgroup and
+  thread_group are NOT cleanly isolable before the thread core. `get_pgroup
+  (pgid)` = `get_pid_thread(pgid)` then follow `thread.pgroup` — pgroup has no
+  independent registry (unlike session's `session_list`); both pgroup and
+  thread_group track membership via **intrusive thread lists** (Tid-coupled).
+  So their lookup (proc table) and membership (Tid keys) both require the
+  thread core. They convert *with* N-R6d, not before. The session pilot
+  (N-R6a) was the one cleanly-isolable subsystem — the primitive is proven;
+  the remaining N-R6 work is one large coupled core wave.
 - **N-R6d (CHECKPOINT with user, HIGH risk):** thread/proc core — Thread
   relationship fields → `Tid`, the intrusive proc-table hlist → a `GenTable`
   index, run/wait queues → `Tid` side-tables. `current`/`cpu_local.proc` stays
