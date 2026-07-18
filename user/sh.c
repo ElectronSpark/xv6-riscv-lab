@@ -1404,11 +1404,64 @@ int main(void) {
             continue;
         }
 
-        // ---- Built-in: echo (with expansion) ----
+        // ---- Built-in: echo (with expansion + output redirection) ----
         if (strncmp_local(buf, "echo ", 5) == 0) {
-            buf[strlen(buf) - 1] = 0;
-            char *expanded = expand_env_vars(buf + 5);
-            printf("%s\n", expanded);
+            buf[strlen(buf) - 1] = 0; // chop \n
+            char *arg = buf + 5;
+            // Recognize an output redirect ('>' or '>>') at the shell
+            // level, before env expansion, so a '>' inside a variable's
+            // value is not treated as an operator -- matching how the
+            // external-command parser (parseredirs) recognizes operators
+            // before expansion. Without this, `echo hi > f` printed the
+            // literal "hi > f" because the builtin bypasses parsecmd.
+            char *redir = strchr(arg, '>');
+            int append = 0;
+            char fname[LINE_BUF_SIZE];
+            fname[0] = 0;
+            if (redir) {
+                if (redir[1] == '>')
+                    append = 1;
+                char *f = redir + (append ? 2 : 1);
+                // Terminate the text part and trim the whitespace that sat
+                // between the last word and the '>' (a real shell tokenizes
+                // the operator, so `echo hi > f` writes "hi", not "hi ").
+                char *te = redir;
+                while (te > arg && (te[-1] == ' ' || te[-1] == '\t'))
+                    te--;
+                *te = 0;
+                while (*f == ' ' || *f == '\t')
+                    f++; // skip whitespace before the filename
+                char *fe = f + strlen(f);
+                while (fe > f && (fe[-1] == ' ' || fe[-1] == '\t'))
+                    *--fe = 0; // trim trailing whitespace
+                if (*f) {
+                    // Expand the filename first: expand_env_vars reuses a
+                    // shared static buffer, so copy the result out before
+                    // expanding the text below (which reuses that buffer).
+                    char *ef = expand_env_vars(f);
+                    int n = strlen(ef);
+                    if (n >= (int)sizeof(fname))
+                        n = sizeof(fname) - 1;
+                    memcpy(fname, ef, n);
+                    fname[n] = 0;
+                }
+            }
+            char *text = expand_env_vars(arg);
+            if (fname[0]) {
+                // Same open flags the external-command redirect parser
+                // uses (sh.c parseredirs): '>' truncates, '>>' does not.
+                int flags = append ? (O_WRONLY | O_CREAT)
+                                   : (O_WRONLY | O_CREAT | O_TRUNC);
+                int fd = open(fname, flags);
+                if (fd < 0) {
+                    errprintf("echo: cannot open %s\n", fname);
+                } else {
+                    fprintf(fd, "%s\n", text);
+                    close(fd);
+                }
+            } else {
+                printf("%s\n", text);
+            }
             continue;
         }
 
