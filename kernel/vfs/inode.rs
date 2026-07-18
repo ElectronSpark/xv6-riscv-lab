@@ -77,11 +77,57 @@
 //! accessors (P3-N5; bit-identical to the bindgen `__bindgen_anon_1`
 //! methods they replaced) on a temporary place expression
 //! (`(*ptr).flags...`), the same pattern `kernel/mm/pcache.rs` uses —
-//! never by materializing a `&mut vfs_inode` for the whole struct. Deliberate deviations from a byte-for-byte C
+//! never through the P3-7c boundary reference (bitfield/union access
+//! stays on the raw place expression; see the Reference-ification note
+//! below). Deliberate deviations from a byte-for-byte C
 //! transliteration are called out inline (see `vfs_chroot`'s discarded
 //! `vfs_chdir` return value, and the `panic!`-free tail-call use of
 //! `xv6_panic`'s `-> !` return type replacing the C's dead
 //! `return -EINVAL;`).
+//!
+//! # Reference-ification (P3-7c)
+//!
+//! Extending the [`fdtable.rs`](crate::vfs::fdtable) P3-7a and
+//! [`file.rs`](crate::vfs::file) P3-7b hoist pattern to this file's
+//! `*_inner` helpers: the null-check plus a single audited
+//! `unsafe { &mut *inode }` conversion happen once, right after the entry
+//! null-check (the outermost frame that genuinely receives a raw
+//! pointer), so the interior *plain* field reads (`sb`, `mode`) become
+//! ordinary safe access (`dir.sb` vs `unsafe { (*dir).sb }`). Signatures
+//! keep their `*mut vfs_inode` (the extern C-ABI wrappers and the
+//! cross-module `pub(crate)` callers pass raw pointers), so the hoist is
+//! internal — matching the fdtable P3-7a slice.
+//!
+//! Converted: `vfs_create`/`vfs_mknod`/`vfs_mkdir`/`vfs_symlink`/
+//! `vfs_link`/`vfs_unlink`/`vfs_readlink`/`vfs_itruncate`/
+//! `vfs_dirty_inode`/`vfs_sync_inode`/`vfs_ilookup`/`vfs_dir_iter`/
+//! `vfs_chdir`/`vfs_move`'s `_inner`s (the primary `dir`/`inode` param).
+//! What deliberately STAYS raw (lifetime/union/traversal honesty):
+//! * the `dev_mnt` union arm reads (`dev_mnt.mnt.mnt_rooti`) — union
+//!   access is `unsafe` regardless of how the container is borrowed;
+//! * the bitfield-flag accessors (`flags.mount()`/`.orphan()`/...), which
+//!   operate on the raw place expression `(*ptr).flags`, unchanged;
+//! * the [`InodeOps`] trait dispatch and the `vfs_ilock`/`vfs_iunlock`/
+//!   `vfs_inode_valid_locked` C-ABI helpers — reached by reborrowing the
+//!   reference as `&raw mut *inode`, a synchronous call (cross-module raw
+//!   boundary, per P3-7b's trait-boundary finding);
+//! * the refcount-drop / free paths — [`vfs_iput`]/[`vfs_iput_finalize`],
+//!   the [`IRef`] smart pointer, `vfs_unlink`'s `target` (it is
+//!   `vfs_iput`-ed) — a `&mut` there would assert validity past the point
+//!   the object may be freed;
+//! * the path-traversal walkers ([`vfs_namei_once`], `get_mnt_recursive`,
+//!   `mountpoint_go_up`, `vfs_dotdot_target`, `vfs_ilock_two_directories`)
+//!   — they hop `parent`/`sb`/mount pointers across *many* inodes and
+//!   free them mid-walk, so no single `&mut` describes the working set;
+//! * buffer / user-memory / `path` pointers.
+//! Aliasing caveat, documented approximation (same class as file.rs's
+//! P3-7b note and the crate's `__ATOMIC_CONSUME` -> `Acquire` mapping): a
+//! held reference operated on under `vfs_ilock` may be observed by the
+//! driver callback through the reborrowed raw pointer while the `&mut`
+//! is nominally live; those accesses are serialized by the inode mutex
+//! and invisible to each frame's codegen, but are a foreign `&mut`
+//! overlap under a strict Stacked/Tree-Borrows reading — the same
+//! layout-frozen approximation the crate accepts crate-wide.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -1389,17 +1435,24 @@ impl Deref for IRef {
 
 /// Mark inode as dirty.
 fn vfs_dirty_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
-    if inode.is_null() || unsafe { (*inode).sb.is_null() } {
+    if inode.is_null() {
         return Err(Errno::Inval);
     }
-    let ret = vfs_inode_valid_locked(inode);
+    // SAFETY: `inode` is non-null (just checked); a live, referenced inode
+    // the caller holds locked. P3-7c boundary hoist — the `sb` read goes
+    // safe; validate/dispatch reborrow `&raw mut *inode`.
+    let inode = unsafe { &mut *inode };
+    if inode.sb.is_null() {
+        return Err(Errno::Inval);
+    }
+    let ret = vfs_inode_valid_locked(&raw mut *inode);
     if ret != 0 {
         return Err(Errno::Raw(ret));
     }
     // SAFETY: non-null, valid, locked `inode` (checked above) — the
     // trait method's contract; a driver without its own dirty tracking
     // inherits the `Ok(())` default (old `None`-slot behavior).
-    unsafe { inode_ops(inode).dirty_inode(inode) }
+    unsafe { inode_ops(&raw mut *inode).dirty_inode(&raw mut *inode) }
 }
 
 pub(crate) extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
@@ -1408,19 +1461,26 @@ pub(crate) extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
 
 /// Sync inode to disk.
 fn vfs_sync_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
-    if inode.is_null() || unsafe { (*inode).sb.is_null() } {
+    if inode.is_null() {
         return Err(Errno::Inval);
     }
-    let sb = unsafe { (*inode).sb };
+    // SAFETY: `inode` is non-null (just checked); a live, referenced inode
+    // the caller holds open. P3-7c boundary hoist — the `sb` read goes
+    // safe; lock/validate/dispatch reborrow `&raw mut *inode`.
+    let inode = unsafe { &mut *inode };
+    if inode.sb.is_null() {
+        return Err(Errno::Inval);
+    }
+    let sb = inode.sb;
 
     // Begin transaction BEFORE acquiring the inode lock, to avoid
     // sleeping with locks held.
     unsafe { sb_ops(sb).begin_transaction(sb) }?;
 
-    vfs_ilock(inode);
-    let v = vfs_inode_valid_locked(inode);
+    vfs_ilock(&raw mut *inode);
+    let v = vfs_inode_valid_locked(&raw mut *inode);
     if v != 0 {
-        vfs_iunlock(inode);
+        vfs_iunlock(&raw mut *inode);
         let _ = unsafe { sb_ops(sb).end_transaction(sb) };
         return Err(Errno::Raw(v));
     }
@@ -1428,8 +1488,8 @@ fn vfs_sync_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
     // SAFETY: non-null, valid, locked `inode` with a transaction open —
     // the trait method's contract; a backendless driver inherits the
     // `Ok(())` default (old `None`-slot skip).
-    let ret = unsafe { inode_ops(inode).sync_inode(inode) };
-    vfs_iunlock(inode);
+    let ret = unsafe { inode_ops(&raw mut *inode).sync_inode(&raw mut *inode) };
+    vfs_iunlock(&raw mut *inode);
 
     if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
         crate::kprintln!("vfs_sync_inode: warning: end_transaction failed with error {}", e.neg());
@@ -1551,7 +1611,16 @@ fn vfs_ilookup_inner(
     name: *const c_char,
     name_len: usize,
 ) -> KResult<()> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — plain
+    // reads (`sb`, `ino`, `mode`) go safe; `dentry` writes, the `..`
+    // target, and lock/validate/dispatch keep raw (reborrow `&raw mut
+    // *dir` / `&raw const *dir`).
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if dentry.is_null() || name.is_null() || name_len == 0 {
@@ -1562,11 +1631,11 @@ fn vfs_ilookup_inner(
     let name_bytes = unsafe { core::slice::from_raw_parts(name as *const u8, name_len) };
 
     if name_len == 1 && name_bytes[0] == b'.' {
-        // SAFETY: non-null `dir`/`dentry`.
+        // SAFETY: non-null `dentry`; `dir` is the boundary reference.
         unsafe {
-            (*dentry).sb = (*dir).sb;
-            (*dentry).ino = (*dir).ino;
-            (*dentry).parent = dir;
+            (*dentry).sb = dir.sb;
+            (*dentry).ino = dir.ino;
+            (*dentry).parent = &raw mut *dir;
         }
         let n = strndup(c".".as_ptr(), 1);
         if n.is_null() {
@@ -1581,17 +1650,18 @@ fn vfs_ilookup_inner(
     }
 
     if name_len == 2 && name_bytes[0] == b'.' && name_bytes[1] == b'.' {
-        let target = vfs_dotdot_target(dir);
+        let target = vfs_dotdot_target(&raw mut *dir);
         if !target.is_null() {
             let n = strndup(c"..".as_ptr(), 2);
             if n.is_null() {
                 return Err(Errno::NoMem);
             }
-            // SAFETY: non-null `target`/`dentry`.
+            // SAFETY: non-null `target`/`dentry`; `target` is a distinct
+            // inode (still raw); `dir` is the boundary reference.
             unsafe {
                 (*dentry).sb = (*target).sb;
                 (*dentry).ino = (*target).ino;
-                (*dentry).parent = if core::ptr::eq(target, dir) { ptr::null_mut() } else { target };
+                (*dentry).parent = if core::ptr::eq(target, &raw const *dir) { ptr::null_mut() } else { target };
                 (*dentry).name = n;
                 (*dentry).name_len = 2;
                 (*dentry).cookies = 0;
@@ -1601,25 +1671,24 @@ fn vfs_ilookup_inner(
         // fall through to driver lookup for normal ".."
     }
 
-    // SAFETY: non-null `dir`.
-    let sb = unsafe { (*dir).sb };
+    let sb = dir.sb;
     vfs_superblock_rlock(sb);
-    vfs_ilock(dir);
+    vfs_ilock(&raw mut *dir);
 
     let ret: KResult<()> = 'out: {
-        let v = vfs_inode_valid_locked(dir);
+        let v = vfs_inode_valid_locked(&raw mut *dir);
         if v != 0 {
             break 'out Err(Errno::Raw(v));
         }
-        if !is_dir(unsafe { (*dir).mode }) {
+        if !is_dir(dir.mode) {
             break 'out Err(Errno::NotDir);
         }
         // SAFETY: `dir` is live, valid, locked, superblock read-locked
-        // — the trait method's contract.
-        unsafe { inode_ops(dir).lookup(dir, dentry, name, name_len) }
+        // — the trait method's contract (reborrowed as the raw pointer).
+        unsafe { inode_ops(&raw mut *dir).lookup(&raw mut *dir, dentry, name, name_len) }
     };
 
-    vfs_iunlock(dir);
+    vfs_iunlock(&raw mut *dir);
     vfs_superblock_unlock(sb);
     ret
 }
@@ -1641,25 +1710,32 @@ pub(crate) extern "C" fn vfs_dir_iter(
     iter: *mut vfs_dir_iter,
     ret_dentry: *mut vfs_dentry,
 ) -> c_int {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return neg(EINVAL);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — plain
+    // reads (`sb`, `ino`, `mode`) go safe; `iter`/`ret_dentry` writes, the
+    // `..` target, and lock/validate/dispatch keep raw (reborrow).
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return neg(EINVAL);
     }
     if iter.is_null() || ret_dentry.is_null() {
         return neg(EINVAL);
     }
 
-    // SAFETY: non-null `dir`.
-    let sb = unsafe { (*dir).sb };
+    let sb = dir.sb;
     vfs_superblock_rlock(sb);
-    vfs_ilock(dir);
+    vfs_ilock(&raw mut *dir);
 
     let mut need_lookup = false;
     let ret: c_int = 'body: {
-        let v = vfs_inode_valid_locked(dir);
+        let v = vfs_inode_valid_locked(&raw mut *dir);
         if v != 0 {
             break 'body v;
         }
-        if !is_dir(unsafe { (*dir).mode }) {
+        if !is_dir(dir.mode) {
             break 'body neg(ENOTDIR);
         }
         // P3-10b: `dir_iter` is a required trait method (every
@@ -1681,8 +1757,8 @@ pub(crate) extern "C" fn vfs_dir_iter(
                 break 'body r;
             }
             unsafe {
-                (*ret_dentry).ino = (*dir).ino;
-                (*ret_dentry).sb = (*dir).sb;
+                (*ret_dentry).ino = dir.ino;
+                (*ret_dentry).sb = dir.sb;
                 (*ret_dentry).parent = ptr::null_mut();
             }
             break 'body 0;
@@ -1690,18 +1766,18 @@ pub(crate) extern "C" fn vfs_dir_iter(
 
         if index == 1 {
             let proc_rooti = current_proc_rooti();
-            if core::ptr::eq(dir, proc_rooti) {
+            if core::ptr::eq(&raw const *dir, proc_rooti) {
                 let r = make_iter_parent(iter, ret_dentry);
                 if r != 0 {
                     break 'body r;
                 }
                 unsafe {
-                    (*ret_dentry).ino = (*dir).ino;
-                    (*ret_dentry).sb = (*dir).sb;
+                    (*ret_dentry).ino = dir.ino;
+                    (*ret_dentry).sb = dir.sb;
                     (*ret_dentry).parent = ptr::null_mut();
                 }
                 break 'body 0;
-            } else if vfs_inode_is_local_root(dir) {
+            } else if vfs_inode_is_local_root(&raw mut *dir) {
                 let r = make_iter_parent(iter, ret_dentry);
                 if r != 0 {
                     break 'body r;
@@ -1717,14 +1793,14 @@ pub(crate) extern "C" fn vfs_dir_iter(
         if unsafe { (*iter).index } >= VFS_DITER_INDEX_PARENT {
             unsafe {
                 (*iter).index += 1;
-                (*ret_dentry).sb = (*dir).sb;
-                (*ret_dentry).parent = dir;
+                (*ret_dentry).sb = dir.sb;
+                (*ret_dentry).parent = &raw mut *dir;
                 (*ret_dentry).cookies = (*iter).cookies;
             }
         }
         // SAFETY: `dir` is live, valid, locked, superblock read-locked
-        // — the trait method's contract.
-        let r = match unsafe { inode_ops(dir).dir_iter(dir, iter, ret_dentry) } {
+        // — the trait method's contract (reborrowed as the raw pointer).
+        let r = match unsafe { inode_ops(&raw mut *dir).dir_iter(&raw mut *dir, iter, ret_dentry) } {
             Ok(()) => 0,
             Err(e) => e.neg(),
         };
@@ -1734,14 +1810,14 @@ pub(crate) extern "C" fn vfs_dir_iter(
         r
     };
 
-    vfs_iunlock(dir);
+    vfs_iunlock(&raw mut *dir);
     vfs_superblock_unlock(sb);
 
     if ret == 0 {
         if unsafe { (*iter).index } == VFS_DITER_INDEX_PARENT && need_lookup {
             // Synthesizing ".." for a mounted root: fill in the correct
             // parent inode now that locks are released.
-            let target = vfs_dotdot_target(dir);
+            let target = vfs_dotdot_target(&raw mut *dir);
             unsafe {
                 (*ret_dentry).ino = (*target).ino;
                 (*ret_dentry).sb = (*target).sb;
@@ -1776,7 +1852,11 @@ pub(crate) extern "C" fn vfs_dir_iter(
 /// Check if a directory is empty (contains only "." and ".."). Caller
 /// must hold the inode lock.
 pub(crate) extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
-    if !is_dir(unsafe { (*dir).mode }) {
+    // SAFETY: `dir` is live and locked (caller's contract). P3-7c boundary
+    // hoist — the `mode` read goes safe; the trait dispatch reborrows
+    // `&raw mut *dir`.
+    let dir = unsafe { &mut *dir };
+    if !is_dir(dir.mode) {
         return 0;
     }
     let mut iter: vfs_dir_iter = unsafe { core::mem::zeroed() };
@@ -1784,10 +1864,9 @@ pub(crate) extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
     iter.index = VFS_DITER_INDEX_PARENT; // Skip "." and ".."
     iter.cookies = 0;
 
-    // SAFETY: `dir` is live and locked (caller's contract). P3-10b:
-    // required trait method — the old `None`-slot "can't check, assume
-    // not empty" branch was dead code and collapses.
-    let ret = unsafe { inode_ops(dir).dir_iter(dir, &mut iter, &mut dentry) };
+    // P3-10b: required trait method — the old `None`-slot "can't check,
+    // assume not empty" branch was dead code and collapses.
+    let ret = unsafe { inode_ops(&raw mut *dir).dir_iter(&raw mut *dir, &mut iter, &mut dentry) };
     if ret.is_err() {
         vfs_release_dentry(&mut dentry);
         return 0; // Error, assume not empty
@@ -1798,24 +1877,31 @@ pub(crate) extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
 }
 
 fn vfs_readlink_inner(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> KResult<isize> {
-    if inode.is_null() || unsafe { (*inode).sb.is_null() } {
+    if inode.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `inode` is non-null (just checked); a live, referenced inode
+    // the caller holds open. P3-7c boundary hoist — plain reads (`sb`,
+    // `mode`) go safe; lock/validate/dispatch reborrow `&raw mut *inode`.
+    let inode = unsafe { &mut *inode };
+    if inode.sb.is_null() {
         return Err(Errno::Inval);
     }
     if buf.is_null() || buflen == 0 {
         return Err(Errno::Inval);
     }
-    vfs_ilock(inode);
+    vfs_ilock(&raw mut *inode);
     let ret: KResult<isize> = 'out: {
-        let v = vfs_inode_valid_locked(inode);
+        let v = vfs_inode_valid_locked(&raw mut *inode);
         if v != 0 {
             break 'out Err(Errno::Raw(v));
         }
-        if !is_lnk(unsafe { (*inode).mode }) {
+        if !is_lnk(inode.mode) {
             break 'out Err(Errno::Inval);
         }
         // SAFETY: `inode` is live, valid, locked — the trait method's
-        // contract.
-        let r = match unsafe { inode_ops(inode).readlink(inode, buf, buflen) } {
+        // contract (reborrowed as the raw pointer it still takes).
+        let r = match unsafe { inode_ops(&raw mut *inode).readlink(&raw mut *inode, buf, buflen) } {
             Ok(r) => r,
             Err(e) => break 'out Err(e),
         };
@@ -1824,7 +1910,7 @@ fn vfs_readlink_inner(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) ->
         }
         Ok(r)
     };
-    vfs_iunlock(inode);
+    vfs_iunlock(&raw mut *inode);
     ret
 }
 
@@ -1841,7 +1927,15 @@ fn vfs_create_inner(
     name: *const c_char,
     name_len: usize,
 ) -> KResult<*mut vfs_inode> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); the caller passes a live,
+    // referenced directory inode it holds open, valid for this call.
+    // P3-7c boundary hoist — plain reads (`sb`, `mode`) go safe; the
+    // lock/validate/dispatch helpers reborrow `&raw mut *dir`.
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
@@ -1849,40 +1943,40 @@ fn vfs_create_inner(
     }
 
     loop {
-        let sb = unsafe { (*dir).sb };
+        let sb = dir.sb;
         unsafe { sb_ops(sb).begin_transaction(sb) }?;
 
         vfs_superblock_wlock(sb);
-        vfs_ilock(dir);
+        vfs_ilock(&raw mut *dir);
 
         // P3-10b: `KResult` end to end — the transitional internal
         // `ERR_PTR` domain (and its `is_eagain_ptr` retry check) is
         // gone; `is_again(&ret)` drives the identical retry.
         let ret: KResult<*mut vfs_inode> = {
-            let v = vfs_inode_valid_locked(dir);
+            let v = vfs_inode_valid_locked(&raw mut *dir);
             if v != 0 {
                 Err(Errno::Raw(v))
-            } else if !is_dir(unsafe { (*dir).mode }) {
+            } else if !is_dir(dir.mode) {
                 Err(Errno::NotDir)
             } else {
                 // SAFETY: `dir` is live, valid, locked, superblock
                 // write-locked, transaction open — the trait method's
-                // contract.
-                unsafe { inode_ops(dir).create(dir, mode, name, name_len) }
+                // contract (reborrowed as the raw pointer it still takes).
+                unsafe { inode_ops(&raw mut *dir).create(&raw mut *dir, mode, name, name_len) }
             }
         };
 
         // Handle EAGAIN: inode allocation collided with a destroying
         // inode. Release all locks and the transaction, yield, retry.
         if is_again(&ret) {
-            vfs_iunlock(dir);
+            vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
             scheduler_yield();
             continue;
         }
 
-        vfs_iunlock(dir);
+        vfs_iunlock(&raw mut *dir);
         vfs_superblock_unlock(sb);
 
         if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
@@ -1908,7 +2002,14 @@ pub(crate) fn vfs_mknod_inner(
     name: *const c_char,
     name_len: usize,
 ) -> KResult<*mut vfs_inode> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — see
+    // `vfs_create_inner`.
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
@@ -1916,33 +2017,33 @@ pub(crate) fn vfs_mknod_inner(
     }
 
     loop {
-        let sb = unsafe { (*dir).sb };
+        let sb = dir.sb;
         unsafe { sb_ops(sb).begin_transaction(sb) }?;
 
         vfs_superblock_wlock(sb);
-        vfs_ilock(dir);
+        vfs_ilock(&raw mut *dir);
 
         let ret: KResult<*mut vfs_inode> = {
-            let v = vfs_inode_valid_locked(dir);
+            let v = vfs_inode_valid_locked(&raw mut *dir);
             if v != 0 {
                 Err(Errno::Raw(v))
-            } else if !is_dir(unsafe { (*dir).mode }) {
+            } else if !is_dir(dir.mode) {
                 Err(Errno::NotDir)
             } else {
                 // SAFETY: as in `vfs_create_inner`.
-                unsafe { inode_ops(dir).mknod(dir, mode, dev, name, name_len) }
+                unsafe { inode_ops(&raw mut *dir).mknod(&raw mut *dir, mode, dev, name, name_len) }
             }
         };
 
         if is_again(&ret) {
-            vfs_iunlock(dir);
+            vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
             scheduler_yield();
             continue;
         }
 
-        vfs_iunlock(dir);
+        vfs_iunlock(&raw mut *dir);
         vfs_superblock_unlock(sb);
 
         if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
@@ -1968,7 +2069,15 @@ fn vfs_link_inner(
     name: *const c_char,
     name_len: usize,
 ) -> KResult<()> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — plain
+    // reads (`sb`, `mode`) go safe; `target` stays an `IRef` (free path),
+    // and lock/validate/dispatch reborrow `&raw mut *dir`.
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 || old.is_null() {
@@ -1985,11 +2094,11 @@ fn vfs_link_inner(
     // wave deletes (P3-9d).
     // SAFETY: see the comment above.
     let target = unsafe { IRef::from_raw(target) };
-    if target.sb != unsafe { (*dir).sb } {
+    if target.sb != dir.sb {
         return Err(Errno::XDev); // Cross-device hard link not supported
     }
 
-    let sb = unsafe { (*dir).sb };
+    let sb = dir.sb;
     unsafe { sb_ops(sb).begin_transaction(sb) }?;
 
     vfs_superblock_wlock(sb);
@@ -1997,12 +2106,12 @@ fn vfs_link_inner(
         if is_dir(target.mode) {
             break 'out_unlock_sb neg(EPERM); // Cannot create hard link to a directory
         }
-        if !is_dir(unsafe { (*dir).mode }) {
+        if !is_dir(dir.mode) {
             break 'out_unlock_sb neg(ENOTDIR);
         }
-        vfs_ilock_two_nondirectories(dir, IRef::as_ptr(&target));
+        vfs_ilock_two_nondirectories(&raw mut *dir, IRef::as_ptr(&target));
         let r = 'out: {
-            let v = vfs_inode_valid_locked(dir);
+            let v = vfs_inode_valid_locked(&raw mut *dir);
             if v != 0 {
                 break 'out v;
             }
@@ -2013,12 +2122,12 @@ fn vfs_link_inner(
             // SAFETY: `target`/`dir` are live, valid, locked, the
             // superblock write-locked, transaction open — the trait
             // method's contract.
-            match unsafe { inode_ops(dir).link(IRef::as_ptr(&target), dir, name, name_len) } {
+            match unsafe { inode_ops(&raw mut *dir).link(IRef::as_ptr(&target), &raw mut *dir, name, name_len) } {
                 Ok(()) => 0,
                 Err(e) => e.neg(),
             }
         };
-        vfs_iunlock_two(IRef::as_ptr(&target), dir);
+        vfs_iunlock_two(IRef::as_ptr(&target), &raw mut *dir);
         r
     };
     vfs_superblock_unlock(sb);
@@ -2044,7 +2153,15 @@ pub(crate) extern "C" fn vfs_link(
 }
 
 fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — `dir`
+    // plain reads (`sb`) go safe; `target` (from lookup) stays raw — it is
+    // `vfs_iput`-ed here (free path), which a `&mut` could not express.
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
@@ -2058,7 +2175,7 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     }
 
     let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
-    let lret = vfs_ilookup(dir, &mut dentry, name, name_len);
+    let lret = vfs_ilookup(&raw mut *dir, &mut dentry, name, name_len);
     if lret != 0 {
         return Err(Errno::Raw(lret));
     }
@@ -2072,7 +2189,7 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
         }
     };
 
-    let sb = unsafe { (*dir).sb };
+    let sb = dir.sb;
     if let Err(e) = unsafe { sb_ops(sb).begin_transaction(sb) } {
         vfs_iput(target); // Drop our reference from lookup
         vfs_release_dentry(&mut dentry);
@@ -2080,11 +2197,11 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     }
 
     vfs_superblock_wlock(sb);
-    vfs_ilock(dir);
+    vfs_ilock(&raw mut *dir);
     vfs_ilock(target);
 
     let ret: c_int = 'out: {
-        let v = vfs_inode_valid_locked(dir);
+        let v = vfs_inode_valid_locked(&raw mut *dir);
         if v != 0 {
             break 'out v;
         }
@@ -2108,13 +2225,13 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
             // SAFETY: `dentry` names `target`; `dir`/`target` locked,
             // superblock write-locked, transaction open — the trait
             // method's contract.
-            match unsafe { inode_ops(dir).rmdir(&mut dentry, target) } {
+            match unsafe { inode_ops(&raw mut *dir).rmdir(&mut dentry, target) } {
                 Ok(()) => 0,
                 Err(e) => e.neg(),
             }
         } else {
             // SAFETY: same contract as the `rmdir` arm above.
-            match unsafe { inode_ops(dir).unlink(&mut dentry, target) } {
+            match unsafe { inode_ops(&raw mut *dir).unlink(&mut dentry, target) } {
                 Ok(()) => 0,
                 Err(e) => e.neg(),
             }
@@ -2135,7 +2252,7 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     }
 
     vfs_iunlock(target);
-    vfs_iunlock(dir);
+    vfs_iunlock(&raw mut *dir);
     vfs_superblock_unlock(sb);
 
     if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
@@ -2156,7 +2273,14 @@ pub(crate) fn vfs_mkdir_inner(
     name: *const c_char,
     name_len: usize,
 ) -> KResult<*mut vfs_inode> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — see
+    // `vfs_create_inner`.
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
@@ -2164,26 +2288,26 @@ pub(crate) fn vfs_mkdir_inner(
     }
 
     loop {
-        let sb = unsafe { (*dir).sb };
+        let sb = dir.sb;
         unsafe { sb_ops(sb).begin_transaction(sb) }?;
 
         vfs_superblock_wlock(sb);
-        vfs_ilock(dir);
+        vfs_ilock(&raw mut *dir);
 
         let ret: KResult<*mut vfs_inode> = {
-            let v = vfs_inode_valid_locked(dir);
+            let v = vfs_inode_valid_locked(&raw mut *dir);
             if v != 0 {
                 Err(Errno::Raw(v))
-            } else if !is_dir(unsafe { (*dir).mode }) {
+            } else if !is_dir(dir.mode) {
                 Err(Errno::NotDir)
             } else {
                 // SAFETY: as in `vfs_create_inner`.
-                unsafe { inode_ops(dir).mkdir(dir, mode, name, name_len) }
+                unsafe { inode_ops(&raw mut *dir).mkdir(&raw mut *dir, mode, name, name_len) }
             }
         };
 
         if is_again(&ret) {
-            vfs_iunlock(dir);
+            vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
             scheduler_yield();
@@ -2192,12 +2316,15 @@ pub(crate) fn vfs_mkdir_inner(
 
         if let Ok(new_inode) = ret {
             vfs_ilock(new_inode);
-            unsafe { (*new_inode).parent = dir };
-            vfs_idup(dir); // increase parent dir refcount
+            // SAFETY: `new_inode` is the freshly created child (non-null
+            // on `Ok`), locked here; `&raw mut *dir` reborrows the parent
+            // reference as the raw pointer `parent` stores.
+            unsafe { (*new_inode).parent = &raw mut *dir };
+            vfs_idup(&raw mut *dir); // increase parent dir refcount
             vfs_iunlock(new_inode);
         }
 
-        vfs_iunlock(dir);
+        vfs_iunlock(&raw mut *dir);
         vfs_superblock_unlock(sb);
 
         if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
@@ -2223,41 +2350,46 @@ fn vfs_move_inner(
     name: *const c_char,
     name_len: usize,
 ) -> KResult<()> {
-    if old_dir.is_null()
-        || unsafe { (*old_dir).sb.is_null() }
-        || new_dir.is_null()
-        || unsafe { (*new_dir).sb.is_null() }
-    {
+    if old_dir.is_null() || new_dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `old_dir`/`new_dir` are non-null (just checked); live,
+    // referenced directory inodes the caller holds open. P3-7c boundary
+    // hoist — plain reads (`sb`, `mode`) go safe; validate/lock/dispatch
+    // reborrow `&raw mut *old_dir`/`&raw mut *new_dir`.
+    let old_dir = unsafe { &mut *old_dir };
+    let new_dir = unsafe { &mut *new_dir };
+    if old_dir.sb.is_null() || new_dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if old_dentry.is_null() || name.is_null() || name_len == 0 {
         return Err(Errno::Inval);
     }
-    let mut ret = vfs_inode_valid_locked(old_dir);
+    let mut ret = vfs_inode_valid_locked(&raw mut *old_dir);
     if ret != 0 && ret != neg(EPERM) {
         return Err(Errno::Raw(ret));
     }
-    ret = vfs_inode_valid_locked(new_dir);
+    ret = vfs_inode_valid_locked(&raw mut *new_dir);
     if ret != 0 && ret != neg(EPERM) {
         return Err(Errno::Raw(ret));
     }
-    let sb = unsafe { (*old_dir).sb };
-    if sb != unsafe { (*new_dir).sb } {
+    let sb = old_dir.sb;
+    if sb != new_dir.sb {
         return Err(Errno::XDev); // Cross-device move not supported
     }
 
     vfs_superblock_wlock(sb);
     let result: c_int = 'out: {
-        if !is_dir(unsafe { (*old_dir).mode }) {
+        if !is_dir(old_dir.mode) {
             break 'out neg(ENOTDIR);
         }
-        if !is_dir(unsafe { (*new_dir).mode }) {
+        if !is_dir(new_dir.mode) {
             break 'out neg(ENOTDIR);
         }
         // Return value intentionally discarded, matching the C original:
         // `old_dir`/`new_dir` are already proven same-filesystem above,
         // so `vfs_ilock_two_directories` cannot fail (`-EXDEV`) here.
-        let _ = vfs_ilock_two_directories(old_dir, new_dir);
+        let _ = vfs_ilock_two_directories(&raw mut *old_dir, &raw mut *new_dir);
 
         // P3-10b: the old fn-pointer equality gate
         // (`old_move != new_move` -> `-ENOSYS`) collapsed — both
@@ -2271,12 +2403,12 @@ fn vfs_move_inner(
         // directories, both locked, superblock write-locked — the
         // trait method's contract.
         let r = match unsafe {
-            inode_ops(old_dir).move_(old_dir, old_dentry, new_dir, name, name_len)
+            inode_ops(&raw mut *old_dir).move_(&raw mut *old_dir, old_dentry, &raw mut *new_dir, name, name_len)
         } {
             Ok(()) => 0,
             Err(e) => e.neg(),
         };
-        vfs_iunlock_two(old_dir, new_dir);
+        vfs_iunlock_two(&raw mut *old_dir, &raw mut *new_dir);
         r
     };
     vfs_superblock_unlock(sb);
@@ -2301,7 +2433,14 @@ fn vfs_symlink_inner(
     target: *const c_char,
     target_len: usize,
 ) -> KResult<*mut vfs_inode> {
-    if dir.is_null() || unsafe { (*dir).sb.is_null() } {
+    if dir.is_null() {
+        return Err(Errno::Inval);
+    }
+    // SAFETY: `dir` is non-null (just checked); a live, referenced
+    // directory inode the caller holds open. P3-7c boundary hoist — see
+    // `vfs_create_inner`.
+    let dir = unsafe { &mut *dir };
+    if dir.sb.is_null() {
         return Err(Errno::Inval);
     }
     if target.is_null() || target_len == 0 || target_len > VFS_PATH_MAX {
@@ -2312,26 +2451,26 @@ fn vfs_symlink_inner(
     }
 
     loop {
-        let sb = unsafe { (*dir).sb };
+        let sb = dir.sb;
         unsafe { sb_ops(sb).begin_transaction(sb) }?;
 
         vfs_superblock_wlock(sb);
-        vfs_ilock(dir);
+        vfs_ilock(&raw mut *dir);
 
         let ret: KResult<*mut vfs_inode> = {
-            let v = vfs_inode_valid_locked(dir);
+            let v = vfs_inode_valid_locked(&raw mut *dir);
             if v != 0 {
                 Err(Errno::Raw(v))
-            } else if !is_dir(unsafe { (*dir).mode }) {
+            } else if !is_dir(dir.mode) {
                 Err(Errno::NotDir)
             } else {
                 // SAFETY: as in `vfs_create_inner`.
-                unsafe { inode_ops(dir).symlink(dir, mode, name, name_len, target, target_len) }
+                unsafe { inode_ops(&raw mut *dir).symlink(&raw mut *dir, mode, name, name_len, target, target_len) }
             }
         };
 
         if is_again(&ret) {
-            vfs_iunlock(dir);
+            vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
             scheduler_yield();
@@ -2340,7 +2479,7 @@ fn vfs_symlink_inner(
 
         // Note: symlinks don't need a parent reference (no ".."
         // traversal needed).
-        vfs_iunlock(dir);
+        vfs_iunlock(&raw mut *dir);
         vfs_superblock_unlock(sb);
 
         if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
@@ -2362,26 +2501,33 @@ pub(crate) extern "C" fn vfs_symlink(
 }
 
 fn vfs_itruncate_inner(inode: *mut vfs_inode, new_size: loff_t) -> KResult<()> {
-    if inode.is_null() || unsafe { (*inode).sb.is_null() } {
+    if inode.is_null() {
         return Err(Errno::Inval);
     }
-    vfs_ilock(inode);
+    // SAFETY: `inode` is non-null (just checked); a live, referenced inode
+    // the caller holds open. P3-7c boundary hoist — see
+    // `vfs_readlink_inner`.
+    let inode = unsafe { &mut *inode };
+    if inode.sb.is_null() {
+        return Err(Errno::Inval);
+    }
+    vfs_ilock(&raw mut *inode);
     let ret: c_int = 'out: {
-        let v = vfs_inode_valid_locked(inode);
+        let v = vfs_inode_valid_locked(&raw mut *inode);
         if v != 0 {
             break 'out v;
         }
-        if !is_reg(unsafe { (*inode).mode }) {
+        if !is_reg(inode.mode) {
             break 'out neg(EINVAL);
         }
         // SAFETY: `inode` is live, valid, locked, a regular file — the
-        // trait method's contract.
-        match unsafe { inode_ops(inode).truncate(inode, new_size) } {
+        // trait method's contract (reborrowed as the raw pointer it takes).
+        match unsafe { inode_ops(&raw mut *inode).truncate(&raw mut *inode, new_size) } {
             Ok(()) => 0,
             Err(e) => e.neg(),
         }
     };
-    vfs_iunlock(inode);
+    vfs_iunlock(&raw mut *inode);
     if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
 }
 
@@ -2479,46 +2625,54 @@ pub(crate) extern "C" fn vfs_iunlock_two(inode1: *mut vfs_inode, inode2: *mut vf
 }
 
 fn vfs_chdir_inner(new_cwd: *mut vfs_inode) -> KResult<()> {
-    if new_cwd.is_null() || unsafe { (*new_cwd).sb.is_null() } {
+    if new_cwd.is_null() {
         return Err(Errno::Inval);
     }
-    if core::ptr::eq(new_cwd, root_inode_ptr()) {
+    // SAFETY: `new_cwd` is non-null (just checked); a live, referenced
+    // inode the caller holds open. P3-7c boundary hoist — plain reads
+    // (`sb`, `mode`) go safe; the identity checks and lock/validate/
+    // get_ref helpers reborrow `&raw mut *new_cwd`.
+    let new_cwd = unsafe { &mut *new_cwd };
+    if new_cwd.sb.is_null() {
+        return Err(Errno::Inval);
+    }
+    if core::ptr::eq(&raw const *new_cwd, root_inode_ptr()) {
         return Err(Errno::Inval); // not allowed to change to the dummy root
     }
     let fs = current_fs();
-    if core::ptr::eq(new_cwd, unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) }) {
+    if core::ptr::eq(&raw const *new_cwd, unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) }) {
         return Ok(()); // No change
     }
 
-    let sb = unsafe { (*new_cwd).sb };
+    let sb = new_cwd.sb;
     vfs_superblock_rlock(sb);
-    vfs_ilock(new_cwd);
+    vfs_ilock(&raw mut *new_cwd);
 
     let mut old: vfs_inode_ref = unsafe { core::mem::zeroed() };
 
-    let v = vfs_inode_valid_locked(new_cwd);
+    let v = vfs_inode_valid_locked(&raw mut *new_cwd);
     if v != 0 {
-        vfs_iunlock(new_cwd);
+        vfs_iunlock(&raw mut *new_cwd);
         vfs_superblock_unlock(sb);
         vfs_inode_put_ref(&mut old);
         return Err(Errno::Raw(v));
     }
-    if !is_dir(unsafe { (*new_cwd).mode }) {
-        vfs_iunlock(new_cwd);
+    if !is_dir(new_cwd.mode) {
+        vfs_iunlock(&raw mut *new_cwd);
         vfs_superblock_unlock(sb);
         vfs_inode_put_ref(&mut old);
         return Err(Errno::NotDir);
     }
 
     let mut new_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
-    let r = vfs_inode_get_ref(new_cwd, &mut new_ref);
+    let r = vfs_inode_get_ref(&raw mut *new_cwd, &mut new_ref);
     if r != 0 {
-        vfs_iunlock(new_cwd);
+        vfs_iunlock(&raw mut *new_cwd);
         vfs_superblock_unlock(sb);
         vfs_inode_put_ref(&mut old);
         return Err(Errno::Raw(r));
     }
-    vfs_iunlock(new_cwd);
+    vfs_iunlock(&raw mut *new_cwd);
     vfs_superblock_unlock(sb);
 
     // To keep it simple, fs_struct is only locked around the swap itself

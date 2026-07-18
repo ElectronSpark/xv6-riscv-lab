@@ -3084,6 +3084,107 @@ table type + 6 dead slots + 1 facade alias deleted.
   since ~Iteration 25, in the waiter-queue path this wave never touches).
   No new faults. LOC: 1 file (`kernel/vfs/file.rs`), signatures internal.
 
+### Iteration 77 — 2026-07-17 — Wave P3-7c (vfs core hub): reference-ification of `vfs/inode.rs`'s `_inner` fns — raw `*mut vfs_inode` field reads → boundary `&mut VfsInode`
+
+- **The vfs-core slice of the reference-ification arc** (user directive:
+  fully adapt Rust style / reduce unsafe), extending the `fdtable.rs`
+  **P3-7a (`37ef76d`)** and `file.rs` **P3-7b (`92f53e6`)** hoist pattern
+  to `vfs/inode.rs`, the vfs hub. In each converted `_inner`/dispatch fn,
+  the entry null-check plus a single audited `unsafe { &mut *inode }`
+  conversion happen **once**, immediately after the null-check (the
+  outermost frame that genuinely receives a raw pointer), after which the
+  interior **plain**-field reads (`sb`, `mode`, `ino`) are ordinary
+  **safe** access (`dir.sb` vs `unsafe { (*dir).sb }`).
+- **Signatures kept `*mut vfs_inode`** (hoist is *internal*, mirroring the
+  `fdtable.rs` P3-7a slice, not the `file.rs` signature swap): the
+  `extern "C"` wrappers and the cross-module `pub(crate)` callers
+  (`vfs_mknod_inner`/`vfs_mkdir_inner` are reached from `vfs_syscall.rs`)
+  pass raw pointers, so converting the signature would ripple into other
+  modules — the brief's "keep the raw signature and hoist internally"
+  branch. **Zero caller/other-file churn** (1 file touched).
+- **Converted** (primary `dir`/`inode` param → interior boundary `&mut`):
+  `vfs_create_inner`, `vfs_mknod_inner`, `vfs_mkdir_inner`,
+  `vfs_symlink_inner`, `vfs_link_inner`, `vfs_unlink_inner` (its `dir`
+  only — `target` stays raw, see below), `vfs_readlink_inner`,
+  `vfs_itruncate_inner`, `vfs_dirty_inode_inner`, `vfs_sync_inode_inner`,
+  `vfs_ilookup_inner`, `vfs_dir_iter`, `vfs_dir_isempty`,
+  `vfs_chdir_inner`, and `vfs_move_inner` (both `old_dir` *and* `new_dir`).
+- **Deliberately kept raw** (lifetime / union / traversal honesty —
+  correctness over metric): (1) the **refcount-drop / free paths** —
+  `vfs_iput` + `vfs_iput_finalize`, the `IRef` RAII smart pointer, and
+  `vfs_unlink`'s `target` (it is `vfs_iput`-ed at the tail): a `&mut`
+  there would assert validity *past* the point the object may be freed;
+  (2) the **path-traversal walkers** — `vfs_namei_once` (also `dev_mnt`
+  union + `vfs_iput` mid-walk + `pathbuf`/`strtok_r` buffer pointers),
+  `get_mnt_recursive`, `mountpoint_go_up`, `vfs_dotdot_target`,
+  `vfs_ilock_two_directories_inner` (a `parent`-chain lockdep walk): they
+  hop `parent`/`sb`/mount pointers across *many* inodes, so no single
+  `&mut` describes the working set; (3) the `dev_mnt` **union** arm reads
+  (`dev_mnt.mnt.mnt_rooti`) — union access is `unsafe` regardless of how
+  the container is borrowed; (4) the **bitfield-flag** accessors
+  (`flags.mount()`/`.orphan()`/`.valid()`/…) — they operate on the raw
+  place expression `(*ptr).flags`, unchanged; (5) the `refcount_atomic`
+  atomic-reinterpret helper, the `ln_init`/`hli_init` **list/hlist**
+  splices, and buffer / user-memory / `path` pointers.
+- **Trait dispatch + C-ABI lock helpers stay raw** (consistent with
+  P3-7b's trait-boundary finding): the `InodeOps` methods
+  (`create`/`mknod`/`mkdir`/`symlink`/`link`/`unlink`/`rmdir`/`lookup`/
+  `dir_iter`/`readlink`/`truncate`/`move_`/`dirty_inode`/`sync_inode`) and
+  `vfs_ilock`/`vfs_iunlock`/`vfs_inode_valid_locked`/`vfs_inode_get_ref`/
+  the `vfs_ilock_two_*` helpers keep their `*mut vfs_inode` signatures,
+  reached by reborrowing `&raw mut *inode` (or `&raw const *inode` for the
+  `core::ptr::eq` identity checks) — a synchronous call each.
+- **rust-skills applied**: `unsafe-minimize-scope` (each hoisted `&mut`
+  narrows the following field cluster to safe access; residual `unsafe`
+  marks only the union member, the flag place-expr, or the raw-`dentry`/
+  trait/C-ABI callback), `unsafe-safety-comment` + `doc-safety-section`
+  (a `SAFETY:` note at every boundary conversion and reborrow; new
+  module-doc "Reference-ification (P3-7c)" section listing the exclusions
+  and the aliasing approximation, plus a fix to the old "never by
+  materializing a `&mut vfs_inode`" line to point at the new boundary
+  reference), `own-borrow-over-clone` (references, no copies of the
+  1088-byte record), `type-option-nullable` (nullable `inode` expressed as
+  the null-check-then-reference boundary; `ops` stays
+  `Option<&'static dyn InodeOps>`). Aliasing caveat documented as the same
+  approximation class as P3-7b/P3-7a and the crate's `__ATOMIC_CONSUME`→
+  `Acquire` mapping: a held reference operated on under `vfs_ilock` may be
+  observed by the driver callback through the reborrowed raw pointer while
+  the `&mut` is nominally live — serialized by the inode mutex, invisible
+  to each frame's codegen, but a foreign `&mut` overlap under a strict
+  Stacked/Tree-Borrows reading (the layout-frozen approximation the arc
+  accepts crate-wide).
+- **Metric**: `grep -cE "unsafe \{" kernel/vfs/inode.rs` **189 → 166**
+  (−23, **12.2%** drop). Below the 20–30% band — the **honest ceiling for
+  *this* file**, and the brief's explicit "do NOT chase the number past
+  correctness" case: unlike `file.rs` (plain-field-read-heavy inners),
+  `inode.rs` is dominated by genuinely-raw sites — the `vfs_iput`
+  retry/destroy/free machinery and `IRef`, the `vfs_namei_once` mount
+  traversal (union + free + buffer), the `parent`-chain lockdep walk, the
+  `dev_mnt` union, the `flags` bitfield place-exprs, and the refcount
+  atomics / list splices — none of which a boundary `&mut` may soundly
+  cover. The 23 removed blocks are exactly the plain `(*x).sb`/`.mode`/
+  `.ino` field-read sites across the create/link/unlink/lookup/iter/
+  chdir/move clusters.
+- **Verification** (worker, cache-first): `cargo clean` + full cmake
+  rebuild → **0 warnings 0 errors**; cache discipline verified before AND
+  after (`CMAKE_BUILD_TYPE` empty, toolchain `riscv64-unknown-elf-gcc`).
+  Boot ×4 (runs 1–4) + baseline, each exactly ONE `init: starting sh` +
+  stable `/ $`. Full corruption battery: `mkdir d1` twice → second
+  `mkdir: d1 failed to create` (EEXIST); `ln /README.md rr` + `wc rr` =
+  **714 3365 26018**; `cat nonexistent_file` → ENOENT (`cannot open`);
+  **symlinktest** both parts `ok`; **stressfs ×2** (read/write storm, no
+  corruption, shell alive); **bigfile** `wrote 65803 blocks` … `bigfile
+  done; ok`; `usertests createdelete`/`linktest`/`unlinkread`/`bigdir`
+  each ran clean (the "lost some free pages ~193006" trailer is the
+  documented pre-existing single-test artifact — **confirmed by stashing
+  the change and re-running baseline: identical 193006 lost pages**, NOT a
+  regression); **testsig ALL TESTS PASSED (21/21)**; **mmaptest all 16
+  tests OK (16/16)**; `usertests forkforkfork` → the IDENTICAL pre-existing
+  "Failed to remove interrupted waiter from queue" waiter-queue signature.
+  **ZERO** corruption markers (`freeing free block`/`incorrect blockno`/
+  `balloc`/`bad inode`/`panic`) across every run. No new faults. LOC: 1
+  file (`kernel/vfs/inode.rs`), signatures unchanged.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
