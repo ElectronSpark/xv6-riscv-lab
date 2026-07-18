@@ -62,9 +62,11 @@
 //!    See the type's own doc, just below [`session_unref`].
 //! 2. [`session_unref`]'s free-condition off-by-one (documented as a
 //!    known, preserved-1:1 bug since Wave 12) is now fixed: see that
-//!    function's doc for the exact change and for a *second, deeper*
-//!    leak this fix does **not** close (found while verifying it) --
-//!    also tracked in `RUST_REWRITE.md`'s Known issues.
+//!    function's doc for the exact change. A *second, deeper*
+//!    baseline-reference leak found while verifying it (the empty
+//!    session parked at `ref_cnt == 1` forever) is now also CLOSED as
+//!    P3-BUG3 -- see [`session_unref`]'s doc and `RUST_REWRITE.md`
+//!    Iteration 82.
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ops::Deref;
@@ -437,11 +439,11 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
         // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
         // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
         // contract). This is the permanent, boot-created session 1 --
-        // nothing ever removes its last member, so (like the original
-        // C/pre-P3-9e code) this reference is never dropped, only handed
-        // back out via `into_raw` below (see `session_unref`'s doc for
-        // why that baseline reference staying held is a known, tracked
-        // leak, not a bug introduced by this wrapper).
+        // initproc is always a member, so it never empties and the
+        // baseline-drop in `session_remove_thread`/`session_remove_pg`
+        // (P3-BUG3) never fires for it; the reference is simply handed
+        // back out via `into_raw` below and stays held for the life of
+        // the system.
         let s = SRef::from_raw(s_raw);
 
         session_add_pg(SRef::as_ptr(&s), pg);
@@ -551,34 +553,37 @@ pub(crate) unsafe extern "C" fn session_ref(s: *mut session) {
 /// "exactly one hart sees the zero transition" guarantee
 /// `kobject_put`/`vfs_iput` already rely on.
 ///
-/// # A second, deeper leak this fix does *not* close
+/// # The baseline-reference leak (P3-BUG3) -- now CLOSED
 ///
-/// Found while verifying the fix above: fixing the comparison makes
-/// `session_unref` free correctly whenever the pre-decrement count
-/// reaches `1` -- but a full grep of every `session_ref`/
-/// `session_unref` call site in the tree (this file is the *only*
-/// caller of either) shows [`session_alloc`]'s baseline `ref_cnt = 1`
-/// is never separately dropped anywhere except [`session_setsid`]'s
-/// `pgroup_alloc`-failure path. Every *successful* `session_setsid`/
-/// [`session_init`] leaves that baseline reference permanently
-/// un-dropped -- [`session_add_thread`]/[`session_remove_thread`] and
-/// [`session_add_pg`]/[`session_remove_pg`] only ever balance the `+1`
-/// *they themselves* took, never the allocation's own `+1`. So even
-/// with the comparison now correct, an ordinary `setsid()` followed by
-/// the leader exiting and its process group going away still leaves the
-/// session at `ref_cnt == 1` forever -- **the practical, long-running
-/// leak from ordinary interactive `setsid` use is not eliminated by
-/// this change**; only the narrow allocation-failure path is (verified:
-/// that path now frees instead of leaking -- see `session_setsid`'s own
-/// updated comment). Closing the rest would mean deciding *where* the
-/// baseline reference should be dropped (e.g. an explicit "last member
-/// left" check added to `session_remove_thread`/`session_remove_pg`, or
-/// starting `ref_cnt` at `0` instead of `1`) -- a session-lifecycle
-/// design decision, not a mechanical comparison fix, and risks a
-/// premature-free/use-after-free bug if rushed. Left undone and
-/// documented here + in `RUST_REWRITE.md`'s Known issues, matching this
-/// project's convention for preserved-but-flagged bugs (compare
-/// `timer_node_init`'s `retry_limit` bug).
+/// Found while verifying the off-by-one fix above: fixing the comparison
+/// made `session_unref` free correctly whenever the pre-decrement count
+/// reaches `1`, but [`session_alloc`]'s baseline `ref_cnt = 1` was never
+/// separately dropped on ordinary teardown -- only on
+/// [`session_setsid`]'s `pgroup_alloc`-failure path. A successful
+/// `setsid()` ends at `ref_cnt == 3` (baseline + 1 pg + 1 thread); the
+/// leader exiting drops the thread ref (3->2) and the process group
+/// emptying drops the pg ref (2->1), leaving the session parked at
+/// `ref_cnt == 1` (the baseline) forever -- a per-session leak on every
+/// ordinary interactive `setsid`.
+///
+/// Closed here: [`session_remove_thread`] and [`session_remove_pg`] now
+/// drop the baseline reference iff their removal *emptied* the session
+/// (`pg_cnt == 0 && t_cnt == 0`), captured BEFORE the member `session_unref`
+/// so it reads live counts. The mechanism is use-after-free-safe by the
+/// invariant `ref_cnt == baseline(1 while non-empty) + pg_cnt + t_cnt`:
+/// while the departing member's own reference is still held the count is
+/// `>= 2`, so the member unref can never free (it only ever lowers
+/// `ref_cnt` to the baseline `1`); the explicit baseline unref on the
+/// empty transition is therefore the *unique* free point, and
+/// `empty -> freed` is terminal (the free sets `exited = 1`, after which
+/// [`session_add_thread`]/[`session_add_pg`] reject new members with
+/// `-ESRCH`). All raw `*mut session` back-pointers (`thread.session`,
+/// `pgroup.session`, `fg_pgrp`, `tty.session`) are cleared before their
+/// unref, so none dangles. The boot session ([`session_init`]/initproc)
+/// and the kernel session (`kernel/proc/thread.rs`'s `KERNEL_SESSION`,
+/// whose `is_kernel` pgroup is never removed) always retain a member, so
+/// neither ever empties and neither is ever freed. See `RUST_REWRITE.md`
+/// Iteration 82 (Known issue marked FIXED as P3-BUG3).
 pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
     if s.is_null() {
         return;
@@ -841,8 +846,21 @@ pub(crate) unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut t
         }
         (*s).t_cnt -= 1;
         (*t).session = ptr::null_mut();
+        // Capture the empty transition BEFORE the member unref below (counts
+        // are already decremented here). While this member's own reference is
+        // still held, `ref_cnt >= 2` (baseline + this ref), so the member
+        // `session_unref` can never free — it only ever brings `ref_cnt` down
+        // to the baseline.
+        let now_empty = (*s).pg_cnt == 0 && (*s).t_cnt == 0;
         (*t).sid = 0;
         session_unref(s);
+        if now_empty {
+            // P3-BUG3 fix: the last member just left, so drop `session_alloc`'s
+            // baseline reference — this is the unique free point for the now
+            // empty session (otherwise it leaks forever at `ref_cnt == 1`).
+            // MUST be the last use of `s`: it may free the pointee.
+            session_unref(s);
+        }
     }
     0
 }
@@ -896,7 +914,20 @@ pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgro
             (*s).fg_pgrp = ptr::null_mut();
         }
         (*pg).session = ptr::null_mut();
+        // Capture the empty transition BEFORE the member unref below (counts
+        // are already decremented here). While this member's own reference is
+        // still held, `ref_cnt >= 2` (baseline + this ref), so the member
+        // `session_unref` can never free — it only ever brings `ref_cnt` down
+        // to the baseline.
+        let now_empty = (*s).pg_cnt == 0 && (*s).t_cnt == 0;
         session_unref(s);
+        if now_empty {
+            // P3-BUG3 fix: the last member just left, so drop `session_alloc`'s
+            // baseline reference — this is the unique free point for the now
+            // empty session (otherwise it leaks forever at `ref_cnt == 1`).
+            // MUST be the last use of `s`: it may free the pointee.
+            session_unref(s);
+        }
     }
     0
 }
@@ -1203,11 +1234,13 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
         session_add_thread(SRef::as_ptr(&s), p);
         (*SRef::as_ptr(&s)).fg_pgrp = pg; // becomes foreground group
 
-        // Success: `s`'s baseline reference is deliberately kept alive
-        // (see `session_unref`'s doc -- this project's known,
-        // not-yet-closed leak), so hand the raw pointer back out without
-        // dropping, matching the pre-P3-9e code's behavior exactly (it
-        // never called `session_unref(s)` on this path either).
+        // Success: hand `s`'s baseline reference back out as a bare
+        // pointer without dropping it. The baseline is now released
+        // automatically once the session empties -- when the leader exits
+        // and its process group goes away, `session_remove_thread`/
+        // `session_remove_pg` drop it on the empty transition (P3-BUG3, see
+        // `session_unref`'s doc). Until then it keeps the live session
+        // pinned, exactly as before.
         let _ = SRef::into_raw(s);
 
         pid_wunlock();

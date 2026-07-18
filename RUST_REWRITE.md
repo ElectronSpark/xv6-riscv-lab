@@ -3541,6 +3541,70 @@ table type + 6 dead slots + 1 facade alias deleted.
   accounting artifact, not a regression. 2 files, comment+relocation only.
   Do NOT commit (per brief).
 
+### Iteration 82 — 2026-07-18 — P3-BUG3: session baseline-reference leak FIXED (drop the alloc baseline on the empty transition)
+- **The bug** (tracked since P3-9e as the "second, deeper leak"):
+  `session_alloc` takes a baseline `ref_cnt = 1`; membership adds a
+  paired ref per pgroup (`session_add_pg`) and per thread
+  (`session_add_thread`), each balanced by `session_remove_pg`/
+  `session_remove_thread`. But nothing ever dropped the *baseline* on
+  ordinary teardown, so a successful `setsid()` (ending at `ref_cnt == 3`:
+  baseline + 1 pg + 1 thread) settled at `ref_cnt == 1` forever after the
+  leader exited and the process group emptied — one leaked session per
+  interactive `setsid`. Only `session_setsid`'s `pgroup_alloc`-failure
+  path dropped the baseline (it still does; that narrow path was already
+  correct).
+- **The fix** (2 files, `kernel/tty/session.rs`): in BOTH
+  `session_remove_thread` and `session_remove_pg`, after the existing
+  count-decrement + member `session_unref`, drop `session_alloc`'s
+  baseline reference iff the removal emptied the session
+  (`pg_cnt == 0 && t_cnt == 0`). `now_empty` is captured BEFORE the member
+  unref (so it reads live counts), and the baseline `session_unref` is the
+  LAST use of `s` (it may free the pointee). No new `unsafe`, no signature
+  change — 2–3 lines under each function's existing `unsafe` block, all
+  under `pid_wlock` (every remove already `pid_assert_wholding()`s).
+- **UAF-safety (invariant confirmed independently against the code)**:
+  `ref_cnt == baseline(1 while non-empty, else 0) + pg_cnt + t_cnt`. At the
+  member unref the departing member's own ref is still held, so
+  `ref_cnt >= 2` — the member unref (frees only on pre-decrement `== 1`)
+  can never free while the baseline is held; it only lowers `ref_cnt` to
+  the baseline `1`. The explicit baseline unref on the empty transition is
+  therefore the *unique* free point, and `empty -> freed` is terminal (the
+  free sets `exited = 1`; `session_add_thread`/`session_add_pg` then reject
+  with `-ESRCH`). All raw back-pointers (`thread.session`, `pgroup.session`,
+  `fg_pgrp`, `tty.session`) are cleared before their unref. **Boot session**
+  (initproc always a member) and **kernel session** (`KERNEL_SESSION`, whose
+  `is_kernel` pgroup `__pgroup_cleanup` never removes) never empty, so
+  neither is ever freed — confirmed by trace (sid=1, sid=0 persist). The
+  setsid *success* path only ever *adds* to the new session, so no
+  transient false-empty on a remove path.
+- **Verification (behavioral, freed-not-leaked + no-crash)**: added a
+  temporary `LIVE_SESSIONS: AtomicI32` (inc after link in `session_alloc`,
+  dec in `session_unref`'s free branch) with a userspace-visible trace.
+  Pre-fix: `testsig` ×3 → live count grew **2→4→6→8** (+2/run, ZERO frees).
+  Post-fix: **every** session freed, live count returns to the boot
+  baseline **2** after each run (sid 46/48/74/76/102/104 each
+  alloc→free). No-crash: `testsig` **21/21 ×3** (Test 15 setsid+child-exit
+  included), `usertests forkfork`/`reparent`/`killstatus` all **OK**,
+  `stressfs`, boot gate = exactly one `init: starting sh` every run — ZERO
+  panic / `non-positive` assert / double-free. The `lost some free pages`
+  single-test trailer is the documented pre-existing accounting artifact
+  (A/B-verified: identical 13-page loss on the stashed pre-fix build),
+  unrelated to sessions (slab-backed, not page-backed). **Instrumentation
+  removed**; final `cargo clean` + full rebuild is **0-warning**;
+  `testsig` **21/21** re-confirmed on the clean build.
+- **rust-skills applied**: `unsafe-safety-comment` (added-code sits under
+  the pre-existing documented `// SAFETY:` block; the empty-transition
+  reasoning is spelled out at each site), `unsafe-minimize-scope` (no new
+  `unsafe`; reused the existing block), `conc-atomic-ordering` (no new
+  atomics — the baseline unref inherits `session_unref`'s established
+  `SeqCst` on `ref_cnt`, this field's single ordering), `mem-drop-order` /
+  own-* (baseline unref is the last use of `s`; `now_empty` captured before
+  the member unref so no read-after-free), `doc-safety-section` /
+  `doc-intra-links` (updated `session_unref`'s doc to mark the leak CLOSED
+  with the mechanism, plus `session_setsid`/`session_init`/module-doc
+  comments). Crate is **edition 2021** — no Rust-2024-only forms
+  introduced. Do NOT commit (per brief).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
@@ -3575,16 +3639,19 @@ table type + 6 dead slots + 1 facade alias deleted.
   `1`, so sessions were never freed via normal refcounting)~~ **The
   comparison itself FIXED in P3-9e** (2026-07-14) — see that wave's log
   entry and `session_unref`'s doc comment for the exact change and its
-  no-double-free argument. **However, a second, deeper, still-open leak
-  was found while verifying the fix**: `session_alloc`'s baseline
-  `ref_cnt = 1` is never separately dropped by any call site except
-  `session_setsid`'s allocation-failure path, so an ordinary successful
-  `setsid()` still leaves its session's `ref_cnt` at `1` forever once its
-  last thread/pgroup member leaves — live-verified via `ps -s` (dumping
-  `session_list` directly): sessions with `threads=0, pgroups=0` persist
-  indefinitely. Closing this needs a session-lifecycle design decision
-  (where the baseline reference should be dropped), not a mechanical
-  fix; left open, tracked here and in `session.rs`'s module doc.
+  no-double-free argument. **A second, deeper leak was found while
+  verifying the fix**: `session_alloc`'s baseline `ref_cnt = 1` was never
+  separately dropped by any call site except `session_setsid`'s
+  allocation-failure path, so an ordinary successful `setsid()` left its
+  session's `ref_cnt` parked at `1` forever once its last thread/pgroup
+  member left. ~~Still open (needs a session-lifecycle design decision).~~
+  **FIXED in Iteration 82 (P3-BUG3)** (2026-07-18) — `session_remove_thread`/
+  `session_remove_pg` now drop the baseline reference on the empty
+  transition (`pg_cnt == 0 && t_cnt == 0`, captured before the member
+  unref). See that wave's log entry and `session_unref`'s updated doc.
+  Instrumented before/after proof: live session count grew +2 per
+  `testsig` run pre-fix (2→4→6→8) vs stable at the boot baseline of 2
+  post-fix (every alloc matched by a free).
 
 - Intermittent `rm <dir>` EBUSY on repeated same-name directory
   reuse (alternating rounds) — proved pre-existing via A/B/A stash+rebuild
