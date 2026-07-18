@@ -3653,9 +3653,25 @@ table type + 6 dead slots + 1 facade alias deleted.
   `testsig` run pre-fix (2→4→6→8) vs stable at the boot baseline of 2
   post-fix (every alloc matched by a free).
 
-- Intermittent `rm <dir>` EBUSY on repeated same-name directory
+- ~~Intermittent `rm <dir>` EBUSY on repeated same-name directory
   reuse (alternating rounds) — proved pre-existing via A/B/A stash+rebuild
-  during P3-9d; likely a dentry-cache-held extra ref on same-name reuse.
+  during P3-9d; likely a dentry-cache-held extra ref on same-name reuse.~~
+  **NO LONGER REPRODUCIBLE (2026-07-18, investigated as P3-BUG4)**: an
+  exhaustive reproduction sweep on HEAD (07fe2b6) found zero failures
+  across the exact described trigger and beyond — simple `mkdir d; rm d`;
+  an 8-round same-name `mkdir d; rm d` alternating loop; 15 rapid rounds
+  of nested same-name reuse (`mkdir d; mkdir d/s; rm d/s; rm d`); and the
+  full directory-churn usertests suite (createdelete/dirtest/subdir/
+  bigdir/rmdot all OK). The `vfs_unlink` `EBUSY` gate
+  (`vfs_inode_refcount_locked(target) > 1`, inode.rs:2222) now sees the
+  correct refcount on same-name reuse. Most likely resolved incidentally
+  by the post-P3-9d vfs-core rewrites (P3-10b converted the inode/
+  superblock ops to `dyn Trait`, changing the `vfs_iput`/dentry-release
+  dispatch that held the stale ref; the P3-7 reference-ification touched
+  the same unlink/iput paths). No code change made — fabricating a fix
+  for a non-reproducing bug would only churn the delicate unlink path for
+  no verified benefit. Reclassified from active bug to not-reproducible;
+  will reopen with a concrete repro if it ever recurs.
 
 - ~~`cat /dev/tty` panics ("pid lock not held")~~ FIXED in Wave 22
   (pid_wlock around session_get_ctrl_tty; cat blocks correctly, ^C works).
