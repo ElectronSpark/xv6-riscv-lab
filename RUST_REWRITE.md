@@ -569,9 +569,13 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   iref, bigdir — all OK), usertests -q (copyinstr2 only). Orchestrator
   audit green.
 - Notes: root fs is RAM-disk-backed by design (persistence across boots is
-  ephemeral — xv6fs_mount_root prefers major-3 ramdisk); sh output
+  ephemeral — xv6fs_mount_root prefers major-3 ramdisk); ~~sh output
   redirection (`> file`) broken in user/sh.c parser (pre-existing,
-  userspace, flagged); InodeRef newtype deferred to a future idiomatic pass.
+  userspace, flagged)~~ **FIXED as P3-BUG5 (db6911c)**: the redirect
+  *parser* was always fine (external commands redirect correctly); the
+  `echo` builtin bypassed it — taught the builtin to honor `>`/`>>`
+  (userspace C, so rust-style N/A). InodeRef newtype deferred to a future
+  idiomatic pass.
 
 ### Iteration 26 — 2026-07-12 — Wave 14: vfs file.c + pipe.c (worker cut off; orchestrator completed verification)
 
