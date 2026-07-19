@@ -723,18 +723,70 @@ impl<T, const CAP: usize, const TAG: u64> GenTable<T, CAP, TAG> {
         None
     }
 
+    /// A lazy [`Iterator`] over every live object's stable pointer, in
+    /// ascending slot order. This is the idiomatic replacement for the
+    /// callback-taking [`for_each`](Self::for_each) below (which is now a
+    /// thin shim over it): `for p in table.iter() { … }` instead of
+    /// `table.for_each(|p| { … })`.
+    ///
+    /// Yields raw `NonNull<T>` (never `&T`) so the consumer decides how to
+    /// dereference under the caller's lock — no `&Freeze` into the loop
+    /// (see the module section's freeze note). The returned iterator borrows
+    /// `&self`, so it (and therefore the owning subsystem lock the caller
+    /// holds for read) must stay live for the whole walk; it never outlives
+    /// that shared borrow.
+    ///
+    /// Requires `&self` (owning lock held at least for read).
+    #[inline]
+    pub fn iter(&self) -> GenTableIter<'_, T> {
+        GenTableIter { slots: self.slots.iter() }
+    }
+
     /// Visit every live object's stable pointer, in ascending slot order.
     /// Hands out raw `NonNull<T>` (never `&T`) so the callback decides how
     /// to dereference under the caller's lock — no `&Freeze` into the loop
     /// (see the module section's freeze note).
     ///
+    /// Thin shim over [`iter`](Self::iter) — prefer the iterator directly in
+    /// new code; kept for callers that still pass a closure.
+    ///
     /// Requires `&self` (owning lock held at least for read).
-    pub fn for_each(&self, mut f: impl FnMut(NonNull<T>)) {
-        for slot in self.slots.iter() {
-            if let Some(p) = slot.ptr {
-                f(p);
-            }
-        }
+    #[inline]
+    pub fn for_each(&self, f: impl FnMut(NonNull<T>)) {
+        self.iter().for_each(f);
+    }
+}
+
+/// A lazy iterator over the live pointers of a [`GenTable`], produced by
+/// [`GenTable::iter`]. Walks the backing slot array in ascending index
+/// order, skipping free slots, and yields each occupied slot's stable
+/// [`NonNull<T>`] — never a `&T`, so it introduces no `&Freeze`-into-a-loop
+/// borrow of the pointee (see the `GenTable` section's freeze note). It
+/// borrows the table (`&'a`) for its whole lifetime, so iteration stays
+/// under whatever lock the caller already holds for the shared borrow.
+pub struct GenTableIter<'a, T> {
+    slots: core::slice::Iter<'a, Slot<T>>,
+}
+
+impl<'a, T> Iterator for GenTableIter<'a, T> {
+    type Item = NonNull<T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<NonNull<T>> {
+        // `find_map` advances the slice iterator to the next occupied slot
+        // and returns its stored pointer; free slots (`ptr == None`) are
+        // skipped, matching `for_each`'s original `if let Some(p)` filter.
+        self.slots.by_ref().find_map(|slot| slot.ptr)
+    }
+}
+
+impl<'a, T, const CAP: usize, const TAG: u64> IntoIterator for &'a GenTable<T, CAP, TAG> {
+    type Item = NonNull<T>;
+    type IntoIter = GenTableIter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> GenTableIter<'a, T> {
+        self.iter()
     }
 }
 

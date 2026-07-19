@@ -315,16 +315,22 @@ unsafe fn set_needs_resched() {
 }
 
 // ---------------- list_foreach over tg_entry / list_entry ---------------
-/// Iterate the thread_list of a thread_group (entries are `tg_entry` in
-/// struct thread). Yields *mut thread for each element. Safe under
-/// concurrent removal of the *current* node (Linux `list_foreach_node_safe`
-/// semantics: caches the next pointer before invoking the body).
+/// A lazy [`Iterator`] over the `thread_list` of a thread_group (entries are
+/// `tg_entry` in struct thread), yielding `*mut thread` for each element.
+/// Drive it with `for t in tg_threads(head) { … }`.
+///
+/// Safe under concurrent removal of the *current* node (Linux
+/// `list_foreach_node_safe` semantics: [`crate::list::ListIterator::next`]
+/// caches the next pointer before yielding the current one, so the loop body
+/// may detach `t` itself). A null `head` yields nothing.
 #[inline]
-fn for_each_tg_thread<F: FnMut(*mut thread)>(head: *mut list_node_t, mut f: F) {
+fn tg_threads<'a>(head: *mut list_node_t) -> crate::list::ListIterator<'a, thread> {
     let off = tg_entry_offset_in_thread();
-    crate::list_for_each!(head, off, t, {
-        f(t as *mut thread);
-    });
+    // SAFETY: every caller passes a live `thread_list` sentinel head of a
+    // `thread_group` held under `pid_lock`; `off` is `thread::tg_entry`'s
+    // real member offset, upholding `ListIterator::new`'s contract. A null
+    // head is handled by `ListIterator` (yields nothing).
+    unsafe { crate::list::ListIterator::new(head, off) }
 }
 
 /// Count entries on a sigpending queue (header list_node_t with embedded
@@ -641,12 +647,12 @@ unsafe fn tg_sigkill_all(tg: *mut thread_group, skip: *mut thread) {
     // SAFETY: callers of this `unsafe fn` (`thread_group_exit`,
     // `tg_signal_send`) guarantee `tg` is a live, non-null
     // `*mut thread_group`, so projecting `&raw mut (*tg).thread_list`
-    // is sound; `for_each_tg_thread` only reads the resulting list
+    // is sound; `tg_threads` only reads the resulting list
     // head.
     u! {
         xv6_pid_rlock();
-        for_each_tg_thread(&raw mut (*tg).thread_list, |t| {
-            if t == skip { return; }
+        for t in tg_threads(&raw mut (*tg).thread_list) {
+            if t == skip { continue; }
             thread_set_killed(t);
             thread_set_sigpending(t);
             if THREAD_SLEEPING(t) {
@@ -654,7 +660,7 @@ unsafe fn tg_sigkill_all(tg: *mut thread_group, skip: *mut thread) {
             } else if THREAD_STOPPED_p(t) {
                 scheduler_wakeup_stopped(t);
             }
-        });
+        }
         xv6_pid_runlock();
     }
 }
@@ -666,7 +672,7 @@ unsafe fn tg_pick_thread(tg: *mut thread_group, signo: c_int) -> *mut thread {
     // `ThreadGroupAccess::from_raw(tg)` returns `Some` and
     // `unwrap_unchecked` is sound. `leader` is guarded by
     // `!leader.is_null()` before every deref/`from_raw` use.
-    // `for_each_tg_thread` yields only live `*mut thread` nodes linked
+    // `tg_threads` yields only live `*mut thread` nodes linked
     // on `tg`'s `thread_list` via `tg_entry`, so each `t` is non-null
     // and valid for `from_raw`/field access.
     u! {
@@ -683,17 +689,17 @@ unsafe fn tg_pick_thread(tg: *mut thread_group, signo: c_int) -> *mut thread {
             }
         }
         let mut chosen: *mut thread = ptr::null_mut();
-        for_each_tg_thread(&raw mut (*tg).thread_list, |t| {
-            if !chosen.is_null() { return; }
-            if t == leader { return; }
+        for t in tg_threads(&raw mut (*tg).thread_list) {
+            if !chosen.is_null() { continue; }
+            if t == leader { continue; }
             let st = thread_state_load(t);
-            if st == THREAD_UNUSED || st == THREAD_ZOMBIE { return; }
+            if st == THREAD_UNUSED || st == THREAD_ZOMBIE { continue; }
             let tt = crate::proc::access::ThreadAccess::from_raw(t).unwrap_unchecked();
-            if tt.sigacts_ptr().is_null() { return; }
+            if tt.sigacts_ptr().is_null() { continue; }
             if !sigismember((*t).signal.sig_mask, signo) {
                 chosen = t;
             }
-        });
+        }
         if !chosen.is_null() { return chosen; }
         leader
     }
@@ -758,15 +764,15 @@ pub(crate) fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_
 
         if is_cont {
             shared.and_sig_pending_mask(!stop_mask);
-            for_each_tg_thread(tga.thread_list_ptr(), |t| {
+            for t in tg_threads(tga.thread_list_ptr()) {
                 ThreadSignalAccess::assume_thread(t).and_sig_pending_mask(!stop_mask);
-            });
+            }
         }
         if is_stop {
             shared.and_sig_pending_mask(!cont_mask);
-            for_each_tg_thread(tga.thread_list_ptr(), |t| {
+            for t in tg_threads(tga.thread_list_ptr()) {
                 ThreadSignalAccess::assume_thread(t).and_sig_pending_mask(!cont_mask);
-            });
+            }
         }
 
         let act = &raw mut (*sigacts).sa[signo as usize];
@@ -812,14 +818,14 @@ pub(crate) fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_
         sigacts_unlock(sigacts);
 
         if is_cont {
-            for_each_tg_thread(tga.thread_list_ptr(), |t| {
+            for t in tg_threads(tga.thread_list_ptr()) {
                 thread_set_sigpending(t);
                 if THREAD_STOPPED_p(t) {
                     scheduler_wakeup_stopped(t);
                 } else if THREAD_INTERRUPTIBLE_p(t) {
                     scheduler_wakeup_interruptible(t);
                 }
-            });
+            }
         } else if !target.is_null() {
             if is_term && THREAD_STOPPED_p(target) {
                 scheduler_wakeup_stopped(target);

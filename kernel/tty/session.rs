@@ -590,7 +590,9 @@ pub(crate) fn session_for_each(mut f: impl FnMut(*mut session)) {
     // scan hands the callback raw `NonNull`/`*mut` pointers, never `&Session`
     // (freeze-hazard note in the `GenTable` doc).
     let table = unsafe { &*SESSION_TABLE.0.get() };
-    table.for_each(|nn| f(nn.as_ptr()));
+    for nn in table.iter() {
+        f(nn.as_ptr());
+    }
 }
 
 // ===========================================================================

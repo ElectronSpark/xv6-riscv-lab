@@ -4209,6 +4209,121 @@ controlling-tty foreground-group path is now fully key-based. Remaining
 `*mut pgroup` (thread_group membership, `thread_group.pgroup`) and
 `thread.thread_group` are the next sub-steps (6d-2c/6d-3).
 
+### Iteration 89 — 2026-07-18 — Wave N-I1: idiomatic `Iterator` impls for the intrusive collections + `GenTable`; callback/`for_each` walks → `for x in coll.iter()`
+
+**Goal (RUST_NATIVE_REDESIGN.md §0 goal 2 — "use idiomatic Rust features,
+especially iterators"; goal 3 — encapsulate traversal `unsafe`):** give the
+kernel's collections real `Iterator` impls and drive the internal Rust walks
+with `for` loops instead of closures/callbacks, so the traversal `unsafe`
+lives in one audited `next()`.
+
+**Delivered:**
+
+- **`kstd.rs` `GenTable::iter()` → `GenTableIter<'a, T>` (new `impl
+  Iterator<Item = NonNull<T>>`)** — a lazy iterator over the backing slot
+  array; `next()` is `self.slots.by_ref().find_map(|slot| slot.ptr)`
+  (skips free slots, ascending index order — byte-identical visit set/order
+  to the old `for_each`). **Fully safe — zero `unsafe`** (kstd stays at 2,
+  both pre-existing/elsewhere). Added **`impl IntoIterator for &GenTable`**
+  (`api-impl-fromiterator`: the reference form, for `for x in &table`).
+  `GenTable::for_each` kept as a **one-line shim** `self.iter().for_each(f)`
+  (the table is the redesign's reusable slotmap; a closure entry point stays
+  useful for future consumers).
+- **`tty/session.rs::session_for_each`** — `table.for_each(|nn| …)` →
+  `for nn in table.iter() { f(nn.as_ptr()) }`. Still yields raw
+  `*mut session` under `pid_lock`, never `&Session` (freeze note honoured).
+- **`proc/thread_group.rs`** — the closure helper `for_each_tg_thread(head,
+  |t| …)` replaced by an **iterator constructor** `tg_threads(head) ->
+  crate::list::ListIterator<'a, thread>` (the single audited `unsafe {
+  ListIterator::new }` boundary), and its **5 call sites** (`tg_sigkill_all`,
+  `tg_pick_thread`, `tg_signal_send` ×3) rewritten as `for t in
+  tg_threads(…) { … }` with closure-`return`-as-skip → `continue`. Semantics
+  identical: `ListIterator::next` snapshots `curr = (*curr).next` **before**
+  yielding, so the loop keeps the "safe under current-node detach"
+  (`list_foreach_node_safe`) property the helper documented.
+
+**Callback boundaries LEFT (reported, by design):**
+
+- `dev/dev.rs::dev_for_each_device` and `proc/proc_shims.rs::{pg_for_each_tg,
+  tg_for_each_thread, session_for_each_all}` are genuine `extern "C"
+  fn(cb, arg)` boundaries reached **by function pointer** (devtmpfs registers
+  every device through `dev_for_each_device`; the proc_shims trio is the
+  C-ABI shim surface). Converting the *dispatcher* would break the pointer
+  ABI — left as-is. (`session_for_each_all` already delegates to the
+  now-iterator-driven `session_for_each`.)
+- `proc/pgroup.rs`'s `pg_for_each_tg!`/`tg_for_each_thread!` macros already
+  expand to `list_for_each!` **`for` loops** (the "good model" this wave
+  replicates), not callbacks — no conversion needed.
+- **`hlist.rs` — DEFERRED.** Its walks are search/pop operations
+  (`find_entry_in_bucket`, `hlist_pop`) that dispatch through the C
+  `func.{hash,get_node,cmp_node}` **function-pointer table** and return a
+  single match, not a collection-yielding `for_each`; there is no internal
+  Rust `for_each` caller to convert. An `HlistIter` would be speculative
+  API with no consumer. (unsafe 89→89.)
+- **`bintree.rs` — DEFERRED.** No callback walks exist; consumers use
+  `rb_first_node`/`rb_next_node` directly on the **rbtree hot path**
+  (`mm/vm.rs`, `mm/pcache.rs`, `proc/thread_queue.rs`) that the module doc
+  itself flags "easy to subtly break by improving it". An in-order tree
+  iterator is real work with no caller warranting it this wave. (unsafe
+  60→60.)
+
+**Freeze/`noalias` screening (memory `freeze-noalias-hazard`):** every new
+iterator yields raw `NonNull`/`*mut` (never `&T`/`&Session`/`&thread`) and
+borrows the collection for the loop's whole duration under the caller's
+existing lock (`GenTableIter` = `&self` under `pid_lock`; `tg_threads` =
+`ListIterator` under `pid_lock`). No `&Freeze`-into-a-loop of a
+concurrently-mutated element is introduced. **No mid-iteration insert/remove
+sites** found among the converted callers (the signal-delivery bodies set
+flags / wake, they do not relink ahead nodes; current-node detach stays safe
+via the next-snapshot).
+
+**Unsafe metric (before → after, `grep -c unsafe`):** `kstd.rs` 2→2,
+`hlist.rs` 89→89, `bintree.rs` 60→60 (deferred), `list.rs` 16→16 (reused
+unchanged); `thread_group.rs` 33→**34** (+1: the one explicit
+`ListIterator::new` boundary in `tg_threads` that was previously hidden
+inside the `list_for_each!` macro expansion — the traversal `unsafe` is now
+one named, audited construction point feeding 5 safe `for` bodies),
+`session.rs` 72→72. Net kernel-wide roughly neutral; the win is
+**idiom + one audited traversal seam**, not raw token count. **Sites
+converted to `.iter()`/`for`: 6** (session_for_each ×1, thread_group ×5) +
+`GenTable::for_each` reduced to an `.iter()` shim + **2 new iterator impls**
+(`GenTableIter`, `IntoIterator for &GenTable`).
+
+**rust-skills applied:** `perf-iter-over-index`/`anti-index-over-iter`
+(slot/`find_map` instead of manual indexing), `perf-iter-lazy` (`iter()` is
+lazy, no intermediate collect), `api-impl-fromiterator` (`IntoIterator` for
+the `&` reference form), `name-iter-convention`/`name-iter-type-match`
+(`iter()` → `GenTableIter`), `closure-fn-trait-bounds` (`for_each` shim keeps
+`impl FnMut`), `unsafe-minimize-scope`/`unsafe-safety-comment` (`tg_threads`'
+single `unsafe` with a `# Safety`-style block comment), `opt-inline-small`
+(`#[inline]` on `iter`/`next`/`into_iter`/`tg_threads`),
+`doc-safety-section`. Crate stays **edition 2021**.
+
+**Verification (orchestrator recipe, `TOOLPREFIX` + `LAB=fs`; cache clean
+before+after — `CMAKE_BUILD_TYPE` empty, `C_COMPILER` = toolchain
+`riscv64-unknown-elf-gcc`, `Lab: fs`):** `cargo clean` (target wiped) + full
+crate recompile → **0 warnings**; kernel + `fs_img` built. Boot gate:
+**exactly one** `init: starting sh` across **6 boots**. **testsig ALL TESTS
+PASSED (21/21)** (session/pgroup walks — the `GenTable` iterator path);
+**`ls /dev` full 12-entry listing ×2** (devtmpfs populate); **usertests
+reparent → ALL TESTS PASSED, killstatus OK, forkforkfork OK** (proc-table +
+thread_group walks; P3-BUG1 intact); **mmaptest all tests passed**;
+**stressfs** ran clean; **`cat /nonexistent` → cannot-open (ENOENT)**. Pipe/
+fork/exec exercised green throughout usertests + testsig (the fs image keeps
+binaries in `/bin` and the doc file is `README.md`, so a bare interactive
+`cat|wc` one-liner is not cleanly demonstrable — a shell/PATH property of the
+image, unrelated to and untouched by this iterator wave). Zero
+`panic`/fault/UAF/hang across all runs. `FAILED -- lost some free pages` is
+the pre-existing accounting trailer (Known issues), not a regression.
+**NOT committed.**
+
+**Outcome: success (scoped).** The `GenTable` gained a real, fully-safe
+`Iterator` + `IntoIterator`; the session and thread-group internal walks now
+read as `for x in coll.iter()`; the `hlist`/`bintree` in-order iterators are
+dispositioned as deferred-with-reason (search-only / hot-path, no warranting
+caller); the C-ABI `*_for_each` function-pointer dispatchers are correctly
+left intact.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
