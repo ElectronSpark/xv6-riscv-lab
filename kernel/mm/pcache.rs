@@ -1364,6 +1364,30 @@ fn xv6_pcache_global_next(cur: *mut Pcache) -> *mut Pcache {
     unsafe { PcacheHandle::new(cur) }.next_in_global_list()
 }
 
+/// Front-to-back iterator over the registered pcaches on the global list,
+/// yielding each live `*mut Pcache`.
+///
+/// The caller MUST hold the global pcache spinlock for the whole walk
+/// (every call site below either asserts it via
+/// `xv6_pcache_global_spin_assert_holding` or holds a `PcGlobalGuard`), so
+/// the list linkage — and therefore each lazily-computed successor — is
+/// stable across the iteration: no loop body here detaches `cur` from the
+/// global list, and per-`pcache` spinlocks taken inside a body guard only
+/// that pcache's own fields, never the global linkage. Replaces the three
+/// hand-rolled `let mut cur = global_first(); while !cur.is_null() { let
+/// next = global_next(cur); …; cur = next; }` walks (mirrors the
+/// `core::iter::successors` list-scan idiom already used in vfs/file.rs).
+fn global_pcache_iter() -> impl Iterator<Item = *mut Pcache> {
+    let first = xv6_pcache_global_first();
+    core::iter::successors(
+        if first.is_null() { None } else { Some(first) },
+        |&cur| {
+            let next = xv6_pcache_global_next(cur);
+            if next.is_null() { None } else { Some(next) }
+        },
+    )
+}
+
 fn xv6_pcache_blk_count(p: *mut Pcache) -> u64 {
     unsafe { PcacheHandle::new(p) }.blk_count()
 }
@@ -2114,12 +2138,9 @@ fn flush_err_continue(p: *mut Pcache, page: *mut Page) {
 
 fn pcache_schedule_flushes_locked(round_start: u64, force_round: bool) -> bool {
     let mut pending_flush = false;
-    let mut cur = xv6_pcache_global_first();
-    while !cur.is_null() {
-        let next = xv6_pcache_global_next(cur);
+    for cur in global_pcache_iter() {
         let _g = lock_pcache_local(cur);
         if !pcache_is_active(cur) {
-            cur = next;
             continue;
         }
         let mut should_flush = false;
@@ -2157,16 +2178,13 @@ fn pcache_schedule_flushes_locked(round_start: u64, force_round: bool) -> bool {
         if xv6_pcache_flush_requested(cur) != 0 {
             pending_flush = true;
         }
-        cur = next;
     }
     pending_flush
 }
 
 fn pcache_pick_pending_before(jiffs: u64) -> *mut Pcache {
     xv6_pcache_global_spin_assert_holding();
-    let mut cur = xv6_pcache_global_first();
-    while !cur.is_null() {
-        let next = xv6_pcache_global_next(cur);
+    for cur in global_pcache_iter() {
         let found = {
             let _g = lock_pcache_local(cur);
             if xv6_pcache_flush_requested(cur) != 0 {
@@ -2179,7 +2197,6 @@ fn pcache_pick_pending_before(jiffs: u64) -> *mut Pcache {
         if found {
             return cur;
         }
-        cur = next;
     }
     ptr::null_mut()
 }
@@ -3121,11 +3138,8 @@ pub(crate) fn dump_pcache_stats(p: *mut Pcache) {
 pub(crate) fn dump_all_pcache_stats() {
     let _gg = lock_pcache_global();
     xv6_pcache_printf_dump_all_header(_gg.global_count());
-    let mut cur = xv6_pcache_global_first();
-    while !cur.is_null() {
-        let next = xv6_pcache_global_next(cur);
+    for cur in global_pcache_iter() {
         dump_pcache_stats(cur);
-        cur = next;
     }
 }
 
