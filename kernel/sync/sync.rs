@@ -469,6 +469,38 @@ impl<'a, T> SpinLockGuard<'a, T> {
         unsafe { crate::proc::sleep_on_chan(chan, self.lock.raw.get()) };
     }
 
+    /// Interruptible analogue of [`sleep_on`](Self::sleep_on): sleep on
+    /// `chan`, atomically releasing this guard's lock and reacquiring the
+    /// **same** lock before returning, but returning early with `-EINTR`
+    /// if a signal is delivered while blocked.
+    ///
+    /// Uses [`crate::proc::sleep_on_chan_interruptible`], whose
+    /// `sleep_on_chan_common` releases this guard's lock, blocks on
+    /// `chan`, then reacquires it before returning on **both** the woken
+    /// (`0`) and the signalled (`-EINTR`) paths (see `proc/sched.rs`). The
+    /// lock is therefore re-held on return in either case, so this guard
+    /// is still valid afterward and the protected data is borrowable
+    /// again -- the typical use is to re-test the wait condition in a loop
+    /// and bail out (dropping the guard) when the return is nonzero.
+    ///
+    /// Takes `&mut self` deliberately, for the same two reasons as
+    /// [`sleep_on`](Self::sleep_on): it ends any outstanding
+    /// `Deref`/`DerefMut` borrow of the protected data before the lock is
+    /// released, and it bars LLVM from hoisting the re-test of the wait
+    /// condition out of the loop (the freeze/noalias defense). The return
+    /// value is `sleep_on_chan_interruptible`'s verbatim -- `0` when woken,
+    /// `-EINTR` when a signal interrupted the wait.
+    #[inline]
+    pub fn sleep_on_interruptible(&mut self, chan: *mut core::ffi::c_void) -> core::ffi::c_int {
+        // SAFETY: `self.lock_ptr()` is the exact lock this guard holds.
+        // `sleep_on_chan_interruptible` releases it, blocks until woken on
+        // `chan` or interrupted by a signal, then reacquires it before
+        // returning on both paths -- restoring this guard's "lock is held
+        // by this hart" invariant, which every other method (`Deref`,
+        // `Drop`, ...) relies on.
+        unsafe { crate::proc::sleep_on_chan_interruptible(chan, self.lock_ptr()) }
+    }
+
     /// The `*mut spinlock_t` embedded in this guard's [`SpinLock`] -- the
     /// exact lock this guard holds.
     ///

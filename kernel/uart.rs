@@ -190,11 +190,11 @@ fn spin_unlock(lk: *mut spinlock_t) {
 // `extern "C"` redeclaration (identical signature).
 use crate::console::consoleintr;
 // P3-D2a: proc/sched.rs chan sleep/wake entry points, reached as plain
-// crate-path items instead of `extern "C"` redeclarations. N-R7: the
-// uninterruptible `sleep_on_chan` is now reached through the guard's
-// `SpinLockGuard::sleep_on` (lock-owns-data), so only the interruptible
-// waiter and the waker are imported directly here.
-use crate::proc::{sleep_on_chan_interruptible, wakeup_on_chan};
+// crate-path items instead of `extern "C"` redeclarations. N-R7c: both
+// the uninterruptible (`sleep_on`) and the interruptible
+// (`sleep_on_interruptible`) TX waits are now reached through the guard
+// (lock-owns-data), so only the waker is imported directly here.
+use crate::proc::wakeup_on_chan;
 
 const EINTR: c_int = 4;
 
@@ -243,27 +243,12 @@ static mut UART_IER: u32 = 0;
 /// here the single fixed address of the `UART_TX` static serves the
 /// same role — it is only ever paired between the TX waiters
 /// ([`uartputc`]/[`uartputs`] via `sleep_on`, [`uart_tx_wait`] via
-/// `sleep_on_chan_interruptible`) and [`uartstart`]'s `wakeup_on_chan`,
+/// `sleep_on_interruptible`) and [`uartstart`]'s `wakeup_on_chan`,
 /// and is never dereferenced, so any consistent unique address is a
 /// faithful replacement.
 #[inline(always)]
 fn tx_chan() -> *mut c_void {
     core::ptr::addr_of!(UART_TX) as *mut c_void
-}
-
-/// The `*mut spinlock_t` embedded inside `UART_TX`.
-///
-/// `SpinLock<T>` is `#[repr(C)]` with its embedded `spinlock_t` as the
-/// first field (an `UnsafeCell<spinlock_t>`, which is
-/// `#[repr(transparent)]`), so the address of the `UART_TX` static *is*
-/// the address of that lock. This returns the exact same pointer
-/// `UART_TX.lock()`'s guard uses internally for `sleep_on`; it is needed
-/// raw only by [`uart_tx_wait`], whose *interruptible* wait the guard
-/// does not expose a method for (the guard offers uninterruptible
-/// `sleep_on` only). See the note in [`uart_tx_wait`].
-#[inline(always)]
-fn uart_tx_lock_ptr() -> *mut spinlock_t {
-    core::ptr::addr_of!(UART_TX) as *mut spinlock_t
 }
 
 // ===========================================================================
@@ -447,41 +432,19 @@ pub(crate) unsafe extern "C" fn uartputs_nb(s: *const c_char, n: c_int) -> c_int
     enqueued
 }
 
-/// Interruptible analogue of [`SpinLockGuard::sleep_on`](crate::sync::SpinLockGuard::sleep_on)
-/// for the TX ring, used by [`uart_tx_wait`].
-///
-/// Takes `&mut` the guard deliberately, exactly as `sleep_on(&mut self)`
-/// does: it forces any outstanding `Deref` borrow of `UartTx` to end
-/// before the sleep, so no `&UartTx` can be cached across the wait
-/// window and the compiler cannot hoist the `tx.w`/`tx.r` retest out of
-/// the wait loop (the freeze-noalias defense — `w`/`r` are `Freeze`
-/// `u64`s another hart mutates via `uartstart` under the same lock).
-///
-/// The guard exposes only the *uninterruptible* `sleep_on`, so this
-/// calls [`sleep_on_chan_interruptible`] on the guard's embedded lock
-/// ([`uart_tx_lock_ptr`], the identical `spinlock_t` the guard holds —
-/// see that fn's `repr(C)` note). `sleep_on_chan_common` atomically
-/// releases that lock, blocks on `chan`, and reacquires it before
-/// returning on *both* the woken and the signalled path (see
-/// `proc/sched.rs`), so `tx` is valid (lock re-held) on return. Returns
-/// 0 when woken (space may be available — recheck the condition) or
-/// `-EINTR` on a pending signal.
-#[inline]
-fn tx_sleep_interruptible(_tx: &mut crate::sync::SpinLockGuard<'_, UartTx>) -> c_int {
-    sleep_on_chan_interruptible(tx_chan(), uart_tx_lock_ptr())
-}
-
 /// Wait interruptibly for space in the UART TX buffer. Returns 0 when
 /// space is available, `-EINTR` on pending signal.
 pub(crate) extern "C" fn uart_tx_wait() -> c_int {
-    // N-R7 lock-owns-data: `UART_TX` guard. The wait is interruptible,
-    // which the guard has no method for, so it goes through
-    // `tx_sleep_interruptible` (see there) — which takes `&mut tx`,
-    // preserving the same borrow-ending / anti-hoist guarantees the
-    // guard's own `sleep_on` gives the blocking TX paths.
+    // N-R7 lock-owns-data: `UART_TX` guard. The wait is interruptible, so
+    // it goes through the guard's own `sleep_on_interruptible(&mut self)`
+    // — which releases and reacquires *this* lock on both the woken and
+    // the signalled path, and which (taking `&mut tx`) gives the same
+    // borrow-ending / anti-hoist guarantees the guard's `sleep_on` gives
+    // the blocking TX paths (`w`/`r` are `Freeze` `u64`s another hart
+    // mutates via `uartstart` under the same lock).
     let mut tx = UART_TX.lock();
     while tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
-        if tx_sleep_interruptible(&mut tx) != 0 {
+        if tx.sleep_on_interruptible(tx_chan()) != 0 {
             // Interrupted by signal; lock is re-held, drop it and bail.
             drop(tx);
             return -EINTR;
