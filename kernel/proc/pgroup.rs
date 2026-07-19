@@ -176,6 +176,47 @@ const _: () = {
     assert!(core::mem::offset_of!(Pgroup, session) == 88, "pgroup.session offset");
 };
 
+// ---------------------------------------------------------------------------
+// N-METH goal #1: the pgroup's own field accessors as inherent methods.
+//
+// These four are the ONLY places in this file that dereference a `*mut Pgroup`
+// to touch a field directly (`(*pg).session` / `(*pg).self_pgid`); everything
+// else goes through the `pg_*` shims. Turning the direct derefs into `&self`/
+// `&mut self` methods is the sound, in-file slice of the free-fn → method
+// conversion: each caller already holds `pid_lock` at the strength the borrow
+// needs (readers under `pid_rlock`, writers under exclusive `pid_wlock`), the
+// reads are single and non-looping (no freeze/`noalias` spin-loop hazard — see
+// the `PGROUP_TABLE` section note), and no synchronization changes. The
+// null-tolerant free-fn wrappers below keep their exact signatures, so no call
+// site (in-file or across the crate) changes.
+impl Pgroup {
+    /// The pgroup's own cached generational key (`self_pgid`), stamped by
+    /// [`pgroup_table_insert`]. Read side of [`pgroup_key_of`].
+    #[inline]
+    fn key(&self) -> Pgid {
+        self.self_pgid
+    }
+
+    /// Stamp the pgroup's own cached generational key.
+    #[inline]
+    fn set_key(&mut self, pgid: Pgid) {
+        self.self_pgid = pgid;
+    }
+
+    /// The stored `session` generational edge ([`Sid`](crate::tty::session::Sid)).
+    /// Read side of [`pgroup_session_resolve`].
+    #[inline]
+    fn session_sid(&self) -> crate::tty::session::Sid {
+        self.session
+    }
+
+    /// Set the stored `session` generational edge.
+    #[inline]
+    fn set_session_sid(&mut self, sid: crate::tty::session::Sid) {
+        self.session = sid;
+    }
+}
+
 // N-R6d-2a: the `pgroup.session` back-edge resolve/store — mirror of the
 // thread edge (`thread_session_resolve`/`thread_session_store`), reading/
 // writing this struct's own generational `Sid` field and delegating the
@@ -189,9 +230,11 @@ const _: () = {
 /// `pid_lock` (reader or writer — [`session_lookup`](crate::tty::session::session_lookup)
 /// requires it; single non-looping generation-checked read, no `&Session`).
 pub(crate) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
-    // SAFETY: `pg` is a live `*mut pgroup` (shim contract); reading its own
-    // `session` `Sid` field is a plain aligned word read.
-    let sid = unsafe { (*pg).session };
+    // SAFETY: `pg` is a live `*mut pgroup` (shim contract); forming the shared
+    // `&self` for this single non-looping read of its own `session` `Sid` field
+    // is race-free under the caller's `pid_lock` (writers need the exclusive
+    // `pid_wlock`).
+    let sid = unsafe { (*pg).session_sid() };
     crate::tty::session::session_lookup(sid).unwrap_or(ptr::null_mut())
 }
 
@@ -200,10 +243,10 @@ pub(crate) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
 /// `pid_wlock` (every `set_session` site does).
 pub(crate) fn pgroup_session_store(pg: *mut Pgroup, s: *mut Session) {
     let sid = crate::tty::session::session_key_of(s);
-    // SAFETY: `pg` is a live `*mut pgroup`; writing its own `session` field
-    // under the caller's `pid_wlock` (exclusive) is race-free.
+    // SAFETY: `pg` is a live `*mut pgroup`; the exclusive `&mut self` write of
+    // its own `session` field under the caller's `pid_wlock` is race-free.
     unsafe {
-        (*pg).session = sid;
+        (*pg).set_session_sid(sid);
     }
 }
 
@@ -269,8 +312,9 @@ fn pgroup_table_insert(pg: *mut Pgroup) -> Option<Pgid> {
     // Cache the freshly-issued key so the back-edge accessors can stamp it in
     // O(1) (`pgroup_key_of`) instead of an O(N) `GenTable::key_of` scan.
     // SAFETY: `pg` is live and exclusively ours here — just allocated,
-    // pre-publication, under `pid_wlock`; `self_pgid` is a plain aligned word.
-    unsafe { (*pg).self_pgid = pgid };
+    // pre-publication, under `pid_wlock`; the `&mut self` `self_pgid` write is
+    // uncontended.
+    unsafe { (*pg).set_key(pgid) };
     Some(pgid)
 }
 
@@ -316,8 +360,9 @@ pub(crate) fn pgroup_key_of(pg: *mut Pgroup) -> Pgid {
     match NonNull::new(pg) {
         None => Pgid::NONE,
         // SAFETY: `pg` is a live `*mut pgroup` (caller passes an owned/looked-up
-        // pgroup under `pid_wlock`); `self_pgid` is a plain aligned word read.
-        Some(nn) => unsafe { (*nn.as_ptr()).self_pgid },
+        // pgroup under `pid_wlock`); the `&self` `self_pgid` read is single and
+        // non-looping.
+        Some(nn) => unsafe { (*nn.as_ptr()).key() },
     }
 }
 
