@@ -135,7 +135,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ops::Deref;
 use core::ptr;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::bindings::{
     dev_t, fs_struct, hlist_entry_t, list_node_t, loff_t, mode_t, thread, vfs_dentry,
@@ -246,11 +246,39 @@ const _: () = {
 /// mount=2, orphan=3, destroying=4, delay_put=5 — identical to
 /// bindgen's `get(N,1)`/`set(N,1)` accessors. See the C header's long
 /// comment on the valid/dirty lifecycle (`kernel/inc/vfs/vfs_types.h`).
+///
+/// # Interior mutability (N-R5a)
+///
+/// The single bit unit is now an [`AtomicU64`] instead of a plain
+/// `u8 + [u8; 7]` pad. These flags (`valid`/`dirty`/`mount`/`orphan`/
+/// `destroying`) are read LOCK-FREE in the inode reclaim/evict pre-check
+/// loops (both here and in `fs.rs`). A plain read of a Freeze field
+/// through a `&VfsInode` inside such a loop is hoisted out by LLVM's
+/// noalias analysis — the freeze-noalias HANG (see MEMORY
+/// `freeze-noalias-hazard`) that gates the P3-7 `*mut vfs_inode ->
+/// &VfsInode` conversion (N-R5b). An atomic is not Freeze, so the reads
+/// stay in the loop. This is layout-identical to the former unit: the
+/// `AtomicU64` is size 8 / align 8 and, on little-endian, keeps every
+/// flag bit N in byte 0 exactly where the old `u8 bits` held it (the
+/// upper seven bytes are the former `_pad`, never observed by any
+/// accessor). The accessor method *signatures* are unchanged, so every
+/// caller (this file, `fs.rs`, `vfs_syscall.rs`) is untouched — their
+/// flag reads simply become non-hoistable relaxed atomics.
+///
+/// Ordering: [`Ordering::Relaxed`]. The real synchronization of these
+/// flags is the inode mutex (every valid/dirty state transition and its
+/// authoritative re-check happen under it); the lock-free pre-check
+/// reads were plain, unordered bitfield accesses in the C original, so
+/// `Relaxed` — which adds atomicity (no torn/lost bits) and defeats the
+/// noalias hoist, but no cross-variable ordering — is both the weakest
+/// correct choice (`conc-atomic-ordering`) and behaviour-identical to
+/// the C's unordered bitfield semantics. No `Copy`/`Clone` (an
+/// `AtomicU64` interior forbids them): nothing copies this holder by
+/// value — every use is an accessor method call on the `(*ptr).flags`
+/// place, and the embedding `VfsInode` was already non-`Copy`/`Clone`.
 #[repr(C, align(8))]
-#[derive(Copy, Clone)]
 pub struct VfsInodeFlagBits {
-    bits: u8,
-    _pad: [u8; 7],
+    bits: AtomicU64,
 }
 
 macro_rules! inode_flag_bit {
@@ -258,12 +286,20 @@ macro_rules! inode_flag_bit {
         $(#[$attr])*
         #[inline]
         pub(crate) fn $get(&self) -> u64 {
-            ((self.bits >> $bit) & 0b1) as u64
+            (self.bits.load(Ordering::Relaxed) >> $bit) & 0b1
         }
         $(#[$attr])*
         #[inline]
         pub(crate) fn $set(&mut self, val: u64) {
-            self.bits = (self.bits & !(1u8 << $bit)) | (((val as u8) & 0b1) << $bit);
+            // Atomic RMW (`fetch_or`/`fetch_and`), never load-modify-store,
+            // so concurrent single-bit updates to *other* flags cannot be
+            // lost. Signature keeps `&mut self` (identical to the pre-N-R5a
+            // form); the atomic methods take `&self`, reached by reborrow.
+            if val & 0b1 != 0 {
+                self.bits.fetch_or(1u64 << $bit, Ordering::Relaxed);
+            } else {
+                self.bits.fetch_and(!(1u64 << $bit), Ordering::Relaxed);
+            }
         }
     };
 }
