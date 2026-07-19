@@ -4324,6 +4324,111 @@ dispositioned as deferred-with-reason (search-only / hot-path, no warranting
 caller); the C-ABI `*_for_each` function-pointer dispatchers are correctly
 left intact.
 
+### Iteration 90 — 2026-07-18 — Wave N-M1 (PILOT of "methods on structs" / the unsafe-density lever): STOP-and-report — the specified metric is already saturated; the Access-accessor sweep cannot move it
+
+**Goal (as briefed):** pilot the "methods on structs" template on ONE
+accessor family (`PgroupAccess`, recommended for its clean single-lock
+`pid_lock` discipline): restructure the `*Access` type to carry a real
+`&'a mut Pgroup` reference so the accessor bodies become **safe** field
+access (`self.inner.field`), hoisting the per-accessor `raw_get!`/`raw_set!`
+`unsafe` up to one audited `unsafe { &mut *p }` in the constructor. Measure
+`grep -roE "\bunsafe\b" kernel/proc/access.rs | wc -l` before→after as the
+density signal for the 52/1k → 20/1k goal.
+
+**Outcome: STOP-and-report (no code change, NOT committed).** The pilot's
+premise — "every accessor carries an `unsafe`, so converting the bodies drops
+the count" — is **empirically false** for the recommended families, because
+a *prior* wave already centralized the accessor unsafe into macro
+definitions. The conversion cannot reduce the specified metric and would
+likely *increase* it by one. This is a valid, load-bearing finding about the
+sweep strategy (mirrors Iteration 84 / N-R1, which also delivered a blocker
+finding rather than the briefed conversion).
+
+**Measured evidence (the whole point):**
+- `access.rs` total `unsafe` tokens: **224** (unchanged — no edit made).
+- `PgroupAccess` impl block (lines 411–467): **4** `unsafe` tokens total.
+  - In the **16 accessor methods** (446–467): **0**.
+  - In the **constructors** (411–445, `from_raw`/`from_ptr`/`assume`): **4**.
+- So the "methods sweep" applied to `PgroupAccess` would convert 16 accessors
+  that **already contain zero literal `unsafe`** → still zero. The 4
+  constructor tokens stay; a `&'a mut Pgroup` model needs its own
+  `unsafe { &mut *p }` (or `NonNull::as_mut`), so the block goes 4 → 4 or 5.
+  **Net access.rs metric: 224 → 224 (best case), 224 → 225 (reference model).
+  Zero reduction; possible +1.**
+
+**Why the metric is already saturated (root cause):**
+- `PgroupAccess`/`SessionAccess` accessors route through `shim_call!(self,
+  pg_*)` → `proc_shims::pg_*` (all **safe** `pub(crate) fn`, P3-D1a) →
+  `field_get!`/`bit_get!`, whose `u!{}` (= `unsafe`) sits in the **macro
+  definition** (counted once), not per call site. The `shim_call!` `unsafe`
+  is itself `#[allow(unused_unsafe)]` and *spurious* here — `pg_*` are safe
+  fns, so it wraps nothing.
+- The `raw_get!`/`raw_set!`-based families (extended `ThreadAccess`,
+  `SchedEntityRef`, `CpuLocalRef`) are the same shape: the `unsafe` is in the
+  macro def, not the accessor bodies.
+- Categorized breakdown of the 224 in access.rs: **25** in macro definitions
+  (lines 1–162); **~79** constructor boilerplate (`unsafe fn from_raw`/
+  `assume` × 21 accessor types + their `unsafe { Self::from_raw… }` bodies);
+  **~120** inline `unsafe {}` in *atomic/pointer* method bodies (`state_load`,
+  `on_cpu_*`, `refcount_*`, `flags_*` — field-address → `*mut AtomicI32`
+  reinterpret + deref). The plain accessors contribute **~0**.
+
+**Additional structural findings shaping the roll-out decision:**
+- **`PgroupAccess` is near-vestigial.** Grep of the whole kernel: exactly
+  **one** live caller — `thread.rs:805`, `PgroupAccess::assume(pg)
+  .mark_kernel()` inside `kthread_hierarchy_init_locked()` (runs under
+  `pid_wlock`, asserted). The other 15 accessors are dead code (`#![allow
+  (dead_code)]`). The real pgroup field access in the working kernel is the
+  **free-fn `pg_*` shims called directly from `pgroup.rs` with raw `*mut
+  Pgroup`** (64 such call sites), never through `PgroupAccess`.
+- **Not all accessors are even convertible to field access.** `session_ptr`/
+  `set_session` must stay routed through `pgroup_session_resolve`/`_store`
+  (the field is a generational `Sid`, resolved through `PGROUP_TABLE`/
+  `SESSION_TABLE`, not a `*mut session`) — a documented GenTable boundary,
+  exactly the class `gentable-scope-limit` flags. Direct `self.inner.session`
+  would return a `Sid`, silently changing the return type/semantics.
+- **The ~120 atomic-method unsafes are irreducible by this template** — they
+  reinterpret a plain field's address as `*mut AtomicI32/U32/U64/Ptr` and
+  deref; that is inherently `unsafe` and cannot become safe field access.
+
+**Lock-discipline verification (done, since it gates any future attempt):**
+The sole construction site (`thread.rs:805`) holds `pid_wlock`; the borrow is
+instantaneous (form → `set_is_kernel(1)` → drop), not a spin/wait loop over
+shared state. A `&mut Pgroup` there would be **sound** per
+`freeze-noalias-hazard` (exclusive under the write lock, no hoistable
+loop-read). So the conversion is *feasible and sound* — it simply buys no
+density. `Pgroup` is `#[derive(Copy)]` `#[repr(C)]` (Freeze), so any *lock-
+free* pgroup reader would be unconvertible; there are none (all pgroup access
+is under `pid_lock`), consistent with `gentable-scope-limit`.
+
+**Strategic recommendation for the density goal (52/1k → 20/1k):** the lever
+is **not** the `*Access` accessor bodies — that unsafe was already hoisted
+into macros in a prior wave, so the source `\bunsafe\b` grep on access.rs is
+saturated and immovable by this template. The genuine remaining `(*x).`
+deref density lives in the **logic files** that still thread raw `*mut`
+through hand-written derefs: `vfs/fs.rs` (389 `(*`), `mm/vm.rs` (235),
+`irq/trap.rs` (190), `dev/fdt.rs` (166), `vfs/tmpfs/inode.rs` (161),
+`proc/proc_shims.rs` (157), the xv6fs/inode layer (~155 each), `pcache.rs`
+(146), `signal.rs` (136). A methods-on-structs sweep should target **those
+raw-pointer call sites** (give the pointee a typed handle whose *constructor*
+does the one audited deref and whose methods are safe), where each converted
+call site removes a real expansion-level deref — not the accessor
+definitions, which are already macro-centralized.
+
+**rust-skills applied:** `unsafe-minimize-scope` (the existing macro
+centralization already embodies it — confirming further hoisting yields
+nothing), `unsafe-safety-comment` (audited the existing `# Safety` contracts),
+`freeze-noalias-hazard` + `gentable-scope-limit` memories (screened the
+reference conversion for soundness and the session-edge table boundary),
+`api-newtype-safety`/`type-phantom-marker` (assessed the `&mut` vs `Copy
+NonNull+PhantomData` trade — `&mut` forces dropping `Copy`, an API change to a
+1-caller type). Crate is edition 2021 (no Rust-2024 forms).
+
+**Verification:** no code changed, so no boot/testsig battery run (the gate
+applies to changes). Build cache confirmed correct beforehand
+(`CMAKE_C_COMPILER = …/toolchain/build/bin/riscv64-unknown-elf-gcc`). Metric
+numbers above are from direct `grep`/`sed` on the unmodified tree.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
