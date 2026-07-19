@@ -1237,56 +1237,68 @@ fn inode_is_local_root(inode: &vfs_inode) -> bool {
 
 /// Mirrors `vfs_private.h`'s `static inline __vfs_inode_valid()`.
 ///
-/// # Safety
-/// `inode`, if non-null, must be a live `vfs_inode`.
-unsafe fn inode_valid(inode: *mut vfs_inode) -> c_int {
-    unsafe {
-        if inode.is_null() {
-            return neg(EINVAL);
-        }
-        if holding_mutex(&raw mut (*inode).mutex) == 0 {
-            return neg(EPERM);
-        }
-        if (*inode).flags.valid() == 0 {
-            return neg(EINVAL);
-        }
-        if !ptr::eq(inode, &raw const vfs_root_inode) {
-            let sb = (*inode).sb;
-            if sb.is_null() || (*sb).flags.valid() == 0 {
-                crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
-                return neg(EINVAL);
-            }
-        }
-        0
+/// N-R5b (VFS-Arc reference conversion): takes a borrowed `&vfs_inode`
+/// instead of a raw `*mut vfs_inode`. Every caller (`vfs_unmount`,
+/// `vfs_unmount_lazy`) null-checks its inode and holds the inode mutex
+/// before calling, so the borrow is sound and the raw form's null branch
+/// collapses (a reference is never null). The fields read here are all
+/// now safe through a shared borrow: the `mutex` is reached only via an
+/// atomic holder load (`holding_mutex`), `flags.valid()` is a relaxed
+/// atomic load (a3a400b), and `sb` is a set-once pointer. The borrow is
+/// ephemeral (dropped at return), so it never races a later mutation of
+/// the same inode. No non-atomic inode field is read in a loop — free of
+/// the freeze-noalias hazard.
+fn inode_valid(inode: &vfs_inode) -> c_int {
+    // `holding_mutex` reads the mutex holder via a SeqCst atomic load; a
+    // raw pointer derived from the shared borrow of the interior-
+    // synchronized `mutex` field is sound to hand it.
+    if holding_mutex(&raw const inode.mutex as *mut _) == 0 {
+        return neg(EPERM);
     }
+    if inode.flags.valid() == 0 {
+        return neg(EINVAL);
+    }
+    if !ptr::eq(inode, &raw const vfs_root_inode) {
+        let sb = inode.sb;
+        // SAFETY: `sb` is the inode's set-once superblock pointer; when
+        // non-null it is a live `vfs_superblock` whose `flags` is an
+        // atomic bitset read via the accessor's relaxed load.
+        if sb.is_null() || unsafe { (*sb).flags.valid() } == 0 {
+            crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
+            return neg(EINVAL);
+        }
+    }
+    0
 }
 
 /// Mirrors `vfs_private.h`'s `static inline __vfs_dir_inode_valid_holding()`.
 ///
-/// # Safety
-/// `inode`, if non-null, must be a live `vfs_inode`.
-unsafe fn dir_inode_valid_holding(inode: *mut vfs_inode) -> c_int {
-    unsafe {
-        if inode.is_null() {
-            return neg(EINVAL);
-        }
-        if holding_mutex(&raw mut (*inode).mutex) == 0 {
-            return neg(EPERM);
-        }
-        if (*inode).flags.valid() == 0 {
-            return neg(EINVAL);
-        }
-        if !is_dir((*inode).mode) {
-            return neg(EINVAL);
-        }
-        if !ptr::eq(inode, &raw const vfs_root_inode) {
-            let sb = (*inode).sb;
-            if sb.is_null() || (*sb).flags.valid() == 0 {
-                return neg(EINVAL);
-            }
-        }
-        0
+/// N-R5b (VFS-Arc reference conversion): borrowed `&vfs_inode` form — the
+/// directory-typed sibling of [`inode_valid`]. Both callers (`vfs_mount`,
+/// `vfs_get_mnt_rooti`) null-check and hold the inode mutex first, so the
+/// ephemeral borrow is sound. Reads only the now-safe set: the `mutex`
+/// (via atomic holder load), `flags.valid()` (relaxed atomic), the
+/// set-once `mode`/`sb`. No loop, no mutation — freeze-noalias-free.
+fn dir_inode_valid_holding(inode: &vfs_inode) -> c_int {
+    if holding_mutex(&raw const inode.mutex as *mut _) == 0 {
+        return neg(EPERM);
     }
+    if inode.flags.valid() == 0 {
+        return neg(EINVAL);
+    }
+    if !is_dir(inode.mode) {
+        return neg(EINVAL);
+    }
+    if !ptr::eq(inode, &raw const vfs_root_inode) {
+        let sb = inode.sb;
+        // SAFETY: `sb` is the inode's set-once superblock pointer; when
+        // non-null it is a live `vfs_superblock` whose `flags` is an
+        // atomic bitset read via the accessor's relaxed load.
+        if sb.is_null() || unsafe { (*sb).flags.valid() } == 0 {
+            return neg(EINVAL);
+        }
+    }
+    0
 }
 
 /******************************************************************************
@@ -1912,7 +1924,7 @@ pub(crate) extern "C" fn vfs_mount(
             return neg(EPERM);
         }
 
-        ret_val = dir_inode_valid_holding(mountpoint);
+        ret_val = dir_inode_valid_holding(&*mountpoint);
         if ret_val != 0 {
             crate::kprintln!("vfs_mount: mountpoint inode not valid, errno={}", ret_val);
             return ret_val;
@@ -2127,7 +2139,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         if holding_mutex(&raw mut (*mountpoint).mutex) == 0 {
             return neg(EPERM);
         }
-        let mut ret_val = inode_valid(mountpoint);
+        let mut ret_val = inode_valid(&*mountpoint);
         if ret_val != 0 {
             return ret_val;
         }
@@ -2154,7 +2166,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         if holding_mutex(&raw mut (*mounted_inode).mutex) == 0 {
             return neg(EPERM);
         }
-        ret_val = inode_valid(mounted_inode);
+        ret_val = inode_valid(&*mounted_inode);
         if ret_val != 0 {
             return ret_val;
         }
@@ -2346,7 +2358,7 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
             return neg(EPERM);
         }
 
-        let ret = inode_valid(mountpoint);
+        let ret = inode_valid(&*mountpoint);
         if ret != 0 {
             return ret;
         }
@@ -2458,7 +2470,7 @@ pub(crate) extern "C" fn vfs_get_mnt_rooti(
         }
         let ret_val;
         vfs_ilock(mountpoint);
-        ret_val = dir_inode_valid_holding(mountpoint);
+        ret_val = dir_inode_valid_holding(&*mountpoint);
         if ret_val != 0 {
             vfs_iunlock(mountpoint);
             return ret_val;
