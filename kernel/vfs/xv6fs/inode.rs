@@ -212,6 +212,23 @@ const _: () = {
     assert!(DIRSIZ == 14, "dirent.name length == DIRSIZ (ON-DISK)");
 };
 
+// N-B1: POD byte-view markers for the two on-disk records reinterpreted
+// out of locked block-cache buffers below. Both are verified truly POD:
+// `#[repr(C)]`, only plain-integer fields (no pointers/references, no
+// `bool`/`char`/enums/niches), and — per the byte-exact layout asserts
+// above — NO padding (`dinode`: 8+4+52 == 64; `dirent`: 2+14 == 16), so
+// `AsBytes` (write-back never persists an uninitialized byte) is sound in
+// addition to `FromBytes`.
+//
+// SAFETY (`FromBytes`): every bit pattern of the record's bytes is a valid
+// value — all fields are `c_short`/`uint`/`ushort`/`c_char` integers.
+// SAFETY (`AsBytes`): `#[repr(C)]` with the padding-free layout asserted
+// above, no pointers/references.
+unsafe impl crate::kstd::FromBytes for Dinode {}
+unsafe impl crate::kstd::AsBytes for Dinode {}
+unsafe impl crate::kstd::FromBytes for Dirent {}
+unsafe impl crate::kstd::AsBytes for Dirent {}
+
 // Sub-wave B landed: xv6fs/{truncate,log,file}.rs are Rust siblings in
 // this same driver now, so these are plain Rust-path imports (not
 // `extern "C"`), matching this crate's established filesystem-driver
@@ -273,7 +290,7 @@ const fn neg(e: u32) -> c_int {
 // ABI-fixed ERR_PTR exactly once at the `extern "C"` boundary via
 // `result_to_errptr`; only the error-return encoding changed, the on-disk
 // I/O / lock / cleanup control flow is byte-identical.
-use crate::kstd::{Errno, KResult};
+use crate::kstd::{BlockView, Errno, KResult};
 
 /// Mirrors `major(dev)`/`minor(dev)` (`kernel/inc/defs.h`) — hardcoded
 /// locally, same rationale/precedent as `superblock.rs`'s own copy.
@@ -332,14 +349,18 @@ pub(crate) extern "C" fn xv6fs_iupdate(ip: *mut xv6fs_inode) {
             // "Fidelity note".
             return;
         }
-        let dip = ((*bp).data as *mut dinode).add(((*ip).vfs_inode.ino % super::IPB) as usize);
+        // SAFETY: `bp` is a locked (exclusively-borrowed) block-cache
+        // buffer just returned by `bread`; `(*bp).data` points to `BSIZE`
+        // page-aligned, initialized bytes borrowed only here until `brelse`.
+        let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
+        let dip = view.nth_mut::<dinode>(((*ip).vfs_inode.ino % super::IPB) as usize);
 
-        (*dip).type_ = xv6fs_mode_to_type((*ip).vfs_inode.mode);
-        (*dip).major = (*ip).major;
-        (*dip).minor = (*ip).minor;
-        (*dip).nlink = (*ip).vfs_inode.n_links as i16;
-        (*dip).size = (*ip).vfs_inode.size as u32;
-        (*dip).addrs = (*ip).addrs;
+        dip.type_ = xv6fs_mode_to_type((*ip).vfs_inode.mode);
+        dip.major = (*ip).major;
+        dip.minor = (*ip).minor;
+        dip.nlink = (*ip).vfs_inode.n_links as i16;
+        dip.size = (*ip).vfs_inode.size as u32;
+        dip.addrs = (*ip).addrs;
 
         xv6fs_log_write(xv6_sb, bp);
         brelse(bp);
@@ -394,12 +415,11 @@ unsafe fn read_dirent(dp: *mut xv6fs_inode, off: u32, alloc: bool) -> Option<dir
         if bp.is_null() {
             return None;
         }
-        let mut de: dirent = core::mem::zeroed();
-        memmove(
-            ptr::addr_of_mut!(de) as *mut c_void,
-            (*bp).data.add(block_off) as *const c_void,
-            core::mem::size_of::<dirent>(),
-        );
+        // SAFETY: `bp` is a locked (exclusively-borrowed) block-cache
+        // buffer just returned by `bread`; `(*bp).data` points to `BSIZE`
+        // page-aligned, initialized bytes borrowed only here until `brelse`.
+        let view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
+        let de = *view.get::<dirent>(block_off);
         brelse(bp);
         Some(de)
     }
@@ -589,10 +609,6 @@ unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, n
         // No empty slot found -- extend directory.
         let off = found_off.unwrap_or((*dp).vfs_inode.size as u32);
 
-        let mut de: dirent = core::mem::zeroed();
-        strncpy(de.name.as_mut_ptr(), name, DIRSIZ);
-        de.inum = inum as u16;
-
         let bn = off / super::BSIZE;
         let block_off = (off % super::BSIZE) as usize;
         let addr = xv6fs_bmap(dp, bn);
@@ -605,11 +621,16 @@ unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, n
             // here, but an unconditional deref would be Rust UB.
             return Err(Errno::Io);
         }
-        memmove(
-            (*bp).data.add(block_off) as *mut c_void,
-            ptr::addr_of!(de) as *const c_void,
-            core::mem::size_of::<dirent>(),
-        );
+        // Build the entry directly in the (exclusively-borrowed, locked)
+        // block buffer — byte-identical to the old stack-build + memmove.
+        // SAFETY: `bp` is a locked block-cache buffer just returned by
+        // `bread`; `(*bp).data` is `BSIZE` page-aligned initialized bytes
+        // borrowed only here until `brelse`.
+        let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
+        let de = view.get_mut::<dirent>(block_off);
+        *de = core::mem::zeroed();
+        strncpy(de.name.as_mut_ptr(), name, DIRSIZ);
+        de.inum = inum as u16;
         xv6fs_log_write(xv6_sb, bp);
         brelse(bp);
 
@@ -759,7 +780,7 @@ fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()
 
         let mut off: u32 = 0;
         while (off as i64) < (*(*dentry).parent).size {
-            if let Some(mut de) = read_dirent(dp, off, true) {
+            if let Some(de) = read_dirent(dp, off, true) {
                 if de.inum != 0 {
                     let de_name_len = strnlen(de.name.as_ptr(), DIRSIZ);
                     if (*dentry).name_len as usize == de_name_len && strncmp((*dentry).name, de.name.as_ptr(), (*dentry).name_len as usize) == 0 {
@@ -767,8 +788,6 @@ fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()
                         if de.inum as u64 != (*target).ino {
                             return Err(Errno::Inval); // Inode number mismatch.
                         }
-
-                        de = core::mem::zeroed();
 
                         let bn = off / super::BSIZE;
                         let block_off = (off % super::BSIZE) as usize;
@@ -778,11 +797,14 @@ fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()
                             // See the module doc's "Fidelity note".
                             return Err(Errno::Io);
                         }
-                        memmove(
-                            (*bp).data.add(block_off) as *mut c_void,
-                            ptr::addr_of!(de) as *const c_void,
-                            core::mem::size_of::<dirent>(),
-                        );
+                        // Clear the entry in place — byte-identical to the
+                        // old zeroed-stack-copy + memmove write-back.
+                        // SAFETY: `bp` is a locked block-cache buffer just
+                        // returned by `bread`; `(*bp).data` is `BSIZE`
+                        // page-aligned initialized bytes borrowed only here
+                        // until `brelse`.
+                        let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
+                        *view.get_mut::<dirent>(block_off) = core::mem::zeroed();
                         let xv6_sb = (*dentry).sb as *mut xv6fs_superblock;
                         xv6fs_log_write(xv6_sb, bp);
                         brelse(bp);
@@ -1103,8 +1125,11 @@ fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
             // would be Rust UB.
             return;
         }
-        let dip = ((*bp).data as *mut dinode).add(((*inode).ino % super::IPB) as usize);
-        (*dip).type_ = 0;
+        // SAFETY: `bp` is a locked (exclusively-borrowed) block-cache
+        // buffer just returned by `bread`; `(*bp).data` points to `BSIZE`
+        // page-aligned, initialized bytes borrowed only here until `brelse`.
+        let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
+        view.nth_mut::<dinode>(((*inode).ino % super::IPB) as usize).type_ = 0;
         xv6fs_log_write(xv6_sb, bp);
         brelse(bp);
     }

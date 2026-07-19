@@ -798,6 +798,166 @@ impl<T, const CAP: usize, const TAG: u64> Default for GenTable<T, CAP, TAG> {
 }
 
 // ===========================================================================
+// `BlockView<'a>` + `FromBytes`/`AsBytes` — safe POD byte-view  [N-B1]
+// ===========================================================================
+//
+// A hand-rolled, zero-dependency (the kernel has no external crates and
+// keeps it that way) `zerocopy`-style safe reinterpretation of a byte
+// buffer as typed plain-old-data. It replaces the fs core's raw
+// `(buf.data as *mut T).add(idx)` + field-access idiom — the single
+// biggest reducible `unsafe` class in the xv6fs on-disk layer — with a
+// bounds-and-alignment-checked typed view.
+//
+// # Why this is sound for the block cache
+//
+// The only consumer is the xv6fs on-disk layer, which reinterprets a
+// block-cache buffer's bytes ONLY while that buffer's mutex is held
+// (`bread` returns a locked buf; access; `bwrite`/`log_write`/`brelse`).
+// During that window the borrow is EXCLUSIVE — no other hart touches the
+// buffer — and the access is straight-line, never a spin/wait loop over
+// the reinterpreted bytes. This is the sound case for a `&mut`/`&` typed
+// view, NOT the freeze-noalias hazard (which bites only a `Freeze` type
+// re-read in a wait loop while another hart writes it). The caller
+// asserts exactly this exclusivity when it constructs the view (see
+// [`BlockView::from_raw_parts_mut`]'s `# Safety`).
+
+/// Marker: `Self` may be materialized from an arbitrary byte pattern — a
+/// `&Self` may safely be produced over any correctly-sized, correctly-
+/// aligned run of initialized bytes.
+///
+/// # Safety
+/// Implementing this is a promise that **every** bit pattern of
+/// `size_of::<Self>()` bytes is a valid, fully-initialized `Self`.
+/// Implementor MUST be:
+/// * `#[repr(C)]` or `#[repr(transparent)]` (a defined, stable layout), and
+/// * composed transitively of ONLY plain-integer / POD fields
+///   (`u8..=u128`/`i8..=i128`, arrays of the same, and nested `FromBytes`
+///   structs).
+///
+/// It MUST NOT contain any type with a validity invariant / niche: no
+/// `bool`, `char`, references, `NonNull`/`NonZero*`, function pointers, or
+/// enums. Padding bytes ARE permitted here (they are simply never read
+/// through the produced `&Self`); forbidding them is [`AsBytes`]'s job.
+pub unsafe trait FromBytes {}
+
+/// Marker: `Self` may be viewed AS bytes — a `&Self`/`&mut Self` may
+/// safely be produced over a buffer that will subsequently be read back as
+/// raw bytes, with no risk of exposing uninitialized memory.
+///
+/// # Safety
+/// In addition to every requirement of [`FromBytes`], implementor MUST
+/// have **NO padding bytes anywhere** in its layout — `size_of::<Self>()`
+/// must equal the sum of its fields' sizes with each field landing at its
+/// natural offset, so that every byte of the value is a real, initialized
+/// field byte. (For `#[repr(C)]` this holds iff no alignment gap is
+/// inserted between consecutive fields nor as trailing padding.) This lets
+/// the block cache write a `&mut Self` and then flush the whole block to
+/// disk without ever persisting an uninitialized padding byte.
+pub unsafe trait AsBytes {}
+
+/// A typed byte-view over an exclusively-borrowed block-cache buffer.
+///
+/// Construct one from a locked buffer's `data`/length via
+/// [`from_raw_parts_mut`](BlockView::from_raw_parts_mut), then read/write
+/// on-disk POD records through [`get`](BlockView::get)/
+/// [`get_mut`](BlockView::get_mut) (byte-offset) or
+/// [`nth`](BlockView::nth)/[`nth_mut`](BlockView::nth_mut) (element-index,
+/// matching the C `.add(idx)` stride idiom). Each accessor bounds- and
+/// alignment-checks before handing out the reference, turning a silent
+/// out-of-bounds/misaligned reinterpret (on-disk corruption or UB) into a
+/// loud, diagnosable kernel panic.
+pub struct BlockView<'a> {
+    bytes: &'a mut [u8],
+}
+
+impl<'a> BlockView<'a> {
+    /// Wrap `len` bytes at `data` as an exclusively-borrowed typed view.
+    ///
+    /// # Safety
+    /// The caller guarantees, for the whole of `'a`:
+    /// * `data` is valid for reads and writes of `len` contiguous bytes,
+    ///   and those bytes are initialized;
+    /// * the buffer is borrowed **exclusively** — no other pointer or hart
+    ///   reads or writes it while this view (or any reference handed out by
+    ///   it) is alive. For the block cache this is discharged by the held
+    ///   `bread`/`brelse` buffer mutex, and access must be straight-line
+    ///   (never a spin/wait loop over the bytes — see the module note);
+    /// * `data` is aligned to at least the alignment of any POD type later
+    ///   accessed through the view (the block cache's `data` is
+    ///   page-aligned, and every per-accessor call additionally checks the
+    ///   specific offset's alignment).
+    #[inline]
+    pub unsafe fn from_raw_parts_mut(data: *mut u8, len: usize) -> Self {
+        // SAFETY: the caller's contract (above) is exactly
+        // `slice::from_raw_parts_mut`'s: `data` valid+init for `len` bytes
+        // and exclusively borrowed for `'a`.
+        Self { bytes: unsafe { core::slice::from_raw_parts_mut(data, len) } }
+    }
+
+    /// Slice `size_of::<T>()` bytes at `byte_off` and check bounds+align.
+    #[inline]
+    fn checked_span<T>(len: usize, base: *const u8, byte_off: usize) -> (*const u8, usize) {
+        let sz = core::mem::size_of::<T>();
+        let end = match byte_off.checked_add(sz) {
+            Some(e) => e,
+            None => xv6_panic(c"BlockView: byte offset overflow".as_ptr()),
+        };
+        kassert!(end <= len, "BlockView: access out of bounds");
+        // SAFETY: `byte_off <= end <= len`, so `base + byte_off` is within
+        // (or one past the end of) the same allocation as `base`.
+        let ptr = unsafe { base.add(byte_off) };
+        kassert!((ptr as usize) % core::mem::align_of::<T>() == 0, "BlockView: misaligned access");
+        (ptr, sz)
+    }
+
+    /// Borrow the POD `T` at byte offset `byte_off` (bounds+align checked).
+    #[inline]
+    pub fn get<T: FromBytes>(&self, byte_off: usize) -> &T {
+        let (ptr, _) = Self::checked_span::<T>(self.bytes.len(), self.bytes.as_ptr(), byte_off);
+        // SAFETY: `ptr` is in-bounds for `size_of::<T>()` bytes and aligned
+        // for `T` (both checked in `checked_span`); `T: FromBytes` so every
+        // bit pattern of those (initialized) bytes is a valid `T`; the
+        // returned `&T` borrows `*self`, and the view holds the sole
+        // (exclusive) borrow of the bytes for `'a` (buffer lock held), so no
+        // aliasing writer can exist while it lives.
+        unsafe { &*(ptr as *const T) }
+    }
+
+    /// Mutably borrow the POD `T` at byte offset `byte_off`
+    /// (bounds+align checked). `T: AsBytes` guarantees writing it back to
+    /// disk never persists an uninitialized padding byte.
+    #[inline]
+    pub fn get_mut<T: FromBytes + AsBytes>(&mut self, byte_off: usize) -> &mut T {
+        let (ptr, _) = Self::checked_span::<T>(self.bytes.len(), self.bytes.as_mut_ptr(), byte_off);
+        // SAFETY: as `get`, plus: the `&mut self` receiver makes this the
+        // sole live borrow of the bytes, so the returned `&mut T` is unique.
+        // `T: FromBytes` (valid to read) + `AsBytes` (no padding to leak on
+        // write-back).
+        unsafe { &mut *(ptr as *mut T) }
+    }
+
+    /// Borrow the `idx`-th `T` element (stride `size_of::<T>()`), mirroring
+    /// the C `(data as *const T).add(idx)` idiom.
+    #[inline]
+    pub fn nth<T: FromBytes>(&self, idx: usize) -> &T {
+        let byte_off = idx
+            .checked_mul(core::mem::size_of::<T>())
+            .unwrap_or_else(|| xv6_panic(c"BlockView: element index overflow".as_ptr()));
+        self.get(byte_off)
+    }
+
+    /// Mutably borrow the `idx`-th `T` element (stride `size_of::<T>()`),
+    /// mirroring the C `(data as *mut T).add(idx)` idiom.
+    #[inline]
+    pub fn nth_mut<T: FromBytes + AsBytes>(&mut self, idx: usize) -> &mut T {
+        let byte_off = idx
+            .checked_mul(core::mem::size_of::<T>())
+            .unwrap_or_else(|| xv6_panic(c"BlockView: element index overflow".as_ptr()));
+        self.get_mut(byte_off)
+    }
+}
+
+// ===========================================================================
 // Compile-time guard: keep `c_char` "used" even in configurations where
 // only a subset of this module's items get referenced.
 // ===========================================================================
