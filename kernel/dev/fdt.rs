@@ -734,6 +734,117 @@ unsafe fn fdt_data_ptr(node: *mut FdtNode) -> *mut u8 {
     (node as *mut u8).wrapping_add(size_of::<FdtNode>())
 }
 
+// ===========================================================================
+// N-METH iterators (goal #2) -- the repetitive device-tree walks recast as
+// `Iterator`s. Each keeps the blob/tree reads behind ONE bounds-/null-
+// checked `next()` instead of the scattered offset/`rb_next_node`
+// arithmetic the C walks open-coded. Every walk site in this file runs at
+// boot, single-threaded, over a tree/blob that is immutable for the
+// duration of the walk (see module doc), so the lazy successor is stable
+// and the rewrite is behaviour-identical.
+// ===========================================================================
+
+/// Iterator over an [`FdtNode`]'s direct children (the rb-tree walk
+/// `rb_first_node`/`rb_next_node` open-coded at every device/reserved-
+/// memory/dump site). Yields each child as `*mut FdtNode`; `rb_entry` is
+/// `FdtNode`'s first field so the `rb_node* -> FdtNode*` cast is offset-0
+/// (mirrors the C `container_of`). The tree is not mutated during any
+/// walk, so pre-advancing `cur` in `next()` is order-equivalent to the C
+/// `node = rb; rb = rb_next_node(rb); <body>` shape.
+struct FdtChildIter {
+    cur: *mut rb_node,
+}
+
+impl Iterator for FdtChildIter {
+    type Item = *mut FdtNode;
+
+    fn next(&mut self) -> Option<*mut FdtNode> {
+        if self.cur.is_null() {
+            return None;
+        }
+        let node = self.cur as *mut FdtNode;
+        // SAFETY: `self.cur` is a live rb_node in the tree (seeded by
+        // `rb_first_node`, only ever advanced by `rb_next_node`); the tree
+        // is immutable for the walk's duration (boot-time, single hart).
+        self.cur = unsafe { crate::bintree::rb_next_node(self.cur) };
+        Some(node)
+    }
+}
+
+/// Iterator over the NUL-separated C strings packed in a property's data
+/// block (the `while pos < data_size { strnlen; pos += len + 1 }` walk in
+/// `fdt_prop_compat`/`fdt_index_node_compat`). Yields `(ptr, len)` per
+/// string, `len` excluding the terminator.
+struct FdtStrList {
+    base: *const u8,
+    len: usize,
+    pos: usize,
+}
+
+impl Iterator for FdtStrList {
+    type Item = (*const c_char, usize);
+
+    fn next(&mut self) -> Option<(*const c_char, usize)> {
+        if self.pos >= self.len {
+            return None;
+        }
+        // SAFETY: `pos < len`, so `base + pos` is in-bounds of the
+        // property's `len`-byte data block; `strnlen` is bounded by the
+        // remaining `len - pos` bytes.
+        let str_ptr = unsafe { self.base.add(self.pos) as *const c_char };
+        let str_len = unsafe { strnlen(str_ptr, self.len - self.pos) };
+        self.pos += str_len + 1;
+        Some((str_ptr, str_len))
+    }
+}
+
+/// Iterator over a parent's children sharing `first`'s exact name (the
+/// `fdt_node_first` + `fdt_node_next_same_name` walk used for `/cpus/cpu*`
+/// and `/memory*`). Seeded with `first` (may be null -> empty). Uses
+/// `core::iter::successors` (the established loop->iterator idiom in this
+/// crate, cf. `vfs/file.rs`, `mm/pcache.rs`).
+///
+/// # Safety
+/// `parent` must point to a live `FdtNode` outliving the iterator; `first`
+/// must be null or a live child of `parent`.
+unsafe fn fdt_same_name_iter(
+    parent: *mut FdtNode,
+    first: *mut FdtNode,
+) -> impl Iterator<Item = *mut FdtNode> {
+    core::iter::successors((!first.is_null()).then_some(first), move |&cur| {
+        // SAFETY: `cur` is a live node just yielded; `parent` live for the
+        // whole walk (caller contract); the tree is immutable at boot.
+        let next = unsafe { fdt_node_next_same_name(parent, cur) };
+        (!next.is_null()).then_some(next)
+    })
+}
+
+impl FdtNode {
+    /// Iterator over this node's direct children in rb-tree order
+    /// (goal #1 method wrapping the [`FdtChildIter`] rb-tree walk).
+    fn children(&self) -> FdtChildIter {
+        // SAFETY: `&self.children` is a live `rb_root`; `rb_first_node`
+        // only reads it. The `*const -> *mut` cast matches the C
+        // `rb_first_node` signature (the walk never mutates the tree).
+        let cur =
+            unsafe { crate::bintree::rb_first_node(&self.children as *const rb_root as *mut rb_root) };
+        FdtChildIter { cur }
+    }
+
+    /// Iterator over the NUL-separated strings packed in this (property)
+    /// node's data block (goal #1 method wrapping [`FdtStrList`]).
+    fn string_list(&self) -> FdtStrList {
+        // SAFETY: `self` is a live `FdtNode`; `data_size` bytes of data
+        // immediately follow the header (see [`fdt_data_ptr`]).
+        let base = unsafe { fdt_data_ptr(self as *const FdtNode as *mut FdtNode) } as *const u8;
+        FdtStrList {
+            base,
+            len: self.data_size as usize,
+            pos: 0,
+        }
+    }
+}
+
 /// Mirrors `strtoul()` (`kernel/inc/string.h`, `static inline`, no
 /// external linkage -- reimplemented locally per this crate's
 /// established convention, e.g. `backtrace.rs`'s own copy). Only ever
@@ -774,59 +885,55 @@ unsafe fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: i32) -> u
     result
 }
 
-/// Rust port of `fdt_parse_namestring()`. The C `copy` parameter is
-/// dropped -- see module doc's "Preserved pre-existing bugs": every call
-/// site in the original passes `copy = false`, making the `memcpy`
-/// branch dead.
-///
-/// # Safety
-/// `node` must point to caller-owned, writable `FdtNode` storage (only
-/// `name_size`/`hash`/`has_addr`/`addr`/`name` are written); `namestring`
-/// must be a valid NUL-terminated C string outliving `node`.
-unsafe fn fdt_parse_namestring(node: *mut FdtNode, namestring: *const c_char, ignore_addr: bool) {
-    // SAFETY: `namestring` valid per caller contract.
-    let full_len = unsafe { strlen(namestring) };
-    let mut len = 0usize;
-    // SAFETY: `namestring` valid, NUL-terminated; this loop stops at the
-    // terminator at the latest.
-    while unsafe { *namestring.add(len) } != 0 && unsafe { *namestring.add(len) } != b'@' as c_char
-    {
-        len += 1;
-    }
-
-    // SAFETY: `node` is caller-owned per this function's contract.
-    unsafe {
-        (*node).name_size = len as u32;
-        (*node).hash = hlist_hash_str(namestring, len);
-    }
-
-    // SAFETY: `namestring` valid; `len <= full_len`.
-    let at_terminator = unsafe { *namestring.add(len) } == 0;
-    if at_terminator || ignore_addr {
-        // SAFETY: `node` caller-owned.
-        unsafe {
-            (*node).has_addr = false;
-            (*node).addr = 0;
-            (*node).name = namestring;
+impl FdtNode {
+    /// Rust port of `fdt_parse_namestring()` (goal #1 method: the receiver
+    /// is the node being written). The C `copy` parameter is dropped --
+    /// see module doc's "Preserved pre-existing bugs": every call site in
+    /// the original passes `copy = false`, making the `memcpy` branch dead.
+    /// Only `name_size`/`hash`/`has_addr`/`addr`/`name` are written.
+    ///
+    /// # Safety
+    /// `namestring` must be a valid NUL-terminated C string outliving
+    /// `self`.
+    unsafe fn parse_namestring(&mut self, namestring: *const c_char, ignore_addr: bool) {
+        // SAFETY: `namestring` valid per caller contract.
+        let full_len = unsafe { strlen(namestring) };
+        let mut len = 0usize;
+        // SAFETY: `namestring` valid, NUL-terminated; this loop stops at
+        // the terminator at the latest.
+        while unsafe { *namestring.add(len) } != 0
+            && unsafe { *namestring.add(len) } != b'@' as c_char
+        {
+            len += 1;
         }
-        return;
-    }
 
-    // SAFETY: `node` caller-owned.
-    unsafe { (*node).has_addr = true };
+        self.name_size = len as u32;
+        // SAFETY: `namestring` valid; `len` bytes readable.
+        self.hash = unsafe { hlist_hash_str(namestring, len) };
 
-    let mut endptr: *mut c_char = ptr::null_mut();
-    // SAFETY: `namestring + len + 1` is in-bounds (there's a '@' at `len`,
-    // so at least a NUL follows).
-    let addr_str = unsafe { namestring.add(len + 1) };
-    let parsed = unsafe { strtoul(addr_str, &raw mut endptr, 16) };
+        // SAFETY: `namestring` valid; `len <= full_len`.
+        let at_terminator = unsafe { *namestring.add(len) } == 0;
+        if at_terminator || ignore_addr {
+            self.has_addr = false;
+            self.addr = 0;
+            self.name = namestring;
+            return;
+        }
 
-    // SAFETY: `node` caller-owned; `addr_str`/`endptr` valid per above.
-    unsafe {
-        if endptr as *const c_char == addr_str || *endptr != 0 {
-            (*node).addr = hlist_hash_str(addr_str, full_len - len - 1);
+        self.has_addr = true;
+
+        let mut endptr: *mut c_char = ptr::null_mut();
+        // SAFETY: `namestring + len + 1` is in-bounds (there's a '@' at
+        // `len`, so at least a NUL follows).
+        let addr_str = unsafe { namestring.add(len + 1) };
+        let parsed = unsafe { strtoul(addr_str, &raw mut endptr, 16) };
+
+        // SAFETY: `addr_str`/`endptr` valid per above.
+        if unsafe { endptr as *const c_char == addr_str || *endptr != 0 } {
+            // SAFETY: `addr_str` valid; `full_len - len - 1` bytes readable.
+            self.addr = unsafe { hlist_hash_str(addr_str, full_len - len - 1) };
         } else {
-            (*node).addr = parsed;
+            self.addr = parsed;
         }
     }
 }
@@ -983,7 +1090,7 @@ pub(crate) unsafe extern "C" fn fdt_node_lookup(
     let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
     // SAFETY: `dummy` is a local, exclusively owned; `name` valid per
     // caller contract.
-    unsafe { fdt_parse_namestring(&raw mut dummy, name, !addr.is_null()) };
+    unsafe { dummy.parse_namestring(name, !addr.is_null()) };
     if !addr.is_null() {
         // SAFETY: `addr` valid per caller contract.
         dummy.addr = unsafe { *addr };
@@ -997,40 +1104,46 @@ pub(crate) unsafe extern "C" fn fdt_node_lookup(
     node as *mut FdtNode
 }
 
-/// Mirrors `__fdt_node_first()`.
-///
-/// # Safety
-/// `parent` must be null or point to a live `FdtNode` (matching the C
-/// original's own lack of a null check -- see module doc's "Preserved
-/// pre-existing bugs").
-unsafe fn fdt_node_first(parent: *mut FdtNode, name: *const c_char) -> *mut FdtNode {
-    // SAFETY: caller contract (matches the C original's unchecked deref).
-    if unsafe { (*parent).child_count } == 0 {
-        return ptr::null_mut();
-    }
-    let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
-    // SAFETY: `dummy` local and live; `name` valid per caller contract.
-    unsafe { fdt_parse_namestring(&raw mut dummy, name, true) };
-    dummy.has_addr = false;
-
-    // SAFETY: `parent` live; `dummy` local and live.
-    let node = unsafe {
-        crate::bintree::rb_find_key_rup(&raw mut (*parent).children, &raw mut dummy as u64)
-    };
-    if node.is_null() {
-        return ptr::null_mut();
-    }
-    let fdt = node as *mut FdtNode;
-    // SAFETY: `fdt`/`dummy` live.
-    unsafe {
-        if (*fdt).hash != dummy.hash
-            || strncmp((*fdt).name, dummy.name, dummy.name_size as usize) != 0
-            || *(*fdt).name.add(dummy.name_size as usize) != 0
-        {
+impl FdtNode {
+    /// Mirrors `__fdt_node_first()` -- the first child matching `name`
+    /// (goal #1 method; receiver is the `parent`). Matches the C
+    /// original's own lack of a null check on `parent`.
+    ///
+    /// # Safety
+    /// `name` must be a valid NUL-terminated C string.
+    unsafe fn first_child_named(&self, name: *const c_char) -> *mut FdtNode {
+        if self.child_count == 0 {
             return ptr::null_mut();
         }
+        let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
+        // SAFETY: `dummy` local and live; `name` valid per caller contract.
+        unsafe { dummy.parse_namestring(name, true) };
+        dummy.has_addr = false;
+
+        // SAFETY: `&self.children` live; `dummy` local and live. The
+        // `*const -> *mut` cast matches `rb_find_key_rup`'s signature
+        // (lookup does not mutate the tree).
+        let node = unsafe {
+            crate::bintree::rb_find_key_rup(
+                &self.children as *const rb_root as *mut rb_root,
+                &raw mut dummy as u64,
+            )
+        };
+        if node.is_null() {
+            return ptr::null_mut();
+        }
+        let fdt = node as *mut FdtNode;
+        // SAFETY: `fdt`/`dummy` live.
+        unsafe {
+            if (*fdt).hash != dummy.hash
+                || strncmp((*fdt).name, dummy.name, dummy.name_size as usize) != 0
+                || *(*fdt).name.add(dummy.name_size as usize) != 0
+            {
+                return ptr::null_mut();
+            }
+        }
+        fdt
     }
-    fdt
 }
 
 /// Mirrors `__fdt_node_next_same_name()`.
@@ -1147,7 +1260,7 @@ pub(crate) unsafe extern "C" fn fdt_path_lookup(blob: *mut FdtBlobInfo, path: *c
                     copy_len,
                 );
                 name_buf[copy_len] = 0;
-                child = fdt_node_first(current, name_buf.as_ptr() as *const c_char);
+                child = (*current).first_child_named(name_buf.as_ptr() as *const c_char);
             }
 
             if child.is_null() {
@@ -1315,7 +1428,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
 
                 let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
                 // SAFETY: `dummy` local; `name` valid.
-                unsafe { fdt_parse_namestring(&raw mut dummy, name, false) };
+                unsafe { dummy.parse_namestring(name, false) };
 
                 // SAFETY: allocator call.
                 let new_node = unsafe { fdt_create_node(dummy.name_size, 0) };
@@ -1400,7 +1513,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
 
                 let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
                 // SAFETY: `dummy` local; `propname` valid.
-                unsafe { fdt_parse_namestring(&raw mut dummy, propname, true) };
+                unsafe { dummy.parse_namestring(propname, true) };
 
                 // SAFETY: allocator call.
                 let prop_node = unsafe { fdt_create_node(dummy.name_size, len) };
@@ -1524,33 +1637,23 @@ unsafe fn fdt_prop_compat(prop: *mut FdtNode, compat: *const c_char) -> bool {
     if prop.is_null() || compat.is_null() {
         return false;
     }
-    // SAFETY: caller contract.
-    let data_size = unsafe { (*prop).data_size } as usize;
-    if data_size == 0 {
-        return false;
-    }
-    // SAFETY: `prop` live; `data_size` bytes readable.
-    let data = unsafe { fdt_data_ptr(prop) };
     // SAFETY: `compat` valid per caller contract.
     let compat_len = unsafe { strlen(compat) };
-    let mut pos = 0usize;
-    while pos < data_size {
-        // SAFETY: `data + pos` in-bounds (`pos < data_size`).
-        let str_ptr = unsafe { data.add(pos) as *const c_char };
-        let str_len = unsafe { strnlen(str_ptr, data_size - pos) };
+    // SAFETY: `prop` non-null past the guard above; `string_list` yields
+    // each NUL-terminated string in its `data_size`-byte data block.
+    for (str_ptr, str_len) in unsafe { (*prop).string_list() } {
         if str_len >= compat_len {
             let mut i = 0usize;
             while i <= str_len - compat_len {
                 // SAFETY: `str_ptr + i` in-bounds; comparing `compat_len`
-                // bytes stays within `data`'s `data_size` extent since
-                // `i + compat_len <= str_len <= data_size - pos`.
+                // bytes stays within the string since
+                // `i + compat_len <= str_len`.
                 if unsafe { strncmp(str_ptr.add(i), compat, compat_len) } == 0 {
                     return true;
                 }
                 i += 1;
             }
         }
-        pos += str_len + 1;
     }
     false
 }
@@ -1837,18 +1940,12 @@ unsafe fn fdt_index_node_compat(blob: *mut FdtBlobInfo, fdt_node: *mut FdtNode) 
         return;
     }
 
-    // SAFETY: `compat_prop` live.
-    let data = unsafe { fdt_data_ptr(compat_prop) };
-    let data_len = unsafe { (*compat_prop).data_size } as usize;
-    let mut pos = 0usize;
-    while pos < data_len {
-        // SAFETY: `data + pos` in-bounds.
-        let str_ptr = unsafe { data.add(pos) as *const c_char };
-        let str_len = unsafe { strnlen(str_ptr, data_len - pos) };
+    // SAFETY: `compat_prop` non-null with `data_size > 0` past the guard;
+    // `string_list` yields each NUL-terminated string in its data block.
+    for (str_ptr, str_len) in unsafe { (*compat_prop).string_list() } {
         if str_len > 0 {
             unsafe { fdt_index_compat_string(blob, fdt_node, str_ptr, str_len) };
         }
-        pos += str_len + 1;
     }
 }
 
@@ -1909,11 +2006,20 @@ unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
     }
 
     // SAFETY: `blob` live; walks `all_nodes`, a well-formed list per
-    // `fdt_build_blob_info`'s construction.
+    // `fdt_build_blob_info`'s construction. The `successors` iterator
+    // reproduces the C `pos = next(head); while pos != head { ..; pos =
+    // next(pos) }` walk exactly (the established loop->iterator idiom in
+    // this crate, cf. `mm/pcache.rs`).
     unsafe {
         let head = &raw mut (*blob).all_nodes;
-        let mut pos = machine::list_entry_next(head);
-        while pos != head {
+        let all_nodes = core::iter::successors(
+            Some(machine::list_entry_next(head)).filter(|&p| p != head),
+            move |&p| {
+                let next = machine::list_entry_next(p);
+                (next != head).then_some(next)
+            },
+        );
+        for pos in all_nodes {
             let node = machine::list_container_of::<FdtNode>(pos, offset_of!(FdtNode, list_entry));
             // Preserved dead branch -- see module doc: `fdt_type` is
             // never `FDT_BEGIN_NODE`, so this never runs.
@@ -1921,7 +2027,6 @@ unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
                 fdt_index_node_compat(blob, node);
                 fdt_index_node_phandle(blob, node);
             }
-            pos = machine::list_entry_next(pos);
         }
     }
 }
@@ -2043,7 +2148,7 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         };
         if !first_arg.is_null() {
             // SAFETY: `first_arg` non-null and live.
-            root = unsafe { fdt_node_first(first_arg, c"".as_ptr()) };
+            root = unsafe { (*first_arg).first_child_named(c"".as_ptr()) };
         }
     }
     if root.is_null() && !blob_root_node.is_null() {
@@ -2081,10 +2186,12 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
             }
         }
 
-        let mut cpu = unsafe { fdt_node_first(cpus, c"cpu".as_ptr()) };
-        while !cpu.is_null() {
+        // SAFETY: `cpus` live; `first_child_named`/`fdt_same_name_iter`
+        // walk its immutable child tree (boot-time, single hart).
+        let cpus_iter =
+            unsafe { fdt_same_name_iter(cpus, (*cpus).first_child_named(c"cpu".as_ptr())) };
+        for _cpu in cpus_iter {
             unsafe { platform.ncpu += 1 };
-            cpu = unsafe { fdt_node_next_same_name(cpus, cpu) };
         }
     }
     if unsafe { platform.ncpu } == 0 {
@@ -2092,8 +2199,14 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
     }
 
     // /memory (possibly multiple banks)
-    let mut memory = unsafe { fdt_node_first(root, c"memory".as_ptr()) };
-    while !memory.is_null() && unsafe { platform.mem_count } < platform_info_mem_regions() {
+    // SAFETY: `root` live; the same-name walk reads its immutable child
+    // tree (boot-time, single hart).
+    let memory_iter =
+        unsafe { fdt_same_name_iter(root, (*root).first_child_named(c"memory".as_ptr())) };
+    for memory in memory_iter {
+        if unsafe { platform.mem_count } >= platform_info_mem_regions() {
+            break;
+        }
         prop = unsafe { fdt_get_prop(memory, c"reg".as_ptr()) };
         if !prop.is_null() {
             let cells_per_entry = root_addr_cells + root_size_cells;
@@ -2129,7 +2242,6 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 i += 1;
             }
         }
-        memory = unsafe { fdt_node_next_same_name(root, memory) };
     }
 
     // /chosen (ramdisk)
@@ -2212,11 +2324,9 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         }
     }
 
-    // SAFETY: `device_parent` live.
-    let mut rb = unsafe { crate::bintree::rb_first_node(&raw mut (*device_parent).children) };
-    while !rb.is_null() {
-        let node = rb as *mut FdtNode;
-        rb = unsafe { crate::bintree::rb_next_node(rb) };
+    // SAFETY: `device_parent` live; its child tree is immutable during
+    // the walk (boot-time, single hart).
+    for node in unsafe { (*device_parent).children() } {
 
         let compat = unsafe { fdt_get_prop(node, c"compatible".as_ptr()) };
         let reg = unsafe { fdt_get_prop(node, c"reg".as_ptr()) };
@@ -2506,10 +2616,9 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         }
 
         let mut rsv_child_count = 0i32;
-        let mut rsv_rb = unsafe { crate::bintree::rb_first_node(&raw mut (*rsvmem).children) };
-        while !rsv_rb.is_null() {
-            let rsv_node = rsv_rb as *mut FdtNode;
-            rsv_rb = unsafe { crate::bintree::rb_next_node(rsv_rb) };
+        // SAFETY: `rsvmem` live; its child tree is immutable during the
+        // walk (boot-time, single hart).
+        for rsv_node in unsafe { (*rsvmem).children() } {
             if !unsafe { fdt_get_prop(rsv_node, c"reg".as_ptr()) }.is_null() {
                 rsv_child_count += 1;
             }
@@ -2528,11 +2637,11 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                     }
                 }
                 let mut idx = unsafe { platform.reserved_count };
-                rsv_rb = unsafe { crate::bintree::rb_first_node(&raw mut (*rsvmem).children) };
-                while !rsv_rb.is_null() && idx < total_count {
-                    let rsv_node = rsv_rb as *mut FdtNode;
-                    rsv_rb = unsafe { crate::bintree::rb_next_node(rsv_rb) };
-
+                // SAFETY: `rsvmem` live; child tree immutable during walk.
+                for rsv_node in unsafe { (*rsvmem).children() } {
+                    if idx >= total_count {
+                        break;
+                    }
                     prop = unsafe { fdt_get_prop(rsv_node, c"reg".as_ptr()) };
                     if !prop.is_null() {
                         unsafe {
@@ -2843,11 +2952,8 @@ unsafe fn fdt_walk_node(node: *mut FdtNode, depth: i32) {
                 crate::kprintln!("phandle = <0x{:x}>", (((*node).phandle as c_int) as i32 as i64) as u64);
             }
 
-            let mut rb = crate::bintree::rb_first_node(&raw mut (*node).children);
-            while !rb.is_null() {
-                let child = rb as *mut FdtNode;
+            for child in (*node).children() {
                 fdt_walk_node(child, depth + 1);
-                rb = crate::bintree::rb_next_node(rb);
             }
         }
     }
