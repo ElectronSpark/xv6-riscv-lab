@@ -385,6 +385,34 @@ pub struct VfsInode {
     pub completion: crate::bindings::completion_t,
 }
 
+impl VfsInode {
+    /// Borrow this inode's superblock, if attached (N-R5c).
+    ///
+    /// `sb` is a **set-once** pointer: once an inode is added to a
+    /// superblock's inode hash it points to that live `vfs_superblock`
+    /// for the rest of the inode's life, and the superblock outlives
+    /// every inode still referencing it (`vfs_iput` frees the sb only
+    /// after removing its last inode). The returned shared borrow is
+    /// bounded by `&self`, so it can never outlive a live borrow of the
+    /// inode, and callers read only the now-atomic `flags` (N-R5c) and
+    /// other set-once fields (`root_inode`) through it — free of the
+    /// freeze-noalias hazard even inside a loop.
+    ///
+    /// This encapsulates the single `*mut vfs_superblock -> &` deref that
+    /// the inode-validity predicates each used to spell inline as an
+    /// `unsafe`-wrapped `(*sb).flags.valid()` block — the superblock
+    /// raw-ptr floor N-R5b left standing (now collapsed: the callers
+    /// become unsafe-free).
+    #[inline]
+    pub(crate) fn superblock(&self) -> Option<&vfs_superblock> {
+        // SAFETY: `self.sb`, when non-null, is the set-once pointer to
+        // this inode's live superblock (see the method doc); the returned
+        // borrow is tied to `&self`, so the superblock cannot be freed
+        // under it. `as_ref` yields `None` for a null pointer.
+        unsafe { self.sb.as_ref() }
+    }
+}
+
 /// The per-filesystem inode-operations vtable — wave P3-10b's
 /// replacement for the C-style `struct vfs_inode_ops` fn-pointer table
 /// (the 19-slot flagship of the ops-table redesign; P3-10a `FileOps`
@@ -1170,16 +1198,28 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
             return;
         }
 
-        // SAFETY: non-null `sb`/`inode`; bitfield/plain-field reads only.
-        let (attached, backendless) = unsafe {
+        // N-R5c: one ephemeral `&vfs_superblock` borrow covers all three
+        // superblock reads (the atomic `flags` bitset + the set-once
+        // `root_inode`), collapsing what were two separate `unsafe`-
+        // wrapped `(*sb)...` blocks into one.
+        //
+        // SAFETY: `sb` is this inode's live set-once superblock (checked
+        // non-null above and held via the write lock); the borrow is
+        // ephemeral — it is dropped at the end of this block, well before
+        // the later `(*sb).orphan_count -= 1` raw mutation — so it never
+        // aliases a mutation, and it reads only the relaxed-atomic
+        // `flags` (N-R5c Step A) and the set-once `root_inode`, so it is
+        // free of the freeze-noalias hazard even inside this loop.
+        let (attached, backendless, is_root_inode) = {
+            let sbref = unsafe { &*sb };
             (
-                (*sb).flags.attached() != 0,
-                (*sb).flags.backendless() != 0,
+                sbref.flags.attached() != 0,
+                sbref.flags.backendless() != 0,
+                core::ptr::eq(inode, sbref.root_inode),
             )
         };
         let n_links = unsafe { (*inode).n_links };
         let is_mount = unsafe { (*inode).flags.mount() != 0 };
-        let is_root_inode = unsafe { core::ptr::eq(inode, (*sb).root_inode) };
 
         if attached && (n_links > 0 || is_mount) && (backendless || is_root_inode || is_mount) {
             let old = refcount_atomic(inode).fetch_sub(1, Ordering::SeqCst);

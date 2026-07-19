@@ -78,7 +78,7 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::offset_of;
 use core::ptr;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::bindings::{
     fs_struct, hlist_bucket_t, hlist_entry_t, hlist_func_t, hlist_t, kobject, list_node_t,
@@ -263,22 +263,60 @@ pub struct VfsFsType {
 /// valid=0, dirty=1, backendless=2, initialized=3, registered=4,
 /// syncing=5, unmounting=6, attached=7 — identical to bindgen's
 /// `get(N,1)`/`set(N,1)` accessors.
+///
+/// # Interior mutability (N-R5c)
+///
+/// The single bit unit is now an [`AtomicU64`] instead of a plain
+/// `u8 + [u8; 7]` pad — mirroring the inode flags conversion (N-R5a).
+/// These superblock flags (`valid`/`attached`/`backendless`/…) are read
+/// LOCK-FREE in the inode-validity predicates and the `vfs_iput`/evict
+/// paths. A plain read of a Freeze field through a `&VfsSuperblock`
+/// inside such a loop is hoisted out by LLVM's noalias analysis — the
+/// freeze-noalias HANG (see MEMORY `freeze-noalias-hazard`) that gates
+/// the `*mut vfs_superblock -> &VfsSuperblock` reference conversion
+/// (N-R5c Step B). An atomic is not Freeze, so the reads stay in the
+/// loop. This is layout-identical to the former unit: the `AtomicU64`
+/// is size 8 / align 8 and, on little-endian, keeps every flag bit N in
+/// byte 0 exactly where the old `u8 bits` held it (the upper seven
+/// bytes are the former `_pad`, never observed by any accessor). The
+/// accessor method *signatures* are unchanged, so every caller (`fs.rs`,
+/// `inode.rs`, drivers) is untouched — their flag reads simply become
+/// non-hoistable relaxed atomics.
+///
+/// Ordering: [`Ordering::Relaxed`]. The real synchronization of these
+/// flags is the superblock lock (every valid/attached/etc. transition
+/// and its authoritative re-check happen under the rwsem/spinlock); the
+/// lock-free pre-check reads were plain, unordered bitfield accesses in
+/// the C original, so `Relaxed` — which adds atomicity (no torn/lost
+/// bits) and defeats the noalias hoist, but no cross-variable ordering —
+/// is both the weakest correct choice (`conc-atomic-ordering`) and
+/// behaviour-identical to the C's unordered bitfield semantics. No
+/// `Copy`/`Clone` (an `AtomicU64` interior forbids them): nothing copies
+/// this holder by value — every use is an accessor method call on the
+/// `(*ptr).flags` place, and the embedding `VfsSuperblock` derives
+/// neither `Copy` nor `Clone`.
 #[repr(C, align(8))]
-#[derive(Copy, Clone)]
 pub struct VfsSuperblockFlagBits {
-    bits: u8,
-    _pad: [u8; 7],
+    bits: AtomicU64,
 }
 
 macro_rules! sb_flag_bit {
     ($get:ident, $set:ident, $bit:expr) => {
         #[inline]
         pub(crate) fn $get(&self) -> u64 {
-            ((self.bits >> $bit) & 0b1) as u64
+            (self.bits.load(Ordering::Relaxed) >> $bit) & 0b1
         }
         #[inline]
         pub(crate) fn $set(&mut self, val: u64) {
-            self.bits = (self.bits & !(1u8 << $bit)) | (((val as u8) & 0b1) << $bit);
+            // Atomic RMW (`fetch_or`/`fetch_and`), never load-modify-store,
+            // so concurrent single-bit updates to *other* flags cannot be
+            // lost. Signature keeps `&mut self` (identical to the pre-N-R5c
+            // form); the atomic methods take `&self`, reached by reborrow.
+            if val & 0b1 != 0 {
+                self.bits.fetch_or(1u64 << $bit, Ordering::Relaxed);
+            } else {
+                self.bits.fetch_and(!(1u64 << $bit), Ordering::Relaxed);
+            }
         }
     };
 }
@@ -1248,6 +1286,12 @@ fn inode_is_local_root(inode: &vfs_inode) -> bool {
 /// ephemeral (dropped at return), so it never races a later mutation of
 /// the same inode. No non-atomic inode field is read in a loop — free of
 /// the freeze-noalias hazard.
+///
+/// N-R5c (superblock reference conversion): the residual `unsafe`-wrapped
+/// `(*sb).flags.valid()` superblock deref — the raw-ptr floor N-R5b left
+/// standing — is now the safe [`VfsInode::superblock`] accessor
+/// (encapsulated set-once `*mut -> &`), and `flags.valid()` is a relaxed
+/// atomic load (N-R5c Step A). The function is now unsafe-free.
 fn inode_valid(inode: &vfs_inode) -> c_int {
     // `holding_mutex` reads the mutex holder via a SeqCst atomic load; a
     // raw pointer derived from the shared borrow of the interior-
@@ -1259,11 +1303,10 @@ fn inode_valid(inode: &vfs_inode) -> c_int {
         return neg(EINVAL);
     }
     if !ptr::eq(inode, &raw const vfs_root_inode) {
-        let sb = inode.sb;
-        // SAFETY: `sb` is the inode's set-once superblock pointer; when
-        // non-null it is a live `vfs_superblock` whose `flags` is an
-        // atomic bitset read via the accessor's relaxed load.
-        if sb.is_null() || unsafe { (*sb).flags.valid() } == 0 {
+        // Superblock validity through the borrowed accessor: `None`
+        // (null `sb`) or `flags.valid() == 0` is the same EINVAL as the
+        // old `sb.is_null() || (*sb).flags.valid() == 0`.
+        if !matches!(inode.superblock(), Some(sb) if sb.flags.valid() != 0) {
             crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
             return neg(EINVAL);
         }
@@ -1279,6 +1322,9 @@ fn inode_valid(inode: &vfs_inode) -> c_int {
 /// ephemeral borrow is sound. Reads only the now-safe set: the `mutex`
 /// (via atomic holder load), `flags.valid()` (relaxed atomic), the
 /// set-once `mode`/`sb`. No loop, no mutation — freeze-noalias-free.
+///
+/// N-R5c: the residual superblock deref is now the safe
+/// [`VfsInode::superblock`] accessor — the function is unsafe-free.
 fn dir_inode_valid_holding(inode: &vfs_inode) -> c_int {
     if holding_mutex(&raw const inode.mutex as *mut _) == 0 {
         return neg(EPERM);
@@ -1290,11 +1336,7 @@ fn dir_inode_valid_holding(inode: &vfs_inode) -> c_int {
         return neg(EINVAL);
     }
     if !ptr::eq(inode, &raw const vfs_root_inode) {
-        let sb = inode.sb;
-        // SAFETY: `sb` is the inode's set-once superblock pointer; when
-        // non-null it is a live `vfs_superblock` whose `flags` is an
-        // atomic bitset read via the accessor's relaxed load.
-        if sb.is_null() || unsafe { (*sb).flags.valid() } == 0 {
+        if !matches!(inode.superblock(), Some(sb) if sb.flags.valid() != 0) {
             return neg(EINVAL);
         }
     }
