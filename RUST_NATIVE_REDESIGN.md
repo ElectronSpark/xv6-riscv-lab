@@ -5,6 +5,28 @@ Hubris) + the current-kernel gap census, into a target architecture and a
 phased, behaviour-preserving execution plan for eliminating the remaining
 C-transliteration patterns from this kernel.
 
+## 0. Primary goals (user-stated, 2026-07-18)
+
+1. **Methods on structs, not free functions taking `*mut T`.** Convert
+   `pub(crate) fn f(x: *mut Foo)` free functions + the `t_*`/`pg_*`/`xv6_*`
+   shims into `impl Foo { fn f(&self) }` inherent methods / trait methods
+   (extend the existing `ThreadAccess`/`SessionAccess` accessor pattern).
+2. **Use idiomatic Rust features — especially iterators.** Intrusive-list /
+   table / `for_each`-callback walks become `Iterator` impls (`list.iter()`,
+   `table.iter()`), encapsulating the traversal `unsafe` once.
+3. **Unsafe density close to Redox.** Drive the `unsafe` count from its
+   current level toward the irreducible floor.
+
+**Census that makes these one lever (HEAD f6feea5): 5,116 `unsafe`** =
+**3,858 `(*x).` raw-pointer field derefs (75% — goal 1 removes these)** +
+549 `addr_of`/`raw_get!`/`raw_set!` accessor macros + **151 `container_of`/
+`for_each` traversal sites (goal 2)** + **~150 irreducible floor** (46
+`asm!` + 104 volatile MMIO/CSR — the Redox/Theseus-scale target) + 207
+free-function shims (goal-1 targets). Goals 1+2 collapse the ~4,900
+reducible blocks toward the ~150 floor → that IS goal 3.
+**Target: `unsafe` → the low hundreds** (asm/PTE/MMIO/DMA floor + necessary
+boundary unsafe), approaching Redox's density (exact number being measured).
+
 ## 1. Honest scope: what "full Rust native" means
 
 Every shipping Rust kernel keeps an irreducible `unsafe` floor. Theseus is
