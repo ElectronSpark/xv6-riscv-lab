@@ -296,3 +296,49 @@ the intrusive proc-table hlist stays for pid-lookup until the LAST sub-step.
   implementation to workers, orchestrator re-verifies every wave against the
   full battery, cache-first audits, honest reclassification over fabricated
   wins, never chase a metric past correctness (`refify-ceiling` memory).
+
+## 7. OUTCOME — the unsafe-reduction investigation (2026-07-18/19, ~13 pilots)
+
+**Final measured state: 3588 `unsafe {}` blocks / 99k LOC = 36.1/1k**
+(baseline ~3665; Redox *kernel* ~28/1k, Theseus 1.9/1k). Delivered this arc:
+a complete data-owning `SpinLock<T>` primitive (5 wait-methods: sleep_on /
+sleep_on_interruptible / wait_on[tq_t] / lock_ptr / data_ptr); **8
+lock-owns-data conversions** (console, uart, xv6fs log, block_cache, sysnet,
+virtio_disk, tty, ptmx) moving ~400 hot-path body-lines from `unsafe` to safe;
+the safe POD `BlockView` byte-view; intrusive-list iterator rollout; and the
+VFS-Arc inode/superblock atomics + reference infrastructure.
+
+**The core empirical finding (why the count is floored):** the `unsafe {}`
+count is dominated by (a) whole-body blocks over ONE shared object's fields,
+and (b) MULTI-OBJECT co-occurring derefs (a fn derefs inode AND superblock AND
+dentry — collapsing one leaves the block on the others). Only **lock-owns-data
+moved the count** (it collapses a whole body of one object behind one lock:
+−80 total). Every other lever is **block-neutral-to-negative** because it
+encapsulates unsafe in audited abstractions (which SPLIT monolithic blocks):
+byte-view +12, iterators +5, inode-refs ±0. Real soundness/idiom improved;
+the crude block metric did not. **Measure structural safety by lines-of-
+unsafe-body-eliminated and dangerous-idiom-retired, NOT the `unsafe {` count.**
+
+**Lever verdicts (exhaustive):**
+- lock-owns-data (SpinLock): the one count lever (−80); **clean targets
+  EXHAUSTED**. Buddy allocator = STOP (split-lock/cacheline floor).
+- byte-view / iterators: goal #1/#2 idiom + soundness wins, block-neutral+.
+  Only ~10–20% of the 678 list-ops are class-A convertible (rest = drain/RCU/
+  hlist/mutation-primitive floor).
+- VFS-Arc: reduces the count but **capped ~−2/wave** (incremental field-
+  atomics: make a Freeze inode/sb field atomic → add a set-once accessor →
+  convert read-mostly fns). Proven: N-R5a/b/c (3590→3588).
+- VFS-Arc **full per-object** (Mutex<T>-owns-data guard): **INFEASIBLE** —
+  `vfs_ilock`/`vfs_iunlock` are paired ACROSS call boundaries (fns return a
+  locked inode; the driver unlocks frames away), which no Drop-unlocking RAII
+  guard can span (same class as the buddy split-lock STOP).
+
+**Conclusion:** the whole-kernel `unsafe {}` density is **architecturally
+floored ~36/1k** for this monolithic kernel (in-kernel disk/DMA/drivers/page-
+tables/RCU + the macro-accessor floor + cross-frame-paired locks + multi-
+object-deref blocks) — the same structural reason Redox's kernel sits at
+28/1k, not Theseus's 1.9. Reaching ~28–34/1k is not available via any sound
+mechanism found; the remaining incremental VFS-Arc path is ~100 corruption-
+critical waves at ~−2 each. The genuine safety wins (whole bodies to safe,
+silent-corruption idioms retired, the reusable SpinLock<T>) are banked and
+correctness-verified; further count-chasing has negative value.
