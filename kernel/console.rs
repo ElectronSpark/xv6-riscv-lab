@@ -242,10 +242,15 @@ pub(crate) extern "C" fn consputc(c: c_int) {
 /// # Safety
 /// `s` must point to at least `n` readable bytes.
 pub(crate) unsafe extern "C" fn consputs(s: *const c_char, n: c_int) {
-    for i in 0..n as isize {
-        // SAFETY: caller guarantees `s` has at least `n` readable bytes.
-        let c = unsafe { *s.offset(i) } as u8 as c_int;
-        consputc(c);
+    // N-METH (goal #2): the raw `for i in 0..n { *s.offset(i) }` pointer
+    // walk became one `from_raw_parts` + slice iteration -- `n` per-byte
+    // raw derefs collapse to a single up-front `unsafe`, mirroring the
+    // tty.rs `tty_input` conversion in the N-METH model (da51c6c).
+    // SAFETY: caller guarantees `s` has at least `n` readable bytes (fn
+    // doc); `n.max(0)` reproduces the old loop's empty range for `n <= 0`.
+    let bytes = unsafe { core::slice::from_raw_parts(s as *const u8, n.max(0) as usize) };
+    for &b in bytes {
+        consputc(b as c_int);
     }
 }
 
@@ -360,13 +365,17 @@ unsafe fn consolewrite(
         }
 
         // Expand into output buffer.
+        // N-METH (goal #2): the `for i in 0..batch_size { ...kbuf[i]... }`
+        // index walk over the just-filled batch became a slice iteration,
+        // the same shape as the tty.rs `tty_write` NL->CRNL conversion in
+        // the N-METH model (da51c6c).
         let mut olen = 0usize;
-        for i in 0..batch_size {
-            if do_onlcr && kbuf[i] == b'\n' {
+        for &b in &kbuf[..batch_size] {
+            if do_onlcr && b == b'\n' {
                 outbuf[olen] = b'\r';
                 olen += 1;
             }
-            outbuf[olen] = kbuf[i];
+            outbuf[olen] = b;
             olen += 1;
         }
 
@@ -876,11 +885,13 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
             sleep_ms(1);
             continue;
         }
-        for i in 0..n as usize {
+        // N-METH (goal #2): drain the filled prefix by slice iteration
+        // instead of a manual `for i in 0..n { buf[i] }` index walk.
+        for &byte in &buf[..n as usize] {
             if !UART_INITIALIZED.load(Ordering::Relaxed) {
-                crate::sbi::sbi_console_putchar(buf[i] as c_int);
+                crate::sbi::sbi_console_putchar(byte as c_int);
             } else {
-                crate::uart::uartputc_sync(buf[i] as c_int);
+                crate::uart::uartputc_sync(byte as c_int);
             }
         }
     }
