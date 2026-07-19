@@ -177,6 +177,17 @@ pub struct Xv6fsSuperblock {
     /// still starts at 1536, and the align-64 `block_cache` still lands
     /// at 2624, leaving the size/offset asserts below unchanged.
     pub log: crate::sync::SpinLock<super::log::LogInner>,
+    /// Per-mount free-block extent cache. N-R7d: lock-owns-data — the
+    /// lock-guarded metadata (rb-tree + bookkeeping) is now a data-owning
+    /// [`SpinLock<BlockCacheInner>`](super::block_cache::BlockCacheInner)
+    /// inside [`Xv6fsBlockCache`](super::block_cache::Xv6fsBlockCache),
+    /// alongside two lock-free siblings: the `initialized` lifecycle flag
+    /// (read without the lock by `__xv6fs_balloc` and `statfs`) and the
+    /// `extent_cache` slab (independently synchronised by the slab
+    /// allocator's own internal lock). The lock-owning struct is laid out to
+    /// occupy exactly the historical 1472-byte slot, so `block_cache` still
+    /// lands at 2624 and this IN-MEMORY mount struct stays 4096 (required:
+    /// the `xv6fs_sb` slab caps objects at one page — `SLAB_OBJ_MAX_SIZE`).
     pub block_cache: crate::bindings::xv6fs_block_cache,
 }
 
@@ -925,8 +936,12 @@ impl SuperblockOps for Xv6fsSuperblockOps {
             (*buf).f_namelen = super::DIRSIZ as u64;
             (*buf).f_files = (*disk_sb).ninodes as u64;
 
+            // `initialized` is the lock-free lifecycle flag; `free_count`
+            // lives inside the lock-owning `SpinLock<BlockCacheInner>`, so
+            // read it under the guard (N-R7d — was a lock-free read).
             if (*xv6_sb).block_cache.initialized != 0 {
-                (*buf).f_bfree = (*xv6_sb).block_cache.free_count as u64;
+                let cache = (*xv6_sb).block_cache.cache.lock();
+                (*buf).f_bfree = cache.free_count as u64;
                 (*buf).f_bavail = (*buf).f_bfree;
             }
         }
