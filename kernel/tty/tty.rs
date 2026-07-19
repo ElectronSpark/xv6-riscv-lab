@@ -15,15 +15,26 @@
 //!
 //! # Locking / concurrency
 //!
-//! `tty->lock` (a [`crate::sync::KSpinlock`]) protects `termios`,
-//! `winsize`, and the raw-mode ring buffer (`raw_buf`/`raw_r`/`raw_w`).
-//! [`tty_input`] and [`tty_echo_char`] both need to call into
-//! `pipe_write()`, which can sleep (the pipe may be full) — exactly
-//! like the C original, the lock is dropped immediately before any such
-//! call and re-acquired immediately after; the state machine below
-//! keeps that drop/reacquire pattern at the same points the C did, via
-//! an owned [`crate::sync::KSpinGuard`] that gets `drop()`-ed and
-//! re-`lock()`-ed explicitly rather than nested/hidden in a helper.
+//! N-R7h (lock-owns-data): the per-tty lock now OWNS the state it
+//! guards. [`Tty::inner`] is a [`crate::sync::SpinLock`]`<`[`TtyInner`]`>`
+//! embedded at offset 0; the lock protects `termios`, `winsize`,
+//! `ref_count`, the raw-mode ring buffer (`raw_buf`/`raw_r`/`raw_w`) and
+//! the raw wait queue (`raw_wait`) — every field inside [`TtyInner`]. A
+//! `.lock()` returns a [`crate::sync::SpinLockGuard`] that
+//! `Deref`s/`DerefMut`s straight to [`TtyInner`]. [`tty_input`] and
+//! [`tty_echo_char`] both need to call into `pipe_write()`, which can
+//! sleep (the pipe may be full) — exactly like the C original, the guard
+//! is `drop()`-ed immediately before any such call and re-`.lock()`-ed
+//! immediately after; the state machine below keeps that drop/reacquire
+//! pattern at the same points the C did, threading the guard explicitly
+//! rather than nesting/hiding it in a helper.
+//!
+//! The non-guarded fields (`ops`, `input_pipe`, `output_pipe`,
+//! `driver_data`, `session`, `name`) stay plain `Tty` fields: they are
+//! set once at [`tty_alloc`] and read lock-free thereafter (the pipe
+//! pointers are also the `pty.rs` peer's data path; `session` is
+//! dereferenced without the lock by [`tty_signal_fg_pgroup`] and the
+//! ioctl paths, matching the C original).
 //!
 //! `tty_input()` is called only from thread context (never from an
 //! interrupt handler directly): `console.rs`'s `consoleintr()` (real
@@ -34,18 +45,19 @@
 //! `tty_input()` sleeping under the covers (via `pipe_write`) is sound
 //! — there is no interrupt-context caller to violate a no-sleep rule.
 //!
-//! `tty_read()`'s raw-mode path parks on `tty->raw_wait` via `tq_wait`,
-//! which atomically drops `tty->lock`, sleeps, and re-acquires it on
-//! wakeup or signal delivery — identical to the C original's
+//! `tty_read()`'s raw-mode path parks on `raw_wait` via the guard's
+//! [`crate::sync::SpinLockGuard::wait_on`] (`tq_wait`), which atomically
+//! drops this lock, sleeps, and re-acquires it on wakeup or signal
+//! delivery — identical to the C original's
 //! `tq_wait(&tty->raw_wait, &tty->lock, NULL)`.
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
-use crate::bindings::{pid_t, pipe, session, slab_cache_t, spinlock_t, termios, thread, tty};
+use crate::bindings::{pid_t, pipe, session, slab_cache_t, termios, thread, tty};
 use crate::kstd::{result_to_neg_errno, Errno, KResult};
-use crate::sync::{KSpinGuard, KSpinlock};
+use crate::sync::{SpinLock, SpinLockGuard};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
@@ -192,11 +204,15 @@ const _: () = {
 // compilers agree, and the struct-level align(64) carries the C
 // record's own 64-byte alignment, exactly as bindgen emitted.
 //
-// DERIVE DECISION (P3-N8): both types derive Copy/Clone exactly as the
-// pre-nativization bindgen emissions did (`tty`'s embedded
-// `spinlock_t`/`tq_t`/`termios`/`winsize` are all Copy). Nothing in the
-// remaining bindgen output embeds either type by value (verified — all
-// uses are pointers).
+// DERIVE DECISION (P3-N8 / N-R7h): `Tty` no longer derives Copy/Clone --
+// as of N-R7h it embeds a `SpinLock<TtyInner>` (an `UnsafeCell`, so not
+// `Copy`). That is sound because `Tty` is only ever handled by pointer
+// (`*mut tty`): nothing in the tree embeds it by value or copies it
+// (verified -- all uses are pointers; `tty_alloc` fills a raw slab
+// allocation field-by-field, never by value-copy). `TtyInner` likewise
+// derives nothing (it too is only reached through the lock guard). The
+// `termios`/`winsize` uabi records keep their own Copy/Clone derives
+// (used by-value across the userspace ioctl boundary, unchanged).
 // ===========================================================================
 
 /// The per-terminal line-discipline/driver operations vtable — wave
@@ -335,52 +351,90 @@ pub trait TtyOps: Sync {
 ///
 /// As of wave P3-10d this layout is NATIVE-OWNED (post-P3-6 there is
 /// no bindgen, no wrapper.h, and no C consumer; the header no longer
-/// constrains it). The former `tty_ops*` pointer is now a real Rust
-/// trait object, `Option<&'static dyn TtyOps>` (a 16-byte fat pointer;
-/// `None` = the console's deliberate no-driver state, previously a
-/// null ops pointer — every field after `ops` shifted by 8 and the
-/// asserts below are the new truth, same precedent as P3-10c's
-/// `Blkdev`).
+/// constrains it), and `bindings::tty` is a pure `pub use` facade of
+/// this exact type. N-R7h (lock-owns-data) reordered it: the lock and
+/// the fields it guards moved into [`Tty::inner`]
+/// (`SpinLock<`[`TtyInner`]`>`) at offset 0, the non-guarded fields
+/// follow, and the layout asserts below are the new truth (total size
+/// unchanged at 512). `ops` is a real Rust trait object,
+/// `Option<&'static dyn TtyOps>` (a 16-byte fat pointer; `None` = the
+/// console's deliberate no-driver state, previously a null ops pointer).
 #[repr(C, align(64))]
-#[derive(Copy, Clone)]
 pub struct Tty {
-    pub lock: spinlock_t,
-    pub termios: termios,
-    pub winsize: crate::bindings::winsize,
+    /// N-R7h (lock-owns-data): the per-tty lock now OWNS the state it
+    /// guards. `SpinLock<TtyInner>` is `#[repr(C)] { UnsafeCell<
+    /// spinlock_t>, UnsafeCell<TtyInner> }`, so `inner` lays out as the
+    /// `spinlock_t` (offset 0 — the `lock@0` guarantee the old bare
+    /// `lock` field carried, asserted below) immediately followed by the
+    /// guarded [`TtyInner`] fields. Every former `KSpinlock::from_bindings(
+    /// &raw mut (*t).lock).lock()` + raw `(*t).<field>` site is now
+    /// `let tty = (*t).inner.lock(); tty.<field>`.
+    pub inner: SpinLock<TtyInner>,
     pub ops: Option<&'static dyn TtyOps>,
-    pub ref_count: c_int,
     pub input_pipe: *mut pipe,
     pub output_pipe: *mut pipe,
-    pub raw_buf: [c_char; 256],
-    pub raw_r: crate::bindings::uint,
-    pub raw_w: crate::bindings::uint,
-    pub raw_wait: crate::bindings::tq_t,
     pub driver_data: *mut c_void,
     pub session: *mut session,
     pub name: [c_char; 64],
 }
 
-// P3-10d NEW-TRUTH layout proof — `Tty` is native-owned (module note
-// above); these values pin the layout *with* the 16-byte
-// `Option<&'static dyn TtyOps>` fat pointer at `ops` (every later
-// field shifted +8 vs the P3-N8 values; total size unchanged at 512 —
-// the shift was absorbed by the trailing align(64) padding).
+/// The lock-guarded per-tty state (N-R7h). Everything the per-tty lock
+/// protects lives here and is reached only through a
+/// [`crate::sync::SpinLockGuard`] (or, at [`tty_alloc`] time, before any
+/// concurrent access). `#[repr(C)]` so `SpinLock<TtyInner>` keeps the
+/// `spinlock_t`-then-guarded-fields byte layout `console.rs`'s
+/// `consolewrite` (which now takes `(*tty).inner.lock()` to read
+/// `termios`) and the layout asserts below both rely on.
+#[repr(C)]
+pub struct TtyInner {
+    pub termios: termios,
+    pub winsize: crate::bindings::winsize,
+    pub ref_count: c_int,
+    pub raw_buf: [c_char; 256],
+    pub raw_r: crate::bindings::uint,
+    pub raw_w: crate::bindings::uint,
+    pub raw_wait: crate::bindings::tq_t,
+}
+
+// N-R7h lock-owns-data layout proof — `Tty` is native-owned (module
+// note above; `bindings::tty` is a pure `pub use` facade of this type,
+// no external `offset_of!`/size asserts, no `.S` refs, so this reorder
+// is legal). The lock+guarded fields moved into `SpinLock<TtyInner>` at
+// offset 0; the non-guarded fields (`ops`/`input_pipe`/`output_pipe`/
+// `driver_data`/`session`/`name`) follow. `SpinLock<TtyInner>` =
+// `#[repr(C)] { UnsafeCell<spinlock_t>(24), UnsafeCell<TtyInner>(368) }`
+// = 392 bytes, laid out as `spinlock_t` then the `TtyInner` fields, so
+// `offset_of!(Tty, inner) == 0` preserves the old `lock@0` guarantee
+// (the spinlock is `inner`'s first byte). Total size stays 512 (the
+// reorder is absorbed by the trailing align(64) padding). `input_pipe`/
+// `output_pipe` shift (96/104 -> 408/416) but are read by NAME only
+// (the `pty.rs` peer), never by offset — verified: no external observer.
 const _: () = {
     assert!(core::mem::size_of::<Option<&'static dyn TtyOps>>() == 16, "tty.ops fat-pointer size");
 
+    // TtyInner (the guarded state) — byte-identical field sequence to
+    // the old bare fields, minus the lock (now `inner`'s prefix).
+    assert!(core::mem::size_of::<TtyInner>() == 368, "TtyInner size");
+    assert!(core::mem::align_of::<TtyInner>() == 8, "TtyInner alignment");
+    assert!(core::mem::offset_of!(TtyInner, termios) == 0, "TtyInner.termios offset");
+    assert!(core::mem::offset_of!(TtyInner, winsize) == 40, "TtyInner.winsize offset");
+    assert!(core::mem::offset_of!(TtyInner, ref_count) == 48, "TtyInner.ref_count offset");
+    assert!(core::mem::offset_of!(TtyInner, raw_buf) == 52, "TtyInner.raw_buf offset");
+    assert!(core::mem::offset_of!(TtyInner, raw_r) == 308, "TtyInner.raw_r offset");
+    assert!(core::mem::offset_of!(TtyInner, raw_w) == 312, "TtyInner.raw_w offset");
+    assert!(core::mem::offset_of!(TtyInner, raw_wait) == 320, "TtyInner.raw_wait offset");
+
+    // SpinLock<TtyInner> = spinlock_t(24) + TtyInner(368).
+    assert!(core::mem::size_of::<SpinLock<TtyInner>>() == 392, "SpinLock<TtyInner> size");
+
     assert!(core::mem::size_of::<Tty>() == 512, "tty size");
     assert!(core::mem::align_of::<Tty>() == 64, "tty alignment");
-    assert!(core::mem::offset_of!(Tty, lock) == 0, "tty.lock offset");
-    assert!(core::mem::offset_of!(Tty, termios) == 24, "tty.termios offset");
-    assert!(core::mem::offset_of!(Tty, winsize) == 64, "tty.winsize offset");
-    assert!(core::mem::offset_of!(Tty, ops) == 72, "tty.ops offset");
-    assert!(core::mem::offset_of!(Tty, ref_count) == 88, "tty.ref_count offset");
-    assert!(core::mem::offset_of!(Tty, input_pipe) == 96, "tty.input_pipe offset");
-    assert!(core::mem::offset_of!(Tty, output_pipe) == 104, "tty.output_pipe offset");
-    assert!(core::mem::offset_of!(Tty, raw_buf) == 112, "tty.raw_buf offset");
-    assert!(core::mem::offset_of!(Tty, raw_r) == 368, "tty.raw_r offset");
-    assert!(core::mem::offset_of!(Tty, raw_w) == 372, "tty.raw_w offset");
-    assert!(core::mem::offset_of!(Tty, raw_wait) == 376, "tty.raw_wait offset");
+    // The `lock@0` guarantee: `inner` at 0 => the embedded `spinlock_t`
+    // is at byte 0, exactly where the old bare `lock` field sat.
+    assert!(core::mem::offset_of!(Tty, inner) == 0, "tty.inner (lock@0) offset");
+    assert!(core::mem::offset_of!(Tty, ops) == 392, "tty.ops offset");
+    assert!(core::mem::offset_of!(Tty, input_pipe) == 408, "tty.input_pipe offset");
+    assert!(core::mem::offset_of!(Tty, output_pipe) == 416, "tty.output_pipe offset");
     assert!(core::mem::offset_of!(Tty, driver_data) == 424, "tty.driver_data offset");
     assert!(core::mem::offset_of!(Tty, session) == 432, "tty.session offset");
     assert!(core::mem::offset_of!(Tty, name) == 440, "tty.name offset");
@@ -612,19 +666,47 @@ pub(crate) unsafe fn tty_alloc(name: *const c_char, ops: Option<&'static dyn Tty
     // field-by-field initialization -- no blanket zeroing was ever done
     // there either).
     unsafe {
-        KSpinlock::from_bindings(&raw mut (*raw).lock).init(c"tty".as_ptr());
-        termios_init_default(&raw mut (*raw).termios);
-        (*raw).winsize.ws_row = DEFAULT_ROWS;
-        (*raw).winsize.ws_col = DEFAULT_COLS;
-        (*raw).winsize.ws_xpixel = 0;
-        (*raw).winsize.ws_ypixel = 0;
+        // N-R7h: build the lock-guarded state, then move a fully
+        // initialised `SpinLock<TtyInner>` into the slab slot. Only the
+        // wait queue needs a post-construction fix-up (`tq_init` wires it
+        // to *this* lock), done under the guard before `raw` is published.
+        // `termios_init_default` writes through a pointer, so seed a stack
+        // `termios` first. `raw_buf` is zeroed here (the C original left
+        // it uninitialised -- harmless, only `raw_r`/`raw_w` index it).
+        let mut termios0: termios = core::mem::zeroed();
+        termios_init_default(&raw mut termios0);
+        let inner = TtyInner {
+            termios: termios0,
+            winsize: crate::bindings::winsize {
+                ws_row: DEFAULT_ROWS,
+                ws_col: DEFAULT_COLS,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+            ref_count: 1,
+            raw_buf: [0; 256],
+            raw_r: 0,
+            raw_w: 0,
+            // Placeholder; `tq_init` below initialises it in place against
+            // this lock.
+            raw_wait: core::mem::zeroed(),
+        };
+        // Move the constructed lock into the (uninitialised) slab slot.
+        core::ptr::write(&raw mut (*raw).inner, SpinLock::new(c"tty", inner));
+        // Wire the raw-mode wait queue to this exact lock. Runs before
+        // `raw` is returned, so no other hart can race the acquire; the
+        // guard hands `tq_init` this lock's `spinlock_t*` (so a later
+        // `wait_on(&raw mut tty.raw_wait, ..)` releases/reacquires it).
+        {
+            let mut g = (*raw).inner.lock();
+            let q = &raw mut g.raw_wait;
+            let lk = g.lock_ptr();
+            tq_init(q, c"tty_raw".as_ptr(), lk);
+        }
+        // Non-guarded fields: set once here, read lock-free thereafter.
         (*raw).ops = ops;
-        (*raw).ref_count = 1;
         (*raw).input_pipe = inp;
         (*raw).output_pipe = outp;
-        (*raw).raw_r = 0;
-        (*raw).raw_w = 0;
-        tq_init(&raw mut (*raw).raw_wait, c"tty_raw".as_ptr(), core::ptr::null_mut());
         (*raw).driver_data = core::ptr::null_mut();
         (*raw).session = core::ptr::null_mut();
         safestrcpy((*raw).name.as_mut_ptr(), name, (*raw).name.len());
@@ -662,12 +744,10 @@ pub(crate) unsafe extern "C" fn tty_free(t: *mut tty) {
 /// `t` must be a live, non-null `tty` (mirrors the C original, which
 /// also unconditionally dereferences `t->lock`).
 pub(crate) unsafe extern "C" fn tty_ref(t: *mut tty) {
-    // SAFETY: see fn doc.
-    let guard = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-    unsafe {
-        (*t).ref_count += 1;
-    }
-    drop(guard);
+    // SAFETY: see fn doc -- creating `&(*t).inner` to lock it is the only
+    // deref; `ref_count` is then a safe guarded field access.
+    let mut guard = unsafe { (*t).inner.lock() };
+    guard.ref_count += 1;
 }
 
 /// # Safety
@@ -676,13 +756,10 @@ pub(crate) unsafe extern "C" fn tty_ref(t: *mut tty) {
 pub(crate) unsafe extern "C" fn tty_unref(t: *mut tty) {
     let should_free;
     {
-        // SAFETY: see fn doc.
-        let guard = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-        unsafe {
-            (*t).ref_count -= 1;
-            should_free = (*t).ref_count <= 0;
-        }
-        drop(guard);
+        // SAFETY: see fn doc -- `&(*t).inner` to lock is the only deref.
+        let mut guard = unsafe { (*t).inner.lock() };
+        guard.ref_count -= 1;
+        should_free = guard.ref_count <= 0;
     }
     if should_free {
         // SAFETY: `t` is caller-guaranteed live (fn doc); a ref_count
@@ -695,55 +772,58 @@ pub(crate) unsafe extern "C" fn tty_unref(t: *mut tty) {
 // ===========================================================================
 // Line-discipline flag helpers.
 //
-// Every helper below requires `t->lock` to already be held by the
-// caller (they only ever run inside a locked critical section in this
-// file) -- mirrors the C `static inline` helpers of the same name,
-// which carried the same implicit contract.
+// N-R7h: these read `termios` flags out of the lock-guarded [`TtyInner`],
+// so they now take `&TtyInner` (obtained via the held `SpinLockGuard`'s
+// `Deref` -- passing `&guard` deref-coerces) instead of a raw `*mut tty`.
+// That both removes the `unsafe` (a plain safe field read) and makes the
+// "lock must be held" contract a borrow the caller already proves by
+// holding the guard -- mirrors the C `static inline` helpers of the same
+// name, which carried the same implicit "lock held" contract.
 // ===========================================================================
 
 #[inline]
-unsafe fn l_canon(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_lflag & ICANON != 0 }
+fn l_canon(t: &TtyInner) -> bool {
+    t.termios.c_lflag & ICANON != 0
 }
 #[inline]
-unsafe fn l_echo(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_lflag & ECHO != 0 }
+fn l_echo(t: &TtyInner) -> bool {
+    t.termios.c_lflag & ECHO != 0
 }
 #[inline]
-unsafe fn l_echoe(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_lflag & ECHOE != 0 }
+fn l_echoe(t: &TtyInner) -> bool {
+    t.termios.c_lflag & ECHOE != 0
 }
 #[inline]
-unsafe fn l_echok(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_lflag & ECHOK != 0 }
+fn l_echok(t: &TtyInner) -> bool {
+    t.termios.c_lflag & ECHOK != 0
 }
 #[inline]
-unsafe fn l_isig(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_lflag & ISIG != 0 }
+fn l_isig(t: &TtyInner) -> bool {
+    t.termios.c_lflag & ISIG != 0
 }
 #[inline]
-unsafe fn i_icrnl(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_iflag & ICRNL != 0 }
+fn i_icrnl(t: &TtyInner) -> bool {
+    t.termios.c_iflag & ICRNL != 0
 }
 #[inline]
-unsafe fn i_igncr(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_iflag & IGNCR != 0 }
+fn i_igncr(t: &TtyInner) -> bool {
+    t.termios.c_iflag & IGNCR != 0
 }
 #[inline]
-unsafe fn i_inlcr(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_iflag & INLCR != 0 }
+fn i_inlcr(t: &TtyInner) -> bool {
+    t.termios.c_iflag & INLCR != 0
 }
 #[inline]
-unsafe fn i_istrip(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_iflag & ISTRIP != 0 }
+fn i_istrip(t: &TtyInner) -> bool {
+    t.termios.c_iflag & ISTRIP != 0
 }
 #[inline]
-unsafe fn o_opost(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_oflag & OPOST != 0 }
+fn o_opost(t: &TtyInner) -> bool {
+    t.termios.c_oflag & OPOST != 0
 }
 #[inline]
-unsafe fn o_onlcr(t: *mut tty) -> bool {
-    unsafe { (*t).termios.c_oflag & ONLCR != 0 }
+fn o_onlcr(t: &TtyInner) -> bool {
+    t.termios.c_oflag & ONLCR != 0
 }
 
 // ===========================================================================
@@ -763,7 +843,11 @@ unsafe fn o_onlcr(t: *mut tty) -> bool {
 ///
 /// # Safety
 /// `t` must be a live `tty` whose `output_pipe` is non-null.
-unsafe fn tty_echo_char(t: *mut tty, c: i32, guard: KSpinGuard) -> KSpinGuard {
+unsafe fn tty_echo_char<'a>(
+    t: *mut tty,
+    c: i32,
+    guard: SpinLockGuard<'a, TtyInner>,
+) -> SpinLockGuard<'a, TtyInner> {
     let mut echobuf = [0u8; 4];
     let mut n = 0usize;
 
@@ -776,9 +860,9 @@ unsafe fn tty_echo_char(t: *mut tty, c: i32, guard: KSpinGuard) -> KSpinGuard {
         echobuf[n] = b'\x08';
         n += 1;
     } else {
-        // SAFETY: `t` is caller-guaranteed live (fn doc); `t->lock` is
-        // still held at this point (guard not yet dropped).
-        if unsafe { o_opost(t) && o_onlcr(t) } && c == b'\n' as i32 {
+        // `guard` is still held here (not yet dropped), so reading the
+        // OPOST/ONLCR flags out of the guarded state is a safe field read.
+        if o_opost(&guard) && o_onlcr(&guard) && c == b'\n' as i32 {
             echobuf[n] = b'\r';
             n += 1;
         }
@@ -790,8 +874,9 @@ unsafe fn tty_echo_char(t: *mut tty, c: i32, guard: KSpinGuard) -> KSpinGuard {
     drop(guard);
     // SAFETY: `t` is caller-guaranteed live (fn doc).
     unsafe { pipe_write((*t).output_pipe, echobuf.as_ptr() as *const c_char, n as u64, 0) };
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() }
+    // SAFETY: `t` is caller-guaranteed live (fn doc); re-acquire the same
+    // lock so the returned guard is valid for the caller to continue.
+    unsafe { (*t).inner.lock() }
 }
 
 // ===========================================================================
@@ -837,9 +922,14 @@ unsafe fn tty_signal_fg_pgroup(t: *mut tty, signum: c_int) {
 /// readable bytes.
 pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64 {
     let n = count as usize;
-    let lock_ptr = unsafe { &raw mut (*t).lock };
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    let mut guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
+    // N-R7h: `guard` `DerefMut`s to the lock-guarded [`TtyInner`]; the
+    // flag helpers take `&guard` (deref-coerced), the raw-ring accesses go
+    // straight through it, and every former `drop`/re-`lock` at a
+    // `pipe_write`/signal point is preserved 1:1 as `drop(guard)` /
+    // `guard = (*t).inner.lock()`.
+    // SAFETY: `t` is caller-guaranteed live (fn doc); `&(*t).inner` to
+    // lock is the only pointer deref for the guard.
+    let mut guard = unsafe { (*t).inner.lock() };
 
     for i in 0..n {
         // SAFETY: caller guarantees `buf[..count]` is readable (fn doc).
@@ -848,34 +938,29 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
 
         // ---------- input flag processing ----------
 
-        // SAFETY: `t` is live; `guard` is held.
-        if unsafe { i_istrip(t) } {
+        if i_istrip(&guard) {
             c &= 0x7F;
         }
 
         if c == b'\r' as i32 {
-            // SAFETY: `t` is live; `guard` is held.
-            if unsafe { i_igncr(t) } {
+            if i_igncr(&guard) {
                 continue;
             }
-            // SAFETY: `t` is live; `guard` is held.
-            if unsafe { i_icrnl(t) } {
+            if i_icrnl(&guard) {
                 c = b'\n' as i32;
             }
         } else if c == b'\n' as i32 {
-            // SAFETY: `t` is live; `guard` is held.
-            if unsafe { i_inlcr(t) } {
+            if i_inlcr(&guard) {
                 c = b'\r' as i32;
             }
         }
 
         // ---------- signal characters ----------
 
-        // SAFETY: `t` is live; `guard` is held.
-        if unsafe { l_isig(t) } {
-            // SAFETY: `t` is live; `guard` is held; reading the whole
-            // small `c_cc` array by value is a plain memcpy.
-            let cc = unsafe { (*t).termios.c_cc };
+        if l_isig(&guard) {
+            // Reading the whole small `c_cc` array by value is a plain
+            // memcpy out of the guarded termios.
+            let cc = guard.termios.c_cc;
 
             if c == cc[VINTR] as i32 {
                 drop(guard);
@@ -883,9 +968,8 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
                 // `tty_signal_fg_pgroup`).
                 unsafe { tty_signal_fg_pgroup(t, SIGINT) };
                 // SAFETY: `t` is live.
-                guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
-                // SAFETY: `t` is live; `guard` is held.
-                if unsafe { l_echo(t) } {
+                guard = unsafe { (*t).inner.lock() };
+                if l_echo(&guard) {
                     // SAFETY: `t` is live.
                     guard = unsafe { tty_echo_char(t, '^' as i32, guard) };
                     guard = unsafe { tty_echo_char(t, 'C' as i32, guard) };
@@ -897,8 +981,8 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
                 drop(guard);
                 // SAFETY: as above.
                 unsafe { tty_signal_fg_pgroup(t, SIGQUIT) };
-                guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
-                if unsafe { l_echo(t) } {
+                guard = unsafe { (*t).inner.lock() };
+                if l_echo(&guard) {
                     guard = unsafe { tty_echo_char(t, '^' as i32, guard) };
                     guard = unsafe { tty_echo_char(t, '\\' as i32, guard) };
                     guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
@@ -908,8 +992,8 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
             if c == cc[VSUSP] as i32 {
                 drop(guard);
                 unsafe { tty_signal_fg_pgroup(t, SIGTSTP) };
-                guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
-                if unsafe { l_echo(t) } {
+                guard = unsafe { (*t).inner.lock() };
+                if l_echo(&guard) {
                     guard = unsafe { tty_echo_char(t, '^' as i32, guard) };
                     guard = unsafe { tty_echo_char(t, 'Z' as i32, guard) };
                     guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
@@ -920,15 +1004,12 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
 
         // ---------- canonical mode editing ----------
 
-        // SAFETY: `t` is live; `guard` is held.
-        if unsafe { l_canon(t) } {
-            // SAFETY: `t` is live; `guard` is held.
-            let cc = unsafe { (*t).termios.c_cc };
+        if l_canon(&guard) {
+            let cc = guard.termios.c_cc;
 
             // Erase (backspace / DEL).
             if c == cc[VERASE] as i32 || c == b'\x08' as i32 {
-                // SAFETY: `t` is live; `guard` is held.
-                if unsafe { l_echoe(t) } {
+                if l_echoe(&guard) {
                     guard = unsafe { tty_echo_char(t, BACKSPACE, guard) };
                 }
                 continue;
@@ -936,7 +1017,7 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
 
             // Kill line (^U).
             if c == cc[VKILL] as i32 {
-                if unsafe { l_echok(t) } {
+                if l_echok(&guard) {
                     guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
                 }
                 continue;
@@ -950,39 +1031,39 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
                 unsafe {
                     pipe_write((*t).input_pipe, &nul as *const u8 as *const c_char, 0, 0);
                 }
-                guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
+                guard = unsafe { (*t).inner.lock() };
                 continue;
             }
         }
 
         // ---------- echo ----------
 
-        if unsafe { l_echo(t) } {
+        if l_echo(&guard) {
             guard = unsafe { tty_echo_char(t, c, guard) };
         }
 
         // ---------- push character to consumer ----------
 
-        if unsafe { !l_canon(t) } {
+        if !l_canon(&guard) {
             // Raw mode: store in the direct ring buffer and wake any
-            // reader immediately (single-character latency).
-            // SAFETY: `t` is live; `guard` is held.
-            unsafe {
-                let next = ((*t).raw_w + 1) & (TTY_RAW_BUF_SIZE - 1);
-                if next != ((*t).raw_r & (TTY_RAW_BUF_SIZE - 1)) {
-                    let idx = ((*t).raw_w & (TTY_RAW_BUF_SIZE - 1)) as usize;
-                    (*t).raw_buf[idx] = c as u8 as c_char;
-                    (*t).raw_w += 1;
-                }
+            // reader immediately (single-character latency). All accesses
+            // are safe guarded field reads/writes through `guard`.
+            let next = (guard.raw_w + 1) & (TTY_RAW_BUF_SIZE - 1);
+            if next != (guard.raw_r & (TTY_RAW_BUF_SIZE - 1)) {
+                let idx = (guard.raw_w & (TTY_RAW_BUF_SIZE - 1)) as usize;
+                guard.raw_buf[idx] = c as u8 as c_char;
+                guard.raw_w += 1;
             }
-            // tq_wakeup_all is safe under spinlock.
-            unsafe { tq_wakeup_all(&raw mut (*t).raw_wait, 0, 0) };
+            // `tq_wakeup_all` is safe under the spinlock (still held via
+            // `guard`); form the raw queue pointer, then wake.
+            let q = &raw mut guard.raw_wait;
+            tq_wakeup_all(q, 0, 0);
         } else {
             // Canonical mode: push into input pipe.
             let ch = c as u8 as c_char;
             drop(guard);
             unsafe { pipe_write((*t).input_pipe, &ch as *const c_char, 1, 0) };
-            guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
+            guard = unsafe { (*t).inner.lock() };
         }
     }
 
@@ -1005,12 +1086,10 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
 /// writable bytes if `user == 0`, or be a valid userspace address
 /// range otherwise (checked internally by `either_copyout`).
 pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64 {
-    let lock_ptr = unsafe { &raw mut (*t).lock };
-
     let canon = {
         // SAFETY: `t` is caller-guaranteed live (fn doc).
-        let _g = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
-        unsafe { l_canon(t) }
+        let g = unsafe { (*t).inner.lock() };
+        l_canon(&g)
     };
 
     if canon {
@@ -1024,7 +1103,7 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
     let target = count as i64;
 
     // SAFETY: `t` is caller-guaranteed live (fn doc).
-    let mut guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
+    let mut guard = unsafe { (*t).inner.lock() };
 
     // The C original wraps this in `while ((size_t)total < count) { ...
     // break; }` -- the trailing `break` always executes on the first
@@ -1032,14 +1111,18 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
     // `count == 0`". Written as an `if` here for clarity; semantics
     // preserved 1:1 (single batch, `read(2)`-style return).
     if total < target {
-        // Wait for at least one character.
-        // SAFETY: `t` is live; `guard` is held.
-        while unsafe { (*t).raw_r == (*t).raw_w } {
+        // Wait for at least one character. All ring reads/writes are safe
+        // guarded field accesses through `guard`.
+        while guard.raw_r == guard.raw_w {
             let cur = crate::machine::current_thread_ptr();
             crate::machine::thread_state_set(cur, crate::bindings::thread_state_THREAD_INTERRUPTIBLE);
-            // `tq_wait` releases `t->lock`, sleeps, and re-acquires it
-            // on wake.
-            unsafe { tq_wait(&raw mut (*t).raw_wait, lock_ptr, core::ptr::null_mut()) };
+            // Park on the raw wait queue. `wait_on` (`tq_wait`) atomically
+            // releases THIS lock, sleeps, and re-acquires it on wake --
+            // same lost-wakeup-free protocol as the C
+            // `tq_wait(&tty->raw_wait, &tty->lock, NULL)`. Raw queue ptr
+            // formed first (ends the borrow before the `&mut self` call).
+            let q = &raw mut guard.raw_wait;
+            guard.wait_on(q, core::ptr::null_mut());
             if signal_pending(cur) {
                 drop(guard);
                 return if total > 0 { total } else { -(EINTR as i64) };
@@ -1047,13 +1130,10 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
         }
 
         // Drain available characters, up to count.
-        // SAFETY: `t` is live; `guard` is held at loop entry each time.
-        while total < target && unsafe { (*t).raw_r != (*t).raw_w } {
-            let idx = unsafe { (*t).raw_r & (TTY_RAW_BUF_SIZE - 1) } as usize;
-            let ch = unsafe { (*t).raw_buf[idx] };
-            unsafe {
-                (*t).raw_r += 1;
-            }
+        while total < target && guard.raw_r != guard.raw_w {
+            let idx = (guard.raw_r & (TTY_RAW_BUF_SIZE - 1)) as usize;
+            let ch = guard.raw_buf[idx];
+            guard.raw_r += 1;
             drop(guard);
 
             if user != 0 {
@@ -1074,7 +1154,9 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
                 }
             }
             total += 1;
-            guard = unsafe { KSpinlock::from_bindings(lock_ptr).lock() };
+            // SAFETY: `t` is live; re-acquire the same lock for the next
+            // iteration / the trailing drop.
+            guard = unsafe { (*t).inner.lock() };
         }
     }
     drop(guard);
@@ -1110,13 +1192,13 @@ pub(crate) unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int 
     let mut revents: c_short = 0;
 
     // SAFETY: `t` is caller-guaranteed live (fn doc).
-    let _guard = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
+    let guard = unsafe { (*t).inner.lock() };
 
     if events & (POLLIN | POLLRDNORM) != 0 {
-        // SAFETY: `t` is live; `_guard` is held.
-        if unsafe { l_canon(t) } {
+        if l_canon(&guard) {
             // Canonical mode: data ready if input pipe has bytes.
-            // SAFETY: `t` is live.
+            // SAFETY: `t` is live; `input_pipe` is a plain (non-guarded)
+            // field read through the raw pointer.
             let pi = unsafe { (*t).input_pipe };
             // SAFETY: `pi` is a live pipe owned by `t` for its lifetime.
             let nwrite = unsafe { load_acquire_u32(&raw const (*pi).nwrite) };
@@ -1125,9 +1207,9 @@ pub(crate) unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int 
                 revents |= events & (POLLIN | POLLRDNORM);
             }
         } else {
-            // Raw mode: data ready if ring buffer is non-empty.
-            // SAFETY: `t` is live; `_guard` is held.
-            if unsafe { (*t).raw_r != (*t).raw_w } {
+            // Raw mode: data ready if ring buffer is non-empty (safe
+            // guarded field reads through `guard`).
+            if guard.raw_r != guard.raw_w {
                 revents |= events & (POLLIN | POLLRDNORM);
             }
         }
@@ -1157,8 +1239,8 @@ pub(crate) unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int 
 pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count: u64, user: c_int) -> i64 {
     let need_opost = {
         // SAFETY: `t` is caller-guaranteed live (fn doc).
-        let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-        unsafe { o_opost(t) && o_onlcr(t) }
+        let g = unsafe { (*t).inner.lock() };
+        o_opost(&g) && o_onlcr(&g)
     };
 
     if !need_opost {
@@ -1255,17 +1337,18 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
         TCGETS => {
             let tp = arg as *mut termios;
             // SAFETY: `t` is live (fn doc); `tp` is a valid writable
-            // `termios*` for this cmd (fn doc).
-            let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-            unsafe { *tp = (*t).termios };
+            // `termios*` for this cmd (fn doc). `termios` is `Copy`, read
+            // out of the guarded state under the lock.
+            let g = unsafe { (*t).inner.lock() };
+            unsafe { *tp = g.termios };
             0
         }
         TCSETS | TCSETSW | TCSETSF => {
             let tp = arg as *mut termios;
             {
                 // SAFETY: see TCGETS arm.
-                let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-                unsafe { (*t).termios = *tp };
+                let mut g = unsafe { (*t).inner.lock() };
+                unsafe { g.termios = *tp };
             }
 
             // Notify driver if it cares.
@@ -1281,9 +1364,10 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             // TCSETSF: also discard pending input.
             if cmd == TCSETSF {
                 {
-                    let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
+                    // SAFETY: `t` is live (fn doc).
+                    let mut g = unsafe { (*t).inner.lock() };
                     // flush raw ring buffer
-                    unsafe { (*t).raw_r = (*t).raw_w };
+                    g.raw_r = g.raw_w;
                 }
                 // SAFETY: as the `set_termios` dispatch above.
                 unsafe {
@@ -1297,15 +1381,18 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
         }
         TIOCGWINSZ => {
             let wsp = arg as *mut crate::bindings::winsize;
-            let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-            unsafe { *wsp = (*t).winsize };
+            // SAFETY: `t` is live (fn doc); `wsp` a valid writable
+            // `winsize*`. `winsize` is `Copy`, read under the lock.
+            let g = unsafe { (*t).inner.lock() };
+            unsafe { *wsp = g.winsize };
             0
         }
         TIOCSWINSZ => {
             let wsp = arg as *mut crate::bindings::winsize;
             {
-                let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
-                unsafe { (*t).winsize = *wsp };
+                // SAFETY: see TIOCGWINSZ arm.
+                let mut g = unsafe { (*t).inner.lock() };
+                unsafe { g.winsize = *wsp };
             }
             // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
             // (tty_alloc's contract); `wsp` is a valid `winsize*` for

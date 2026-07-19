@@ -51,7 +51,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::bindings::{
-    cdev_t, device_t, mode_t, pipe, session, spinlock_t, tty,
+    cdev_t, device_t, mode_t, pipe, session, tty,
 };
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
@@ -77,20 +77,12 @@ use crate::sync::SpinLock;
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
 use crate::printf::{__panic_end, __panic_start};
 
-// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
-// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
-// this file's original extern declarations asserted `safe fn` (usual
-// FFI-facade convention). Thin wrappers preserve that safe facade for the
-// unchanged call sites. (`name` cast: old redeclaration said
-// `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
-fn spin_lock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(lk) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
-fn spin_unlock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(lk) }
-}
+// N-R7h: the raw `spin_lock`/`spin_unlock` facade wrappers that used to
+// sit here were driven by exactly one site -- `consolewrite`'s manual
+// lock of the console tty's `lock` to read `termios`. That tty is now a
+// lock-owns-data `SpinLock<TtyInner>` (`kernel/tty/tty.rs`), so the site
+// takes `(*tty_ptr).inner.lock()` (an RAII guard) instead, and these
+// wrappers -- along with their `spinlock_t` import -- are retired.
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -333,12 +325,15 @@ unsafe fn consolewrite(
     let tty_ptr = console_tty();
     if !tty_ptr.is_null() {
         // SAFETY: `tty_ptr` was published by `consoledevinit()` and is
-        // never freed for the kernel's lifetime.
+        // never freed for the kernel's lifetime. N-R7h (lock-owns-data):
+        // the tty's `termios` now lives inside `SpinLock<TtyInner>`;
+        // `(*tty_ptr).inner.lock()` acquires the same per-tty lock this
+        // used to take manually, and the guard `Deref`s to read `termios`.
         unsafe {
-            spin_lock(&raw mut (*tty_ptr).lock);
-            let oflag = (*tty_ptr).termios.c_oflag;
+            let tty = (*tty_ptr).inner.lock();
+            let oflag = tty.termios.c_oflag;
             do_onlcr = (oflag & crate::bindings::OPOST) != 0 && (oflag & crate::bindings::ONLCR) != 0;
-            spin_unlock(&raw mut (*tty_ptr).lock);
+            drop(tty);
         }
     }
 
