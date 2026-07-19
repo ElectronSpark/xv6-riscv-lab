@@ -264,15 +264,12 @@ pub(crate) extern "C" fn xv6fs_bmap(ip: *mut xv6fs_inode, mut bn: u32) -> u32 {
         let dev = (*ip).dev;
 
         // Get hint for locality: use last allocated block if any.
-        let mut hint: u32 = 0;
-        let mut i = super::NDIRECT as isize - 1;
-        while i >= 0 {
-            if (*ip).addrs[i as usize] != 0 {
-                hint = (*ip).addrs[i as usize];
-                break;
-            }
-            i -= 1;
-        }
+        // (Goal #2) reverse scan of the direct slots -> `.iter().rev().find()`.
+        // Snapshot the Copy `[u32; 13]` first (inode is locked here, so this
+        // is a stable, behavior-identical copy — and it sidesteps taking a
+        // reference into a raw-pointer deref).
+        let addrs = (*ip).addrs;
+        let hint = addrs[..super::NDIRECT as usize].iter().rev().copied().find(|&a| a != 0).unwrap_or(0);
 
         // Direct blocks.
         if bn < super::NDIRECT {
@@ -380,15 +377,14 @@ unsafe fn __xv6fs_itrunc_ind_partial(xv6_sb: *mut xv6fs_superblock, entry: *mut 
         let a = (*bp).data as *mut u32;
         let mut freed: i32 = 0;
 
-        let mut j = start_idx;
-        while j < super::NINDIRECT {
+        // (Goal #2) fixed-range indirect-slot walk -> range iterator.
+        for j in start_idx..super::NINDIRECT {
             let v = *a.add(j as usize);
             if v != 0 {
                 __xv6fs_bfree(xv6_sb, dev, v);
                 *a.add(j as usize) = 0;
                 freed += 1;
             }
-            j += 1;
         }
 
         if freed > 0 {
@@ -437,9 +433,8 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
         let dev = (*ip).dev;
         let mut freed_this_batch: i32 = 0;
 
-        // Free direct blocks.
-        let mut i: usize = 0;
-        while i < super::NDIRECT as usize {
+        // Free direct blocks. (Goal #2) direct-slot walk -> range iterator.
+        for i in 0..super::NDIRECT as usize {
             if (*ip).addrs[i] != 0 {
                 __xv6fs_bfree(xv6_sb, dev, (*ip).addrs[i]);
                 (*ip).addrs[i] = 0;
@@ -453,7 +448,6 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
                     freed_this_batch = 0;
                 }
             }
-            i += 1;
         }
 
         // Free indirect blocks.
@@ -464,8 +458,9 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
             }
             let mut a = (*bp).data as *mut u32;
 
-            let mut j: u32 = 0;
-            while j < super::NINDIRECT {
+            // (Goal #2) single-indirect slot walk -> range iterator (the
+            // batch-commit path re-`bread`s and re-binds `bp`/`a`).
+            for j in 0..super::NINDIRECT {
                 let v = *a.add(j as usize);
                 if v != 0 {
                     __xv6fs_bfree(xv6_sb, dev, v);
@@ -486,7 +481,6 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
                         a = (*bp).data as *mut u32;
                     }
                 }
-                j += 1;
             }
             xv6fs_log_write(xv6_sb, bp);
             brelse(bp);
@@ -510,8 +504,9 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
             }
             let mut da = (*dbp).data as *mut u32;
 
-            let mut j: u32 = 0;
-            while j < super::NINDIRECT {
+            // (Goal #2) double-indirect L1 walk -> range iterator (batch
+            // paths re-`bread` and re-bind `dbp`/`da`, and `bp`/`a` below).
+            for j in 0..super::NINDIRECT {
                 let dv = *da.add(j as usize);
                 if dv != 0 {
                     let mut bp = bread(dev, dv);
@@ -520,8 +515,8 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
                     }
                     let mut a = (*bp).data as *mut u32;
 
-                    let mut k: u32 = 0;
-                    while k < super::NINDIRECT {
+                    // (Goal #2) L2 slot walk -> range iterator.
+                    for k in 0..super::NINDIRECT {
                         let v = *a.add(k as usize);
                         if v != 0 {
                             __xv6fs_bfree(xv6_sb, dev, v);
@@ -549,7 +544,6 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
                                 a = (*bp).data as *mut u32;
                             }
                         }
-                        k += 1;
                     }
                     xv6fs_log_write(xv6_sb, bp);
                     brelse(bp);
@@ -571,7 +565,6 @@ pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
                         da = (*dbp).data as *mut u32;
                     }
                 }
-                j += 1;
             }
             xv6fs_log_write(xv6_sb, dbp);
             brelse(dbp);
@@ -597,13 +590,12 @@ unsafe fn __xv6fs_truncate_partial(ip: *mut xv6fs_inode, first_block: u32) -> c_
         let dev = (*ip).dev;
 
         // Free direct blocks from first_block onwards.
-        let mut i = first_block;
-        while i < super::NDIRECT {
+        // (Goal #2) direct-slot walk -> range iterator.
+        for i in first_block..super::NDIRECT {
             if (*ip).addrs[i as usize] != 0 {
                 __xv6fs_bfree(xv6_sb, dev, (*ip).addrs[i as usize]);
                 (*ip).addrs[i as usize] = 0;
             }
-            i += 1;
         }
 
         // Handle indirect blocks.
@@ -627,13 +619,12 @@ unsafe fn __xv6fs_truncate_partial(ip: *mut xv6fs_inode, first_block: u32) -> c_
                 }
                 let a = (*bp).data as *mut u32;
 
-                let mut j: u32 = 0;
-                while j < super::NINDIRECT {
+                // (Goal #2) L1 walk (free every L2 block) -> range iterator.
+                for j in 0..super::NINDIRECT {
                     let v = *a.add(j as usize);
                     if v != 0 {
                         __xv6fs_itrunc_ind(xv6_sb, a.add(j as usize), dev);
                     }
-                    j += 1;
                 }
                 brelse(bp);
                 __xv6fs_bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize + 1]);
@@ -660,14 +651,13 @@ unsafe fn __xv6fs_truncate_partial(ip: *mut xv6fs_inode, first_block: u32) -> c_
                 }
 
                 // Free remaining L1 entries completely.
-                let mut j = l1_start;
-                while j < super::NINDIRECT {
+                // (Goal #2) remaining-L1 walk -> range iterator.
+                for j in l1_start..super::NINDIRECT {
                     let v = *a.add(j as usize);
                     if v != 0 {
                         __xv6fs_itrunc_ind(xv6_sb, a.add(j as usize), dev);
                         modified = true;
                     }
-                    j += 1;
                 }
 
                 if modified {
@@ -681,15 +671,8 @@ unsafe fn __xv6fs_truncate_partial(ip: *mut xv6fs_inode, first_block: u32) -> c_
                     xv6_panic(c"xv6fs_truncate: bread failed".as_ptr());
                 }
                 let a = (*bp).data as *mut u32;
-                let mut all_zero = true;
-                let mut j: u32 = 0;
-                while j < super::NINDIRECT {
-                    if *a.add(j as usize) != 0 {
-                        all_zero = false;
-                        break;
-                    }
-                    j += 1;
-                }
+                // (Goal #2) all-L1-entries-zero scan -> `.any()`.
+                let all_zero = !(0..super::NINDIRECT).any(|j| *a.add(j as usize) != 0);
                 brelse(bp);
 
                 if all_zero {
@@ -771,13 +754,12 @@ pub(crate) fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> KResult
     if ret != 0 {
         return Err(Errno::Raw(ret));
     }
-    let mut bn = old_blocks;
-    while bn < new_blocks {
+    // (Goal #2) block-extend walk -> range iterator.
+    for bn in old_blocks..new_blocks {
         if xv6fs_bmap(ip, bn) == 0 {
             xv6fs_end_op(xv6_sb);
             return Err(Errno::NoSpc);
         }
-        bn += 1;
     }
     // SAFETY: `inode` is live.
     unsafe { (*inode).size = new_size };

@@ -443,9 +443,11 @@ fn __xv6fs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_c
     }
 
     let dp = dir as *mut xv6fs_inode;
-    let mut off: u32 = 0;
+    // Directory size is loop-invariant here (inode locked; the scan never
+    // grows it). (Goal #2) fixed-stride dir-entry scan -> range iterator.
     // SAFETY: `dir` is live.
-    while (off as i64) < unsafe { (*dir).size } {
+    let size = unsafe { (*dir).size } as u32;
+    for off in (0..size).step_by(DIRENT_SIZE as usize) {
         // SAFETY: `dp` is live.
         if let Some(de) = unsafe { read_dirent(dp, off, true) } {
             if de.inum != 0 {
@@ -467,7 +469,6 @@ fn __xv6fs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_c
                 }
             }
         }
-        off += DIRENT_SIZE;
     }
 
     Err(Errno::NoEnt)
@@ -492,8 +493,11 @@ fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *m
     // SAFETY: `iter` is live.
     if unsafe { (*iter).index } == 1 {
         // Look up ".." in the on-disk directory to get parent inode number.
-        let mut off: u32 = 0;
-        while (off as i64) < unsafe { (*dir).size } {
+        // (Goal #2) fixed-stride dir-entry scan -> range iterator (size
+        // loop-invariant, inode locked).
+        // SAFETY: `dir` is live.
+        let size = unsafe { (*dir).size } as u32;
+        for off in (0..size).step_by(DIRENT_SIZE as usize) {
             // SAFETY: `dp` is live.
             if let Some(de) = unsafe { read_dirent(dp, off, true) } {
                 if de.inum != 0 && de.name[0] == b'.' as c_char && de.name[1] == b'.' as c_char && de.name[2] == 0 {
@@ -512,17 +516,18 @@ fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *m
                     return Ok(());
                 }
             }
-            off += DIRENT_SIZE;
         }
         // ".." not found on disk (shouldn't happen for valid dirs).
         return Err(Errno::NoEnt);
     }
 
     // Handle regular entries when index > 1.
-    // SAFETY: `ret_dentry` is live.
+    // (Goal #2) fixed-stride dir-entry scan from the continuation cookie ->
+    // range iterator (size loop-invariant, inode locked).
+    // SAFETY: `ret_dentry`/`dir` are live.
     let start_off = unsafe { (*ret_dentry).cookies } as u32;
-    let mut off = start_off;
-    while (off as i64) < unsafe { (*dir).size } {
+    let size = unsafe { (*dir).size } as u32;
+    for off in (start_off..size).step_by(DIRENT_SIZE as usize) {
         // SAFETY: `dp` is live.
         if let Some(de) = unsafe { read_dirent(dp, off, true) } {
             if de.inum != 0 {
@@ -547,7 +552,6 @@ fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *m
                 }
             }
         }
-        off += DIRENT_SIZE;
     }
 
     // End of directory -- return 0 with name=NULL to signal end.
@@ -573,16 +577,16 @@ fn __xv6fs_dir_iter(dir: *mut vfs_inode, iter: *mut vfs_dir_iter, ret_dentry: *m
 /// NUL-terminated (within `DIRSIZ` bytes) C string.
 unsafe fn __xv6fs_dir_name_exists(dp: *mut xv6fs_inode, name: *const c_char) -> u32 {
     unsafe {
-        let mut off: u32 = 0;
-        while (off as i64) < (*dp).vfs_inode.size {
-            if let Some(de) = read_dirent(dp, off, false) {
-                if de.inum != 0 && strncmp(de.name.as_ptr(), name, DIRSIZ) == 0 {
-                    return de.inum as u32;
-                }
-            }
-            off += DIRENT_SIZE;
-        }
-        0
+        // (Goal #2) name-scan -> `.find_map()` (size loop-invariant, inode
+        // locked). Returns the matching inum or 0.
+        let size = (*dp).vfs_inode.size as u32;
+        (0..size)
+            .step_by(DIRENT_SIZE as usize)
+            .find_map(|off| {
+                let de = read_dirent(dp, off, false)?;
+                (de.inum != 0 && strncmp(de.name.as_ptr(), name, DIRSIZ) == 0).then_some(de.inum as u32)
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -594,18 +598,12 @@ unsafe fn __xv6fs_dir_name_exists(dp: *mut xv6fs_inode, name: *const c_char) -> 
 /// `DIRSIZ` bytes.
 unsafe fn __xv6fs_dirlink(xv6_sb: *mut xv6fs_superblock, dp: *mut xv6fs_inode, name: *const c_char, inum: u32) -> KResult<()> {
     unsafe {
-        // Look for an empty directory slot.
-        let mut off: u32 = 0;
-        let mut found_off: Option<u32> = None;
-        while (off as i64) < (*dp).vfs_inode.size {
-            if let Some(de) = read_dirent(dp, off, true) {
-                if de.inum == 0 {
-                    found_off = Some(off);
-                    break;
-                }
-            }
-            off += DIRENT_SIZE;
-        }
+        // Look for an empty directory slot. (Goal #2) empty-slot scan ->
+        // `.find()` (size loop-invariant, inode locked).
+        let size = (*dp).vfs_inode.size as u32;
+        let found_off = (0..size)
+            .step_by(DIRENT_SIZE as usize)
+            .find(|&off| read_dirent(dp, off, true).map_or(false, |de| de.inum == 0));
         // No empty slot found -- extend directory.
         let off = found_off.unwrap_or((*dp).vfs_inode.size as u32);
 
@@ -657,21 +655,19 @@ fn __xv6fs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
     // SAFETY: `name` has at least `name_len` readable bytes.
     unsafe { memmove(name_buf.as_mut_ptr() as *mut c_void, name as *const c_void, name_len) };
 
-    let mut existing_ino: u32 = 0;
-    let mut off: u32 = 0;
-    // SAFETY: `dir` is live.
-    while (off as i64) < unsafe { (*dir).size } {
-        // SAFETY: `dp` is live.
-        if let Some(de) = unsafe { read_dirent(dp, off, false) } {
-            if de.inum != 0 && strncmp(de.name.as_ptr(), name_buf.as_ptr() as *const c_char, DIRSIZ) == 0 {
-                existing_ino = de.inum as u32;
-                break;
-            }
-        }
-        off += DIRENT_SIZE;
-    }
+    // (Goal #2) existing-name scan -> `.find_map()` (size loop-invariant,
+    // inode locked).
+    // SAFETY: `dir`/`dp` are live.
+    let existing = unsafe {
+        let size = (*dir).size as u32;
+        (0..size).step_by(DIRENT_SIZE as usize).find_map(|off| {
+            let de = read_dirent(dp, off, false)?;
+            (de.inum != 0 && strncmp(de.name.as_ptr(), name_buf.as_ptr() as *const c_char, DIRSIZ) == 0)
+                .then_some(de.inum)
+        })
+    };
 
-    if existing_ino != 0 {
+    if existing.is_some() {
         return Err(Errno::Exist);
     }
 
@@ -778,8 +774,10 @@ fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()
         // VFS core handled checking for "." and "..".
         let dp = (*dentry).parent as *mut xv6fs_inode;
 
-        let mut off: u32 = 0;
-        while (off as i64) < (*(*dentry).parent).size {
+        // (Goal #2) entry-scan -> range iterator (size loop-invariant,
+        // inode locked).
+        let size = (*(*dentry).parent).size as u32;
+        for off in (0..size).step_by(DIRENT_SIZE as usize) {
             if let Some(de) = read_dirent(dp, off, true) {
                 if de.inum != 0 {
                     let de_name_len = strnlen(de.name.as_ptr(), DIRSIZ);
@@ -825,7 +823,6 @@ fn __xv6fs_unlink(dentry: *mut vfs_dentry, target: *mut vfs_inode) -> KResult<()
                     }
                 }
             }
-            off += DIRENT_SIZE;
         }
 
         Err(Errno::NoEnt)
