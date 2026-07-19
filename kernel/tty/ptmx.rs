@@ -32,8 +32,8 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
-use crate::bindings::{cdev_t, mode_t, slab_cache_t, spinlock_t, tty, vfs_file, vfs_inode};
-use crate::sync::KSpinlock;
+use crate::bindings::{cdev_t, mode_t, slab_cache_t, tty, vfs_file, vfs_inode};
+use crate::sync::SpinLock;
 
 // P3-10a: the file-ops tables are `FileOps` trait implementors now
 // (`&'static dyn` dispatch, see `vfs/file.rs`) — the former `static
@@ -150,23 +150,72 @@ macro_rules! ptmx_assert_errno {
 // Per-PTY state.
 // ===========================================================================
 
+/// N-R7i lock-owns-data: the former `lock: spinlock_t` handle plus the
+/// three fields it guarded (`refcount`/`master_open`/`cdev_live`) are now
+/// a single data-owning [`SpinLock<PtyInner>`], embedded at offset 0 so
+/// the lock's `spinlock_t` stays the pair's first byte (matches the tty
+/// conversion in wave N-R7h). Every former `KSpinlock::from_bindings(
+/// &raw mut (*pair).lock).lock()` + raw `(*pair).refcount` deref site
+/// below became `(*pair).inner.lock()` -> a guard that `Deref`s straight
+/// to `&mut PtyInner`, so the guarded-field access needs no `unsafe` of
+/// its own (only the outer raw-pointer deref of `pair` remains).
+///
+/// The non-guarded plain fields (`slave`/`slave_cdev`/`index`) are set
+/// once at alloc and read lock-free thereafter, exactly as the C
+/// original read them outside the lock: `slave`/`slave_cdev` are device
+/// registration state, `index` is immutable after setup.
 #[repr(C)]
 struct PtyPair {
-    /// The slave tty (allocated by `pty_alloc`).
+    /// Lock-owned mutable state (`refcount`/`master_open`/`cdev_live`).
+    /// Embedded at offset 0 -> its `spinlock_t` is the pair's first byte.
+    inner: SpinLock<PtyInner>,
+    /// The slave tty (allocated by `pty_alloc`). Non-guarded: set once.
     slave: *mut tty,
-    /// Registered cdev for `/dev/pts/N`.
+    /// Registered cdev for `/dev/pts/N`. Non-guarded: reached by
+    /// `container_of` via `offset_of!(PtyPair, slave_cdev)` (layout-
+    /// agnostic — self-adapts to this reorder).
     slave_cdev: cdev_t,
-    /// PTY index (N in `/dev/pts/N`).
+    /// PTY index (N in `/dev/pts/N`). Non-guarded: immutable after setup.
     index: c_int,
+}
+
+/// The lock-guarded interior of a [`PtyPair`] (was the three
+/// `lock`-protected `c_int` fields). `#[repr(C)]` so the enclosing
+/// `SpinLock<PtyInner>` keeps a predictable layout.
+#[repr(C)]
+struct PtyInner {
     /// Open master + slave fds.
     refcount: c_int,
     /// Master side still alive?
     master_open: c_int,
     /// Slave cdev still registered?
     cdev_live: c_int,
-    /// Protects `refcount` / `master_open` / `cdev_live`.
-    lock: spinlock_t,
 }
+
+// N-R7i layout evidence — NATIVE-OWNED (no C mirror: no external
+// `offset_of!`/`size_of::<PtyPair>` outside this file, no `.S` refs, and
+// PtyPair is only ever reached via `*mut PtyPair` slab slots). The
+// load-bearing invariant is `offset_of!(PtyPair, inner) == 0` (lock@0),
+// which preserves the old `lock@0` guarantee: `SpinLock<PtyInner>`'s
+// first field is the `spinlock_t`, so the pair's first byte is still the
+// lock word. `size_of::<PtyPair>()` (slab alloc, ~728) and
+// `offset_of!(PtyPair, slave_cdev)` (`container_of`, ~421) both recompute
+// automatically from this reorder; no external consumer pins them.
+const _: () = {
+    // Guarded interior: three packed `c_int`s.
+    assert!(core::mem::size_of::<PtyInner>() == 12, "PtyInner size");
+    assert!(core::mem::align_of::<PtyInner>() == 4, "PtyInner alignment");
+    assert!(core::mem::offset_of!(PtyInner, refcount) == 0, "PtyInner.refcount offset");
+    assert!(core::mem::offset_of!(PtyInner, master_open) == 4, "PtyInner.master_open offset");
+    assert!(core::mem::offset_of!(PtyInner, cdev_live) == 8, "PtyInner.cdev_live offset");
+    // SpinLock<PtyInner> = spinlock_t(24) + PtyInner(12), padded to align 8.
+    assert!(core::mem::size_of::<SpinLock<PtyInner>>() == 40, "SpinLock<PtyInner> size");
+    assert!(core::mem::align_of::<SpinLock<PtyInner>>() == 8, "SpinLock<PtyInner> alignment");
+    // The lock@0 guarantee + the fields that follow it.
+    assert!(core::mem::offset_of!(PtyPair, inner) == 0, "PtyPair.inner (lock@0) offset");
+    assert!(core::mem::offset_of!(PtyPair, slave) == 40, "PtyPair.slave offset");
+    assert!(core::mem::offset_of!(PtyPair, slave_cdev) == 48, "PtyPair.slave_cdev offset");
+};
 
 /// `UnsafeCell<MaybeUninit<T>>` + `unsafe impl Sync` for one file-scope
 /// lock/cache/table storage cell. Same pattern as `kernel/kobject.rs`'s
@@ -222,11 +271,9 @@ static mut PTMX_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 /// `pair` must be a live `*mut PtyPair`.
 unsafe fn pty_pair_put(pair: *mut PtyPair) -> bool {
     // SAFETY: caller guarantees `pair` is live (fn doc).
-    let _g = unsafe { KSpinlock::from_bindings(&raw mut (*pair).lock).lock() };
-    unsafe {
-        (*pair).refcount -= 1;
-        (*pair).refcount <= 0
-    }
+    let mut p = unsafe { (*pair).inner.lock() };
+    p.refcount -= 1;
+    p.refcount <= 0
 }
 
 /// # Safety
@@ -423,11 +470,13 @@ unsafe fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
 
     // Reject open after master closed (device is being torn down).
     {
-        let _g = unsafe { KSpinlock::from_bindings(&raw mut (*pair).lock).lock() };
-        if unsafe { (*pair).master_open } == 0 {
+        // SAFETY: `pair` is live (`container_of` of a registered slave
+        // cdev; only installed on live pairs — see fn doc).
+        let mut p = unsafe { (*pair).inner.lock() };
+        if p.master_open == 0 {
             return -ENXIO;
         }
-        unsafe { (*pair).refcount += 1 };
+        p.refcount += 1;
     }
 
     // tty-level open (bumps tty refcount).
@@ -508,10 +557,12 @@ fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_file) {
     // ---- master-specific teardown ----
     let do_unregister;
     {
-        let _g = unsafe { KSpinlock::from_bindings(&raw mut (*pair).lock).lock() };
-        unsafe { (*pair).master_open = 0 };
-        do_unregister = unsafe { (*pair).cdev_live } != 0;
-        unsafe { (*pair).cdev_live = 0 };
+        // SAFETY: `pair` is live (checked non-null above; taken from a
+        // still-open master `vfs_file`'s `private_data`).
+        let mut p = unsafe { (*pair).inner.lock() };
+        p.master_open = 0;
+        do_unregister = p.cdev_live != 0;
+        p.cdev_live = 0;
     }
 
     // Hang up the slave tty so any blocked readers/writers unblock.
@@ -651,13 +702,19 @@ unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
     // before any bitfield accessor -- which does read-modify-write --
     // touches it).
     unsafe {
+        // N-R7i: build the lock-guarded interior, then move a fully
+        // initialised `SpinLock<PtyInner>` into the (uninitialised) slab
+        // slot via `ptr::write` (no drop of the old garbage). Done before
+        // `pair` is published to `PTY_TABLE`/`file->private_data`, so no
+        // other hart can race the acquire.
+        core::ptr::write(
+            &raw mut (*pair).inner,
+            SpinLock::new(c"pty_pair", PtyInner { refcount: 1, master_open: 1, cdev_live: 0 }),
+        );
+        // Non-guarded plain fields: set once here, read lock-free after.
         (*pair).slave = core::ptr::null_mut();
         (*pair).slave_cdev = MaybeUninit::zeroed().assume_init();
         (*pair).index = idx;
-        (*pair).refcount = 1;
-        (*pair).master_open = 1;
-        (*pair).cdev_live = 0;
-        KSpinlock::from_bindings(&raw mut (*pair).lock).init(c"pty_pair".as_ptr());
     }
 
     // Build slave name "pts/N".
@@ -696,7 +753,11 @@ unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
         unsafe { slab_free(pair as *mut c_void) };
         return ret;
     }
-    unsafe { (*pair).cdev_live = 1 };
+    // Guarded field: `pair` is still private (not yet in `PTY_TABLE` /
+    // `file->private_data`), but access goes through the lock to honour
+    // the lock-owns-data invariant.
+    // SAFETY: `pair` is live, freshly allocated above.
+    unsafe { (*pair).inner.lock().cdev_live = 1 };
 
     // Record in global table.
     PTY_TABLE.lock()[idx as usize] = pair;
