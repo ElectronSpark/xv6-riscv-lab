@@ -332,26 +332,51 @@ fn __tmpfs_make_symlink_target(ti: *mut tmpfs_inode, target: *const c_char, len:
     Ok(())
 }
 
-/// Initialize a tmpfs inode as a regular file.
-fn __tmpfs_make_regfile(ti: *mut tmpfs_inode) {
-    // NOTE (fidelity): the C original ends with
-    // `memset(&tmpfs_inode->file, 0, sizeof(tmpfs_inode->file));`. The
-    // `file` union variant is `union { uint8 data[0]; }` -- a struct
-    // containing only a zero-length array, i.e. `sizeof(...) == 0` (bindgen
-    // agrees: it generated a genuinely empty type for this variant). That
-    // memset is therefore a zero-byte, provably-inert no-op in the C
-    // original itself, not something this port needs to (or safely could,
-    // in the same "zero specific bytes" sense) reproduce; every caller
-    // (`__tmpfs_create`) already receives a freshly `memset`-to-zero
-    // `tmpfs_inode` from `__tmpfs_alloc_inode_structure`, so the union
-    // storage is already zero regardless. Intentionally dropped, not
-    // silently lost -- documented per this crate's fidelity discipline.
-    //
-    // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`.
-    unsafe {
-        (*ti).vfs_inode.size = 0;
-        (*ti).embedded = 1;
-        (*ti).vfs_inode.mode = S_IFREG | 0o644;
+// ===========================================================================
+// Inherent methods on the native `TmpfsInode` (goal 1: methods on structs,
+// not free functions over `*mut tmpfs_inode`). Each of these leaf
+// initializers touches only plain fields of an exclusively-owned,
+// freshly-allocated inode, so its body is fully SAFE — the single audited
+// `unsafe { &mut *ti }` boundary hoist happens once at the caller
+// (N-S1 structural conversion). Writing a `Copy` union field
+// (`vfs_inode.dev_mnt.cdev`/`.bdev`) through `&mut self` is itself safe;
+// only *reading* a union field would require `unsafe`.
+// ===========================================================================
+impl TmpfsInode {
+    /// Initialize this inode as a regular file. (Was `__tmpfs_make_regfile`.)
+    fn make_regfile(&mut self) {
+        // NOTE (fidelity): the C original ends with
+        // `memset(&tmpfs_inode->file, 0, sizeof(tmpfs_inode->file));`. The
+        // `file` union variant is `union { uint8 data[0]; }` -- a struct
+        // containing only a zero-length array, i.e. `sizeof(...) == 0`
+        // (bindgen agrees: it generated a genuinely empty type for this
+        // variant). That memset is therefore a zero-byte, provably-inert
+        // no-op in the C original itself, not something this port needs to
+        // (or safely could, in the same "zero specific bytes" sense)
+        // reproduce; every caller (`__tmpfs_create`) already receives a
+        // freshly `memset`-to-zero `tmpfs_inode` from
+        // `__tmpfs_alloc_inode_structure`, so the union storage is already
+        // zero regardless. Intentionally dropped, not silently lost --
+        // documented per this crate's fidelity discipline.
+        self.vfs_inode.size = 0;
+        self.embedded = 1;
+        self.vfs_inode.mode = S_IFREG | 0o644;
+    }
+
+    /// Initialize this inode as a character device node.
+    /// (Was `tmpfs_make_cdev`.)
+    fn make_cdev(&mut self, cdev: dev_t) {
+        self.vfs_inode.mode = S_IFCHR | 0o644;
+        self.vfs_inode.size = 0;
+        self.vfs_inode.dev_mnt.cdev = cdev;
+    }
+
+    /// Initialize this inode as a block device node.
+    /// (Was `tmpfs_make_bdev`.)
+    fn make_bdev(&mut self, bdev: dev_t) {
+        self.vfs_inode.mode = S_IFBLK | 0o644;
+        self.vfs_inode.size = 0;
+        self.vfs_inode.dev_mnt.bdev = bdev;
     }
 }
 
@@ -530,23 +555,9 @@ pub(crate) extern "C" fn tmpfs_make_directory(ti: *mut tmpfs_inode) {
     }
 }
 
-fn tmpfs_make_cdev(ti: *mut tmpfs_inode, cdev: dev_t) {
-    // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`.
-    unsafe {
-        (*ti).vfs_inode.mode = S_IFCHR | 0o644;
-        (*ti).vfs_inode.size = 0;
-        (*ti).vfs_inode.dev_mnt.cdev = cdev;
-    }
-}
-
-fn tmpfs_make_bdev(ti: *mut tmpfs_inode, bdev: dev_t) {
-    // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`.
-    unsafe {
-        (*ti).vfs_inode.mode = S_IFBLK | 0o644;
-        (*ti).vfs_inode.size = 0;
-        (*ti).vfs_inode.dev_mnt.bdev = bdev;
-    }
-}
+// `tmpfs_make_cdev`/`tmpfs_make_bdev` are now the safe inherent methods
+// `TmpfsInode::make_cdev`/`make_bdev` (see the `impl TmpfsInode` block
+// above); their sole caller `__tmpfs_mknod_inner` hoists one `&mut *ti`.
 
 /// Lookup a child inode by name in a tmpfs directory inode.
 fn __tmpfs_dir_lookup_by_name(ti: *mut tmpfs_inode, name: *const c_char, name_len: usize) -> *mut tmpfs_dentry {
@@ -664,8 +675,9 @@ fn __tmpfs_lookup(dir: *mut vfs_inode, dentry: *mut vfs_dentry, name: *const c_c
     // VFS handles "." and ".." for process root and local root. Driver
     // only sees ".." for ordinary (non-root) directories.
     if name_len == 2 {
-        // SAFETY: `name` is a valid `name_len`-byte buffer.
-        let is_dotdot = unsafe { strncmp(name, c"..".as_ptr(), 2) == 0 };
+        // `strncmp` is a `safe fn` in this file's `unsafe extern` FFI facade,
+        // so comparing the first two bytes needs no `unsafe` block.
+        let is_dotdot = strncmp(name, c"..".as_ptr(), 2) == 0;
         if is_dotdot {
             // SAFETY: `dir`/`dentry` are live (caller's contract).
             unsafe {
@@ -856,10 +868,16 @@ fn __tmpfs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
         Err(e) => Err(e),
         Ok((ti, _dentry)) => {
-            __tmpfs_make_regfile(ti);
-            // SAFETY: `ti` is a live, locked `tmpfs_inode`.
-            vfs_iunlock(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) });
-            Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
+            // SAFETY: `ti` is the freshly-allocated, locked, still-unpublished
+            // inode just returned by `__tmpfs_alloc_link_inode` (not yet
+            // reachable by any other hart), so a `&mut` is exclusive. This
+            // single hoist covers the safe method init and both former
+            // `addr_of_mut` raw derefs (N-S1).
+            let ti = unsafe { &mut *ti };
+            ti.make_regfile();
+            let vi = ptr::addr_of_mut!(ti.vfs_inode);
+            vfs_iunlock(vi);
+            Ok(vi)
         }
     }
 }
@@ -965,14 +983,18 @@ fn __tmpfs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
     match __tmpfs_alloc_link_inode(tmpfs_dir, mode, name, name_len) {
         Err(e) => Err(e),
         Ok((ti, _dentry)) => {
+            // SAFETY: freshly-allocated, locked, still-unpublished inode, so a
+            // `&mut` is exclusive. One hoist covers the safe device-node init
+            // methods and both former `addr_of_mut` raw derefs (N-S1).
+            let ti = unsafe { &mut *ti };
             if s_isblk(mode) {
-                tmpfs_make_bdev(ti, dev);
+                ti.make_bdev(dev);
             } else if s_ischr(mode) {
-                tmpfs_make_cdev(ti, dev);
+                ti.make_cdev(dev);
             }
-            // SAFETY: `ti` is a live, locked `tmpfs_inode`.
-            vfs_iunlock(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) });
-            Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
+            let vi = ptr::addr_of_mut!(ti.vfs_inode);
+            vfs_iunlock(vi);
+            Ok(vi)
         }
     }
 }
@@ -1076,25 +1098,34 @@ fn __tmpfs_symlink_inner(
     } else if let Err(e) = __tmpfs_make_symlink_target(new_inode, target, target_len) {
         {
             __tmpfs_do_unlink(dentry);
-            // SAFETY: `dir`/`new_inode` are live.
-            let rm_ret = unsafe { vfs_remove_inode((*dir).sb, ptr::addr_of_mut!((*new_inode).vfs_inode)) };
+            // SAFETY: `new_inode` is the freshly-allocated, locked inode; it
+            // is now detached from its directory (`__tmpfs_do_unlink` above)
+            // and unpublished, so a `&mut` is exclusive. `dir.sb` stays a raw
+            // read (`dir` is a shared, refcounted parent — see the
+            // reference-hoist screen in the module notes). The `vi` reborrow
+            // feeds the safe `vfs_remove_inode`/`vfs_iunlock`/
+            // `tmpfs_free_inode` calls (N-S1).
+            let ni = unsafe { &mut *new_inode };
+            let vi = ptr::addr_of_mut!(ni.vfs_inode);
+            let dsb = unsafe { (*dir).sb };
+            let rm_ret = vfs_remove_inode(dsb, vi);
             kassert!(
                 rm_ret == 0,
                 "Tmpfs symlink: failed to remove inode after symlink target allocation failure"
             );
             __tmpfs_free_dentry(dentry);
             // Inode is locked and detached from superblock; directly free it.
-            // SAFETY: `new_inode` is live and locked.
-            unsafe {
-                vfs_iunlock(ptr::addr_of_mut!((*new_inode).vfs_inode));
-                super::superblock::tmpfs_free_inode(ptr::addr_of_mut!((*new_inode).vfs_inode));
-            }
+            vfs_iunlock(vi);
+            super::superblock::tmpfs_free_inode(vi);
             return Err(e);
         }
     }
-    // SAFETY: `new_inode` is live and locked.
-    vfs_iunlock(unsafe { ptr::addr_of_mut!((*new_inode).vfs_inode) });
-    Ok(unsafe { ptr::addr_of_mut!((*new_inode).vfs_inode) })
+    // SAFETY: `new_inode` is the live, locked, still-unpublished symlink
+    // inode; one `&mut` hoist replaces the two former `addr_of_mut` derefs.
+    let ni = unsafe { &mut *new_inode };
+    let vi = ptr::addr_of_mut!(ni.vfs_inode);
+    vfs_iunlock(vi);
+    Ok(vi)
 }
 
 /// Destroy inode data when the last reference is dropped and `n_links ==

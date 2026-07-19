@@ -4429,6 +4429,119 @@ applies to changes). Build cache confirmed correct beforehand
 (`CMAKE_C_COMPILER = …/toolchain/build/bin/riscv64-unknown-elf-gcc`). Metric
 numbers above are from direct `grep`/`sed` on the unmodified tree.
 
+### Iteration 91 — 2026-07-18 — Wave N-S1 (FIRST structural per-file conversion, the template): `vfs/tmpfs/inode.rs` comprehensive unsafe-reduction on the cleanest kernel-object file — modest real drop + the ceiling data point
+
+**Goal (as briefed, `RUST_NATIVE_REDESIGN.md` §0 goals 1+3):** establish the
+per-file comprehensive-conversion template (per-function `&mut *p` hoist +
+convert every op-class so the whole-body `unsafe` block can actually shrink)
+and MEASURE the density drop on the cleanest high-density candidate —
+`kernel/vfs/tmpfs/inode.rs` (88 `unsafe`, 161 `(*x).` derefs, ZERO rcu, ZERO
+hardware, fully in-memory). This file backs `/tmp` (tmpfs) and `/dev`
+(devtmpfs reuses these exact inode ops), so the boot path itself exercises it.
+
+**Outcome: SOUND, MODEST reduction — the file is near the refify ceiling.**
+Metric (touched only `vfs/tmpfs/inode.rs`, NOT committed):
+- **Code-token `unsafe` (comment-stripped, the honest signal): 86 → 79 (−7,
+  −8.1%).**
+- Raw `grep -cE "\bunsafe\b"` line count: **88 → 85 (−3)** — the smaller
+  headline is a measurement artifact: the 4 new `// SAFETY:` notes each
+  contain the literal word "unsafe", inflating the line-grep. (Reported both
+  per the brief; the comment-stripped 86→79 is the real code change.)
+- **`(*` derefs: 161 → 143 (−18, −11.2%)** — the character shift is bigger
+  than the block-count shift, exactly the P3-7 `refify-ceiling` pattern.
+
+**What converted (the sound, count-reducing moves only):**
+1. **Goal-1 methods on the native struct.** `__tmpfs_make_regfile` /
+   `tmpfs_make_cdev` / `tmpfs_make_bdev` (free fns over `*mut tmpfs_inode`,
+   each a whole-body `unsafe` block of pure field writes) → **safe inherent
+   methods** `TmpfsInode::make_regfile`/`make_cdev`/`make_bdev` (`&mut self`,
+   fully safe bodies — writing a `Copy` union field `dev_mnt.cdev`/`.bdev`
+   through `&mut self` is itself safe). Their two callers (`create`/`mknod`
+   `_inner`) each now do ONE `unsafe { &mut *ti }` hoist that also absorbs the
+   two former `addr_of_mut!((*ti).vfs_inode)` derefs. Pair-level: create+regfile
+   3→1, mknod+cdev+bdev 4→1.
+2. **Redundant `unsafe` removed** around the `safe fn strncmp` call in
+   `__tmpfs_lookup` (the FFI facade declares it `safe fn`, so the block wrapped
+   nothing) — −1.
+3. **Multi-`addr_of` collapse** in `__tmpfs_symlink_inner`: 4 tokens → 3 (one
+   `&mut *new_inode` hoist per branch feeds the *safe* `vfs_remove_inode`/
+   `vfs_iunlock`/`tmpfs_free_inode` calls; `dir.sb` stays a raw read).
+
+**The residual floor (WHY it's ceiling'd — the critical finding):** the
+remaining 79 are dominated by op-classes a reference hoist CANNOT remove, and
+splitting the whole-body blocks to chase them would *increase* the count (the
+`refify-ceiling` trap, re-confirmed):
+- **Union reinterpretation** — `dir_hlist`/`embedded_data`/`symlink_target_slot`
+  (`unsafe fn`, offset-0 `(*ti).u as *mut T`). `embedded_data` is `pub(crate)`
+  and called from `truncate.rs`/`file.rs`, so its signature is frozen.
+- **Intrusive hlist walks** — `hlist_first_entry`/`hlist_next_entry` +
+  bucket iteration (`unsafe fn`, raw `list_node` chasing). Goal-2 (`Iterator`)
+  territory, not reference territory.
+- **Raw-pointer FIELDS inside the structs** — `tmpfs_dentry.inode: *mut
+  TmpfsInode`, `vfs_inode.parent: *mut vfs_inode`. Dereferencing these is
+  `unsafe` *even from a safe `&` to the container* — the whole-body functions
+  (`dir_iter`, `unlink`, `rmdir`, `readlink`, `getattr`, `link`×4, `move`×5)
+  are stuck here. Only goals 1/2 turning those edges into `Arc`/keys removes
+  them.
+- **Aliasing bar on `n_links` refs** — `__tmpfs_link`/`__tmpfs_move` mutate the
+  target inode's `n_links` via a raw pointer *inside* `__tmpfs_do_link` while
+  the outer fn also touches it; hoisting a `&mut target` there would create
+  raw-vs-`&mut` aliasing UB. Left raw deliberately (soundness > metric).
+- **`mem::zeroed`/`write_bytes`/`read_unaligned`** on raw buffers, and the
+  `ref_count`-as-`AtomicI32` reinterpret. Genuine floor.
+
+**Freeze / lock-discipline screen (mandatory, done):** the hoisted `&mut
+TmpfsInode`/`&mut vfs_inode` cases are all on **freshly-allocated, locked,
+still-unpublished** inodes (returned by `__tmpfs_alloc_link_inode` /
+mid-`symlink` before link) — not yet reachable by any other hart, so the
+`&mut` is genuinely exclusive. Verified `vfs_get_inode_cached_inner` bumps
+`ref_count` via `fetch_add` *before* `vfs_ilock` (so a live-inode `&mut` over
+`ref_count` would formally race), which is exactly why the shared-parent
+(`dir`) reads were LEFT raw and only unpublished-inode refs were hoisted. No
+spin/wait loop reads a hoisted field (the `freeze-noalias-hazard` optimizer
+failure mode is absent here). Pattern matches the shipped P3-7 `vfs/inode.rs`
+hoist precedent.
+
+**rust-skills applied:** `unsafe-minimize-scope` (collapsed multi-`addr_of`
+into one hoist; did NOT split whole-body blocks — that would raise the count),
+`unsafe-safety-comment` (every hoist/residual block carries an audited
+`// SAFETY:` citing the lock + unpublished-inode exclusivity),
+`type-deref-coercion`/`api`/`name-funcs-snake` (goal-1 `&mut self` methods,
+snake_case), `own-borrow-over-clone` (references over raw derefs where sound),
+`freeze-noalias-hazard`+`refify-ceiling`+`gentable-scope-limit` memories
+(soundness screen + the ceiling expectation). Crate is edition 2021.
+
+**Verification (full battery, cache clean before+after, 0-warning gate):**
+`cargo clean` + forced full recompile of the crate = **0 warnings, 0 errors**;
+the cross-cutting `offset_of!` layout asserts still compile (compile-time).
+Build cache confirmed (`CMAKE_C_COMPILER = …/toolchain/build/bin/
+riscv64-unknown-elf-gcc`, `Lab: fs`, empty `BUILD_TYPE`). Booted ×5, each with
+**exactly one** `init: starting sh` + stable prompt, `tmpfs: mounted at /tmp`,
+`devtmpfs: populated 9 device nodes` + `devtmpfs: mounted at /dev`. Functional
+(all via tmpfs/devtmpfs inode ops): **`ls /dev`** full node listing (console,
+tty, null, zero, random, ptmx, disk0/1, ramdisk, pts/); `mkdir /tmp/d1` then
+duplicate → EEXIST ("failed to create"); nested `mkdir /tmp/a/b`; `ls /tmp` +
+`ls /tmp/a` (dir_iter/lookup); `echo hello > /tmp/f1` + `cat` → `hello` +
+`rm /tmp/f1` (tmpfs create/write/read/unlink); **`symlinktest` in `/tmp`: ok
+(both subtests)**; `cat | wc` pipe; ENOENT on missing path. Suites:
+**`testsig` 21/21**, **`mmaptest` 16/16 ("all tests passed")**, `usertests
+createdelete` OK, `usertests forkforkfork` OK, `stressfs` OK. **Zero panic /
+UAF / corruption / hang** across all runs. The trailing `FAILED -- lost some
+free pages` on `usertests` is the documented pre-existing accounting trailer
+(Known issues), not a regression. NOT committed (per brief).
+
+**Roll-out implication:** the N-S1 template *works* and is sound, but on this
+(the cleanest) file it yields ~−8% code-`unsafe` / ~−11% derefs — a genuine
+but modest drop, because tmpfs/inode.rs is a union + intrusive-list + raw-graph
+file, not a scattered-field-deref file. The template's *character* win
+(interior field access goes safe, one audited boundary) is real; the *count*
+win is capped by the structural floor. Reaching the 52→20/1k goal on this
+subsystem needs goals 1/2 to convert the raw-pointer graph EDGES
+(`dentry.inode`, `inode.parent` → `Arc`/keys) and the hlist walk → `Iterator`,
+NOT more reference hoisting. This matches Iteration 78's split-and-ceiling
+finding and Iteration 90's prediction that these files need edge-typing, not
+accessor sweeps.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
