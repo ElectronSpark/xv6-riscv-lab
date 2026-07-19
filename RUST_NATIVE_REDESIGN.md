@@ -233,6 +233,19 @@ the intrusive proc-table hlist stays for pid-lookup until the LAST sub-step.
 - **6d-2:** convert `thread.pgroup`/`thread.session`/`thread.thread_group`
   edges → keys (Pgid/Sid/Tgid via their tables); wire `session.fg_pgrp` and
   `pgroup.session` (deferred from the pilot) to keys.
+  - DONE: 6d-2a (session edges, 5c0bc2b), 6d-2b (pgroup table + edges, 2c650f4).
+  - **6d-2c BOUNDARY (2026-07-18, no code change):** `thread.thread_group`
+    canNOT become a `GenTable` key — it is the **signal subsystem's central
+    edge, synchronized by RCU + refcount, not `pid_lock`**. A table resolve
+    would (1) race a concurrent `remove` (the freeze-noalias data-race, since
+    ~11 signal.rs readers hold only RCU), (2) invert `pid_lock > sigacts.lock`
+    → deadlock (3 readers hold `sigacts_lock`), and (3) leak the tg (free path
+    runs after `pid_wunlock`; exit re-reads the edge to find the tg to put).
+    So `thread.thread_group` + the tg **membership** list stay raw `*mut` +
+    RCU — a permanent, principled boundary (RCU is idiomatic; see
+    memory `gentable-scope-limit`). GenTable fits ONLY single-lock
+    (`pid_lock`) edges. 3 of 4 thread edges converted; the signal hub is the
+    irreducible RCU floor.
 - **6d-3:** pgroup + thread_group **membership** (intrusive thread lists) →
   `Tid`-keyed side-tables; retire those `container_of` sites.
 - **6d-4:** scheduler **run/wait** queues → `Tid` side-tables / key-carrying
