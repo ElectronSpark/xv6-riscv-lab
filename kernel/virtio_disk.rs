@@ -105,17 +105,24 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{compiler_fence, fence, AtomicU32, Ordering};
 
 use crate::bindings::{
-    bio, bio_vec, blkdev_t, device_t, mode_t, page_t, platform_info, spinlock_t,
+    bio, bio_vec, blkdev_t, device_t, mode_t, page_t, platform_info,
     thread, tq_t, virtio_blk_req, virtq_avail, virtq_desc, virtq_used, EIO, PGSIZE,
 };
 use crate::dev::blkdev::BlkdevOps;
 use crate::kstd::KResult;
+// N-R7g (lock-owns-data): the disk's *non-DMA* request-tracking state
+// (descriptor free-map, `used_idx` consume cursor, descriptor-starvation
+// wait queue) now lives in a data-owning `SpinLock<DiskInner>`; the DMA
+// rings, the device-read `ops[]` headers, and the `info[]` array (whose
+// `.status` byte is a device DMA-WRITE target -- see [`virtio_disk_rw`])
+// stay raw. `tq_wait` is reached through the guard's `wait_on`.
+use crate::sync::SpinLock;
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 // P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached by crate path.
@@ -130,24 +137,12 @@ use crate::proc::proc_shims::xv6_current_thread;
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
 // established cross-module convention).
 // ---------------------------------------------------------------------------
-// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
-// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
-// this file's original extern declarations asserted `safe fn` (usual
-// FFI-facade convention; raw calls throughout, see the note that used to
-// sit in the extern block). Thin wrappers preserve that safe facade for
-// the unchanged call sites.
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
-fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
-    unsafe { crate::lock::spinlock::spin_init(l, name) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
-fn spin_lock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(l) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
-fn spin_unlock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(l) }
-}
+// N-R7g: the hand-rolled `spin_init`/`spin_lock`/`spin_unlock` facade
+// wrappers are gone -- the disk's lock is now embedded in
+// `SpinLock<DiskInner>`, so every acquire/release is the guard's `lock()`/
+// `Drop`, the descriptor-starvation sleep is the guard's `wait_on`, and
+// the diagnostic name is set once by `SpinLock::new`. (The DMA rings and
+// the `info[]`/`ops[]` request buffers stay raw -- see the struct below.)
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
@@ -517,7 +512,39 @@ impl Freelist {
 struct DiskInfo {
     bio: *mut bio,
     done: bool,
+    /// **Device DMA-WRITE target** (see [`virtio_disk_rw`]'s descriptor-2
+    /// setup: descriptor `idx[2]`'s buffer address is
+    /// `&info[idx[0]].status`, flagged `VRING_DESC_F_WRITE`). The device
+    /// writes `0` here on success. This is why the whole `info[]` array
+    /// CANNOT move into the lock-owns-data `SpinLock` (N-R7g): a
+    /// `SpinLockGuard`'s `&mut` would claim exclusive/`noalias` access to
+    /// a byte the device mutates asynchronously by physical address. The
+    /// module doc's "`struct disk` ... is not hardware ABI" line omits
+    /// this field; the code (and its `// device writes the status`
+    /// comment) is authoritative. `info[]` therefore stays a raw `Disk`
+    /// field, serialised by the same lock but not owned by it.
     status: u8,
+}
+
+/// The lock-protected **non-DMA** request-tracking state (N-R7g). Exactly
+/// the fields the device never touches by physical address:
+/// * `desc_freelist` -- the descriptor free-map (`freelist_alloc`/`_free`
+///   bookkeeping; pure CPU-side).
+/// * `used_idx` -- the driver's *own* copy of how far it has consumed the
+///   used ring. The device has its **own** `used->idx` in the DMA `used`
+///   page (read raw in [`virtio_disk_intr`]); this cursor is never DMA.
+/// * `desc_wait_queue` -- the descriptor-starvation wait queue, `tq_init`'d
+///   against this lock so a later [`SpinLockGuard::wait_on`] releases and
+///   reacquires *this* same lock.
+///
+/// Everything the device reads or writes by physical address stays a raw
+/// [`Disk`] field: the `desc`/`avail`/`used` ring pointers, the
+/// device-read `ops[]` request headers, and the `info[]` array (its
+/// `.status` byte is a device DMA-write target -- see [`DiskInfo`]).
+struct DiskInner {
+    used_idx: u16,
+    desc_freelist: Freelist,
+    desc_wait_queue: tq_t,
 }
 
 #[repr(C)]
@@ -526,14 +553,15 @@ struct Disk {
     avail: *mut virtq_avail,
     used: *mut virtq_used,
 
-    used_idx: u16,
-    desc_freelist: Freelist,
-
     info: [DiskInfo; NUM],
     ops: [virtio_blk_req; NUM],
 
-    vdisk_lock: spinlock_t,
-    desc_wait_queue: tq_t,
+    /// N-R7g: lock-owns-data for the non-DMA tracking state. Replaces the
+    /// former `vdisk_lock: spinlock_t` + bare `used_idx`/`desc_freelist`/
+    /// `desc_wait_queue` fields. The lock still serialises the raw `info[]`
+    /// / ring accesses in `virtio_disk_rw`/`virtio_disk_intr` (they run
+    /// while this guard is held), it just no longer *owns* them.
+    inner: SpinLock<DiskInner>,
 }
 
 // ---------------------------------------------------------------------------
@@ -750,30 +778,30 @@ unsafe fn thread_state_set_uninterruptible(p: *mut thread) {
 // ===========================================================================
 
 /// Mirrors `alloc_desc`: find a free descriptor, mark it non-free, return
-/// its index.
-///
-/// # Safety
-/// `disk` must be live; caller must hold `(*disk).vdisk_lock`.
-unsafe fn alloc_desc(disk: *mut Disk) -> i32 {
-    // SAFETY: caller contract.
-    unsafe { (*disk).desc_freelist.alloc() }
+/// its index. N-R7g: operates on the lock-owned [`DiskInner`] free-map
+/// (`inner` is the held guard's `&mut`), so no `unsafe` -- the freelist is
+/// pure CPU-side state.
+fn alloc_desc(inner: &mut DiskInner) -> i32 {
+    inner.desc_freelist.alloc()
 }
 
 /// Mirrors `free_desc`: mark a descriptor as free, wake waiters if
-/// enough descriptors are now available.
+/// enough descriptors are now available. N-R7g: the free-map + wait queue
+/// come from the held guard (`inner`); `desc` is the raw DMA descriptor
+/// ring (stays raw -- the device-shared page), cleared here as before.
 ///
 /// # Safety
-/// `disk` must be live; caller must hold `(*disk).vdisk_lock`.
-unsafe fn free_desc(disk: *mut Disk, i: i32) {
-    // SAFETY: caller contract.
-    if unsafe { (*disk).desc_freelist.free_item(i) } != 0 {
+/// `desc` must be the disk's live descriptor ring; caller must hold the
+/// disk's `inner` lock (evidenced by the `&mut DiskInner`).
+unsafe fn free_desc(inner: &mut DiskInner, desc: *mut virtq_desc, i: i32) {
+    if inner.desc_freelist.free_item(i) != 0 {
         panic_fixed("free_desc: invalid free");
     }
 
     // SAFETY: caller contract; `i` just validated as a real descriptor
-    // index by `free_item` above.
+    // index by `free_item` above. `desc` is the raw device-shared ring.
     unsafe {
-        let d = (*disk).desc.add(i as usize);
+        let d = desc.add(i as usize);
         (*d).addr = 0;
         (*d).len = 0;
         (*d).flags = 0;
@@ -781,29 +809,29 @@ unsafe fn free_desc(disk: *mut Disk, i: i32) {
     }
 
     fence(Ordering::SeqCst);
-    // Wake waiters if enough descriptors are free. Already holding
-    // `vdisk_lock` (caller contract), so wake directly.
-    // SAFETY: caller contract.
-    if unsafe { (*disk).desc_freelist.available() } >= 3 {
-        // SAFETY: `desc_wait_queue` is a live, initialised `tq_t`.
-        unsafe { tq_wakeup_all(&raw mut (*disk).desc_wait_queue, 0, 0) };
+    // Wake waiters if enough descriptors are free. Already holding the
+    // lock (the `&mut DiskInner` proves it), so wake directly.
+    if inner.desc_freelist.available() >= 3 {
+        // `desc_wait_queue` is a live, initialised `tq_t` in the guarded
+        // state; `tq_wakeup_all` is a safe, null-tolerant primitive.
+        tq_wakeup_all(&raw mut inner.desc_wait_queue, 0, 0);
     }
 }
 
 /// Mirrors `free_chain`: free a chain of descriptors.
 ///
 /// # Safety
-/// `disk` must be live; caller must hold `(*disk).vdisk_lock`; `i` must
-/// be the head of a valid descriptor chain.
-unsafe fn free_chain(disk: *mut Disk, mut i: i32) {
+/// `desc` must be the disk's live descriptor ring; caller must hold the
+/// disk's `inner` lock; `i` must be the head of a valid descriptor chain.
+unsafe fn free_chain(inner: &mut DiskInner, desc: *mut virtq_desc, mut i: i32) {
     loop {
-        // SAFETY: caller contract.
+        // SAFETY: caller contract; `desc` is the raw device-shared ring.
         let (flag, nxt) = unsafe {
-            let d = (*disk).desc.add(i as usize);
+            let d = desc.add(i as usize);
             ((*d).flags, (*d).next)
         };
         // SAFETY: caller contract.
-        unsafe { free_desc(disk, i) };
+        unsafe { free_desc(inner, desc, i) };
         if flag & VRING_DESC_F_NEXT != 0 {
             i = nxt as i32;
         } else {
@@ -816,20 +844,20 @@ unsafe fn free_chain(disk: *mut Disk, mut i: i32) {
 /// contiguous); disk transfers always use three descriptors.
 ///
 /// # Safety
-/// `disk` must be live; caller must hold `(*disk).vdisk_lock`.
-unsafe fn alloc3_desc(disk: *mut Disk, idx: &mut [i32; 3]) -> i32 {
+/// `desc` must be the disk's live descriptor ring; caller must hold the
+/// disk's `inner` lock.
+unsafe fn alloc3_desc(inner: &mut DiskInner, desc: *mut virtq_desc, idx: &mut [i32; 3]) -> i32 {
     // `__atomic_signal_fence(__ATOMIC_SEQ_CST)` -- compiler-reordering
     // barrier only, no hardware fence (see module doc's barrier
     // accounting).
     compiler_fence(Ordering::SeqCst);
     for i in 0..3 {
-        // SAFETY: caller contract.
-        idx[i] = unsafe { alloc_desc(disk) };
+        idx[i] = alloc_desc(inner);
         if idx[i] < 0 {
-            // SAFETY: caller contract; `idx[0..i)` were successfully
-            // allocated above.
+            // `idx[0..i)` were successfully allocated above.
             for j in 0..i {
-                unsafe { free_desc(disk, idx[j]) };
+                // SAFETY: caller contract; `desc` live.
+                unsafe { free_desc(inner, desc, idx[j]) };
             }
             return -1;
         }
@@ -859,27 +887,41 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
         panic_fixed("virtio_disk_rw: buf is NULL");
     }
 
-    // Raw spin_lock/spin_unlock (not RAII): interacts with `tq_wait`'s
-    // internal release/reacquire below -- see module doc.
+    // The raw DMA descriptor ring pointer, copied out before the lock:
+    // the ring page is device-shared and stays raw; the free-map that
+    // hands out indices into it is the lock-owned state.
     // SAFETY: `disk` live.
-    spin_lock(unsafe { &raw mut (*disk).vdisk_lock });
+    let desc = unsafe { (*disk).desc };
+
+    // N-R7g: acquire the lock-owns-data guard. `d` `DerefMut`s to the
+    // guarded [`DiskInner`] (free-map, `used_idx`, wait queue); it holds
+    // the *same* `spinlock_t` the C `vdisk_lock` was, so it still
+    // serialises the raw `info[]`/ring accesses below (they run while `d`
+    // is held) and releases on every exit (RAII) -- replacing the manual
+    // `spin_lock`/`spin_unlock` pair.
+    // SAFETY: `disk` live.
+    let mut d = unsafe { (*disk).inner.lock() };
 
     // The spec's Section 5.2 says legacy block operations use three
     // descriptors: one for type/reserved/sector, one for the data, one
     // for a 1-byte status result.
     let mut idx = [0i32; 3];
     loop {
-        // SAFETY: `disk` live, lock held.
-        if unsafe { alloc3_desc(disk, &mut idx) } == 0 {
+        // SAFETY: `desc` live, lock held via `d`.
+        if unsafe { alloc3_desc(&mut d, desc, &mut idx) } == 0 {
             break;
         }
         // No free descriptors; wait on the per-disk queue.
         // SAFETY: `xv6_current_thread()` returns the live current thread
         // (or null, handled internally).
         unsafe { thread_state_set_uninterruptible(xv6_current_thread()) };
-        // SAFETY: `disk` live; `vdisk_lock` held (released/reacquired
-        // internally by `tq_wait`).
-        tq_wait(unsafe { &raw mut (*disk).desc_wait_queue }, unsafe { &raw mut (*disk).vdisk_lock }, ptr::null_mut());
+        // Wait on the descriptor-starvation queue: `wait_on` atomically
+        // releases THIS guard's lock, blocks on the queue, and reacquires
+        // the same lock before returning (the `tq_wait(q, &lk)` protocol,
+        // no lost-wakeup window). The raw queue pointer is formed first so
+        // no borrow of `d` is retained across the `&mut self` call.
+        let wq = &raw mut d.desc_wait_queue;
+        d.wait_on(wq, ptr::null_mut());
     }
 
     // Format the three descriptors. qemu's virtio-blk.c reads them.
@@ -934,10 +976,11 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
     // Submit only -- completion is handled by `virtio_disk_intr()`,
     // which frees the descriptor chain and signals the bio via
     // `bio_complete()`. Callers wait for I/O via `bio_await()`.
-    // SAFETY: `disk` live.
+    // SAFETY: `disk` live; `info[]` is a raw field (DMA-contaminated via
+    // `.status`), serialised by the held guard `d`.
     unsafe { (*disk).info[idx[0] as usize].done = false };
-    // SAFETY: `disk` live.
-    spin_unlock(unsafe { &raw mut (*disk).vdisk_lock });
+    // `d` drops here -> releases the lock (was the explicit `spin_unlock`).
+    drop(d);
 }
 
 /// Mirrors `virtio_disk_intr`.
@@ -947,8 +990,17 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
     // `virtio_blkdev_init` below.
     let disk = unsafe { disk_ptr(diskno) };
 
+    // Raw DMA ring pointers, copied out before the lock (device-shared
+    // pages, stay raw). `used_idx` -- the driver's *own* consume cursor --
+    // is the lock-owned state and is read/written through the guard below.
     // SAFETY: `disk` live.
-    spin_lock(unsafe { &raw mut (*disk).vdisk_lock });
+    let (desc, used) = unsafe { ((*disk).desc, (*disk).used) };
+
+    // N-R7g: acquire the lock-owns-data guard (same `spinlock_t` as the C
+    // `vdisk_lock`); releases on scope exit (RAII), replacing the manual
+    // `spin_lock`/`spin_unlock`.
+    // SAFETY: `disk` live.
+    let mut d = unsafe { (*disk).inner.lock() };
 
     // The device won't raise another interrupt until we tell it we've
     // seen this interrupt, which the following does. This may race with
@@ -966,18 +1018,21 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
     // The device increments disk->used->idx when it adds an entry to
     // the used ring.
     loop {
-        // SAFETY: `disk` live.
-        let (used_idx, dev_idx) = unsafe { ((*disk).used_idx, (*(*disk).used).idx) };
+        // `used_idx` from the guard (lock-owned cursor); `dev_idx` is the
+        // device's own index in the raw DMA `used` page.
+        // SAFETY: `used` live DMA ring.
+        let (used_idx, dev_idx) = (d.used_idx, unsafe { (*used).idx });
         if used_idx == dev_idx {
             break;
         }
         fence(Ordering::SeqCst);
-        // SAFETY: `disk` live.
-        let id = unsafe { (*(*disk).used).ring[(used_idx as usize) % NUM].id } as usize;
+        // SAFETY: `used` live DMA ring.
+        let id = unsafe { (*used).ring[(used_idx as usize) % NUM].id } as usize;
 
         // SAFETY: `id` is a device-reported descriptor index, `< NUM`
         // (the used ring only ever reports indices this driver itself
-        // published, all `< NUM`).
+        // published, all `< NUM`). `info[]` is a raw `Disk` field
+        // (DMA-contaminated via `.status`), serialised by the held guard.
         let (status, bio_ptr) = unsafe { ((*disk).info[id].status, (*disk).info[id].bio) };
 
         if status != 0 {
@@ -989,7 +1044,7 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
             });
         }
 
-        // SAFETY: `disk` live.
+        // SAFETY: `disk` live; `info[]` raw field, serialised by `d`.
         if unsafe { (*disk).info[id].done } {
             panic_fixed("virtio_disk_intr: already done");
         }
@@ -999,8 +1054,8 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
         // Clean up descriptor chain and info slot.
         // SAFETY: `disk` live.
         unsafe { (*disk).info[id].bio = ptr::null_mut() };
-        // SAFETY: `disk` live, lock held, `id` a valid chain head.
-        unsafe { free_chain(disk, id as i32) };
+        // SAFETY: `desc` live, lock held via `d`, `id` a valid chain head.
+        unsafe { free_chain(&mut d, desc, id as i32) };
 
         // Signal bio completion -- wakes any thread in `bio_await()`.
         if !bio_ptr.is_null() {
@@ -1012,13 +1067,12 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
             }
         }
 
-        // SAFETY: `disk` live.
-        unsafe { (*disk).used_idx = (*disk).used_idx.wrapping_add(1) };
+        d.used_idx = d.used_idx.wrapping_add(1);
         fence(Ordering::SeqCst);
     }
 
-    // SAFETY: `disk` live.
-    spin_unlock(unsafe { &raw mut (*disk).vdisk_lock });
+    // `d` drops here -> releases the lock (was the explicit `spin_unlock`).
+    drop(d);
 }
 
 // ===========================================================================
@@ -1163,8 +1217,30 @@ fn virtio_disk_init_one(diskno: usize) {
     // then initialise every field explicitly below.
     unsafe { memset(disk as *mut c_void, 0, core::mem::size_of::<Disk>()) };
 
-    // SAFETY: `disk` live.
-    unsafe { spin_init(&raw mut (*disk).vdisk_lock, c"virtio_disk".as_ptr() as *mut c_char) };
+    // N-R7g: install the lock-owns-data inner state. The `memset` above
+    // zeroed the `inner` slot too (which would leave a null-named lock);
+    // `ptr::write` overwrites it with a properly-named, const-initialised
+    // `SpinLock` (`SpinLock::new` writes the exact `{locked:0, name, cpu:
+    // null}` state `spin_init` would, so no runtime `spin_init` is
+    // needed). The `MaybeUninit` slot has no prior value to drop, and this
+    // runs before the disk is registered (single-threaded), so the raw
+    // write is sound. `desc_freelist`/`desc_wait_queue` are zero-initial
+    // here (`Freelist::new`/zeroed `tq_t`) and fully set up below.
+    // SAFETY: `disk` exclusively owned; `inner` slot is uninitialised
+    // MaybeUninit memory being initialised for the first time.
+    unsafe {
+        core::ptr::write(
+            &raw mut (*disk).inner,
+            SpinLock::new(
+                c"virtio_disk",
+                DiskInner {
+                    used_idx: 0,
+                    desc_freelist: Freelist::new(),
+                    desc_wait_queue: core::mem::zeroed(),
+                },
+            ),
+        );
+    }
 
     // SAFETY: `diskno` valid.
     let magic_ok = unsafe {
@@ -1254,13 +1330,25 @@ fn virtio_disk_init_one(diskno: usize) {
         // queue is ready.
         core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_READY), 1);
 
-        // all NUM descriptors start out unused.
-        (*disk).desc_freelist.init();
-        tq_init(&raw mut (*disk).desc_wait_queue, c"virtio_desc_wait".as_ptr(), &raw mut (*disk).vdisk_lock);
-
         // tell device we're completely ready.
         status |= VIRTIO_CONFIG_S_DRIVER_OK;
         core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_STATUS), status);
+    }
+
+    // all NUM descriptors start out unused; wire the descriptor-starvation
+    // queue to the disk's lock. N-R7g: the free-map + wait queue are now
+    // lock-owned, so this init goes through a guard -- `tq_init(q, name,
+    // guard.lock_ptr())` wires the queue to *this* lock, so a later
+    // `wait_on` releases/reacquires it (the exact `lock_ptr()`/`tq_init`
+    // use its doc calls out). Init-time and single-threaded, so acquiring
+    // the guard here is uncontended.
+    {
+        // SAFETY: `disk` live; `inner` was initialised above.
+        let mut d = unsafe { (*disk).inner.lock() };
+        d.desc_freelist.init();
+        let wq = &raw mut d.desc_wait_queue;
+        let lk = d.lock_ptr();
+        tq_init(wq, c"virtio_desc_wait".as_ptr(), lk);
     }
 
     virtio_blkdev_init(diskno);
