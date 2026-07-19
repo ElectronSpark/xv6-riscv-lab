@@ -42,14 +42,18 @@
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use crate::bindings::{buf, spinlock_t, thread, tq_t, xv6fs_log, xv6fs_logheader, xv6fs_superblock};
+use crate::bindings::{buf, spinlock_t, tq_t, xv6fs_logheader, xv6fs_superblock};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
-use crate::proc::{tq_bulk_move, tq_init, tq_wait, tq_wakeup_all};
+use crate::proc::{tq_bulk_move, tq_init, tq_wakeup_all};
+// N-R7b: the log's in-memory control state is now a data-owning
+// `SpinLock<LogInner>` (lock-owns-data); `tq_wait` is reached through the
+// guard's `wait_on` instead of a bare crate-path call.
+use crate::sync::SpinLock;
 
 // ===========================================================================
 // Native xv6fs log types — P3-N8 nativization (user directive: remove
@@ -100,6 +104,15 @@ pub struct Xv6fsLogHeader {
 /// per-superblock logging state for crash recovery (in-memory only;
 /// only its `lh` member's *contents* reach disk, via
 /// `__xv6fs_write_head`).
+///
+/// N-R7b: **superseded in the live code path by [`SpinLock<LogInner>`]**
+/// (lock-owns-data). This full-fat struct — with the `lock: spinlock_t`
+/// baked in as a plain field — is retained ONLY as the target of the
+/// `crate::bindings::xv6fs_log` facade re-export in `kernel/bindings.rs`
+/// (a file outside this wave's edit scope), so that facade keeps
+/// resolving. Nothing constructs or stores an `Xv6fsLog` anymore; the
+/// mounted superblock holds a `SpinLock<LogInner>` instead. The layout
+/// asserts below still pin its historical shape.
 #[repr(C, align(64))]
 #[derive(Copy, Clone)]
 pub struct Xv6fsLog {
@@ -141,6 +154,48 @@ const _: () = {
     assert!(core::mem::offset_of!(Xv6fsLog, lh) == 92, "xv6fs_log.lh offset");
 };
 
+/// The lock-protected in-memory log control state (N-R7b) — everything
+/// [`Xv6fsLog`] held **except** the `lock` field, which now lives in the
+/// enclosing [`SpinLock`] (`raw`). Stored as `SpinLock<LogInner>` in
+/// [`Xv6fsSuperblock::log`](super::superblock::Xv6fsSuperblock); every
+/// begin/end/log_write field touch goes through the guard (safe), while
+/// the commit/recovery I/O helpers reach it via
+/// [`SpinLock::data_ptr`] under the `committing`-flag protocol (they
+/// cannot hold the spinlock across sleeping `bread`/`bwrite`).
+///
+/// `lh` is the ON-DISK [`Xv6fsLogHeader`] record, rides here unchanged
+/// (same `#[repr(C)]` bytes `__xv6fs_write_head` streams to disk); the
+/// asserts below pin its offset within this in-memory struct.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct LogInner {
+    /// Per-log wait queue for `begin_op` waiters (init'd against the
+    /// enclosing `SpinLock`'s lock in [`xv6fs_initlog`]).
+    pub wait_queue: tq_t,
+    pub start: c_int,
+    pub size: c_int,
+    pub outstanding: c_int,
+    pub committing: c_int,
+    pub dev: c_int,
+    pub lh: Xv6fsLogHeader,
+}
+
+// N-R7b interior-layout proof for the de-locked inner state. Independent
+// of the enclosing `SpinLock`'s own layout; the point is to keep the
+// ON-DISK `lh` sub-record 4-aligned and contiguous with the control
+// scalars (identical to `Xv6fsLog` minus the leading 24-byte lock).
+const _: () = {
+    assert!(core::mem::align_of::<LogInner>() == 8, "LogInner alignment");
+    assert!(core::mem::offset_of!(LogInner, wait_queue) == 0, "LogInner.wait_queue offset");
+    assert!(core::mem::offset_of!(LogInner, start) == 48, "LogInner.start offset");
+    assert!(core::mem::offset_of!(LogInner, size) == 52, "LogInner.size offset");
+    assert!(core::mem::offset_of!(LogInner, outstanding) == 56, "LogInner.outstanding offset");
+    assert!(core::mem::offset_of!(LogInner, committing) == 60, "LogInner.committing offset");
+    assert!(core::mem::offset_of!(LogInner, dev) == 64, "LogInner.dev offset");
+    assert!(core::mem::offset_of!(LogInner, lh) == 68, "LogInner.lh offset (ON-DISK sub-record)");
+    assert!(core::mem::size_of::<LogInner>() == 1032, "LogInner size");
+};
+
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
@@ -157,23 +212,10 @@ unsafe extern "C" {
 
 }
 
-// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
-// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
-// this file's original extern declarations asserted `safe fn` (usual
-// FFI-facade convention). Thin wrappers preserve that safe facade for the
-// unchanged call sites.
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
-fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
-    unsafe { crate::lock::spinlock::spin_init(l, name) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
-fn spin_lock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(l) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
-fn spin_unlock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(l) }
-}
+// N-R7b: the hand-rolled `spin_init`/`spin_lock`/`spin_unlock` facade
+// wrappers are gone — the log's lock is now embedded in
+// `SpinLock<LogInner>`, so every acquire/release is the guard's `lock()`/
+// `Drop`, and the diagnostic name is set once by `SpinLock::new`.
 
 // P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
@@ -216,8 +258,8 @@ const THREAD_UNINTERRUPTIBLE: c_int = 6;
 /// their home location.
 ///
 /// # Safety
-/// `log` must point to a live `xv6fs_log`.
-unsafe fn __xv6fs_install_trans(log: *mut xv6fs_log, recovering: bool) {
+/// `log` must point to a live `LogInner`.
+unsafe fn __xv6fs_install_trans(log: *mut LogInner, recovering: bool) {
     unsafe {
         let mut tail: i32 = 0;
         while tail < (*log).lh.n {
@@ -248,8 +290,8 @@ unsafe fn __xv6fs_install_trans(log: *mut xv6fs_log, recovering: bool) {
 /// in-memory log header.
 ///
 /// # Safety
-/// `log` must point to a live `xv6fs_log`.
-unsafe fn __xv6fs_read_head(log: *mut xv6fs_log) {
+/// `log` must point to a live `LogInner`.
+unsafe fn __xv6fs_read_head(log: *mut LogInner) {
     unsafe {
         let b = bread((*log).dev as u32, (*log).start as u32);
         let lh = (*b).data as *const xv6fs_logheader;
@@ -267,8 +309,8 @@ unsafe fn __xv6fs_read_head(log: *mut xv6fs_log) {
 /// This is the true point at which the current transaction commits.
 ///
 /// # Safety
-/// `log` must point to a live `xv6fs_log`.
-unsafe fn __xv6fs_write_head(log: *mut xv6fs_log) {
+/// `log` must point to a live `LogInner`.
+unsafe fn __xv6fs_write_head(log: *mut LogInner) {
     unsafe {
         let b = bread((*log).dev as u32, (*log).start as u32);
         let hb = (*b).data as *mut xv6fs_logheader;
@@ -284,8 +326,8 @@ unsafe fn __xv6fs_write_head(log: *mut xv6fs_log) {
 }
 
 /// # Safety
-/// `log` must point to a live `xv6fs_log`.
-unsafe fn __xv6fs_recover_from_log(log: *mut xv6fs_log) {
+/// `log` must point to a live `LogInner`.
+unsafe fn __xv6fs_recover_from_log(log: *mut LogInner) {
     unsafe {
         __xv6fs_read_head(log);
         __xv6fs_install_trans(log, true); // if committed, copy from log to disk
@@ -302,8 +344,8 @@ unsafe fn __xv6fs_recover_from_log(log: *mut xv6fs_log) {
 /// Uses async writes with a final sync for better I/O batching.
 ///
 /// # Safety
-/// `log` must point to a live `xv6fs_log`.
-unsafe fn __xv6fs_write_log(log: *mut xv6fs_log) {
+/// `log` must point to a live `LogInner`.
+unsafe fn __xv6fs_write_log(log: *mut LogInner) {
     unsafe {
         let mut tail: i32 = 0;
         while tail < (*log).lh.n {
@@ -324,8 +366,8 @@ unsafe fn __xv6fs_write_log(log: *mut xv6fs_log) {
 }
 
 /// # Safety
-/// `log` must point to a live `xv6fs_log`.
-unsafe fn __xv6fs_commit(log: *mut xv6fs_log) {
+/// `log` must point to a live `LogInner`.
+unsafe fn __xv6fs_commit(log: *mut LogInner) {
     unsafe {
         if (*log).lh.n > 0 {
             __xv6fs_write_log(log); // Write modified blocks from cache to log.
@@ -349,23 +391,43 @@ pub(crate) extern "C" fn xv6fs_initlog(xv6_sb: *mut xv6fs_superblock) {
     // SAFETY: `xv6_sb` is live (caller's contract, mount-time setup with
     // no concurrent access yet).
     unsafe {
-        let log = ptr::addr_of_mut!((*xv6_sb).log);
-        let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
-
         if core::mem::size_of::<xv6fs_logheader>() >= super::BSIZE as usize {
             xv6_panic(c"xv6fs_initlog: too big logheader".as_ptr());
         }
 
-        spin_init(ptr::addr_of_mut!((*log).lock), c"xv6fs_log".as_ptr() as *mut c_char);
-        tq_init(ptr::addr_of_mut!((*log).wait_queue), c"xv6fs_log_wait".as_ptr(), ptr::addr_of_mut!((*log).lock));
-        (*log).start = (*disk_sb).logstart as c_int;
-        (*log).size = (*disk_sb).nlog as c_int;
-        (*log).dev = xv6fs_sb_dev(xv6_sb) as c_int;
-        (*log).outstanding = 0;
-        (*log).committing = 0;
-        (*log).lh.n = 0;
+        let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
+        let log_slot = ptr::addr_of_mut!((*xv6_sb).log);
 
-        __xv6fs_recover_from_log(log);
+        // The mount path zero-initialised the whole superblock, so the log
+        // slot is all-zero bytes (an unnamed, unlocked spinlock + a zeroed
+        // LogInner). Overwrite it with a properly *named* lock (the name the
+        // deadlock-panic path prints) around a zeroed LogInner. `LogInner`/
+        // `SpinLock` hold no Drop types, so `ptr::write` correctly does not
+        // drop the previous all-zero bytes. This is the runtime-alloc
+        // analogue of the console pilot's `static SpinLock::new(...)`.
+        ptr::write(log_slot, SpinLock::new(c"xv6fs_log", core::mem::zeroed::<LogInner>()));
+        let log_lock: &SpinLock<LogInner> = &*log_slot;
+
+        // Populate the control state under the guard (single-threaded at
+        // mount) and wire the per-log wait queue to THIS lock, so a later
+        // `begin_op` `wait_on(&raw mut inner.wait_queue, ..)` releases and
+        // reacquires exactly this spinlock.
+        {
+            let mut log = log_lock.lock();
+            let lock_ptr = log.lock_ptr();
+            tq_init(&raw mut log.wait_queue, c"xv6fs_log_wait".as_ptr(), lock_ptr);
+            log.start = (*disk_sb).logstart as c_int;
+            log.size = (*disk_sb).nlog as c_int;
+            log.dev = xv6fs_sb_dev(xv6_sb) as c_int;
+            log.outstanding = 0;
+            log.committing = 0;
+            log.lh.n = 0;
+        }
+
+        // Recovery replays/clears the on-disk log via sleeping bread/bwrite,
+        // so it cannot hold the spinlock; mount is single-threaded, so the
+        // lock-free `data_ptr()` access has no concurrent accessor.
+        __xv6fs_recover_from_log(log_lock.data_ptr());
     }
 }
 
@@ -377,38 +439,41 @@ pub(crate) extern "C" fn xv6fs_initlog(xv6_sb: *mut xv6fs_superblock) {
 /// `xv6_sb` must point to a live `xv6fs_superblock`.
 unsafe fn __xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock, state: c_int) -> c_int {
     unsafe {
-        let log = ptr::addr_of_mut!((*xv6_sb).log);
+        let log_lock: &SpinLock<LogInner> = &(*xv6_sb).log;
         let interruptible = state == THREAD_INTERRUPTIBLE;
         let current = xv6_current_thread();
 
-        spin_lock(ptr::addr_of_mut!((*log).lock));
+        // Acquire once; the guard is re-held across every `wait_on` (which
+        // atomically drops+reacquires this same lock), so each loop
+        // iteration re-tests `committing`/`lh.n` under the lock. The early
+        // `return`s drop the guard on the way out (== the old
+        // `spin_unlock`). `wait_on`'s `&mut self` is the freeze/noalias
+        // defense that keeps the condition re-read inside the loop.
+        let mut log = log_lock.lock();
         loop {
-            if (*log).committing != 0 {
+            if log.committing != 0 {
                 if interruptible && signal_pending(current) {
-                    spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
                 xv6_thread_state_set(current, state);
-                let ret = tq_wait(ptr::addr_of_mut!((*log).wait_queue), ptr::addr_of_mut!((*log).lock), ptr::null_mut());
+                let wq = &raw mut log.wait_queue;
+                let ret = log.wait_on(wq, ptr::null_mut());
                 if interruptible && ret != 0 && signal_pending(current) {
-                    spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
-            } else if (*log).lh.n + ((*log).outstanding + 1) * super::MAXOPBLOCKS > super::XV6FS_LOGSIZE {
+            } else if log.lh.n + (log.outstanding + 1) * super::MAXOPBLOCKS > super::XV6FS_LOGSIZE {
                 // This op might exhaust log space; wait for commit.
                 if interruptible && signal_pending(current) {
-                    spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
                 xv6_thread_state_set(current, state);
-                let ret = tq_wait(ptr::addr_of_mut!((*log).wait_queue), ptr::addr_of_mut!((*log).lock), ptr::null_mut());
+                let wq = &raw mut log.wait_queue;
+                let ret = log.wait_on(wq, ptr::null_mut());
                 if interruptible && ret != 0 && signal_pending(current) {
-                    spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
             } else {
-                (*log).outstanding += 1;
-                spin_unlock(ptr::addr_of_mut!((*log).lock));
+                log.outstanding += 1;
                 break;
             }
         }
@@ -452,22 +517,33 @@ pub(crate) extern "C" fn xv6fs_begin_op_nointr(xv6_sb: *mut xv6fs_superblock) {
 pub(crate) extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe {
-        let log = ptr::addr_of_mut!((*xv6_sb).log);
+        let log_lock: &SpinLock<LogInner> = &(*xv6_sb).log;
         let mut do_commit = false;
 
-        spin_lock(ptr::addr_of_mut!((*log).lock));
-        (*log).outstanding -= 1;
-        if (*log).committing != 0 {
-            xv6_panic(c"xv6fs: log.committing".as_ptr());
-        }
-        if (*log).outstanding == 0 {
-            do_commit = true;
-            (*log).committing = 1;
-        }
-        spin_unlock(ptr::addr_of_mut!((*log).lock));
+        {
+            let mut log = log_lock.lock();
+            log.outstanding -= 1;
+            if log.committing != 0 {
+                xv6_panic(c"xv6fs: log.committing".as_ptr());
+            }
+            if log.outstanding == 0 {
+                do_commit = true;
+                log.committing = 1;
+            }
+        } // guard dropped -> spin_unlock
 
         if do_commit {
-            __xv6fs_commit(log);
+            // Commit runs LOCK-FREE, serialised by `committing == 1`: while
+            // it holds, `begin_op` waiters block and no `log_write` can run
+            // (outstanding == 0), so the committer is the sole accessor of
+            // the log's in-memory state. It streams the log to disk across
+            // sleeping `bread`/`bwrite`, so it must NOT hold the spinlock --
+            // hence `data_ptr()`, the escape hatch for exactly this
+            // committing-flag-protected access. The lock release above and
+            // reacquire below provide the release/acquire barrier that
+            // publishes the committer's writes (e.g. `lh.n = 0`) to the next
+            // lock holder.
+            __xv6fs_commit(log_lock.data_ptr());
 
             // Drain waiters into a stack-local queue and wake them, all
             // under `log->lock`. The wake MUST happen inside the same
@@ -485,15 +561,15 @@ pub(crate) extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
             // `log->wait_queue` (migration not yet done) or has already
             // been popped by `tq_wakeup_all` (is_enqueued() == false).
             let mut temp_queue: tq_t = core::mem::zeroed();
-            tq_init(ptr::addr_of_mut!(temp_queue), c"xv6fs_log_temp".as_ptr(), ptr::null_mut());
+            tq_init(&raw mut temp_queue, c"xv6fs_log_temp".as_ptr(), ptr::null_mut());
 
-            spin_lock(ptr::addr_of_mut!((*log).lock));
-            (*log).committing = 0;
-            tq_bulk_move(ptr::addr_of_mut!(temp_queue), ptr::addr_of_mut!((*log).wait_queue));
+            let mut log = log_lock.lock();
+            log.committing = 0;
+            tq_bulk_move(&raw mut temp_queue, &raw mut log.wait_queue);
             if temp_queue.counter > 0 {
-                tq_wakeup_all(ptr::addr_of_mut!(temp_queue), 0, 0);
+                tq_wakeup_all(&raw mut temp_queue, 0, 0);
             }
-            spin_unlock(ptr::addr_of_mut!((*log).lock));
+            // guard dropped -> spin_unlock
         }
     }
 }
@@ -507,30 +583,30 @@ pub(crate) extern "C" fn xv6fs_log_write(xv6_sb: *mut xv6fs_superblock, b: *mut 
     // SAFETY: `xv6_sb`/`b` are live (caller's contract: called between
     // begin_op/end_op).
     unsafe {
-        let log = ptr::addr_of_mut!((*xv6_sb).log);
+        let log_lock: &SpinLock<LogInner> = &(*xv6_sb).log;
 
-        spin_lock(ptr::addr_of_mut!((*log).lock));
-        if (*log).lh.n >= super::XV6FS_LOGSIZE || (*log).lh.n >= (*log).size - 1 {
+        let mut log = log_lock.lock();
+        if log.lh.n >= super::XV6FS_LOGSIZE || log.lh.n >= log.size - 1 {
             xv6_panic(c"xv6fs: too big a transaction".as_ptr());
         }
-        if (*log).outstanding < 1 {
+        if log.outstanding < 1 {
             xv6_panic(c"xv6fs: log_write outside of trans".as_ptr());
         }
 
         let mut i: usize = 0;
-        while (i as i32) < (*log).lh.n {
-            if (*log).lh.block[i] == (*b).blockno as i32 {
+        while (i as i32) < log.lh.n {
+            if log.lh.block[i] == (*b).blockno as i32 {
                 // Log absorption.
                 break;
             }
             i += 1;
         }
-        (*log).lh.block[i] = (*b).blockno as i32;
-        if i as i32 == (*log).lh.n {
+        log.lh.block[i] = (*b).blockno as i32;
+        if i as i32 == log.lh.n {
             // Add new block to log?
             bpin(b);
-            (*log).lh.n += 1;
+            log.lh.n += 1;
         }
-        spin_unlock(ptr::addr_of_mut!((*log).lock));
+        // guard dropped -> spin_unlock
     }
 }

@@ -361,6 +361,35 @@ impl<T> SpinLock<T> {
             None
         }
     }
+
+    /// Raw pointer to the protected data, **bypassing the lock**.
+    ///
+    /// This is the `UnsafeCell::get`-style escape hatch: it returns
+    /// `*mut T` without acquiring the spinlock and without borrowing
+    /// `self` beyond the call, so it is the tool for the (rare) call
+    /// sites that protect the data with an *external* mutual-exclusion
+    /// protocol rather than this lock. The canonical such site is the
+    /// xv6fs log committer (`kernel/vfs/xv6fs/log.rs`): once `end_op`
+    /// has set `committing = 1` under the lock and released it, exactly
+    /// one hart runs `__xv6fs_commit`, which streams the 964-byte log
+    /// header to disk across many sleeping `bread`/`bwrite` calls -- it
+    /// therefore *cannot* hold the spinlock (spinlocks disable
+    /// interrupts and must not be held across a yield), yet the
+    /// `committing` flag guarantees no other accessor touches the data
+    /// meanwhile. The lock release/reacquire around the commit provides
+    /// the release/acquire barrier that publishes the committer's writes
+    /// to the next lock holder.
+    ///
+    /// **Caller discipline:** producing the pointer is safe (it is just
+    /// `UnsafeCell::get`), but dereferencing it is `unsafe` and sound
+    /// only while some protocol *other* than this spinlock guarantees no
+    /// other hart -- and no live [`SpinLockGuard`] on this lock --
+    /// accesses the data (for the log, the `committing` flag). Misuse
+    /// (deref while another accessor is live) is a data race.
+    #[inline]
+    pub fn data_ptr(&self) -> *mut T {
+        self.data.get()
+    }
 }
 
 /// RAII guard returned by [`SpinLock::lock`] / [`SpinLock::try_lock`].
@@ -438,6 +467,63 @@ impl<'a, T> SpinLockGuard<'a, T> {
         // guard's "lock is held by this hart" invariant, which every
         // other method (`Deref`, `Drop`, ...) relies on.
         unsafe { crate::proc::sleep_on_chan(chan, self.lock.raw.get()) };
+    }
+
+    /// The `*mut spinlock_t` embedded in this guard's [`SpinLock`] -- the
+    /// exact lock this guard holds.
+    ///
+    /// Exposed for the (few) call sites that must hand the underlying
+    /// lock to a C-ABI primitive that expects a `*mut spinlock_t` -- e.g.
+    /// wiring a `tq_t` wait queue to this lock at init time
+    /// (`tq_init(q, name, guard.lock_ptr())`), so that a later
+    /// [`wait_on`](Self::wait_on) on that queue releases and reacquires
+    /// *this* same lock. The pointer references storage embedded in the
+    /// `SpinLock` (never freed while the lock is alive) and is valid for
+    /// at least the guard's lifetime.
+    #[inline]
+    pub fn lock_ptr(&self) -> *mut crate::bindings::spinlock_t {
+        self.lock.raw.get()
+    }
+
+    /// Wait on the thread queue `q`, atomically releasing this guard's
+    /// lock and reacquiring the **same** lock before returning -- the
+    /// `tq_t` analogue of [`sleep_on`](Self::sleep_on).
+    ///
+    /// [`crate::proc::tq_wait`] enqueues the caller on `q`, then releases
+    /// this guard's spinlock and blocks as one step with respect to a
+    /// `tq_wakeup*` on `q`, so a wakeup racing the wait is never lost
+    /// (no lost-wakeup window -- same contract as `sleep(chan, &lk)`).
+    /// The lock is re-held on return, so this guard is still valid
+    /// afterward and the protected data is borrowable again; the typical
+    /// use is to re-test the wait condition in a loop. The return value
+    /// is `tq_wait`'s verbatim -- `-EINTR` when a signal interrupted an
+    /// interruptible wait, `0` otherwise -- so the caller keeps the
+    /// interruptible early-return path.
+    ///
+    /// Takes `&mut self` deliberately, for the same two reasons as
+    /// [`sleep_on`](Self::sleep_on): it ends any outstanding
+    /// `Deref`/`DerefMut` borrow of the protected data before the lock
+    /// is released, and it bars LLVM from hoisting the re-test of the
+    /// wait condition out of the loop (the freeze/noalias defense).
+    ///
+    /// **Caller discipline:** `q` must point to a live `tq_t` (typically
+    /// embedded in this lock's own guarded data, e.g.
+    /// `&raw mut inner.wait_queue`) that was `tq_init`'d against *this*
+    /// lock; `rdata` must be null or a valid writable `*mut u64`.
+    /// `tq_wait` atomically releases this guard's lock, blocks, and
+    /// reacquires it before returning, so the guard stays valid across
+    /// the wait (same contract as `sleep_on`).
+    #[inline]
+    pub fn wait_on(
+        &mut self,
+        q: *mut crate::bindings::tq_t,
+        rdata: *mut u64,
+    ) -> core::ffi::c_int {
+        // `self.lock_ptr()` is the exact lock this guard holds; `tq_wait`
+        // (itself a safe, null-tolerant primitive) releases it, blocks on
+        // `q`, then reacquires it before returning -- restoring this
+        // guard's "lock held by this hart" invariant.
+        crate::proc::tq_wait(q, self.lock_ptr(), rdata)
     }
 }
 

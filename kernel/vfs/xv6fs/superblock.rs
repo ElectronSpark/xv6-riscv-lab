@@ -166,7 +166,17 @@ pub struct Xv6fsSuperblock {
     pub blkdev: *mut blkdev_t,
     pub dirty: core::ffi::c_int,
     pub(crate) _pad0: [u64; 2],
-    pub log: crate::bindings::xv6fs_log,
+    /// Per-mount write-ahead log control state. N-R7b: lock-owns-data —
+    /// was `xv6fs_log` (a plain struct with an inline `spinlock_t` field
+    /// hand-guarded by `begin_op`/`end_op`); now a data-owning
+    /// [`SpinLock<LogInner>`](super::log::LogInner). This is an IN-MEMORY
+    /// mount struct only (allocated from the `xv6fs_sb` slab, never
+    /// written to disk at this layout — the on-disk superblock is the
+    /// separate 32-byte [`OndiskSuperblock`] in `disk_sb`), so retyping
+    /// `log` is layout-internal: `SpinLock<LogInner>` (align 8, ~1056 B)
+    /// still starts at 1536, and the align-64 `block_cache` still lands
+    /// at 2624, leaving the size/offset asserts below unchanged.
+    pub log: crate::sync::SpinLock<super::log::LogInner>,
     pub block_cache: crate::bindings::xv6fs_block_cache,
 }
 
