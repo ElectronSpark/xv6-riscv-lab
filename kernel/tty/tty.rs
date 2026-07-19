@@ -22,7 +22,7 @@
 //! the raw wait queue (`raw_wait`) — every field inside [`TtyInner`]. A
 //! `.lock()` returns a [`crate::sync::SpinLockGuard`] that
 //! `Deref`s/`DerefMut`s straight to [`TtyInner`]. [`tty_input`] and
-//! [`tty_echo_char`] both need to call into `pipe_write()`, which can
+//! [`Tty::echo_char`] both need to call into `pipe_write()`, which can
 //! sleep (the pipe may be full) — exactly like the C original, the guard
 //! is `drop()`-ed immediately before any such call and re-`.lock()`-ed
 //! immediately after; the state machine below keeps that drop/reacquire
@@ -33,7 +33,7 @@
 //! `driver_data`, `session`, `name`) stay plain `Tty` fields: they are
 //! set once at [`tty_alloc`] and read lock-free thereafter (the pipe
 //! pointers are also the `pty.rs` peer's data path; `session` is
-//! dereferenced without the lock by [`tty_signal_fg_pgroup`] and the
+//! dereferenced without the lock by [`Tty::signal_fg_pgroup`] and the
 //! ioctl paths, matching the C original).
 //!
 //! `tty_input()` is called only from thread context (never from an
@@ -529,7 +529,7 @@ const SIGTSTP: c_int = 20;
 /// `kernel/inc/tty/tty_types.h`.
 const TTY_RAW_BUF_SIZE: u32 = 256;
 
-/// Sentinel raw byte pushed through [`tty_echo_char`] for the erase
+/// Sentinel raw byte pushed through [`Tty::echo_char`] for the erase
 /// (backspace) visual sequence (`BS SPC BS`). Distinct from the literal
 /// `'\b'` (0x08) byte, which is one of the *input* erase triggers.
 const BACKSPACE: i32 = 0x100;
@@ -773,137 +773,157 @@ pub(crate) unsafe extern "C" fn tty_unref(t: *mut tty) {
 // Line-discipline flag helpers.
 //
 // N-R7h: these read `termios` flags out of the lock-guarded [`TtyInner`],
-// so they now take `&TtyInner` (obtained via the held `SpinLockGuard`'s
-// `Deref` -- passing `&guard` deref-coerces) instead of a raw `*mut tty`.
-// That both removes the `unsafe` (a plain safe field read) and makes the
-// "lock must be held" contract a borrow the caller already proves by
-// holding the guard -- mirrors the C `static inline` helpers of the same
-// name, which carried the same implicit "lock held" contract.
+// so they took `&TtyInner` (obtained via the held `SpinLockGuard`'s
+// `Deref`) instead of a raw `*mut tty` -- a plain safe field read whose
+// "lock must be held" contract is proven by the caller holding the guard.
+//
+// N-METH (goal #1): these `&TtyInner` free fns became inherent
+// [`TtyInner`] methods -- the natural receiver is exactly the guarded
+// state they read, and every caller already holds a `SpinLockGuard`, so
+// `helper(&guard)` becomes the idiomatic `guard.helper()` (method
+// resolution auto-derefs the guard to `&TtyInner`). This mirrors the C
+// `static inline` helpers of the same name, which carried the same
+// implicit "lock held" contract.
 // ===========================================================================
 
-#[inline]
-fn l_canon(t: &TtyInner) -> bool {
-    t.termios.c_lflag & ICANON != 0
-}
-#[inline]
-fn l_echo(t: &TtyInner) -> bool {
-    t.termios.c_lflag & ECHO != 0
-}
-#[inline]
-fn l_echoe(t: &TtyInner) -> bool {
-    t.termios.c_lflag & ECHOE != 0
-}
-#[inline]
-fn l_echok(t: &TtyInner) -> bool {
-    t.termios.c_lflag & ECHOK != 0
-}
-#[inline]
-fn l_isig(t: &TtyInner) -> bool {
-    t.termios.c_lflag & ISIG != 0
-}
-#[inline]
-fn i_icrnl(t: &TtyInner) -> bool {
-    t.termios.c_iflag & ICRNL != 0
-}
-#[inline]
-fn i_igncr(t: &TtyInner) -> bool {
-    t.termios.c_iflag & IGNCR != 0
-}
-#[inline]
-fn i_inlcr(t: &TtyInner) -> bool {
-    t.termios.c_iflag & INLCR != 0
-}
-#[inline]
-fn i_istrip(t: &TtyInner) -> bool {
-    t.termios.c_iflag & ISTRIP != 0
-}
-#[inline]
-fn o_opost(t: &TtyInner) -> bool {
-    t.termios.c_oflag & OPOST != 0
-}
-#[inline]
-fn o_onlcr(t: &TtyInner) -> bool {
-    t.termios.c_oflag & ONLCR != 0
+impl TtyInner {
+    #[inline]
+    fn l_canon(&self) -> bool {
+        self.termios.c_lflag & ICANON != 0
+    }
+    #[inline]
+    fn l_echo(&self) -> bool {
+        self.termios.c_lflag & ECHO != 0
+    }
+    #[inline]
+    fn l_echoe(&self) -> bool {
+        self.termios.c_lflag & ECHOE != 0
+    }
+    #[inline]
+    fn l_echok(&self) -> bool {
+        self.termios.c_lflag & ECHOK != 0
+    }
+    #[inline]
+    fn l_isig(&self) -> bool {
+        self.termios.c_lflag & ISIG != 0
+    }
+    #[inline]
+    fn i_icrnl(&self) -> bool {
+        self.termios.c_iflag & ICRNL != 0
+    }
+    #[inline]
+    fn i_igncr(&self) -> bool {
+        self.termios.c_iflag & IGNCR != 0
+    }
+    #[inline]
+    fn i_inlcr(&self) -> bool {
+        self.termios.c_iflag & INLCR != 0
+    }
+    #[inline]
+    fn i_istrip(&self) -> bool {
+        self.termios.c_iflag & ISTRIP != 0
+    }
+    #[inline]
+    fn o_opost(&self) -> bool {
+        self.termios.c_oflag & OPOST != 0
+    }
+    #[inline]
+    fn o_onlcr(&self) -> bool {
+        self.termios.c_oflag & ONLCR != 0
+    }
 }
 
 // ===========================================================================
-// Echo a character to the output pipe.
+// Echo + signal generation -- internal per-tty helpers.
+//
+// N-METH (goal #1): the two private helpers that took a raw `*mut tty`
+// (`tty_echo_char`, `tty_signal_fg_pgroup`) became inherent [`Tty`]
+// methods on `&self`. Because [`Tty`] embeds a `SpinLock` (an
+// `UnsafeCell`) it is NOT `Freeze`, so `&self` carries no `noalias`/
+// `readonly` and the interior mutation through `self.inner` is exactly
+// the `std::sync::Mutex` shared-`&self`/guarded-`&mut` pattern -- sound,
+// and no LLVM read-hoist hazard. With `&self` the receiver deref that
+// used to be `unsafe { (*t).<field> }` is a plain safe field read
+// (`self.output_pipe`, `self.session`, `self.inner`), so `echo_char`
+// loses its wide receiver `unsafe` down to the single `pipe_write` call
+// and `signal_fg_pgroup` loses `unsafe` entirely.
 // ===========================================================================
 
-/// Echo one character (or the `BACKSPACE` erase sequence) to the
-/// output pipe.
-///
-/// # Locking
-/// `guard` must be the caller's currently-held `t->lock` guard. This
-/// function drops it before calling `pipe_write()` (which can sleep if
-/// the output pipe is full) and returns a freshly re-acquired guard --
-/// the caller must use the returned guard from this point on, exactly
-/// mirroring the C original's "drop the spinlock before calling
-/// pipe_write(), re-lock after" comment.
-///
-/// # Safety
-/// `t` must be a live `tty` whose `output_pipe` is non-null.
-unsafe fn tty_echo_char<'a>(
-    t: *mut tty,
-    c: i32,
-    guard: SpinLockGuard<'a, TtyInner>,
-) -> SpinLockGuard<'a, TtyInner> {
-    let mut echobuf = [0u8; 4];
-    let mut n = 0usize;
+impl Tty {
+    /// Echo one character (or the `BACKSPACE` erase sequence) to the
+    /// output pipe.
+    ///
+    /// # Locking
+    /// `guard` must be `self`'s currently-held lock guard. This method
+    /// drops it before calling `pipe_write()` (which can sleep if the
+    /// output pipe is full) and returns a freshly re-acquired guard tied
+    /// to `&self` -- the caller must use the returned guard from this
+    /// point on, exactly mirroring the C original's "drop the spinlock
+    /// before calling pipe_write(), re-lock after" comment. The
+    /// `'a`-bound receiver/guard makes that re-acquire a *safe*
+    /// `self.inner.lock()` (was an `unsafe` raw re-deref).
+    fn echo_char<'a>(
+        &'a self,
+        c: i32,
+        guard: SpinLockGuard<'a, TtyInner>,
+    ) -> SpinLockGuard<'a, TtyInner> {
+        let mut echobuf = [0u8; 4];
+        let mut n = 0usize;
 
-    if c == BACKSPACE {
-        // BS SPC BS
-        echobuf[n] = b'\x08';
-        n += 1;
-        echobuf[n] = b' ';
-        n += 1;
-        echobuf[n] = b'\x08';
-        n += 1;
-    } else {
-        // `guard` is still held here (not yet dropped), so reading the
-        // OPOST/ONLCR flags out of the guarded state is a safe field read.
-        if o_opost(&guard) && o_onlcr(&guard) && c == b'\n' as i32 {
-            echobuf[n] = b'\r';
+        if c == BACKSPACE {
+            // BS SPC BS
+            echobuf[n] = b'\x08';
+            n += 1;
+            echobuf[n] = b' ';
+            n += 1;
+            echobuf[n] = b'\x08';
+            n += 1;
+        } else {
+            // `guard` is still held here (not yet dropped), so reading the
+            // OPOST/ONLCR flags out of the guarded state is a safe read.
+            if guard.o_opost() && guard.o_onlcr() && c == b'\n' as i32 {
+                echobuf[n] = b'\r';
+                n += 1;
+            }
+            echobuf[n] = c as u8;
             n += 1;
         }
-        echobuf[n] = c as u8;
-        n += 1;
+
+        // Drop the lock before calling pipe_write() -- it can sleep.
+        drop(guard);
+        // SAFETY: `self` is a live `Tty` (the `&self` receiver), so
+        // `self.output_pipe` is the non-null pipe installed by
+        // `tty_alloc`; `echobuf[..n]` is a valid readable buffer.
+        unsafe { pipe_write(self.output_pipe, echobuf.as_ptr() as *const c_char, n as u64, 0) };
+        // Re-acquire the same lock so the returned guard is valid for the
+        // caller to continue -- now a safe borrow of `self.inner`.
+        self.inner.lock()
     }
 
-    // Drop the lock before calling pipe_write() -- it can sleep.
-    drop(guard);
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    unsafe { pipe_write((*t).output_pipe, echobuf.as_ptr() as *const c_char, n as u64, 0) };
-    // SAFETY: `t` is caller-guaranteed live (fn doc); re-acquire the same
-    // lock so the returned guard is valid for the caller to continue.
-    unsafe { (*t).inner.lock() }
-}
-
-// ===========================================================================
-// Signal generation (foreground process group).
-// ===========================================================================
-
-/// Send a signal to the terminal's foreground process group, or to the
-/// current process if there is no session / foreground group.
-///
-/// # Safety
-/// `t` must be a live `tty`. Must be called with `t->lock` **not**
-/// held (it dereferences `t->session` without the lock, matching the
-/// C original -- see the call sites in [`tty_input`], all of which
-/// drop the lock immediately before calling this).
-unsafe fn tty_signal_fg_pgroup(t: *mut tty, signum: c_int) {
-    // SAFETY: see fn doc.
-    let sess = unsafe { (*t).session };
-    if !sess.is_null() {
-        let fg = session_get_fg_pgid(sess);
-        if fg > 0 {
-            pgroup_kill(fg, signum);
-            return;
+    /// Send a signal to the terminal's foreground process group, or to
+    /// the current process if there is no session / foreground group.
+    ///
+    /// # Locking
+    /// Must be called with `self`'s lock **not** held (it dereferences
+    /// `self.session` lock-free, matching the C original -- see the call
+    /// sites in [`tty_input`], all of which drop the guard immediately
+    /// before calling this). With `&self` the former
+    /// `unsafe { (*t).session }` is now a plain safe field read.
+    fn signal_fg_pgroup(&self, signum: c_int) {
+        let sess = self.session;
+        if !sess.is_null() {
+            // SAFETY: `sess` is non-null (checked) and, per the C
+            // original's lock-free access, a live `session` for `self`.
+            let fg = unsafe { session_get_fg_pgid(sess) };
+            if fg > 0 {
+                pgroup_kill(fg, signum);
+                return;
+            }
         }
+        // Fallback: no session or no fg group -- signal current process.
+        let cur = crate::machine::current_thread_ptr();
+        kill_proc(cur, signum);
     }
-    // Fallback: no session or no fg group -- signal current process.
-    let cur = crate::machine::current_thread_ptr();
-    kill_proc(cur, signum);
 }
 
 // ===========================================================================
@@ -922,81 +942,84 @@ unsafe fn tty_signal_fg_pgroup(t: *mut tty, signum: c_int) {
 /// readable bytes.
 pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64 {
     let n = count as usize;
-    // N-R7h: `guard` `DerefMut`s to the lock-guarded [`TtyInner`]; the
-    // flag helpers take `&guard` (deref-coerced), the raw-ring accesses go
-    // straight through it, and every former `drop`/re-`lock` at a
-    // `pipe_write`/signal point is preserved 1:1 as `drop(guard)` /
-    // `guard = (*t).inner.lock()`.
-    // SAFETY: `t` is caller-guaranteed live (fn doc); `&(*t).inner` to
-    // lock is the only pointer deref for the guard.
-    let mut guard = unsafe { (*t).inner.lock() };
+    // N-METH: bind `&Tty` once (`this`). `Tty` embeds a `SpinLock`
+    // (`UnsafeCell`) so it is NOT `Freeze` -- this shared receiver carries
+    // no `noalias`/`readonly`, and the mutation of `TtyInner` through
+    // `this.inner`'s guard is the standard `Mutex`-shared-`&self` pattern
+    // (sound; no LLVM read-hoist hazard). This turns every former
+    // `unsafe { (*t).inner.lock() }` re-lock into a safe `this.inner.lock()`
+    // and lets the two internal helpers be called as methods
+    // (`this.echo_char(..)` / `this.signal_fg_pgroup(..)`); the guard's
+    // `'this` lifetime is what makes `echo_char`'s returned guard valid.
+    // SAFETY: `t` is caller-guaranteed live (fn doc).
+    let this: &Tty = unsafe { &*t };
+    let mut guard = this.inner.lock();
 
-    for i in 0..n {
-        // SAFETY: caller guarantees `buf[..count]` is readable (fn doc).
-        let raw_byte = unsafe { *buf.add(i) } as u8;
+    // N-METH (goal #2): the manual `for i in 0..n { *buf.add(i) }` index
+    // walk became a slice iteration -- one `from_raw_parts` up front
+    // replaces `n` per-byte raw derefs.
+    // SAFETY: caller guarantees `buf[..count]` is readable (fn doc); `buf`
+    // is not mutated for the duration of this call (input-only).
+    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, n) };
+    for &raw_byte in bytes {
         let mut c = raw_byte as i32;
 
         // ---------- input flag processing ----------
 
-        if i_istrip(&guard) {
+        if guard.i_istrip() {
             c &= 0x7F;
         }
 
         if c == b'\r' as i32 {
-            if i_igncr(&guard) {
+            if guard.i_igncr() {
                 continue;
             }
-            if i_icrnl(&guard) {
+            if guard.i_icrnl() {
                 c = b'\n' as i32;
             }
         } else if c == b'\n' as i32 {
-            if i_inlcr(&guard) {
+            if guard.i_inlcr() {
                 c = b'\r' as i32;
             }
         }
 
         // ---------- signal characters ----------
 
-        if l_isig(&guard) {
+        if guard.l_isig() {
             // Reading the whole small `c_cc` array by value is a plain
             // memcpy out of the guarded termios.
             let cc = guard.termios.c_cc;
 
             if c == cc[VINTR] as i32 {
                 drop(guard);
-                // SAFETY: `t` is live; lock dropped above (fn doc of
-                // `tty_signal_fg_pgroup`).
-                unsafe { tty_signal_fg_pgroup(t, SIGINT) };
-                // SAFETY: `t` is live.
-                guard = unsafe { (*t).inner.lock() };
-                if l_echo(&guard) {
-                    // SAFETY: `t` is live.
-                    guard = unsafe { tty_echo_char(t, '^' as i32, guard) };
-                    guard = unsafe { tty_echo_char(t, 'C' as i32, guard) };
-                    guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
+                this.signal_fg_pgroup(SIGINT);
+                guard = this.inner.lock();
+                if guard.l_echo() {
+                    guard = this.echo_char('^' as i32, guard);
+                    guard = this.echo_char('C' as i32, guard);
+                    guard = this.echo_char('\n' as i32, guard);
                 }
                 continue;
             }
             if c == cc[VQUIT] as i32 {
                 drop(guard);
-                // SAFETY: as above.
-                unsafe { tty_signal_fg_pgroup(t, SIGQUIT) };
-                guard = unsafe { (*t).inner.lock() };
-                if l_echo(&guard) {
-                    guard = unsafe { tty_echo_char(t, '^' as i32, guard) };
-                    guard = unsafe { tty_echo_char(t, '\\' as i32, guard) };
-                    guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
+                this.signal_fg_pgroup(SIGQUIT);
+                guard = this.inner.lock();
+                if guard.l_echo() {
+                    guard = this.echo_char('^' as i32, guard);
+                    guard = this.echo_char('\\' as i32, guard);
+                    guard = this.echo_char('\n' as i32, guard);
                 }
                 continue;
             }
             if c == cc[VSUSP] as i32 {
                 drop(guard);
-                unsafe { tty_signal_fg_pgroup(t, SIGTSTP) };
-                guard = unsafe { (*t).inner.lock() };
-                if l_echo(&guard) {
-                    guard = unsafe { tty_echo_char(t, '^' as i32, guard) };
-                    guard = unsafe { tty_echo_char(t, 'Z' as i32, guard) };
-                    guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
+                this.signal_fg_pgroup(SIGTSTP);
+                guard = this.inner.lock();
+                if guard.l_echo() {
+                    guard = this.echo_char('^' as i32, guard);
+                    guard = this.echo_char('Z' as i32, guard);
+                    guard = this.echo_char('\n' as i32, guard);
                 }
                 continue;
             }
@@ -1004,21 +1027,21 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
 
         // ---------- canonical mode editing ----------
 
-        if l_canon(&guard) {
+        if guard.l_canon() {
             let cc = guard.termios.c_cc;
 
             // Erase (backspace / DEL).
             if c == cc[VERASE] as i32 || c == b'\x08' as i32 {
-                if l_echoe(&guard) {
-                    guard = unsafe { tty_echo_char(t, BACKSPACE, guard) };
+                if guard.l_echoe() {
+                    guard = this.echo_char(BACKSPACE, guard);
                 }
                 continue;
             }
 
             // Kill line (^U).
             if c == cc[VKILL] as i32 {
-                if l_echok(&guard) {
-                    guard = unsafe { tty_echo_char(t, '\n' as i32, guard) };
+                if guard.l_echok() {
+                    guard = this.echo_char('\n' as i32, guard);
                 }
                 continue;
             }
@@ -1027,24 +1050,24 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
             if c == cc[VEOF] as i32 {
                 drop(guard);
                 let nul: u8 = 0;
-                // SAFETY: `t` is live; lock dropped above.
+                // SAFETY: `this` is live; lock dropped above.
                 unsafe {
-                    pipe_write((*t).input_pipe, &nul as *const u8 as *const c_char, 0, 0);
+                    pipe_write(this.input_pipe, &nul as *const u8 as *const c_char, 0, 0);
                 }
-                guard = unsafe { (*t).inner.lock() };
+                guard = this.inner.lock();
                 continue;
             }
         }
 
         // ---------- echo ----------
 
-        if l_echo(&guard) {
-            guard = unsafe { tty_echo_char(t, c, guard) };
+        if guard.l_echo() {
+            guard = this.echo_char(c, guard);
         }
 
         // ---------- push character to consumer ----------
 
-        if !l_canon(&guard) {
+        if !guard.l_canon() {
             // Raw mode: store in the direct ring buffer and wake any
             // reader immediately (single-character latency). All accesses
             // are safe guarded field reads/writes through `guard`.
@@ -1062,8 +1085,9 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
             // Canonical mode: push into input pipe.
             let ch = c as u8 as c_char;
             drop(guard);
-            unsafe { pipe_write((*t).input_pipe, &ch as *const c_char, 1, 0) };
-            guard = unsafe { (*t).inner.lock() };
+            // SAFETY: `this` is live; lock dropped above.
+            unsafe { pipe_write(this.input_pipe, &ch as *const c_char, 1, 0) };
+            guard = this.inner.lock();
         }
     }
 
@@ -1089,7 +1113,7 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
     let canon = {
         // SAFETY: `t` is caller-guaranteed live (fn doc).
         let g = unsafe { (*t).inner.lock() };
-        l_canon(&g)
+        g.l_canon()
     };
 
     if canon {
@@ -1195,7 +1219,7 @@ pub(crate) unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int 
     let guard = unsafe { (*t).inner.lock() };
 
     if events & (POLLIN | POLLRDNORM) != 0 {
-        if l_canon(&guard) {
+        if guard.l_canon() {
             // Canonical mode: data ready if input pipe has bytes.
             // SAFETY: `t` is live; `input_pipe` is a plain (non-guarded)
             // field read through the raw pointer.
@@ -1240,7 +1264,7 @@ pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count
     let need_opost = {
         // SAFETY: `t` is caller-guaranteed live (fn doc).
         let g = unsafe { (*t).inner.lock() };
-        o_opost(&g) && o_onlcr(&g)
+        g.o_opost() && g.o_onlcr()
     };
 
     if !need_opost {
@@ -1285,15 +1309,18 @@ pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count
             }
         }
 
-        // Expand NL -> CRNL into a second buffer.
+        // Expand NL -> CRNL into a second buffer. N-METH (goal #2): the
+        // manual `for j in 0..batch_usize { kbuf[j] }` index walk became a
+        // slice iteration over the filled prefix (bounds checks dropped;
+        // `olen` still tracks the write cursor into `outbuf`).
         let mut outbuf = [0u8; 128];
         let mut olen = 0usize;
-        for j in 0..batch_usize {
-            if kbuf[j] == b'\n' {
+        for &byte in &kbuf[..batch_usize] {
+            if byte == b'\n' {
                 outbuf[olen] = b'\r';
                 olen += 1;
             }
-            outbuf[olen] = kbuf[j];
+            outbuf[olen] = byte;
             olen += 1;
         }
 
