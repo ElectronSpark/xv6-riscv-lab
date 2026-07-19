@@ -1325,19 +1325,25 @@ unsafe fn unregister_fs_type_locked(fs_type: *mut vfs_fs_type) {
 /// struct's first field (offset 0), so the walk casts `list_node_t`
 /// pointers to `*mut vfs_fs_type` directly.
 unsafe fn get_fs_type_locked(name: *const c_char) -> *mut vfs_fs_type {
-    unsafe {
-        let name_len = strlen(name);
-        let head = &raw mut VFS_FS_TYPES;
-        let mut pos = (*head).next;
-        while pos != head {
-            let fs_type = pos as *mut vfs_fs_type;
-            if strncmp((*fs_type).name, name, name_len) == 0 {
-                return fs_type;
-            }
-            pos = (*pos).next;
+    // SAFETY: `name` is a caller-provided C string; `strlen` reads it.
+    let name_len = unsafe { strlen(name) };
+    let head = &raw mut VFS_FS_TYPES;
+    // N-I1: the raw `(*pos).next` chase is replaced by the safe
+    // `ListIterator` (via `list_for_each!`). `vfs_fs_type.list_entry` is at
+    // offset 0 (asserted above); the walk runs under the fs-types lock the
+    // caller already holds, so no node is inserted/removed under it — a
+    // class-(A) read-only walk. Only the per-item field read stays `unsafe`
+    // (the item-deref floor: `ListIterator` yields `*mut vfs_fs_type`).
+    crate::list_for_each!(head, offset_of!(vfs_fs_type, list_entry), node, {
+        let fs_type: *mut vfs_fs_type = node;
+        // SAFETY: `fs_type` is a live `vfs_fs_type` linked on `VFS_FS_TYPES`
+        // via its offset-0 `list_entry`; `(*fs_type).name` is a stable C
+        // string set at registration. `strncmp` reads both C strings.
+        if unsafe { strncmp((*fs_type).name, name, name_len) } == 0 {
+            return fs_type;
         }
-        ptr::null_mut()
-    }
+    });
+    ptr::null_mut()
 }
 
 // `vfs_fs_type.kobj` is *not* the struct's first field (`list_entry` and
@@ -3331,40 +3337,55 @@ pub(crate) extern "C" fn vfs_dump_sb_inodes(sb: *mut vfs_superblock) {
 /// 0), so these walks cast `list_node_t` pointers directly (see the
 /// hlist-walker section doc for the same reasoning).
 pub(crate) extern "C" fn vfs_dump_inodes() {
-    unsafe {
-        crate::kprintln!("\n=== VFS Inode Dump ===");
+    crate::kprintln!("\n=== VFS Inode Dump ===");
 
-        vfs_mount_lock();
+    // SAFETY: `vfs_mount_lock`/`unlock` are the FFI mount-lock primitives;
+    // the whole walk below runs under this lock.
+    unsafe { vfs_mount_lock(); }
 
-        let fs_head = &raw mut VFS_FS_TYPES;
-        let mut fpos = (*fs_head).next;
-        while fpos != fs_head {
-            let fstype = fpos as *mut vfs_fs_type;
-            fpos = (*fpos).next;
+    let fs_head = &raw mut VFS_FS_TYPES;
+    // N-I1: outer raw `(*fpos).next` chase over the fs-type list replaced by
+    // the safe `ListIterator`. Class-(A) read-only walk under the mount lock
+    // (no fs-type is registered/unregistered under it). Item field reads keep
+    // their `unsafe` (item-deref floor). Both walks capture the next node
+    // before yielding — the same list-foreach-safe semantics the old manual
+    // `fpos = (*fpos).next` before the body provided.
+    crate::list_for_each!(fs_head, offset_of!(vfs_fs_type, list_entry), fnode, {
+        let fstype: *mut vfs_fs_type = fnode;
+        // SAFETY: `fstype` is a live `vfs_fs_type` on `VFS_FS_TYPES`
+        // (offset-0 `list_entry`); its `sb_count`/`name`/`superblocks`
+        // fields are valid under the held mount lock.
+        let (sb_count, name) = unsafe { ((*fstype).sb_count, (*fstype).name) };
+        if sb_count == 0 {
+            continue;
+        }
 
-            if (*fstype).sb_count == 0 {
-                continue;
-            }
+        crate::kprintln!(
+            "\nFilesystem type: {} (superblocks: {})",
+            crate::printf::Cs(name),
+            sb_count,
+        );
 
-            crate::kprintln!(
-                "\nFilesystem type: {} (superblocks: {})",
-                crate::printf::Cs((*fstype).name),
-                (*fstype).sb_count,
-            );
-
-            let sb_head = &raw mut (*fstype).superblocks;
-            let mut spos = (*sb_head).next;
-            while spos != sb_head {
-                let sb = spos as *mut vfs_superblock;
-                spos = (*spos).next;
-
+        // SAFETY: `superblocks` is a live, initialized list head embedded in
+        // `fstype` (offset 16), valid under the mount lock.
+        let sb_head = unsafe { &raw mut (*fstype).superblocks };
+        // N-I1: inner raw `(*spos).next` chase over the superblock sibling
+        // list replaced by the safe `ListIterator`. Class-(A) read-only walk;
+        // `dump_sb_inodes` only reads (under the sb's own rlock) and never
+        // unlinks a sibling.
+        crate::list_for_each!(sb_head, offset_of!(vfs_superblock, siblings), snode, {
+            let sb: *mut vfs_superblock = snode;
+            // SAFETY: `sb` is a live `vfs_superblock` linked via its offset-0
+            // `siblings`; the rlock/dump/unlock trio requires exactly that.
+            unsafe {
                 vfs_superblock_rlock(sb);
                 dump_sb_inodes(sb);
                 vfs_superblock_unlock(sb);
             }
-        }
+        });
+    });
 
-        vfs_mount_unlock();
-        crate::kprintln!("\n=== End of Inode Dump ===\n");
-    }
+    // SAFETY: matched with the `vfs_mount_lock()` above.
+    unsafe { vfs_mount_unlock(); }
+    crate::kprintln!("\n=== End of Inode Dump ===\n");
 }
