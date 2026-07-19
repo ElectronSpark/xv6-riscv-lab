@@ -1547,16 +1547,20 @@ fn vfs_make_absolute_path(relpath: &[c_char], relpath_len: c_int, abspath: &mut 
     let mut pathlen: usize = 0;
     abspath[pathlen] = b'/' as c_char;
     pathlen += 1;
-    for i in (0..name_count).rev() {
-        // SAFETY: `names[i]` is a live, NUL-terminated inode/mountpoint name.
-        let len = unsafe { strlen(names[i]) };
+    // N-METH goal #2: the collected component names are emitted root-first
+    // by iterating the filled prefix in reverse — a `slice::iter().rev()`
+    // over `names[..name_count]` instead of a reverse index range (the
+    // index was only ever a `names[i]` subscript). Same order, same bytes.
+    for &name in names[..name_count].iter().rev() {
+        // SAFETY: `name` is a live, NUL-terminated inode/mountpoint name.
+        let len = unsafe { strlen(name) };
         if pathlen + len + 1 >= MAXPATH {
             return neg(ENAMETOOLONG);
         }
         unsafe {
             memmove(
                 abspath.as_mut_ptr().add(pathlen) as *mut c_void,
-                names[i] as *const c_void,
+                name as *const c_void,
                 len,
             );
         }

@@ -467,61 +467,66 @@ fn fdtable_free(fdtable: *mut vfs_fdtable) {
 // Public C-ABI entry points.
 // ===========================================================================
 
-/// Core fd-allocation logic behind [`vfs_fdtable_alloc_fd_from`], factored
-/// out as a private helper returning [`KResult`] (P3-CS3: this function's
-/// only caller is in this same file, so the `Result` cascade is fully
-/// contained — see the module's Result-over-ERR_PTR note). Every early
-/// failure used to be a separate `return neg(E*)` the caller had to trust
-/// was exhaustive; here the three distinct failure modes (bad args, out of
-/// fds, OOM duplicating the file reference) are ordinary `Err` returns
-/// composed with `?`, and the one success path is the one `Ok`.
-///
-/// LOCKING: caller MUST hold `fdtable.lock` (same contract as
-/// [`vfs_fdtable_alloc_fd_from`]).
-///
-/// P3-7a: `fdtable` is a reference now (validity established once at the
-/// entry-point boundary); `file` stays raw — it goes straight into the
-/// `vfs_fdup` refcount machinery (and into the table, outliving the
-/// call), which a borrow could not honestly express.
-fn alloc_fd_from_locked(
-    fdtable: &mut VfsFdtable,
-    file: *mut vfs_file,
-    start_fd: c_int,
-) -> KResult<usize> {
-    if file.is_null() {
-        return Err(Errno::Inval);
-    }
-    if start_fd < 0 || start_fd as usize >= NOFILE {
-        return Err(Errno::Inval);
-    }
-    kassert!(
-        KSpinlock::from_bindings(ptr::addr_of_mut!(fdtable.lock)).holding(),
-        "vfs_fdtable_alloc_fd_from: fdtable lock not held"
-    );
-    // Lock held (asserted above), so these plain field reads cannot race
-    // a concurrent writer.
-    if fdtable.fd_count as usize >= NOFILE {
-        return Err(Errno::MFile); // Too many open files
-    }
-    let word = fdtable.files_bitmap[0];
-    let fd = first_clear_bit_from(word, start_fd as usize);
-    if fd < 0 || fd as usize >= NOFILE {
-        return Err(Errno::MFile); // No free file descriptor
-    }
-    let fd = fd as usize;
+// N-METH goal #1: the fd-space mutators that operate on a live, exclusively
+// borrowed `&mut VfsFdtable` are inherent methods on the struct (a purely
+// syntactic `&mut VfsFdtable` -> `&mut self` change — no aliasing shift,
+// so no Freeze-noalias exposure). The `extern "C"` entry points below stay
+// free functions (C-ABI dispatch surface) and call these methods after the
+// one raw-pointer -> `&mut` conversion at their boundary.
+impl VfsFdtable {
+    /// Core fd-allocation logic behind [`vfs_fdtable_alloc_fd_from`],
+    /// factored out as a private helper returning [`KResult`] (P3-CS3: this
+    /// method's only caller is in this same file, so the `Result` cascade
+    /// is fully contained — see the module's Result-over-ERR_PTR note).
+    /// Every early failure used to be a separate `return neg(E*)` the
+    /// caller had to trust was exhaustive; here the three distinct failure
+    /// modes (bad args, out of fds, OOM duplicating the file reference) are
+    /// ordinary `Err` returns composed with `?`, and the one success path
+    /// is the one `Ok`.
+    ///
+    /// LOCKING: caller MUST hold `self.lock` (same contract as
+    /// [`vfs_fdtable_alloc_fd_from`]).
+    ///
+    /// P3-7a / N-METH: `self` is a reference now (validity established once
+    /// at the entry-point boundary); `file` stays raw — it goes straight
+    /// into the `vfs_fdup` refcount machinery (and into the table,
+    /// outliving the call), which a borrow could not honestly express.
+    fn alloc_fd_from_locked(&mut self, file: *mut vfs_file, start_fd: c_int) -> KResult<usize> {
+        if file.is_null() {
+            return Err(Errno::Inval);
+        }
+        if start_fd < 0 || start_fd as usize >= NOFILE {
+            return Err(Errno::Inval);
+        }
+        kassert!(
+            KSpinlock::from_bindings(ptr::addr_of_mut!(self.lock)).holding(),
+            "vfs_fdtable_alloc_fd_from: fdtable lock not held"
+        );
+        // Lock held (asserted above), so these plain field reads cannot
+        // race a concurrent writer.
+        if self.fd_count as usize >= NOFILE {
+            return Err(Errno::MFile); // Too many open files
+        }
+        let word = self.files_bitmap[0];
+        let fd = first_clear_bit_from(word, start_fd as usize);
+        if fd < 0 || fd as usize >= NOFILE {
+            return Err(Errno::MFile); // No free file descriptor
+        }
+        let fd = fd as usize;
 
-    if vfs_fdup(file).is_null() {
-        return Err(Errno::NoMem); // Failed to duplicate file reference
-    }
+        if vfs_fdup(file).is_null() {
+            return Err(Errno::NoMem); // Failed to duplicate file reference
+        }
 
-    fdtable.files_bitmap[0] |= 1u64 << fd;
-    fdtable.cloexec_bitmap[0] &= !(1u64 << fd);
-    // SAFETY: `files[fd]` is a live slot of a live fdtable (reference
-    // param); publication must be a `Release` store because concurrent
-    // RCU readers load this slot without the lock.
-    unsafe { rcu_assign_file(ptr::addr_of_mut!(fdtable.files[fd]), file) };
-    fd_count_atomic(fdtable).fetch_add(1, Ordering::SeqCst);
-    Ok(fd)
+        self.files_bitmap[0] |= 1u64 << fd;
+        self.cloexec_bitmap[0] &= !(1u64 << fd);
+        // SAFETY: `files[fd]` is a live slot of a live fdtable (reference
+        // receiver); publication must be a `Release` store because
+        // concurrent RCU readers load this slot without the lock.
+        unsafe { rcu_assign_file(ptr::addr_of_mut!(self.files[fd]), file) };
+        fd_count_atomic(self).fetch_add(1, Ordering::SeqCst);
+        Ok(fd)
+    }
 }
 
 /// Allocate a file descriptor starting from a minimum fd `>= start_fd`.
@@ -548,7 +553,7 @@ pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
     // valid for the call. P3-7a boundary conversion — see the module
     // doc's aliasing caveat for the concurrent-RCU-reader approximation.
     let fdtable = unsafe { &mut *fdtable };
-    match alloc_fd_from_locked(fdtable, file, start_fd) {
+    match fdtable.alloc_fd_from_locked(file, start_fd) {
         Ok(fd) => fd as c_int,
         Err(e) => e.neg(),
     }
@@ -688,15 +693,23 @@ pub(crate) extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
     // either). The borrow ends before `fdtable_free` consumes the raw
     // pointer.
     let ft = unsafe { &mut *fdtable };
-    // First, close all open files in the range [0, NOFILE).
-    for i in 0..NOFILE {
-        let file = ft.files[i];
+    // First, close all open files in the range [0, NOFILE). N-METH goal #2:
+    // the fixed-array scan is an `iter_mut()` over the (now exclusively
+    // owned) slot array; the closed-count is tallied and applied to
+    // `fd_count` once after the walk (the per-slot `fd_count -= 1` would
+    // otherwise re-borrow `ft` mutably inside `ft.files.iter_mut()`),
+    // byte-for-byte the same final `fd_count` and same ascending
+    // `vfs_fput` order as the index loop it replaces.
+    let mut closed: c_int = 0;
+    for slot in ft.files.iter_mut() {
+        let file = *slot;
         if is_fd(file) {
             vfs_fput(file);
-            ft.files[i] = ptr::null_mut();
-            ft.fd_count -= 1;
+            *slot = ptr::null_mut();
+            closed += 1;
         }
     }
+    ft.fd_count -= closed;
 
     kassert!(ft.fd_count >= 0, "vfs_fdtable_destroy: fd_count negative");
     fdtable_free(fdtable);
