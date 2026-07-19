@@ -60,7 +60,7 @@
 //! [`session_set_ctrl_tty`] now sets both sides of the relationship and
 //! keeps a [`tty_ref`]/[`tty_unref`] pair balanced against it (so the
 //! tty cannot be freed while a session still designates it as the
-//! controlling terminal), symmetrically cleared by `__session_detach_ctrl_tty`
+//! controlling terminal), symmetrically cleared by `Session::detach_ctrl_tty`
 //! on every teardown path: replacing an already-set `ctrl_tty`,
 //! [`session_hangup`], and session finalization in [`session_unref`].
 //! See the [`session_set_ctrl_tty`] doc for the exact design.
@@ -213,6 +213,36 @@ const _: () = {
     assert!(core::mem::offset_of!(Session, fg_pgrp) == 80, "session.fg_pgrp offset");
     assert!(core::mem::offset_of!(Session, ctrl_tty) == 88, "session.ctrl_tty offset");
 };
+
+// ---------------------------------------------------------------------------
+// N-METH goal #1: the session's own field accessors as inherent methods
+// (mirrors `proc/pgroup.rs`'s `Pgroup::key`/`set_key`).
+//
+// These are the only two places in this file that dereference a `*mut session`
+// solely to read/write its cached generational key `self_sid` directly; every
+// other `self_sid` touch goes through the null-tolerant `session_key_of`
+// wrapper (which now delegates here). Turning the direct field derefs into
+// `&self`/`&mut self` methods is the sound slice of the free-fn → method
+// conversion: both call sites (`session_key_of`, `session_table_insert`) hold
+// `pid_wlock`, so the borrow is exclusive/uncontended, the reads/writes are
+// single and non-looping (no freeze/`noalias` spin-loop hazard — see the
+// `SESSION_TABLE` doc), and no synchronization changes. The `session_key_of`
+// wrapper keeps its exact null-tolerant signature, so no call site (in-file or
+// cross-crate) changes.
+impl Session {
+    /// The session's own cached generational key (`self_sid`), stamped by
+    /// [`session_table_insert`]. Read side of [`session_key_of`].
+    #[inline]
+    fn key(&self) -> Sid {
+        self.self_sid
+    }
+
+    /// Stamp the session's own cached generational key.
+    #[inline]
+    fn set_key(&mut self, sid: Sid) {
+        self.self_sid = sid;
+    }
+}
 
 // P3-1C mesh sweep: tty/tty.rs is in scope for this wave; converted from
 // `extern "C"` redeclarations to plain crate-path items (identical
@@ -520,8 +550,9 @@ fn session_table_insert(s: *mut session) -> Option<Sid> {
     // `thread.session`/`pgroup.session` back-edge accessors can stamp it in
     // O(1) (`session_key_of`) instead of an O(N) `GenTable::key_of` scan.
     // SAFETY: `s` is live and exclusively ours here — just allocated,
-    // pre-publication, under `pid_wlock`; `self_sid` is a plain aligned word.
-    unsafe { (*s).self_sid = sid };
+    // pre-publication, under `pid_wlock`; the `&mut self` `self_sid` write is
+    // uncontended.
+    unsafe { (*s).set_key(sid) };
     Some(sid)
 }
 
@@ -575,8 +606,9 @@ pub(crate) fn session_key_of(s: *mut session) -> Sid {
     match core::ptr::NonNull::new(s) {
         None => Sid::NONE,
         // SAFETY: `s` is a live `*mut session` (caller passes an owned/looked-up
-        // session under `pid_wlock`); `self_sid` is a plain aligned word read.
-        Some(nn) => unsafe { (*nn.as_ptr()).self_sid },
+        // session under `pid_wlock`); the `&self` `self_sid` read is single and
+        // non-looping.
+        Some(nn) => unsafe { (*nn.as_ptr()).key() },
     }
 }
 
@@ -811,7 +843,10 @@ pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
             // call is about to free (previously "defensive"/dead code
             // under the off-by-one bug; now the live path the last
             // dropped reference actually takes).
-            __session_detach_ctrl_tty(s);
+            // SAFETY: `pid_wlock` held (this free branch requires it) and
+            // `ref_cnt` just reached zero — sole owner, so `&mut *s` is
+            // exclusive.
+            (*s).detach_ctrl_tty();
             // Deregister from the generational session table (N-R6a) — the
             // replacement for the `session_list` unlink. This bumps the
             // slot's generation, so any outstanding `Sid` to this session
@@ -1163,25 +1198,35 @@ pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgro
 // Controlling terminal.
 // ===========================================================================
 
-/// Detach whatever controlling terminal `s` currently has (if any),
-/// clearing the tty's back-pointer and releasing the ref
-/// `session_set_ctrl_tty` took. Internal teardown helper: unlike
-/// `session_set_ctrl_tty`, it does not bail out on `s->exited` -- this
-/// is exactly what [`session_hangup`] and [`session_unref`]'s
-/// finalization branch call *while* tearing a session down.
-///
-/// # Safety
-/// `s` must be a live `session`. Caller must hold `pid_wlock`.
-unsafe fn __session_detach_ctrl_tty(s: *mut session) {
-    // SAFETY: see fn doc; `old_tty`, if non-null, was itself established
-    // as live by a prior `session_set_ctrl_tty` call (which took a
-    // `tty_ref` on it), so it is still live here.
-    unsafe {
-        let old_tty = (*s).ctrl_tty;
-        (*s).ctrl_tty = ptr::null_mut();
+impl Session {
+    /// Detach whatever controlling terminal this session currently has (if
+    /// any), clearing the tty's back-pointer and releasing the ref
+    /// `session_set_ctrl_tty` took. Internal teardown helper: unlike
+    /// `session_set_ctrl_tty`, it does not bail out on `exited` -- this
+    /// is exactly what [`session_hangup`] and [`session_unref`]'s
+    /// finalization branch call *while* tearing a session down.
+    ///
+    /// N-METH: inherent `&mut self` method (was the free fn
+    /// `__session_detach_ctrl_tty(s: *mut session)`); every caller already
+    /// holds `pid_wlock` (exclusive), and — in `session_unref`'s finalization
+    /// branch — this session's `ref_cnt` has already reached zero, so the
+    /// `&mut self` borrow is exclusive and uncontended. The `ctrl_tty`
+    /// read/clear is now a plain safe field access; the raw `tty`
+    /// back-pointer clear + [`tty_unref`] keep their `unsafe`.
+    ///
+    /// # Safety
+    /// Caller must hold `pid_wlock`.
+    unsafe fn detach_ctrl_tty(&mut self) {
+        let old_tty = self.ctrl_tty;
+        self.ctrl_tty = ptr::null_mut();
         if !old_tty.is_null() {
-            (*old_tty).session = ptr::null_mut();
-            tty_unref(old_tty);
+            // SAFETY: `old_tty` was established as live by a prior
+            // `session_set_ctrl_tty` call (which took a `tty_ref` on it), so it
+            // is still live here.
+            unsafe {
+                (*old_tty).session = ptr::null_mut();
+                tty_unref(old_tty);
+            }
         }
     }
 }
@@ -1206,7 +1251,7 @@ unsafe fn __session_detach_ctrl_tty(s: *mut session) {
 /// - Takes a [`tty_ref`] on `new_tty` for as long as `s` designates it
 ///   as the controlling terminal, and [`tty_unref`]s whatever `old_tty`
 ///   this replaces (or is cleared to null) via
-///   [`__session_detach_ctrl_tty`] -- so the tty can never be freed out
+///   [`Session::detach_ctrl_tty`] -- so the tty can never be freed out
 ///   from under a session that still points to it, and the ref/unref
 ///   pairing stays balanced no matter how many times the controlling
 ///   tty is attached, replaced, or cleared. `session_hangup` and
@@ -1235,7 +1280,8 @@ pub(crate) unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *
         if (*s).ctrl_tty == new_tty {
             return;
         }
-        __session_detach_ctrl_tty(s);
+        // SAFETY: `pid_wlock` held (asserted at fn entry) — `&mut *s` exclusive.
+        (*s).detach_ctrl_tty();
         (*s).ctrl_tty = new_tty;
         if !new_tty.is_null() {
             (*new_tty).session = s;
@@ -1355,7 +1401,7 @@ unsafe fn __hangup_signal_tg(t: *mut thread) {
 /// Mark a session as exited and send SIGHUP (then SIGCONT) to its
 /// foreground process group -- or do nothing if it has none. Also
 /// disassociates the controlling terminal (via
-/// [`__session_detach_ctrl_tty`], which also clears the tty's
+/// [`Session::detach_ctrl_tty`], which also clears the tty's
 /// back-pointer -- see the module doc's SIGINT-fix section).
 ///
 /// Called when the session leader exits or the controlling terminal is
@@ -1391,7 +1437,8 @@ pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
             });
         }
 
-        __session_detach_ctrl_tty(s);
+        // SAFETY: `pid_wlock` held (asserted above) — `&mut *s` exclusive.
+        (*s).detach_ctrl_tty();
         (*s).fg_pgrp = Pgid::NONE;
     }
 }
