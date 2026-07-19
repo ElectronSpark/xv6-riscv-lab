@@ -72,8 +72,11 @@ static int gpu_drm_mode_getcrtc(uint64 arg)
     req.x = 0;
     req.y = 0;
     req.gamma_size = GPU_DRM_GAMMA_LUT_SIZE;
-    req.mode_valid = 1;
-    gpu_drm_fill_mode(&req.mode);
+    req.mode_valid = req.fb_id != 0;
+    if (req.mode_valid)
+        gpu_drm_fill_mode(&req.mode);
+    else
+        memset(&req.mode, 0, sizeof(req.mode));
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -116,69 +119,23 @@ static void gpu_drm_connector_add_mode(
     (*count)++;
 }
 
-static uint32 gpu_drm_connector_min_u32(uint32 a, uint32 b)
-{
-    if (a == 0)
-        return b;
-    if (b == 0)
-        return a;
-    return a < b ? a : b;
-}
-
-static uint32 gpu_drm_connector_max_u32(uint32 a, uint32 b)
-{
-    return a > b ? a : b;
-}
-
 static uint32 gpu_drm_build_connector_modes(
     struct drm_mode_modeinfo_compat modes[GPU_DRM_CONNECTOR_MODE_CAP])
 {
     uint32 current_w = 0, current_h = 0;
-    uint32 host_w = 0, host_h = 0;
-    uint32 edid_w = 0, edid_h = 0, edid_refresh = 0;
-    uint32 limit_w, limit_h;
     uint32 count = 0;
 
+    /*
+     * Every mode returned by GETCONNECTOR is a promise that an atomic client
+     * may create a MODE_ID blob for it and successfully TEST_ONLY that state.
+     * The backend cannot yet carry a mode change through resize and scanout
+     * reconfiguration, so advertise only the active mode.  Listing EDID or
+     * convenience modes here while rejecting them later recreates KWin's
+     * opening-logo stall when a saved output configuration selects one.
+     */
     gpu_drm_get_mode_size(&current_w, &current_h);
-    virtio_gpu_probe_scanout(&host_w, &host_h);
-    virtio_gpu_probe_edid_mode(&edid_w, &edid_h, &edid_refresh);
-
     gpu_drm_connector_add_mode(modes, &count, current_w, current_h,
                                60000, 1);
-    if (edid_w != 0 && edid_h != 0)
-        gpu_drm_connector_add_mode(modes, &count, edid_w, edid_h,
-                                   edid_refresh, 0);
-    if (host_w != 0 && host_h != 0)
-        gpu_drm_connector_add_mode(modes, &count, host_w, host_h,
-                                   60000, 0);
-
-    limit_w = gpu_drm_connector_max_u32(current_w, host_w);
-    limit_w = gpu_drm_connector_max_u32(limit_w, edid_w);
-    limit_h = gpu_drm_connector_max_u32(current_h, host_h);
-    limit_h = gpu_drm_connector_max_u32(limit_h, edid_h);
-
-    if (limit_w == 0 || limit_h == 0) {
-        limit_w = FB_DEFAULT_WIDTH;
-        limit_h = FB_DEFAULT_HEIGHT;
-    }
-
-    if (gpu_drm_connector_min_u32(limit_w, 1920) == 1920 &&
-        gpu_drm_connector_min_u32(limit_h, 1080) == 1080)
-        gpu_drm_connector_add_mode(modes, &count, 1920, 1080, 60000, 0);
-    if (gpu_drm_connector_min_u32(limit_w, 1280) == 1280 &&
-        gpu_drm_connector_min_u32(limit_h, 800) == 800)
-        gpu_drm_connector_add_mode(modes, &count, 1280, 800, 60000, 0);
-    if (gpu_drm_connector_min_u32(limit_w, 1280) == 1280 &&
-        gpu_drm_connector_min_u32(limit_h, 720) == 720)
-        gpu_drm_connector_add_mode(modes, &count, 1280, 720, 60000, 0);
-    if (gpu_drm_connector_min_u32(limit_w, 1024) == 1024 &&
-        gpu_drm_connector_min_u32(limit_h, 768) == 768)
-        gpu_drm_connector_add_mode(modes, &count, 1024, 768, 60000, 0);
-    if (gpu_drm_connector_min_u32(limit_w, 800) == 800 &&
-        gpu_drm_connector_min_u32(limit_h, 600) == 600)
-        gpu_drm_connector_add_mode(modes, &count, 800, 600, 60000, 0);
-    gpu_drm_connector_add_mode(modes, &count, 640, 480, 60000, 0);
-
     return count;
 }
 

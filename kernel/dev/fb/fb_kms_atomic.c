@@ -487,6 +487,9 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
     int32 out_fence_fd = -1;
     struct gpu_kms_prepared_out_fence prepared_out_fence;
     struct gpu_kms_cursor_atomic_state cursor_state;
+    uint64 proposed_mode_id;
+    uint32 proposed_active;
+    uint32 proposed_primary_fb;
     int ret = 0;
 
     memset(in_fence_files, 0, sizeof(in_fence_files));
@@ -498,13 +501,6 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EFAULT;
     if ((req.flags & ~DRM_MODE_ATOMIC_FLAGS) != 0 || req.reserved != 0)
         return -EINVAL;
-    if ((req.flags & DRM_MODE_ATOMIC_NONBLOCK) != 0 &&
-        (req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0) {
-        spin_lock(&fb_state.lock);
-        fb_state.stats.kms_atomic_nonblock_rejects++;
-        spin_unlock(&fb_state.lock);
-        return -EOPNOTSUPP;
-    }
     if (req.count_objs > sizeof(obj_ids) / sizeof(obj_ids[0]))
         return -EINVAL;
     if (req.count_objs != 0 &&
@@ -533,15 +529,28 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
             return -EFAULT;
     }
 
+    for (uint32 i = 0; i < total_props; i++) {
+        if (atomic_props[i] == GPU_DRM_PROP_MODE_ID) {
+            ret = gpu_drm_validate_mode_blob(atomic_values[i]);
+            if (ret != 0)
+                return ret;
+        }
+    }
+
     spin_lock(&fb_state.lock);
     gpu_kms_cursor_atomic_snapshot_locked(&cursor_state);
+    proposed_active = fb_state.current_kms_fb_id != 0;
+    proposed_mode_id = proposed_active ? GPU_DRM_MODE_BLOB_ID : 0;
+    proposed_primary_fb = fb_state.current_kms_fb_id;
     total_props = 0;
     for (uint32 i = 0; i < req.count_objs && ret == 0; i++) {
         for (uint32 j = 0; j < prop_counts[i]; j++) {
+            uint32 prop = atomic_props[total_props + j];
+            uint64 value = atomic_values[total_props + j];
+
             ret = gpu_kms_validate_prop_locked(owner, obj_ids[i],
                                                DRM_MODE_OBJECT_ANY,
-                                               atomic_props[total_props + j],
-                                               atomic_values[total_props + j],
+                                               prop, value,
                                                &new_fb, &has_new_fb,
                                                &out_fence_ptr,
                                                in_fence_fds,
@@ -550,9 +559,22 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                                                &cursor_state);
             if (ret != 0)
                 break;
+            if (obj_ids[i] == GPU_DRM_CRTC_ID) {
+                if (prop == GPU_DRM_PROP_ACTIVE)
+                    proposed_active = (uint32)value;
+                else if (prop == GPU_DRM_PROP_MODE_ID)
+                    proposed_mode_id = value;
+            } else if (obj_ids[i] == GPU_DRM_PRIMARY_PLANE_ID &&
+                       prop == GPU_DRM_PROP_FB_ID) {
+                proposed_primary_fb = (uint32)value;
+            }
         }
         total_props += prop_counts[i];
     }
+    if (ret == 0 &&
+        ((proposed_active != 0) != (proposed_mode_id != 0) ||
+         (proposed_active != 0) != (proposed_primary_fb != 0)))
+        ret = -EINVAL;
     spin_unlock(&fb_state.lock);
     if (ret != 0)
         return ret;
@@ -581,6 +603,24 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
             return ret;
         }
         in_fence_ref_count++;
+    }
+
+    /*
+     * Compatibility path: accept KWin's ordinary unfenced NONBLOCK flips, but
+     * complete the software present synchronously below.  This is not true
+     * asynchronous DRM NONBLOCK semantics; a real input fence could sleep and
+     * remains rejected until a deferred atomic worker can retain the BO,
+     * owner, event, and fence state through completion.
+     */
+    if ((req.flags & DRM_MODE_ATOMIC_NONBLOCK) != 0 &&
+        (req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        in_fence_count != 0) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.kms_atomic_nonblock_rejects++;
+        spin_unlock(&fb_state.lock);
+        gpu_kms_put_in_fence_file_refs(in_fence_files,
+                                       in_fence_ref_count);
+        return -EOPNOTSUPP;
     }
 
     /*

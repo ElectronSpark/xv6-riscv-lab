@@ -114,6 +114,79 @@ static int gpu_drm_mode_getblob(uint64 arg)
     return 0;
 }
 
+/*
+ * Atomic clients do not reuse the driver's immutable MODE_ID blob.  libdrm
+ * creates a new property blob containing the selected connector mode and
+ * passes that returned id back in the CRTC MODE_ID property.  xv6 does not
+ * yet carry a changed mode through atomic commit into backend resize state,
+ * so accept only a dynamic copy of the active mode.  Other advertised modes
+ * must fail instead of reporting a successful-but-ignored modeset.
+ */
+static int gpu_drm_mode_timings_equal(
+    const struct drm_mode_modeinfo_compat *a,
+    const struct drm_mode_modeinfo_compat *b)
+{
+    return a != NULL && b != NULL &&
+        a->clock == b->clock &&
+        a->hdisplay == b->hdisplay &&
+        a->hsync_start == b->hsync_start &&
+        a->hsync_end == b->hsync_end &&
+        a->htotal == b->htotal &&
+        a->hskew == b->hskew &&
+        a->vdisplay == b->vdisplay &&
+        a->vsync_start == b->vsync_start &&
+        a->vsync_end == b->vsync_end &&
+        a->vtotal == b->vtotal &&
+        a->vscan == b->vscan &&
+        a->vrefresh == b->vrefresh &&
+        a->flags == b->flags;
+}
+
+static int gpu_drm_user_blob_has_size_locked(uint32 id, uint32 size)
+{
+    for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+        if (fb_state.user_blobs[i].in_use &&
+            fb_state.user_blobs[i].id == id)
+            return fb_state.user_blobs[i].data != NULL &&
+                fb_state.user_blobs[i].length == size;
+    }
+    return 0;
+}
+
+static int gpu_drm_validate_mode_blob(uint64 value)
+{
+    struct drm_mode_modeinfo_compat selected;
+    struct drm_mode_modeinfo_compat active;
+    int found = 0;
+
+    if (value == 0 || value == GPU_DRM_MODE_BLOB_ID)
+        return 0;
+    if (value > 0xffffffffULL)
+        return -EINVAL;
+
+    memset(&selected, 0, sizeof(selected));
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+        if (fb_state.user_blobs[i].in_use &&
+            fb_state.user_blobs[i].id == (uint32)value) {
+            if (fb_state.user_blobs[i].data != NULL &&
+                fb_state.user_blobs[i].length == sizeof(selected)) {
+                memmove(&selected, fb_state.user_blobs[i].data,
+                        sizeof(selected));
+                found = 1;
+            }
+            break;
+        }
+    }
+    spin_unlock(&fb_state.lock);
+    if (!found)
+        return -EINVAL;
+
+    memset(&active, 0, sizeof(active));
+    gpu_drm_fill_mode(&active);
+    return gpu_drm_mode_timings_equal(&selected, &active) ? 0 : -EINVAL;
+}
+
 static uint32 gpu_drm_alloc_user_blob_id_locked(void)
 {
     uint32 start = fb_state.next_user_blob_id;
@@ -227,6 +300,18 @@ static int gpu_drm_mode_destroyblob(uint64 arg)
     return -ENOENT;
 }
 
+/*
+ * A hardware cursor plane is meaningful only when the visible scanout is the
+ * virtio-gpu device that owns a cursor queue.  Advertising it on Bochs/BGA
+ * makes a compositor remove the cursor from software composition and then
+ * abort the whole primary-plane commit when the virtio cursor operation
+ * correctly returns -ENODEV.  Callers hold fb_state.lock.
+ */
+static int gpu_kms_cursor_plane_available_locked(void)
+{
+    return fb_state.virtio_backed && virtio_gpu_cursor_available();
+}
+
 static int gpu_drm_mode_getplaneresources(uint64 arg)
 {
     struct drm_mode_get_plane_res_compat req;
@@ -235,18 +320,22 @@ static int gpu_drm_mode_getplaneresources(uint64 arg)
         GPU_DRM_CURSOR_PLANE_ID,
     };
     uint32 copy_count;
+    uint32 plane_count;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    spin_lock(&fb_state.lock);
+    plane_count = gpu_kms_cursor_plane_available_locked() ? 2 : 1;
+    spin_unlock(&fb_state.lock);
     copy_count = req.count_planes;
-    if (copy_count > sizeof(plane_ids) / sizeof(plane_ids[0]))
-        copy_count = sizeof(plane_ids) / sizeof(plane_ids[0]);
+    if (copy_count > plane_count)
+        copy_count = plane_count;
     if (req.plane_id_ptr != 0 && copy_count != 0) {
         if (either_copyout(1, req.plane_id_ptr, plane_ids,
                            copy_count * sizeof(plane_ids[0])) < 0)
             return -EFAULT;
     }
-    req.count_planes = sizeof(plane_ids) / sizeof(plane_ids[0]);
+    req.count_planes = plane_count;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -259,21 +348,29 @@ static int gpu_drm_mode_getplane(uint64 arg)
     uint32 current_fb;
     uint32 format_count;
     uint32 copy_count;
+    int cursor_available;
+    int current_cursor_visible;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    spin_lock(&fb_state.lock);
+    cursor_available = gpu_kms_cursor_plane_available_locked();
+    current_fb = req.plane_id == GPU_DRM_CURSOR_PLANE_ID ?
+        fb_state.current_cursor_fb_id : fb_state.current_kms_fb_id;
+    current_cursor_visible = fb_state.current_cursor_visible;
+    spin_unlock(&fb_state.lock);
     if (req.plane_id == GPU_DRM_PRIMARY_PLANE_ID) {
         formats = gpu_kms_primary_scanout_formats;
         format_count =
             sizeof(gpu_kms_primary_scanout_formats) /
             sizeof(gpu_kms_primary_scanout_formats[0]);
-        current_fb = fb_state.current_kms_fb_id;
     } else if (req.plane_id == GPU_DRM_CURSOR_PLANE_ID) {
+        if (!cursor_available)
+            return -ENOENT;
         formats = gpu_kms_cursor_formats;
         format_count =
             sizeof(gpu_kms_cursor_formats) /
             sizeof(gpu_kms_cursor_formats[0]);
-        current_fb = fb_state.current_cursor_fb_id;
     } else {
         return -ENOENT;
     }
@@ -285,7 +382,7 @@ static int gpu_drm_mode_getplane(uint64 arg)
                        copy_count * sizeof(formats[0])) < 0)
         return -EFAULT;
     req.crtc_id = req.plane_id == GPU_DRM_CURSOR_PLANE_ID &&
-        !fb_state.current_cursor_visible ? 0 : GPU_DRM_CRTC_ID;
+        !current_cursor_visible ? 0 : GPU_DRM_CRTC_ID;
     req.fb_id = current_fb;
     req.possible_crtcs = 1;
     req.gamma_size = req.plane_id == GPU_DRM_PRIMARY_PLANE_ID ?
@@ -603,6 +700,11 @@ static int gpu_drm_mode_setplane(struct fb_gpu_render_owner *owner,
     if (req.flags != 0)
         return -EINVAL;
     if (req.plane_id == GPU_DRM_CURSOR_PLANE_ID) {
+        spin_lock(&fb_state.lock);
+        owned = gpu_kms_cursor_plane_available_locked();
+        spin_unlock(&fb_state.lock);
+        if (!owned)
+            return -ENOENT;
         if ((req.crtc_id == 0) != (req.fb_id == 0))
             return -EINVAL;
         if (req.crtc_id != 0 && req.crtc_id != GPU_DRM_CRTC_ID)
@@ -880,14 +982,14 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
  * it paces at one vblank.
  *
  * R5 / BUFFER LIFETIME (#1 correctness concern — host DMA into guest memory):
- * the accept path pins the BO with fb_bo_get_owned() and transfers that ref to
- * the worker, which drops it only after fb_blit_from_bo_format() returns (the
- * blit is fenced and blocks for the host ack, so the host is done reading the
- * buffer by then). fb_bo_put() frees a BO slot only when dead && refs==0, so
- * an RMFB or fd-close during an in-flight present cannot free/reuse the BO the
- * host is scanning out — it just defers the free to our put. (This same ref
- * discipline is why the pre-existing SYNCHRONOUS path is not racy either: it
- * holds an fb_bo_get_owned ref across its blit.)
+ * the accept path pins the BO with fb_bo_get_owned() while the worker queues
+ * SET_SCANOUT for every actual resource switch, followed by RESOURCE_FLUSH.
+ * Normal renderer work remains pipelined on the shared control queue, and
+ * resource destruction routes through the synchronous unref path, which
+ * drains earlier async commands before guest backing is freed.  Fenced flush
+ * and strict per-resource reuse waits remain diagnostics: the former can hang
+ * in the host virgl path, while the latter serializes normal Plasma/Chromium
+ * frames because virgl's resource list does not distinguish reads from writes.
  *
  * ORDERING / OVERLAP (req 2): a single in-flight async present per CRTC. A new
  * flip submitted while one is in flight returns -EBUSY (legacy DRM semantics
@@ -997,9 +1099,9 @@ static void gpu_kms_async_present_worker(struct work_struct *work)
     if (bo != NULL) {
         blit_ret = gpu_kms_present_blit(bo, width, height, xres, yres,
                                         pixel_format, modifier);
-        /* Host is done reading the buffer once the fenced blit returns; only
-         * now may the R5-critical BO reference be dropped. Hold window =
-         * accept-time ref (submit_ns) to this put. */
+        /* The blit queues the resource switch and flush.  Resource destruction
+         * drains that async work; this worker reference protects the
+         * accept-to-queue handoff without turning each flip into a CPU wait. */
         fb_bo_put(bo);
         put_ns = gpu_kms_monotonic_ns();
         if (put_ns > submit_ns)
@@ -1361,11 +1463,17 @@ static int gpu_drm_mode_cursor(struct fb_gpu_render_owner *owner,
     struct drm_mode_cursor2_compat req;
     int ret = 0;
     int visible;
+    int cursor_available;
     int32 x;
     int32 y;
 
     if (owner == NULL)
         return -EBADF;
+    spin_lock(&fb_state.lock);
+    cursor_available = gpu_kms_cursor_plane_available_locked();
+    spin_unlock(&fb_state.lock);
+    if (!cursor_available)
+        return -EOPNOTSUPP;
     memset(&req, 0, sizeof(req));
     if (cursor2) {
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)

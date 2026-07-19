@@ -837,27 +837,33 @@ static int virtio_gpu_resource_flush(struct virtio_gpu *g,
 }
 
 /*
- * Fire-and-forget RESOURCE_FLUSH for the bound scanout resource.
+ * Asynchronous RESOURCE_FLUSH for the bound scanout resource.
  *
  * The synchronous virtio_gpu_resource_flush() path blocks the compositor's
  * present loop on the host's flush acknowledgement, which on the WSL D3D12
  * virgl host costs ~15ms per frame and serialises the desktop at roughly half
  * the application's render rate.  Linux/Alpine instead pipelines: it posts the
  * flush and continues servicing the event loop while the host composites in
- * parallel.  This routes the flush through the single-slot async submit so the
- * present returns immediately; the next ctrlq submission drains it (waiting for
- * the prior flush only if the host has not finished yet).  Gated by the
+ * parallel.  This routes the flush through the async submit ring.  Callers that
+ * only need FIFO ordering may pass a NULL fence_out; page-flip callers request
+ * a real host-completion fence so retirement and resource teardown remain
+ * observable without blocking every compositor frame.  Gated by the
  * "virtio_gpu_async_scanout_flush" cmdline flag so the synchronous behaviour
  * remains the default.
  */
 static int virtio_gpu_resource_flush_async(struct virtio_gpu *g,
                                            struct virtio_gpu_resource *res,
                                            uint32 x, uint32 y, uint32 width,
-                                           uint32 height)
+                                           uint32 height,
+                                           uint64 *fence_out)
 {
     struct virtio_gpu_resource_flush *cmd;
     struct virtio_gpu_ctrl_hdr *resp;
     struct virtio_gpu_async_submit prep;
+    uint64 fence_id = 0;
+
+    if (fence_out != NULL)
+        *fence_out = 0;
 
     memset(&prep, 0, sizeof(prep));
     cmd = kalloc();
@@ -879,8 +885,16 @@ static int virtio_gpu_resource_flush_async(struct virtio_gpu *g,
     cmd->r.height = height;
     cmd->resource_id = res->id;
 
+    if (fence_out != NULL) {
+        spin_lock(&g->lock);
+        fence_id = ++g->next_fence_id;
+        spin_unlock(&g->lock);
+        cmd->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+        cmd->hdr.fence_id = fence_id;
+    }
+
     prep.ctx_id = 0;
-    prep.fence_id = 0;
+    prep.fence_id = fence_id;
     prep.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
     prep.expected = VIRTIO_GPU_RESP_OK_NODATA;
     prep.cmd = cmd;
@@ -896,6 +910,8 @@ static int virtio_gpu_resource_flush_async(struct virtio_gpu *g,
         virtio_gpu_async_submit_free(&prep);
         return -1;
     }
+    if (fence_out != NULL)
+        *fence_out = fence_id;
     return 0;
 }
 
@@ -1002,7 +1018,8 @@ static int virtio_gpu_transfer_to_host_3d_async(struct virtio_gpu *g,
     cmd->layer_stride = layer_stride ? layer_stride :
         (uint64)transfer_stride * res->height;
 
-    a = virtio_gpu_async_reserve_slot(g);
+    a = virtio_gpu_async_reserve_slot(
+        g, VIRTIO_GPU_ASYNC_REASON_TRANSFER);
     if (a == NULL) {
         kfree(cmd);
         kfree(resp);

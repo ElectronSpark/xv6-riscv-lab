@@ -47,7 +47,8 @@ static int gpu_kms_object_exists_locked(uint32 obj_id, uint32 obj_type,
         if (obj_id == GPU_DRM_CRTC_ID || obj_id == GPU_DRM_CONNECTOR_ID ||
             obj_id == GPU_DRM_ENCODER_ID ||
             obj_id == GPU_DRM_PRIMARY_PLANE_ID ||
-            obj_id == GPU_DRM_CURSOR_PLANE_ID ||
+            (obj_id == GPU_DRM_CURSOR_PLANE_ID &&
+             gpu_kms_cursor_plane_available_locked()) ||
             obj_id == GPU_DRM_MODE_BLOB_ID ||
             obj_id == GPU_DRM_IN_FORMATS_BLOB_ID)
             return 1;
@@ -63,7 +64,8 @@ static int gpu_kms_object_exists_locked(uint32 obj_id, uint32 obj_type,
         return obj_id == GPU_DRM_ENCODER_ID;
     case DRM_MODE_OBJECT_PLANE:
         return obj_id == GPU_DRM_PRIMARY_PLANE_ID ||
-            obj_id == GPU_DRM_CURSOR_PLANE_ID;
+            (obj_id == GPU_DRM_CURSOR_PLANE_ID &&
+             gpu_kms_cursor_plane_available_locked());
     case DRM_MODE_OBJECT_BLOB:
     case DRM_MODE_OBJECT_MODE:
         return obj_id == GPU_DRM_MODE_BLOB_ID ||
@@ -129,7 +131,7 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
         gpu_kms_push_prop(out, GPU_DRM_PROP_ACTIVE,
                           current_fb != 0 ? 1 : 0);
         gpu_kms_push_prop(out, GPU_DRM_PROP_MODE_ID,
-                          GPU_DRM_MODE_BLOB_ID);
+                          current_fb != 0 ? GPU_DRM_MODE_BLOB_ID : 0);
         gpu_kms_push_prop(out, GPU_DRM_PROP_OUT_FENCE_PTR, 0);
         break;
     case DRM_MODE_OBJECT_CONNECTOR:
@@ -263,7 +265,11 @@ static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
         }
         break;
     case GPU_DRM_PROP_MODE_ID:
-        if (value != 0 && value != GPU_DRM_MODE_BLOB_ID)
+        if (value != 0 && value != GPU_DRM_MODE_BLOB_ID &&
+            (value > 0xffffffffULL ||
+             !gpu_drm_user_blob_has_size_locked(
+                 (uint32)value,
+                 sizeof(struct drm_mode_modeinfo_compat))))
             return -EINVAL;
         break;
     case GPU_DRM_PROP_ACTIVE:
@@ -414,11 +420,24 @@ static int gpu_drm_mode_obj_setproperty(struct fb_gpu_render_owner *owner,
         return -EOPNOTSUPP;
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    if (req.prop_id == GPU_DRM_PROP_MODE_ID) {
+        ret = gpu_drm_validate_mode_blob(req.value);
+        if (ret != 0)
+            return ret;
+    }
     spin_lock(&fb_state.lock);
     ret = gpu_kms_validate_prop_locked(owner, req.obj_id, req.obj_type,
                                        req.prop_id, req.value, &new_fb,
                                        &has_new_fb, NULL, NULL, NULL, 0,
                                        NULL);
+    if (ret == 0 && req.obj_id == GPU_DRM_CRTC_ID &&
+        req.prop_id == GPU_DRM_PROP_MODE_ID &&
+        ((req.value != 0) != (fb_state.current_kms_fb_id != 0)))
+        ret = -EINVAL;
+    if (ret == 0 && req.obj_id == GPU_DRM_CRTC_ID &&
+        req.prop_id == GPU_DRM_PROP_ACTIVE && req.value != 0 &&
+        fb_state.current_kms_fb_id == 0)
+        ret = -EINVAL;
     if (ret == 0 && has_new_fb) {
         struct fb_gpu_kms_fb_entry *fb =
             new_fb == 0 ? NULL : gpu_kms_fb_lookup_locked(new_fb);

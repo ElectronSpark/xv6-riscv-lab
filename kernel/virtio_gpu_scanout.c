@@ -375,8 +375,21 @@ static int virtio_gpu_cursor_queue_init(struct virtio_gpu *g)
     spin_init(&q->lock, "virtio_gpucur");
     g->cursor_ring = qsize;
     g->cursor_visible = 0;
-    g->cursor_ready = 1;
+    __atomic_store_n(&g->cursor_ready, 1, __ATOMIC_RELEASE);
     return 0;
+}
+
+int virtio_gpu_cursor_available(void)
+{
+    struct virtio_gpu *g = &gpu;
+
+    /*
+     * Cursor queue setup is optional.  Do not advertise a KMS cursor plane
+     * merely because virtio-gpu owns the scanout: a device with no usable
+     * queue must leave cursor composition to the primary plane.
+     */
+    return __atomic_load_n(&g->initialized, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&g->cursor_ready, __ATOMIC_ACQUIRE);
 }
 
 static struct virtio_gpu_resource *
@@ -1133,7 +1146,7 @@ void virtio_gpu_init(void)
     status |= VIRTIO_CONFIG_S_DRIVER_OK;
     cfg->device_status = status;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    g->initialized = 1;
+    __atomic_store_n(&g->initialized, 1, __ATOMIC_RELEASE);
 
     /* IRQ-driven retire: must exist before the first interrupt fires. */
     virtio_gpu_reap_wq_init(g);
@@ -1546,6 +1559,7 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
     int prepared_async_flush = 0;
     int wait_holder = VIRTIO_GPU_OP_NONE;
     struct virtio_gpu_async_submit scanout_flush_prep;
+    uint64 present_fence = 0;
     uint64 total_start = 0;
     uint64 lock_acquired = 0;
     uint64 set_scanout_start;
@@ -1648,16 +1662,43 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
         ret = 0;
     } else if (already_bound && virtio_gpu_async_scanout_flush_enabled()) {
         scanout_path = 2;
-        if (prepared_async_flush)
-            ret = virtio_gpu_async_post_prepared(
-                g, &scanout_flush_prep,
-                VIRTIO_GPU_ASYNC_REASON_FLUSH, 0) == 0 ? 0 : -EIO;
-        else
-            ret = virtio_gpu_resource_flush_async(g, res, x, y, w, h) == 0 ?
+        if (prepared_async_flush) {
+            struct virtio_gpu_ctrl_hdr *hdr = scanout_flush_prep.cmd;
+
+            if (virtio_gpu_cmdline_enabled(
+                    "virtio_gpu_fenced_scanout_flush")) {
+                spin_lock(&g->lock);
+                present_fence = ++g->next_fence_id;
+                spin_unlock(&g->lock);
+                hdr->flags = VIRTIO_GPU_FLAG_FENCE;
+                hdr->fence_id = present_fence;
+                scanout_flush_prep.fence_id = present_fence;
+            }
+            if (virtio_gpu_async_post_prepared(
+                    g, &scanout_flush_prep,
+                    VIRTIO_GPU_ASYNC_REASON_FLUSH, 0) != 0) {
+                present_fence = 0;
+                ret = -EIO;
+            } else {
+                ret = 0;
+            }
+        } else {
+            ret = virtio_gpu_resource_flush_async(g, res, x, y, w, h,
+                    virtio_gpu_cmdline_enabled(
+                        "virtio_gpu_fenced_scanout_flush") ?
+                        &present_fence : NULL) == 0 ?
                   0 : -EIO;
+        }
     } else {
         scanout_path = 3;
         ret = virtio_gpu_resource_flush(g, res, x, y, w, h) == 0 ? 0 : -EIO;
+    }
+    if (ret == 0 && present_fence != 0) {
+        spin_lock(&g->lock);
+        res = virtio_gpu_lookup_resource_locked(g, resource_id);
+        if (res != NULL)
+            res->last_present_fence = present_fence;
+        spin_unlock(&g->lock);
     }
     if (scanout_perf)
         flush_ticks = r_time() - flush_start;
@@ -1707,6 +1748,7 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     uint64 completed_fence = 0;
     int should_wait_src_fence = 0;
     int ordered_async_src_fence = 0;
+    uint64 present_fence = 0;
     int ret;
     struct virtio_gpu_async_submit scanout_prep;
     static int flip_logs;
@@ -1780,7 +1822,13 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
         virtio_gpu_page_flip_scanout_set_reset(g);
     already_bound = g->bound_scanout_resource_id == res->id;
     registered = virtio_gpu_page_flip_scanout_set_contains(g, res->id);
-    if (!already_bound && !registered) {
+    /*
+     * SET_SCANOUT selects one current resource; it does not register a BO
+     * permanently.  The old cache skipped this command when KWin cycled back
+     * to one of its three previously seen buffers, leaving QEMU bound to a
+     * different BO and turning later flushes into stale/no-op presents.
+     */
+    if (!already_bound) {
         if ((virtio_gpu_cmdline_enabled(
                  "virtio_gpu_async_page_flip_scanout") ||
              virtio_gpu_cmdline_enabled("vgpu_async_pf")) &&
@@ -1819,11 +1867,21 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     }
     if (virtio_gpu_async_scanout_flush_enabled())
         ret = virtio_gpu_resource_flush_async(g, res, 0, 0,
-                                              scanout_w, scanout_h) == 0 ?
+                                              scanout_w, scanout_h,
+                virtio_gpu_cmdline_enabled(
+                    "virtio_gpu_fenced_scanout_flush") ?
+                    &present_fence : NULL) == 0 ?
             0 : -EIO;
     else
         ret = virtio_gpu_resource_flush(g, res, 0, 0, scanout_w,
                                         scanout_h) == 0 ? 0 : -EIO;
+    if (ret == 0 && present_fence != 0) {
+        spin_lock(&g->lock);
+        res = virtio_gpu_lookup_resource_locked(g, resource_id);
+        if (res != NULL)
+            res->last_present_fence = present_fence;
+        spin_unlock(&g->lock);
+    }
     if (ret == 0 && flip_logs < 8) {
         printf("virtio_gpu: page-flip present resource=%u size=%ux%u already_bound=%d registered=%d rebind=%d set_count=%u async_scanout=%d\n",
                res->id, scanout_w, scanout_h, already_bound, registered,

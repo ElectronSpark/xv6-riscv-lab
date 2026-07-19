@@ -8,6 +8,7 @@
 #include <dev/evdev.h>
 #include <lock/spinlock.h>
 #include <proc/sched.h>
+#include <timer/timer.h>
 #include <kqueue.h>
 #include <kqueue_types.h>
 #include <vfs/poll.h>
@@ -158,9 +159,23 @@ struct evdev_client {
 
 static struct evdev_state evkbd;
 static struct evdev_state evptr;
-static uint64 evdev_clock_us;
 static int evdev_ready;
 static int evdev_trace;
+
+static uint64 evdev_monotonic_us(void)
+{
+    uint64 ticks = r_time();
+    uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
+
+    /* Match CLOCK_MONOTONIC, which sys_clock_gettime() derives from the
+     * same architecture timebase.  libinput compares input_event timestamps
+     * with that clock and treats stale timestamps as an input-processing
+     * backlog.  A synthetic per-record counter starts far behind boot time
+     * and advances faster for multi-record pointer frames, producing exactly
+     * that false backlog. */
+    return (ticks / freq) * 1000000ULL +
+           ((ticks % freq) * 1000000ULL) / freq;
+}
 
 static void set_bit(uint64 *bits, uint code)
 {
@@ -191,9 +206,10 @@ static void ring_push_locked(struct evdev_state *st, uint16 type, uint16 code,
     struct input_event ev;
     struct evdev_client *client;
 
-    ev.sec = evdev_clock_us / 1000000;
-    ev.usec = evdev_clock_us % 1000000;
-    evdev_clock_us += 1000;
+    uint64 now_us = evdev_monotonic_us();
+
+    ev.sec = now_us / 1000000;
+    ev.usec = now_us % 1000000;
     ev.type = type;
     ev.code = code;
     ev.value = value;
@@ -305,17 +321,17 @@ void evdev_pointer_event(const struct mouse_event *ev)
     if (ev->flags & MOUSE_EVENT_F_ABSOLUTE) {
         int32 abs_x = (int32)(uint16)ev->dx;
         int32 abs_y = (int32)(uint16)ev->dy;
-        int32 rel_x = abs_x - evptr.abs_x;
-        int32 rel_y = abs_y - evptr.abs_y;
 
         evptr.abs_x = abs_x;
         evptr.abs_y = abs_y;
+        /* A Linux absolute tablet reports EV_ABS for an absolute packet; it
+         * does not also synthesize an EV_REL delta.  Sending both makes
+         * libinput apply the same move twice.  In Plasma that can move a
+         * click from the launcher into a newly opened menu and activate an
+         * unrelated application.  The shared device still advertises and
+         * emits EV_REL for genuine PS/2 relative packets below. */
         ring_push_locked(&evptr, EV_ABS, ABS_X, evptr.abs_x);
         ring_push_locked(&evptr, EV_ABS, ABS_Y, evptr.abs_y);
-        if (rel_x)
-            ring_push_locked(&evptr, EV_REL, REL_X, rel_x);
-        if (rel_y)
-            ring_push_locked(&evptr, EV_REL, REL_Y, rel_y);
     } else {
         if (ev->dx)
             ring_push_locked(&evptr, EV_REL, REL_X, ev->dx);

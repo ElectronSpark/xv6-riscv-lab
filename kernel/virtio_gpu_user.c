@@ -1,5 +1,5 @@
 /*
- * N1/M7 (2026-07-05): DEFAULT-OFF pending rework.  The first default-on
+ * N1/M7 (2026-07-05): initial DEFAULT-OFF rework.  The first default-on
  * battery hit `PANIC thread_queue.c:213 tq_remove: queue is empty` in
  * virtio_gpu paths (2/2 GUI runs): releasing op_lock across the
  * make-room stall allows MULTIPLE concurrent waiters on the used-ring
@@ -8,7 +8,6 @@
  * The same-binary opt-out control (unlocked_wait=0, depth 60 + poll
  * defaults on) ran a clean full video window — bisect is conclusive.
  * Re-enable only after making the used-ring wait multi-waiter-safe.
- * Opt in with virtio_gpu_submit_unlocked_wait=1 for that rework's A/B.
  *
  * 2026-07-05 redesign (B2/B3/progress, still default-OFF pending A/B):
  * the reaper is now TOTAL (sync completions route through the queue's
@@ -19,6 +18,12 @@
  * of occupancy.  These changes run unconditionally and are safe in
  * default mode; this flag still only controls whether ctx_submit
  * releases op_lock across make-room stalls.
+ *
+ * 2026-07-19 validation: the multi-waiter-safe queue, reason-specific submit
+ * accounting, posted-age watchdog, and abort generation pass the SDL hover
+ * workload.  The reproducible SDL/virgl launcher now enables
+ * virtio_gpu_submit_unlocked_wait=1; an explicit zero remains the same-binary
+ * diagnostic control.
  */
 static int virtio_gpu_submit_unlocked_wait_enabled(void)
 {
@@ -28,6 +33,32 @@ static int virtio_gpu_submit_unlocked_wait_enabled(void)
 
     if (!initialized) {
         enabled = cmdline_get_param("virtio_gpu_submit_unlocked_wait",
+                                    value, sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+/*
+ * Diagnostic only.  Virgl's submit resource list is a reachability list, not
+ * a read/write access mask.  Treating every listed resource as a write hazard
+ * serialized ordinary Plasma/Chromium frames behind nearly every scanout
+ * flush and reduced 720p presentation from the 50--60 fps range to 37.8 fps.
+ * Keep the strict policy available for an A/B together with
+ * virtio_gpu_fenced_scanout_flush=1, but leave normal presentation pipelined
+ * like Linux: SET_SCANOUT + RESOURCE_FLUSH stay ordered on the control queue
+ * and a synchronous RESOURCE_UNREF drains outstanding async work before
+ * freeing a resource.
+ */
+static int virtio_gpu_present_reuse_wait_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("virtio_gpu_present_reuse_wait",
                                     value, sizeof(value)) == 0 &&
             value[0] != '0' && value[0] != 'n' && value[0] != 'N';
         initialized = 1;
@@ -277,6 +308,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     struct virtio_gpu_context *ctx;
     struct virtio_gpu_async_submit prep;
     uint64 fence_id;
+    uint64 present_wait_fence;
     int trace = virtio_gpu_submit_trace_collect_enabled();
     uint64 trace_start = trace ? r_time() : 0;
     uint64 trace_lock_start = 0;
@@ -378,6 +410,47 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     if (trace)
         virtio_gpu_submit_trace_set_current(g, owner_id, owner_tgid, ctx_id,
                                             shape);
+    /* Strict hazard experiment only; see the policy comment above. */
+    while (virtio_gpu_present_reuse_wait_enabled()) {
+        uint64 completed_fence;
+
+        present_wait_fence = 0;
+        spin_lock(&g->lock);
+        completed_fence = g->stats.last_fence;
+        if (resources != NULL) {
+            for (uint32 i = 0; i < resource_count; i++) {
+                struct virtio_gpu_resource *res;
+
+                if (resources[i] == 0)
+                    continue;
+                res = virtio_gpu_lookup_resource_locked(g, resources[i]);
+                if (res != NULL &&
+                    (allow_imported_resources ||
+                     virtio_gpu_owner_matches(res->owner_id,
+                                              res->owner_tgid,
+                                              owner_id, owner_tgid) ||
+                     virtio_gpu_resource_context_attached_locked(res,
+                                                                 ctx_id)) &&
+                    res->last_present_fence > completed_fence &&
+                    res->last_present_fence > present_wait_fence)
+                    present_wait_fence = res->last_present_fence;
+            }
+        }
+        spin_unlock(&g->lock);
+        if (present_wait_fence == 0)
+            break;
+
+        if (trace)
+            virtio_gpu_submit_trace_clear_current(g);
+        virtio_gpu_op_unlock(g);
+        ret = virtio_gpu_drain_async_until_fence(g, present_wait_fence);
+        virtio_gpu_op_lock(g, VIRTIO_GPU_OP_SUBMIT_3D);
+        if (trace)
+            virtio_gpu_submit_trace_set_current(g, owner_id, owner_tgid,
+                                                ctx_id, shape);
+        if (ret != 0)
+            goto out_unlock_submit;
+    }
     if (resources != NULL) {
         for (uint32 i = 0; i < resource_count; i++) {
             struct virtio_gpu_resource *res;

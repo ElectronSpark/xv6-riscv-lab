@@ -28,6 +28,7 @@
 #include <mm/rmap.h>
 #include <mm/vm.h>
 #include <proc/thread.h>
+#include <proc/sched.h>
 #include <proc/workqueue.h>
 #include "arch/vm.h"
 
@@ -554,6 +555,10 @@ struct virtio_gpu_resource {
     uint64 host_visible_size;
     uint32 host_visible_map_info;
     uint64 last_submit_fence;
+    /* Host-read completion for the most recent scanout flush.  This is kept
+     * for the strict reuse-wait diagnostic; normal presentation relies on
+     * fenced control-queue ordering and the synchronous destruction drain. */
+    uint64 last_present_fence;
     uint32 export_refs;
     int destroy_pending;
 };
@@ -709,6 +714,7 @@ enum virtio_gpu_async_slot_state {
 
 struct virtio_gpu_async_submit {
     int state; /* enum virtio_gpu_async_slot_state; must stay first */
+    enum virtio_gpu_async_reason reason;
     uint32 ctx_id;
     uint64 fence_id;
     uint32 type;
@@ -861,8 +867,18 @@ struct virtio_gpu {
      * erases.
      */
     uint32 async_count;
+    /* SUBMIT_3D subset of async_count.  Display flushes and scanout changes
+     * must not consume the renderer's independently configured submit
+     * admission depth.  Written under ctrlq.lock; readers use atomic loads. */
+    uint32 async_submit_count;
     uint32 async_abandoned;
     uint64 async_retire_seq;
+    /* Monotonic timeout-recovery generation.  A drain snapshots this so a
+     * watchdog quarantine cannot masquerade as successful completion. */
+    uint64 async_abort_seq;
+    /* One coalesced sched_timer callback covers the whole async ring.  The
+     * flag is serialized by ctrlq.lock, including callback disarm/rearm. */
+    uint32 async_watchdog_armed;
     /*
      * Usable async ring slots: min(VIRTIO_GPU_ASYNC_MAX_DEPTH,
      * (negotiated queue size - DESC_BASE) / DESC_PER_SLOT).  Written
@@ -2529,6 +2545,25 @@ static uint32 virtio_gpu_wait_window_ms(void)
                                    VIRTIO_GPU_IRQ_WAIT_MS_MAX);
 }
 
+/*
+ * Synchronous commands retain the optional long irq_wait_ms window because a
+ * cold host shader/compiler operation can legitimately take seconds.  Async
+ * queue admission and drains need a much tighter hang bound: letting one lost
+ * virgl fence inherit a 60-second warm-up allowance freezes every later GUI
+ * submit that reaches the admission limit.  Keep the historical five-second
+ * driver deadline by default, allow an explicit diagnostic override, and
+ * never exceed the enclosing synchronous deadline.
+ */
+static uint32 virtio_gpu_async_wait_window_ms(void)
+{
+    uint32 total = virtio_gpu_wait_window_ms();
+    uint32 async = virtio_gpu_cmdline_uint(
+        "virtio_gpu_async_stall_ms", VIRTIO_GPU_IRQ_WAIT_MS,
+        VIRTIO_GPU_IRQ_WAIT_MS_MAX);
+
+    return async < total ? async : total;
+}
+
 static uint32 virtio_gpu_wait_budget_remaining(uint64 start_jiffs,
                                                uint32 total_ms)
 {
@@ -3618,7 +3653,8 @@ static int virtio_gpu_async_validate_retire(struct virtio_gpu *g,
         } else {
             spin_lock(&g->lock);
             g->stats.fences++;
-            g->stats.last_fence = a->fence_id;
+            if (a->fence_id > g->stats.last_fence)
+                g->stats.last_fence = a->fence_id;
             spin_unlock(&g->lock);
         }
     }
@@ -3765,6 +3801,8 @@ static int virtio_gpu_async_reap_completed_reaplocked(
             continue;
         }
 
+        enum virtio_gpu_async_reason retired_reason = a->reason;
+
         virtio_gpu_drain_sample_count(sample, a->type);
         if (virtio_gpu_async_validate_retire(g, a) != 0)
             ret = -1;
@@ -3773,6 +3811,8 @@ static int virtio_gpu_async_reap_completed_reaplocked(
          * progress waiters promptly (they poll retire_seq anyway). */
         intena = spin_lock_irqsave(&q->lock);
         g->async_count--;
+        if (retired_reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D)
+            g->async_submit_count--;
         g->async_retire_seq++;
         complete_all(&g->async_wait);
         spin_unlock_irqrestore(&q->lock, intena);
@@ -3853,8 +3893,33 @@ out:
     return ret;
 }
 
+/* Caller holds async_reap_serialize. */
+static uint32
+virtio_gpu_async_oldest_posted_age_ms_reaplocked(struct virtio_gpu *g,
+                                                  uint64 now)
+{
+    uint64 oldest = 0;
+
+    for (int i = 0; i < VIRTIO_GPU_ASYNC_MAX_DEPTH; i++) {
+        struct virtio_gpu_async_submit *a = &g->async_ring[i];
+
+        if (__atomic_load_n(&a->state, __ATOMIC_ACQUIRE) !=
+            VIRTIO_GPU_ASYNC_SLOT_POSTED || a->posted_ticks == 0)
+            continue;
+        if (oldest == 0 || a->posted_ticks < oldest)
+            oldest = a->posted_ticks;
+    }
+    if (oldest == 0 || now <= oldest)
+        return 0;
+
+    uint64 age_ms = virtio_gpu_ticks_to_us(now - oldest) / 1000ULL;
+    return age_ms > 0xffffffffULL ? 0xffffffffU : (uint32)age_ms;
+}
+
 /*
- * Abandon all outstanding async slots after a host timeout.
+ * Abandon all outstanding async slots after the oldest posted command has
+ * exceeded min_age_ms.  Returns one only when a still-device-owned command
+ * was actually quarantined.
  *
  * B3 fix: slots whose commands were POSTED to the device are NOT freed —
  * the device may still DMA into their cmd/data/resp buffers and their
@@ -3868,13 +3933,13 @@ out:
  * Lock order: async_reap_serialize -> { g->lock | q->lock } (never
  * nested with each other here).
  */
-static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
+static int virtio_gpu_async_abort_expired(struct virtio_gpu *g,
+                                          uint32 min_age_ms)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
+    uint32 oldest_age_ms;
+    int aborted = 0;
     int intena;
-
-    virtio_gpu_count_timeout(g);
-    virtio_gpu_count_failure(g);
 
     /* Abort walks the POSTED population wholesale — it must never run
      * concurrently with a reaper mid-retire on one of the slots. */
@@ -3883,6 +3948,14 @@ static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
     /* First consume everything that actually completed, so only slots
      * the device still owns are abandoned. */
     (void)virtio_gpu_async_reap_completed_reaplocked(g, NULL);
+    oldest_age_ms = virtio_gpu_async_oldest_posted_age_ms_reaplocked(
+        g, r_time());
+    if (oldest_age_ms < min_age_ms) {
+        mutex_unlock(&g->async_reap_serialize);
+        return 0;
+    }
+    virtio_gpu_count_timeout(g);
+    virtio_gpu_count_failure(g);
 
     /*
      * A host stall wedges the shared control queue, but only the contexts that
@@ -3911,8 +3984,13 @@ static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
 
         intena = spin_lock_irqsave(&q->lock);
         if (a->state == VIRTIO_GPU_ASYNC_SLOT_POSTED) {
+            if (!aborted)
+                g->async_abort_seq++;
+            aborted = 1;
             a->state = VIRTIO_GPU_ASYNC_SLOT_ABANDONED;
             g->async_count--;
+            if (a->reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D)
+                g->async_submit_count--;
             g->async_abandoned++;
             g->async_retire_seq++;
             complete_all(&g->async_wait);
@@ -3920,22 +3998,113 @@ static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
         spin_unlock_irqrestore(&q->lock, intena);
     }
     mutex_unlock(&g->async_reap_serialize);
+    return aborted;
+}
+
+/*
+ * Age of the oldest device-owned async command.  The hang budget begins when
+ * a command is posted, not when a later submit finally encounters admission
+ * pressure.  Without this correction a command that was already 15 seconds
+ * old could inherit a fresh 60-second wait and produce the observed ~75-second
+ * desktop freeze.
+ */
+static uint32 virtio_gpu_async_oldest_posted_age_ms(struct virtio_gpu *g)
+{
+    uint32 age_ms;
+
+    mutex_lock(&g->async_reap_serialize);
+    age_ms = virtio_gpu_async_oldest_posted_age_ms_reaplocked(g, r_time());
+    mutex_unlock(&g->async_reap_serialize);
+    return age_ms;
+}
+
+static uint32 virtio_gpu_async_wait_budget_remaining(
+    struct virtio_gpu *g, uint64 start_jiffs, uint32 total_ms)
+{
+    uint32 loop_remaining =
+        virtio_gpu_wait_budget_remaining(start_jiffs, total_ms);
+    uint32 oldest_age_ms = virtio_gpu_async_oldest_posted_age_ms(g);
+    uint32 age_remaining = oldest_age_ms >= total_ms ?
+        0 : total_ms - oldest_age_ms;
+
+    return age_remaining < loop_remaining ? age_remaining : loop_remaining;
+}
+
+static void virtio_gpu_async_watchdog_timer(void *data);
+
+static void virtio_gpu_async_watchdog_schedule(struct virtio_gpu *g,
+                                                uint32 delay_ms)
+{
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    int intena;
+
+    if (delay_ms == 0)
+        delay_ms = 1;
+    if (sched_timer_add(virtio_gpu_async_watchdog_timer, g, delay_ms) == 0)
+        return;
+
+    /* Admission waits still retain the same timeout as a fallback.  Clear
+     * the coalescing flag so a later post can retry timer allocation. */
+    intena = spin_lock_irqsave(&q->lock);
+    g->async_watchdog_armed = 0;
+    spin_unlock_irqrestore(&q->lock, intena);
+    printf("virtio_gpu: async watchdog timer unavailable\n");
+}
+
+/*
+ * Active async-ring hangcheck.  This is one coalesced timer for the oldest
+ * device-owned command, not one timer per frame.  It makes timeout detection
+ * independent of a later KMS or renderer caller reaching admission pressure.
+ */
+static void virtio_gpu_async_watchdog_timer(void *data)
+{
+    struct virtio_gpu *g = (struct virtio_gpu *)data;
+    struct virtio_gpu_queue *q;
+    uint32 budget_ms;
+    uint32 oldest_age_ms;
+    uint32 delay_ms;
+    uint32 count;
+    int intena;
+
+    if (g == NULL)
+        return;
+    q = &g->ctrlq;
+    budget_ms = virtio_gpu_async_wait_window_ms();
+
+    (void)virtio_gpu_async_abort_expired(g, budget_ms);
+    (void)virtio_gpu_async_reap_completed(g);
+    oldest_age_ms = virtio_gpu_async_oldest_posted_age_ms(g);
+
+    /* Serialize disarm with posts.  If a post wins q->lock first, count is
+     * nonzero and this callback remains responsible for rearming. */
+    intena = spin_lock_irqsave(&q->lock);
+    count = g->async_count;
+    if (count == 0) {
+        g->async_watchdog_armed = 0;
+        spin_unlock_irqrestore(&q->lock, intena);
+        return;
+    }
+    delay_ms = oldest_age_ms >= budget_ms ? 1 : budget_ms - oldest_age_ms;
+    spin_unlock_irqrestore(&q->lock, intena);
+    virtio_gpu_async_watchdog_schedule(g, delay_ms);
 }
 
 static int virtio_gpu_drain_async_submit_sample(
     struct virtio_gpu *g, int wait,
     struct virtio_gpu_async_drain_sample *sample)
 {
+    uint64 abort_seq = __atomic_load_n(&g->async_abort_seq,
+                                       __ATOMIC_ACQUIRE);
     int ret = virtio_gpu_async_reap_completed_sample(g, sample);
 
     if (!wait)
         return ret;
 
     uint64 budget_start = get_jiffs();
-    uint32 budget_total = virtio_gpu_wait_window_ms();
+    uint32 budget_total = virtio_gpu_async_wait_window_ms();
     while (__atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) > 0) {
-        uint32 remaining =
-            virtio_gpu_wait_budget_remaining(budget_start, budget_total);
+        uint32 remaining = virtio_gpu_async_wait_budget_remaining(
+            g, budget_start, budget_total);
         if (remaining == 0 ||
             !virtio_gpu_async_wait_progress(g, remaining)) {
             /* Progress is snapshot-based; reap and re-check once before
@@ -3945,12 +4114,18 @@ static int virtio_gpu_drain_async_submit_sample(
                 ret = -1;
             if (__atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) == 0)
                 break;
-            virtio_gpu_async_abort_all(g);
-            return -1;
+            if (virtio_gpu_async_abort_expired(g, budget_total))
+                return -1;
+            /* The oldest command retired at the deadline and only younger
+             * work remains.  Give that new oldest command its own budget. */
+            budget_start = get_jiffs();
+            continue;
         }
         if (virtio_gpu_async_reap_completed_sample(g, sample) != 0)
             ret = -1;
     }
+    if (__atomic_load_n(&g->async_abort_seq, __ATOMIC_ACQUIRE) != abort_seq)
+        ret = -1;
     return ret;
 }
 
@@ -3962,20 +4137,28 @@ static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait)
 static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
                                               uint64 fence_id)
 {
+    uint64 abort_seq = __atomic_load_n(&g->async_abort_seq,
+                                       __ATOMIC_ACQUIRE);
     int ret = virtio_gpu_async_reap_completed(g);
     uint64 done;
 
     uint64 budget_start = get_jiffs();
-    uint32 budget_total = virtio_gpu_wait_window_ms();
+    uint32 budget_total = virtio_gpu_async_wait_window_ms();
     for (;;) {
         spin_lock(&g->lock);
         done = g->stats.last_fence;
         spin_unlock(&g->lock);
         if (done >= fence_id ||
-            __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) == 0)
+            __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) == 0) {
+            if (__atomic_load_n(&g->async_abort_seq,
+                                __ATOMIC_ACQUIRE) != abort_seq)
+                ret = -1;
+            if (done < fence_id)
+                ret = -1;
             return ret;
-        uint32 remaining =
-            virtio_gpu_wait_budget_remaining(budget_start, budget_total);
+        }
+        uint32 remaining = virtio_gpu_async_wait_budget_remaining(
+            g, budget_start, budget_total);
         if (remaining == 0 ||
             !virtio_gpu_async_wait_progress(g, remaining)) {
             /* Reap and re-check once before declaring the queue wedged
@@ -3987,10 +4170,18 @@ static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
             done = g->stats.last_fence;
             spin_unlock(&g->lock);
             if (done >= fence_id ||
-                __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) == 0)
+                __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) == 0) {
+                if (__atomic_load_n(&g->async_abort_seq,
+                                    __ATOMIC_ACQUIRE) != abort_seq)
+                    ret = -1;
+                if (done < fence_id)
+                    ret = -1;
                 return ret;
-            virtio_gpu_async_abort_all(g);
-            return -1;
+            }
+            if (virtio_gpu_async_abort_expired(g, budget_total))
+                return -1;
+            budget_start = get_jiffs();
+            continue;
         }
         if (virtio_gpu_async_reap_completed(g) != 0)
             ret = -1;
@@ -4004,15 +4195,20 @@ static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
  * shrink the usable ring until the device returns them).  Lock-free
  * hint reads — exactness is enforced by reserve_slot under q->lock.
  */
-static int virtio_gpu_async_room_available(struct virtio_gpu *g, int depth)
+static int virtio_gpu_async_room_available(
+    struct virtio_gpu *g, int depth, enum virtio_gpu_async_reason reason)
 {
     uint32 count = __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE);
+    uint32 admitted = count;
     uint32 abandoned = __atomic_load_n(&g->async_abandoned,
                                        __ATOMIC_ACQUIRE);
 
     if (depth <= 0 || g->async_capacity <= 0)
         return 0;
-    return (int)count < depth &&
+    if (reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D)
+        admitted = __atomic_load_n(&g->async_submit_count,
+                                   __ATOMIC_ACQUIRE);
+    return (int)admitted < depth &&
            count + abandoned < (uint32)g->async_capacity;
 }
 
@@ -4049,8 +4245,8 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
         trace_count_max = __atomic_load_n(&g->async_count,
                                           __ATOMIC_ACQUIRE);
     uint64 budget_start = get_jiffs();
-    uint32 budget_total = virtio_gpu_wait_window_ms();
-    while (!virtio_gpu_async_room_available(g, depth)) {
+    uint32 budget_total = virtio_gpu_async_wait_window_ms();
+    while (!virtio_gpu_async_room_available(g, depth, reason)) {
         uint64 count = __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE);
 
         if (trace && count > trace_count_max)
@@ -4067,19 +4263,24 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
         spin_lock(&g->lock);
         g->stats.async_wait_progress_calls++;
         spin_unlock(&g->lock);
-        uint32 remaining =
-            virtio_gpu_wait_budget_remaining(budget_start, budget_total);
+        uint32 remaining = virtio_gpu_async_wait_budget_remaining(
+            g, budget_start, budget_total);
         if (remaining == 0 ||
             !virtio_gpu_async_wait_progress(g, remaining)) {
             /* Progress is snapshot-based; reap and re-check once before
              * declaring the queue wedged (a concurrent consumer may
              * have freed room around our snapshot). */
             (void)virtio_gpu_async_reap_completed(g);
-            if (virtio_gpu_async_room_available(g, depth))
+            if (virtio_gpu_async_room_available(g, depth, reason))
                 break;
-            virtio_gpu_async_abort_all(g);
-            ret = -1;
-            goto out;
+            if (virtio_gpu_async_abort_expired(g, budget_total) ||
+                __atomic_load_n(&g->async_abandoned,
+                                __ATOMIC_ACQUIRE) > 0) {
+                ret = -1;
+                goto out;
+            }
+            budget_start = get_jiffs();
+            continue;
         }
         /* A retired command may report an error; its slot is still freed. */
         (void)virtio_gpu_async_reap_completed(g);
@@ -4154,6 +4355,7 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
     struct virtio_gpu_queue *q = &g->ctrlq;
     uint32 base = a->desc_base;
     uint64 trace_async_count = 0;
+    int arm_watchdog = 0;
     int intena;
 
     if (virtio_gpu_submit_trace_collect_enabled())
@@ -4191,12 +4393,19 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
     if (a->state != VIRTIO_GPU_ASYNC_SLOT_CLAIMED)
         printf("virtio_gpu: async post on slot in state %d\n", a->state);
     a->state = VIRTIO_GPU_ASYNC_SLOT_POSTED;
+    if (!g->async_watchdog_armed) {
+        g->async_watchdog_armed = 1;
+        arm_watchdog = 1;
+    }
     q->avail->ring[q->avail->idx % q->size] = (uint16)base;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     q->avail->idx++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     virtio_gpu_notify(g, 0);
     spin_unlock_irqrestore(&q->lock, intena);
+    if (arm_watchdog)
+        virtio_gpu_async_watchdog_schedule(
+            g, virtio_gpu_async_wait_window_ms());
     spin_lock(&g->lock);
     virtio_gpu_count_async_posted_locked(g, a->type);
     trace_async_count = __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE);
@@ -4209,7 +4418,8 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
  * Caller must have ensured room via virtio_gpu_async_make_room().
  */
 static struct virtio_gpu_async_submit *
-virtio_gpu_async_reserve_slot(struct virtio_gpu *g)
+virtio_gpu_async_reserve_slot(struct virtio_gpu *g,
+                              enum virtio_gpu_async_reason reason)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
     struct virtio_gpu_async_submit *found = NULL;
@@ -4232,9 +4442,12 @@ virtio_gpu_async_reserve_slot(struct virtio_gpu *g)
             continue;
         memset(a, 0, sizeof(*a));
         a->state = VIRTIO_GPU_ASYNC_SLOT_CLAIMED;
+        a->reason = reason;
         a->desc_base = VIRTIO_GPU_ASYNC_DESC_BASE +
                        i * VIRTIO_GPU_ASYNC_DESC_PER_SLOT;
         g->async_count++;
+        if (reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D)
+            g->async_submit_count++;
         found = a;
         break;
     }
@@ -4256,7 +4469,7 @@ static int virtio_gpu_async_room_nowait(struct virtio_gpu *g,
     int depth = virtio_gpu_async_depth_for_reason(g, reason);
 
     (void)virtio_gpu_async_reap_completed(g);
-    if (!virtio_gpu_async_room_available(g, depth))
+    if (!virtio_gpu_async_room_available(g, depth, reason))
         return -EAGAIN;
     return 0;
 }
@@ -4275,7 +4488,7 @@ static int virtio_gpu_async_post_prepared(
     } else if (virtio_gpu_async_make_room(g, reason) != 0)
         return -1;
 
-    a = virtio_gpu_async_reserve_slot(g);
+    a = virtio_gpu_async_reserve_slot(g, reason);
     if (a == NULL) {
         /*
          * The room probe is a lock-free hint; losing the slot by the
@@ -4425,6 +4638,10 @@ int virtio_gpu_user_move_injected_cursor(uint16 x_abs, uint16 y_abs,
     (void)y_abs;
     (void)visible;
     return -ENODEV;
+}
+int virtio_gpu_cursor_available(void)
+{
+    return 0;
 }
 int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                                     void *dst, uint32 dst_pitch,
