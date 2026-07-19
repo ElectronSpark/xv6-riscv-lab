@@ -230,11 +230,9 @@ fn alloc_fifo_rqs_for_cls(cls_id: c_int) {
 
 // P3-1B: only caller is `init_fifo_rq` (same file) -- demoted.
 pub(crate) extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
-    let mut cls = start_cls_id;
-    while cls < end_cls_id {
+    for cls in start_cls_id..end_cls_id {
         cffi::sched_class_register(cls, SchedClass::Fifo);
         alloc_fifo_rqs_for_cls(cls);
-        cls += 1;
     }
 }
 

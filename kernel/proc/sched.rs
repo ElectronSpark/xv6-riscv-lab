@@ -893,10 +893,10 @@ const STATE_STRS: &[(thread_state, &[u8])] = &[
 ];
 
 fn state_str(s: thread_state) -> *const c_char {
-    for (k, v) in STATE_STRS.iter() {
-        if *k == s { return v.as_ptr() as *const c_char; }
-    }
-    c"UNKNOWN".as_ptr()
+    STATE_STRS
+        .iter()
+        .find(|(k, _)| *k == s)
+        .map_or_else(|| c"UNKNOWN".as_ptr(), |(_, v)| v.as_ptr() as *const c_char)
 }
 
 pub(crate) unsafe fn scheduler_dump_chan_queue() {
