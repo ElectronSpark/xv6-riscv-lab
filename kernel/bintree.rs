@@ -385,6 +385,65 @@ pub(crate) unsafe fn rb_next_node(node: *mut RbNode) -> *mut RbNode {
     }
 }
 
+/// In-order forward iterator over a tree's nodes: yields the same
+/// sequence as the hand-rolled `let mut n = rb_first_node(root); while
+/// !n.is_null() { ...; n = rb_next_node(n); }` walk that appears at the
+/// `mm`/`vfs`/`proc` consumer sites, as one `for n in root.iter()`.
+///
+/// Holds a bare cursor (no borrow of the tree), so it composes with the
+/// intrusive-pointer idiom the rest of this module speaks: each `next()`
+/// returns a `*mut RbNode` and advances via [`rb_next_node`].
+///
+/// This is a *plain successor walk*: it reads the current node to find
+/// its successor. Deleting or re-linking the node the iterator is
+/// currently sitting on mid-walk is a use-after-free — such teardown
+/// loops must keep capturing the successor *before* mutating (see
+/// `vfs/xv6fs/block_cache.rs::xv6fs_bcache_destroy`) and stay hand-rolled.
+pub(crate) struct RbTreeIter {
+    cur: *mut RbNode,
+}
+
+impl Iterator for RbTreeIter {
+    type Item = *mut RbNode;
+
+    #[inline]
+    fn next(&mut self) -> Option<*mut RbNode> {
+        if self.cur.is_null() {
+            return None;
+        }
+        let node = self.cur;
+        // SAFETY: `node` is non-null here and, by the iterator's contract
+        // (tree not structurally mutated at the cursor mid-walk), still a
+        // live node of a well-formed tree — exactly `rb_next_node`'s
+        // requirement.
+        self.cur = unsafe { rb_next_node(node) };
+        Some(node)
+    }
+}
+
+impl RawRbRoot {
+    /// In-order forward iterator over this tree's nodes (`rb_first_node`
+    /// then repeated [`rb_next_node`]).
+    ///
+    /// # Safety
+    /// `self` must be a live, well-formed `rb_root`, and the tree must not
+    /// be structurally mutated at the iterator's current node for the
+    /// lifetime of the returned [`RbTreeIter`] (deleting the *current*
+    /// node mid-walk is a use-after-free; capture the successor first).
+    #[inline]
+    pub(crate) unsafe fn iter(&self) -> RbTreeIter {
+        // The walk reads through raw pointers (`rb_first_node` takes
+        // `*mut`), matching the module-wide intrusive-pointer idiom; the
+        // `&self` receiver is not retained past this call.
+        let root = self as *const RawRbRoot as *mut RawRbRoot;
+        // SAFETY: `root` points to `self`, a live `rb_root` per the
+        // caller contract.
+        RbTreeIter {
+            cur: unsafe { rb_first_node(root) },
+        }
+    }
+}
+
 /// # Safety
 /// `node` must be null or point to a live `rb_node`.
 pub(crate) unsafe fn rb_prev_node(node: *mut RbNode) -> *mut RbNode {

@@ -366,7 +366,6 @@ const _: () = {
 // their `#[no_mangle]` exports are gone; this file's original extern
 // declarations were plain (non-`safe`) `fn`s, so every call site already
 // sits in an `unsafe` context -- the plain `use` keeps them unchanged.
-use crate::bintree::{rb_first_node, rb_next_node};
 
 // P3-D3a: `page_free` is genuinely `unsafe fn` in `crate::mm::page` now
 // that its `#[no_mangle]` export is gone; this file's original extern
@@ -909,9 +908,10 @@ pub(crate) unsafe fn scheduler_dump_chan_queue() {
         // `TnodeTreeArm` (its `entry` sits at arm offset 0).
         let tree_entry_off = offset_of!(tnode, u)
             + offset_of!(crate::proc::thread_queue::TnodeTreeArm, entry);
-        let mut node = rb_first_node(root);
-        while !node.is_null() {
-            let next = rb_next_node(node);
+        // Read-only walk (dump only, no tree mutation) -> the additive
+        // `RawRbRoot::iter()` in-order iterator replaces the hand-rolled
+        // `rb_first_node`/`rb_next_node` cursor.
+        for node in (*root).iter() {
             let tn = (node as *mut u8).wrapping_sub(tree_entry_off) as *mut tnode_t;
             let proc = tnode_get_thread(tn);
             if proc.is_null() {
@@ -926,7 +926,6 @@ pub(crate) unsafe fn scheduler_dump_chan_queue() {
                     crate::printf::Cs(state_str(thread_state_get(proc))),
                 );
             }
-            node = next;
         }
     }
 }
