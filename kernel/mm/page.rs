@@ -978,8 +978,7 @@ fn init_range_flags(pa_start: u64, pa_end: u64, flags: u64) -> i32 {
         return -1;
     }
     ffi::log_init_range(pa_start, pa_end, flags);
-    let mut base = pa_start;
-    while base < pa_end {
+    for base in (pa_start..pa_end).step_by(PAGE_SIZE as usize) {
         match pa_to_page(base) {
             Some(p) => p.init(base, 0, flags),
             None => {
@@ -987,7 +986,6 @@ fn init_range_flags(pa_start: u64, pa_end: u64, flags: u64) -> i32 {
                 return -1;
             }
         }
-        base += PAGE_SIZE;
     }
     0
 }
@@ -1184,46 +1182,51 @@ fn pcpu_cache_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     Some(unsafe { &mut *page_ptr })
 }
 
-fn pcpu_cache_put(page: &mut Page, order: u64) -> i32 {
-    if order > PCPU_CACHE_MAX_ORDER { return -1; }
-    let cpu = ffi::cpuid() as usize;
-    let cache = pcpu_cache(cpu, order);
-    let cache_limit = if order == 0 { PCPU_HOT_PAGE_CACHE_SIZE } else { PCPU_CACHE_SIZE };
-    let preserve = page.has_valid_tail_structure(order);
-    let mut ret: i32 = -1;
+impl Page {
+    /// Return this page (a group header of `order`) to the calling CPU's
+    /// per-CPU cache. Returns 0 if it was cached, -1 if the cache was full
+    /// (caller must then release it to the buddy pools).
+    fn pcpu_cache_put(&mut self, order: u64) -> i32 {
+        if order > PCPU_CACHE_MAX_ORDER { return -1; }
+        let cpu = ffi::cpuid() as usize;
+        let cache = pcpu_cache(cpu, order);
+        let cache_limit = if order == 0 { PCPU_HOT_PAGE_CACHE_SIZE } else { PCPU_CACHE_SIZE };
+        let preserve = self.has_valid_tail_structure(order);
+        let mut ret: i32 = -1;
 
-    if order == 0 {
-        let _preempt = crate::machine::PreemptGuard::new();
-        let cur = cache.count.load(Ordering::Acquire);
-        if cur < cache_limit {
-            let _g = KSpinlock::from_ptr(page.lock_ptr()).lock();
-            if preserve {
-                page.as_buddy_group_preserve_tails(order, BUDDY_STATE_CACHED);
-            } else {
-                page.as_buddy_group(order, BUDDY_STATE_CACHED);
+        if order == 0 {
+            let _preempt = crate::machine::PreemptGuard::new();
+            let cur = cache.count.load(Ordering::Acquire);
+            if cur < cache_limit {
+                let _g = KSpinlock::from_ptr(self.lock_ptr()).lock();
+                if preserve {
+                    self.as_buddy_group_preserve_tails(order, BUDDY_STATE_CACHED);
+                } else {
+                    self.as_buddy_group(order, BUDDY_STATE_CACHED);
+                }
+                ffi::list_push_front(&mut cache.lru_head, self.buddy_lru_ptr());
+                let old = cache.count.fetch_add(1, Ordering::Release);
+                if old == u32::MAX { ffi::panic(b"PCPU cache counter overflow\0"); }
+                ret = 0;
             }
-            ffi::list_push_front(&mut cache.lru_head, page.buddy_lru_ptr());
-            let old = cache.count.fetch_add(1, Ordering::Release);
-            if old == u32::MAX { ffi::panic(b"PCPU cache counter overflow\0"); }
-            ret = 0;
-        }
-    } else {
-        let _gc = KSpinlock::from_ptr(cache.lock_ptr()).lock();
-        let cur = cache.count.load(Ordering::Acquire);
-        if cur < cache_limit {
-            let _gp = KSpinlock::from_ptr(page.lock_ptr()).lock();
-            if preserve {
-                page.as_buddy_group_preserve_tails(order, BUDDY_STATE_CACHED);
-            } else {
-                page.as_buddy_group(order, BUDDY_STATE_CACHED);
+        } else {
+            let _gc = KSpinlock::from_ptr(cache.lock_ptr()).lock();
+            let cur = cache.count.load(Ordering::Acquire);
+            if cur < cache_limit {
+                let _gp = KSpinlock::from_ptr(self.lock_ptr()).lock();
+                if preserve {
+                    self.as_buddy_group_preserve_tails(order, BUDDY_STATE_CACHED);
+                } else {
+                    self.as_buddy_group(order, BUDDY_STATE_CACHED);
+                }
+                ffi::list_push_front(&mut cache.lru_head, self.buddy_lru_ptr());
+                let old = cache.count.fetch_add(1, Ordering::Release);
+                if old == u32::MAX { ffi::panic(b"PCPU cache counter overflow\0"); }
+                ret = 0;
             }
-            ffi::list_push_front(&mut cache.lru_head, page.buddy_lru_ptr());
-            let old = cache.count.fetch_add(1, Ordering::Release);
-            if old == u32::MAX { ffi::panic(b"PCPU cache counter overflow\0"); }
-            ret = 0;
         }
+        ret
     }
-    ret
 }
 
 // ===========================================================================
@@ -1340,15 +1343,20 @@ fn buddy_merge_and_insert(start_page: &mut Page, start_order: u64) {
     }
 }
 
-fn buddy_put(page: &mut Page) -> i32 {
-    if !page.is_freeable() { return -1; }
-    if pcpu_cache_put(page, 0) == 0 { return 0; }
-    {
-        let _g = KSpinlock::from_ptr(page.lock_ptr()).lock();
-        page.as_buddy_header(0, BUDDY_STATE_INTERMEDIATE);
+impl Page {
+    /// Free this page back to the buddy system: try the per-CPU cache first,
+    /// otherwise mark it an order-0 header and merge it into the buddy pools.
+    /// Returns -1 if the page is not freeable, 0 on success.
+    fn buddy_put(&mut self) -> i32 {
+        if !self.is_freeable() { return -1; }
+        if self.pcpu_cache_put(0) == 0 { return 0; }
+        {
+            let _g = KSpinlock::from_ptr(self.lock_ptr()).lock();
+            self.as_buddy_header(0, BUDDY_STATE_INTERMEDIATE);
+        }
+        buddy_merge_and_insert(self, 0);
+        0
     }
-    buddy_merge_and_insert(page, 0);
-    0
 }
 
 // ===========================================================================
@@ -1363,12 +1371,10 @@ fn page_buddy_reserve_range(pa_start: u64, pa_end: u64,
         return;
     }
     ffi::log_reserving(r_start, r_end);
-    let mut base = r_start;
-    while base < r_end {
+    for base in (r_start..r_end).step_by(PAGE_SIZE as usize) {
         let p = pa_to_page(base)
             .unwrap_or_else(|| ffi::panic(b"__page_buddy_reserve_range(): get NULL page\0"));
         p.flags |= PAGE_FLAG_LOCKED;
-        base += PAGE_SIZE;
     }
 }
 
@@ -1386,25 +1392,28 @@ fn mark_reserved_page(pa_start: u64, pa_end: u64) {
 }
 
 fn find_next_avail(start_pa: u64, end_pa: u64) -> u64 {
-    let mut pa = start_pa;
-    while pa < end_pa {
-        let p = pa_to_page(pa)
-            .unwrap_or_else(|| ffi::panic(b"find_next_avail: NULL page\0"));
-        if (p.flags & PAGE_FLAG_LOCKED) == 0 { break; }
-        pa += PAGE_SIZE;
-    }
-    pa
+    // First page in the range that is NOT locked, else `end_pa` (matching the
+    // original `while`-then-`break`-then-return-`pa` walk).
+    (start_pa..end_pa)
+        .step_by(PAGE_SIZE as usize)
+        .find(|&pa| {
+            let p = pa_to_page(pa)
+                .unwrap_or_else(|| ffi::panic(b"find_next_avail: NULL page\0"));
+            (p.flags & PAGE_FLAG_LOCKED) == 0
+        })
+        .unwrap_or(end_pa)
 }
 
 fn find_current_end(start_pa: u64, end_pa: u64) -> u64 {
-    let mut pa = start_pa;
-    while pa < end_pa {
-        let p = pa_to_page(pa)
-            .unwrap_or_else(|| ffi::panic(b"find_current_end: NULL page\0"));
-        if (p.flags & PAGE_FLAG_LOCKED) != 0 { break; }
-        pa += PAGE_SIZE;
-    }
-    pa
+    // First locked page in the range, else `end_pa`.
+    (start_pa..end_pa)
+        .step_by(PAGE_SIZE as usize)
+        .find(|&pa| {
+            let p = pa_to_page(pa)
+                .unwrap_or_else(|| ffi::panic(b"find_current_end: NULL page\0"));
+            (p.flags & PAGE_FLAG_LOCKED) != 0
+        })
+        .unwrap_or(end_pa)
 }
 
 fn page_buddy_init_as_order(pa_start: u64, order: u64) {
@@ -1627,7 +1636,7 @@ pub(crate) unsafe fn __page_free(page: *mut Page, order: u64) {
         }
     }
 
-    if order <= PCPU_CACHE_MAX_ORDER && pcpu_cache_put(p, order) == 0 {
+    if order <= PCPU_CACHE_MAX_ORDER && p.pcpu_cache_put(order) == 0 {
         return;
     }
 
@@ -1839,7 +1848,7 @@ pub(crate) unsafe fn __page_ref_dec(page: *mut Page) -> c_int {
                 p.set_pcache_node(ptr::null_mut());
             }
         }
-        if buddy_put(p) != 0 {
+        if p.buddy_put() != 0 {
             ffi::panic(b"page_ref_dec\0");
         }
     }

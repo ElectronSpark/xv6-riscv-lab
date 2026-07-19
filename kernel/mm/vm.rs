@@ -463,6 +463,36 @@ fn xv6_vm_prev_free(vm_ptr: *mut vm, cur: *mut vma) -> *mut vma {
     )
 }
 
+/// Forward iterator over `vm`'s VMA list (`vm_list` linkage), yielding each
+/// live `*mut vma`. Read-only walk: the caller must hold the vm lock and must
+/// not free/detach the yielded vma during iteration (the successor link is
+/// read lazily, so freeing the current node would invalidate the walk — the
+/// `__vm_destroy` teardown, which frees each vma, deliberately keeps its
+/// hand-rolled capture-next loop). Mirrors `xv6_vm_first_vma`/`xv6_vm_next_vma`.
+fn vm_vma_iter(vm_ptr: *mut vm) -> impl Iterator<Item = *mut vma> {
+    core::iter::successors(
+        Some(xv6_vm_first_vma(vm_ptr)).filter(|p| !p.is_null()),
+        move |&cur| {
+            let next = xv6_vm_next_vma(vm_ptr, cur);
+            (!next.is_null()).then_some(next)
+        },
+    )
+}
+
+/// Reverse iterator over `vm`'s free VMA list (`free_list_entry` linkage),
+/// yielding each live `*mut vma` from last to first. Same read-only /
+/// don't-detach contract as [`vm_vma_iter`]. Mirrors
+/// `xv6_vm_last_free`/`xv6_vm_prev_free`.
+fn vm_free_list_rev_iter(vm_ptr: *mut vm) -> impl Iterator<Item = *mut vma> {
+    core::iter::successors(
+        Some(xv6_vm_last_free(vm_ptr)).filter(|p| !p.is_null()),
+        move |&cur| {
+            let prev = xv6_vm_prev_free(vm_ptr, cur);
+            (!prev.is_null()).then_some(prev)
+        },
+    )
+}
+
 // --- list insert / detach (mirror list.h inlines) -----------------------
 #[inline]
 fn list_entry_insert_after(prev: *mut list_node_t, new: *mut list_node_t) {
@@ -968,8 +998,10 @@ pub(crate) fn __vma_set_free(vma_ptr: *mut vma) {
 
         let pagetable = (*(*vma_ptr).vm).pagetable;
         if !pagetable.is_null() {
-            let mut a = (*vma_ptr).start;
-            while a < (*vma_ptr).end {
+            // Page-aligned VA stride over the vma range; the per-page PTE
+            // teardown below stays a raw hardware-visible write (page-table
+            // floor), only the walk counter becomes an iterator.
+            for a in ((*vma_ptr).start..(*vma_ptr).end).step_by(PGSIZE as usize) {
                 let pte = crate::mm::vm_pgtab::walk(
                     pagetable as *mut u64,
                     a,
@@ -990,7 +1022,6 @@ pub(crate) fn __vma_set_free(vma_ptr: *mut vma) {
                         page_ref_dec(pa as *mut c_void);
                     }
                 }
-                a = a.wrapping_add(PGSIZE as u64);
             }
         }
 
@@ -1094,8 +1125,8 @@ pub(crate) fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
         if (*src).flags != PROT_NONE as u64 {
             let pgtb_src = (*(*src).vm).pagetable as *mut u64;
             let pgtb_dst = (*(*dst).vm).pagetable as *mut u64;
-            let mut a = (*src).start;
-            while a < (*src).end {
+            // Page-aligned VA stride; per-page COW PTE writes below stay raw.
+            for a in ((*src).start..(*src).end).step_by(PGSIZE as usize) {
                 let src_pte = crate::mm::vm_pgtab::walk(
                     pgtb_src,
                     a,
@@ -1135,7 +1166,6 @@ pub(crate) fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
                         }
                     }
                 }
-                a = a.wrapping_add(PGSIZE as u64);
             }
             // Flush remote TLBs that may still cache the now-read-only mappings.
             vm_remote_sfence((*src).vm);
@@ -1641,12 +1671,8 @@ pub(crate) fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -> u6
         }
 
         // Walk vm->vm_free_list in reverse.
-        let mut cur = xv6_vm_last_free(vm_ptr);
-        while !cur.is_null() {
-            let prev = xv6_vm_prev_free(vm_ptr, cur);
-
+        for cur in vm_free_list_rev_iter(vm_ptr) {
             if (*cur).flags != PROT_NONE as u64 {
-                cur = prev;
                 continue;
             }
 
@@ -1665,7 +1691,6 @@ pub(crate) fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -> u6
                     return result;
                 }
             }
-            cur = prev;
         }
         0
     }
@@ -1819,21 +1844,14 @@ pub(crate) fn vma_alloc(vm_ptr: *mut vm, mut va: u64, size: u64, flags: u64) -> 
             return core::ptr::null_mut();
         }
 
-        let mut free_area: *mut vma = core::ptr::null_mut();
-        if va == 0 {
+        let free_area: *mut vma = if va == 0 {
             // Find the last free area large enough (reverse walk).
-            let mut cur = xv6_vm_last_free(vm_ptr);
-            while !cur.is_null() {
-                let prev = xv6_vm_prev_free(vm_ptr, cur);
-                if vma_size(cur) >= size {
-                    free_area = cur;
-                    break;
-                }
-                cur = prev;
-            }
+            vm_free_list_rev_iter(vm_ptr)
+                .find(|&cur| vma_size(cur) >= size)
+                .unwrap_or(core::ptr::null_mut())
         } else {
-            free_area = vm_find_area(vm_ptr, va);
-        }
+            vm_find_area(vm_ptr, va)
+        };
 
         if free_area.is_null() {
             return core::ptr::null_mut();
@@ -2514,9 +2532,10 @@ pub(crate) fn vm_copy(src: *mut vm) -> *mut vm {
     let _src_g = rlock_vm(src);
     let mut _dst_g = wlock_vm(dst);
 
-    let mut vma_cur = xv6_vm_first_vma(src);
-    while !vma_cur.is_null() {
-        let next = xv6_vm_next_vma(src, vma_cur);
+    // Read-only walk of `src`'s VMA list (src is read-locked; the body only
+    // allocates into `dst`, never frees a `src` vma), so the lazy successor
+    // iterator is stable.
+    for vma_cur in vm_vma_iter(src) {
         if machine::vma_flags(vma_cur) != PROT_NONE as u64 {
             let new_vma = vma_alloc(
                 dst,
@@ -2544,7 +2563,6 @@ pub(crate) fn vm_copy(src: *mut vm) -> *mut vm {
                 return ((-(ENOMEM as isize)) as isize) as *mut vm;
             }
         }
-        vma_cur = next;
     }
     dst
 }
@@ -2709,8 +2727,7 @@ pub(crate) fn vm_mprotect(
 
         {
             let _pgl = lock_vm_pgtable(vm_ptr);
-            let mut va = addr;
-            while va < addr + size {
+            for va in (addr..addr + size).step_by(PGSIZE as usize) {
                 let pte = walk(
                     _pgl.pagetable as *mut u64,
                     va,
@@ -2724,7 +2741,6 @@ pub(crate) fn vm_mprotect(
                         | pte_flags
                         | (PTE_V | PTE_A | PTE_D) as u64;
                 }
-                va += PGSIZE as u64;
             }
         }
 
@@ -2818,8 +2834,7 @@ pub(crate) fn vm_mremap(
             if new_vma.is_null() {
                 break 'done;
             }
-            let mut offset: u64 = 0;
-            while offset < old_size {
+            for offset in (0..old_size).step_by(PGSIZE as usize) {
                 let old_pte = walk(
                     _g.pagetable as *mut u64,
                     old_addr + offset,
@@ -2844,7 +2859,6 @@ pub(crate) fn vm_mremap(
                     page_ref_inc(pa as *mut c_void);
                     *old_pte = 0;
                 }
-                offset += PGSIZE as u64;
             }
             vma_free(vm_ptr, vma_ptr);
             vm_remote_sfence(vm_ptr);
@@ -3001,8 +3015,7 @@ pub(crate) fn vm_madvise(
                 MADV_DONTNEED => {
                     {
                         let _pgl = lock_vm_pgtable(vm_ptr);
-                        let mut va = addr;
-                        while va < addr + size {
+                        for va in (addr..addr + size).step_by(PGSIZE as usize) {
                             let pte = walk(
                                 _pgl.pagetable as *mut u64,
                                 va,
@@ -3017,7 +3030,6 @@ pub(crate) fn vm_madvise(
                                 }
                                 *pte = 0;
                             }
-                            va += PGSIZE as u64;
                         }
                     }
                     vm_remote_sfence(vm_ptr);
@@ -3260,8 +3272,7 @@ pub(crate) fn dump_vm(vm_ptr: *mut vm) {
         crate::kprintln!("VM dump:");
         crate::kprintln!("Pagetable: {}", crate::printf::Ptr((*vm_ptr).pagetable as u64));
         crate::kprintln!("VMAs:");
-        let mut vma_ptr = xv6_vm_first_vma(vm_ptr);
-        while !vma_ptr.is_null() {
+        for vma_ptr in vm_vma_iter(vm_ptr) {
             let mut flags_buf: [c_char; 10] = [0; 10];
             vm_dump_flags(
                 (*vma_ptr).flags,
@@ -3276,7 +3287,6 @@ pub(crate) fn dump_vm(vm_ptr: *mut vm) {
                 crate::printf::Ptr((*vma_ptr).file as u64),
                 (*vma_ptr).pgoff as u64,
             );
-            vma_ptr = xv6_vm_next_vma(vm_ptr, vma_ptr);
         }
     }
 }

@@ -756,6 +756,29 @@ fn cache_from_entry(entry: *mut ListNode) -> *mut SlabCache {
     crate::mm::cffi::container_of(entry, core::mem::offset_of!(SlabCache, cache_list_entry))
 }
 
+/// Forward iterator over the slab-cache registry list, yielding each
+/// registered `SlabCache` (resolved via `container_of` on its
+/// `cache_list_entry`). The caller must hold `ALL_SLAB_CACHES_LOCK` for the
+/// entire walk and must not detach/free the yielded cache during iteration —
+/// the successor link is read lazily, so mutating the current node would
+/// invalidate the walk (this is the read-only reporting idiom; the
+/// shrink-all path, which drops the lock and restarts, deliberately does not
+/// use it).
+fn cache_registry_iter(head: *mut ListNode) -> impl Iterator<Item = *mut SlabCache> {
+    // SAFETY: `head` is the initialized registry list head and every `cur` is
+    // a live `cache_list_entry` node linked into it; reading the `next` link
+    // is a plain load, valid while the registry lock is held by the caller.
+    let first = unsafe { (*head).next };
+    core::iter::successors(
+        (first != head).then_some(first),
+        move |&cur| {
+            let next = unsafe { (*cur).next };
+            (next != head).then_some(next)
+        },
+    )
+    .map(cache_from_entry)
+}
+
 fn register_cache(cache: &mut SlabCache) {
     ensure_registry_init();
     ffi::list_init(&mut cache.cache_list_entry);
@@ -822,10 +845,8 @@ pub(crate) fn slab_dump_all(detailed: c_int) -> u64 {
 
         let head = registry_head();
         let _g = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
-        let mut cur = (*head).next;
-        while cur != head {
-            let cache = &mut *cache_from_entry(cur);
-            let next = (*cur).next;
+        for cache_ptr in cache_registry_iter(head) {
+            let cache = &mut *cache_ptr;
             let slab_total = cache.slab_total.load(Ordering::Acquire);
             let obj_active = cache.obj_active.load(Ordering::Acquire);
             let global_free = cache.global_free_count.load(Ordering::Acquire);
@@ -842,7 +863,6 @@ pub(crate) fn slab_dump_all(detailed: c_int) -> u64 {
                     pages,
                 );
             }
-            cur = next;
         }
         drop(_g);
 
@@ -1157,9 +1177,10 @@ impl Slab {
         // Thread the free list through the objects themselves. Pointer math
         // is done via `usize`; the only raw write is `write_free_link`.
         let data_start = (page_base as usize).wrapping_add(offs);
+        let data_end = data_start + (obj_num as usize) * obj_size;
         let mut prev: *mut c_void = ptr::null_mut();
-        for i in 0..(obj_num as usize) {
-            let tmp = (data_start + i * obj_size) as *mut c_void;
+        for tmp_addr in (data_start..data_end).step_by(obj_size) {
+            let tmp = tmp_addr as *mut c_void;
             write_free_link(tmp, prev);
             prev = tmp;
         }
