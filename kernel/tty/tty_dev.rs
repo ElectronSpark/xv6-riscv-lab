@@ -50,7 +50,7 @@ use crate::dev::cdev::{cdev_register, CdevOps};
 // `safe`; every call site already sits inside an `unsafe extern "C" fn`
 // body except `ctrl_tty()`'s `session_get_ctrl_tty` call, which gets an
 // explicit `unsafe { }` block below.
-use super::session::session_get_ctrl_tty;
+use super::session::{session_get_ctrl_tty, session_lookup};
 use super::tty::{tty_close, tty_ioctl, tty_open, tty_poll, tty_read, tty_write};
 
 /// `S_IFCHR` (`kernel/inc/uabi/stat.h`).
@@ -99,15 +99,23 @@ fn ctrl_tty() -> *mut tty {
     }
     // SAFETY: `t` is the live current-thread pointer returned by
     // `current_thread_ptr()` (the Rust equivalent of the C `current`
-    // macro), just checked non-null; `session` is a plain pointer
-    // field with no further invariants to uphold for a read.
-    let session = unsafe { (*t).session };
-    if session.is_null() {
+    // macro), just checked non-null; `session` is now a generational `Sid`
+    // (N-R6d-2a) — a plain aligned word read with no further invariants.
+    let sid = unsafe { (*t).session };
+    if sid.is_none() {
         return core::ptr::null_mut();
     }
     pid_wlock();
-    // SAFETY: `session` was just checked non-null above.
-    let t = unsafe { session_get_ctrl_tty(session) };
+    // Resolve the `Sid` to a live session under `pid_wlock` (required by
+    // `session_lookup`); a stale key (session freed) resolves to null → no
+    // controlling tty, the same answer the old null-pointer path gave.
+    let session = session_lookup(sid).unwrap_or(core::ptr::null_mut());
+    let t = if session.is_null() {
+        core::ptr::null_mut()
+    } else {
+        // SAFETY: `session` is a live session pointer just resolved above.
+        unsafe { session_get_ctrl_tty(session) }
+    };
     pid_wunlock();
     t
 }

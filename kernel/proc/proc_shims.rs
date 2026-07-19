@@ -386,7 +386,14 @@ pub(crate) fn t_parent(p: *mut thread) -> *mut thread {
     crate::proc::thread::thread_parent_resolve(p)
 }
 pub(crate) fn t_pgroup(p: *mut thread) -> *mut pgroup { field_get!(p, pgroup) }
-pub(crate) fn t_session(p: *mut thread) -> *mut session { field_get!(p, session) }
+// N-R6d-2a: `thread.session` is now a generational `Sid`, not a `*mut session`.
+// The get/set shims resolve/store it through the pilot's `SESSION_TABLE`; a
+// stale `Sid` (session freed) resolves to null — the "session gone" semantics
+// callers already null-check. Signatures unchanged, so every caller (access.rs
+// `session_ptr`/`set_session`, exit.rs, clone.rs, pid.rs, pgroup.rs) is untouched.
+pub(crate) fn t_session(p: *mut thread) -> *mut session {
+    crate::proc::thread::thread_session_resolve(p)
+}
 pub(crate) fn t_thread_group(p: *mut thread) -> *mut thread_group {
     field_get!(p, thread_group)
 }
@@ -406,7 +413,9 @@ pub(crate) fn t_set_parent(p: *mut thread, par: *mut thread) {
     crate::proc::thread::thread_parent_store(p, par)
 }
 pub(crate) fn t_set_thread_group(p: *mut thread, tg: *mut thread_group) { field_set!(p, thread_group, tg) }
-pub(crate) fn t_set_session(p: *mut thread, s: *mut session) { field_set!(p, session, s) }
+pub(crate) fn t_set_session(p: *mut thread, s: *mut session) {
+    crate::proc::thread::thread_session_store(p, s)
+}
 pub(crate) fn t_set_tgid(p: *mut thread, v: c_int) { field_set!(p, tgid, v) }
 pub(crate) fn t_set_sid(p: *mut thread, v: c_int) { field_set!(p, sid, v) }
 
@@ -424,14 +433,18 @@ pub(crate) fn pg_exited(pg: *mut pgroup) -> c_int {
 pub(crate) fn pg_is_kernel(pg: *mut pgroup) -> c_int {
     bit_get!(pg, flags, is_kernel) as c_int
 }
-pub(crate) fn pg_session(pg: *mut pgroup) -> *mut session { field_get!(pg, session) }
+// N-R6d-2a: `pgroup.session` is a generational `Sid` — resolve/store through
+// `SESSION_TABLE` (see `t_session`).
+pub(crate) fn pg_session(pg: *mut pgroup) -> *mut session {
+    crate::proc::pgroup::pgroup_session_resolve(pg)
+}
 
 pub(crate) fn pg_set_pgid(pg: *mut pgroup, v: c_int) { field_set!(pg, pgid, v) }
 pub(crate) fn pg_set_leader(pg: *mut pgroup, tg: *mut thread_group) {
     field_set!(pg, leader, tg)
 }
 pub(crate) fn pg_set_session(pg: *mut pgroup, s: *mut session) {
-    field_set!(pg, session, s)
+    crate::proc::pgroup::pgroup_session_store(pg, s)
 }
 pub(crate) fn pg_set_exited(pg: *mut pgroup, v: c_int) {
     bit_set!(pg, flags, set_exited, if v != 0 { 1 } else { 0 })

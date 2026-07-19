@@ -155,6 +155,17 @@ pub struct Session {
     pub(crate) pgrps: crate::list::ListNode,
     pub(crate) fg_pgrp: *mut pgroup,
     pub(crate) ctrl_tty: *mut tty,
+    // N-R6d-2a: the session caches its own generational key here, stamped by
+    // `session_table_insert` right after `SESSION_TABLE.insert` hands it out.
+    // The `thread.session`/`pgroup.session` back-edges (converted to `Sid`
+    // this sub-step) read it via `session_key_of` to encode a `set_session`
+    // in O(1) — cheaper than an O(N) `GenTable::key_of` reverse scan. A
+    // `#[repr(C)]` tail field: no C consumer remains (0 `.c` files in-tree),
+    // and every session is slab-allocated with `size_of::<session>()`, so
+    // growing the struct 96 → 104 is self-contained. `Sid`'s internal layout
+    // is unobserved externally; only its 8-byte tail placement matters (the
+    // offset assert below pins it).
+    pub(crate) self_sid: Sid,
 }
 
 // P3-N3 hardcoded layout proof — values captured from the
@@ -168,8 +179,13 @@ pub struct Session {
 // 0/16/20/[24]/32/40/56/64/80/88 (the anonymous bitfield struct
 // occupies [24,32), pinned in the probe by both neighbours).
 const _: () = {
-    assert!(core::mem::size_of::<Session>() == 96, "session size");
+    // N-R6d-2a: size 96 → 104 for the appended `self_sid: Sid` (8-byte tail).
+    // `Session` align stays 8 (pointer fields dominate `Sid`'s align 4). No C
+    // consumer remains, so this is a pure Rust-side growth.
+    assert!(core::mem::size_of::<Session>() == 104, "session size");
     assert!(core::mem::align_of::<Session>() == 8, "session alignment");
+    assert!(core::mem::size_of::<Sid>() == 8, "Sid must be 8 bytes (session.self_sid tail)");
+    assert!(core::mem::offset_of!(Session, self_sid) == 96, "session.self_sid offset");
     assert!(core::mem::offset_of!(Session, global_entry) == 0, "session.global_entry offset");
     assert!(core::mem::offset_of!(Session, sid) == 16, "session.sid offset");
     assert!(core::mem::offset_of!(Session, ref_cnt) == 20, "session.ref_cnt offset");
@@ -481,11 +497,19 @@ fn session_table_insert(s: *mut session) -> Option<Sid> {
     // registry is exclusive — no other hart holds a reference into the table
     // (readers need `pid_rlock`, excluded by our write lock).
     let table = unsafe { &mut *SESSION_TABLE.0.get() };
-    table.insert(nn)
+    let sid = table.insert(nn)?;
+    // N-R6d-2a: cache the freshly-issued key in the session itself so the
+    // `thread.session`/`pgroup.session` back-edge accessors can stamp it in
+    // O(1) (`session_key_of`) instead of an O(N) `GenTable::key_of` scan.
+    // SAFETY: `s` is live and exclusively ours here — just allocated,
+    // pre-publication, under `pid_wlock`; `self_sid` is a plain aligned word.
+    unsafe { (*s).self_sid = sid };
+    Some(sid)
 }
 
-/// Remove `s` from the registry (by its stable pointer — `Session` has no
-/// room to cache its own `Sid`), bumping the slot generation so any
+/// Remove `s` from the registry (by its stable pointer — the cached
+/// `self_sid` is only ever read while the session is live), bumping the slot
+/// generation so any
 /// outstanding [`Sid`] to it goes stale. A no-op if `s` was never inserted.
 ///
 /// Caller must hold `pid_wlock` (the session teardown/free path — matches
@@ -519,6 +543,23 @@ pub(crate) fn session_lookup(sid: Sid) -> Option<*mut session> {
     // `GenTable` doc).
     let table = unsafe { &*SESSION_TABLE.0.get() };
     table.get(sid).map(|nn| nn.as_ptr())
+}
+
+/// Encode a `*mut session` as the generational [`Sid`] to store in a back-edge
+/// (`thread.session`/`pgroup.session`): null → [`Sid::NONE`] ("no session"),
+/// otherwise the session's own cached key `self_sid` (stamped at
+/// [`session_table_insert`]). O(1) — the read side of the back-edge
+/// `set_session` accessors, avoiding an O(N) [`GenTable::key_of`] reverse scan.
+///
+/// Caller holds `pid_wlock` (every `set_session` site does — the read of
+/// `self_sid` on a live session is race-free under it).
+pub(crate) fn session_key_of(s: *mut session) -> Sid {
+    match core::ptr::NonNull::new(s) {
+        None => Sid::NONE,
+        // SAFETY: `s` is a live `*mut session` (caller passes an owned/looked-up
+        // session under `pid_wlock`); `self_sid` is a plain aligned word read.
+        Some(nn) => unsafe { (*nn.as_ptr()).self_sid },
+    }
 }
 
 /// Visit every live session in the registry, passing each as a raw
@@ -960,10 +1001,14 @@ pub(crate) unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thre
         if (*s).flags.exited() != 0 {
             return -ESRCH;
         }
-        if !(*t).session.is_null() {
+        // N-R6d-2a: `thread.session` is now a generational `Sid`. A live thread
+        // never holds a stale key (it is detached from its session before that
+        // session can be freed), so `!is_none()` is the exact structural
+        // analog of the old `!is_null()` "already in a session" guard.
+        if !(*t).session.is_none() {
             return -EEXIST;
         }
-        (*t).session = s;
+        (*t).session = session_key_of(s);
         (*t).sid = (*s).sid;
         ll_init(&raw mut (*t).sid_entry);
         ll_push_back(&raw mut (*s).threads, &raw mut (*t).sid_entry);
@@ -985,14 +1030,16 @@ pub(crate) unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut t
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*t).session != s {
+        // N-R6d-2a: compare the stored `Sid` against `s`'s own key (both name
+        // the same live session iff equal) — the `Sid` analog of `!= s`.
+        if (*t).session != session_key_of(s) {
             return -EINVAL;
         }
         if !ll_is_detached(&raw mut (*t).sid_entry) {
             ll_detach(&raw mut (*t).sid_entry);
         }
         (*s).t_cnt -= 1;
-        (*t).session = ptr::null_mut();
+        (*t).session = Sid::NONE;
         // Capture the empty transition BEFORE the member unref below (counts
         // are already decremented here). While this member's own reference is
         // still held, `ref_cnt >= 2` (baseline + this ref), so the member
@@ -1028,10 +1075,12 @@ pub(crate) unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup)
         if (*s).flags.exited() != 0 {
             return -ESRCH;
         }
-        if !(*pg).session.is_null() {
+        // N-R6d-2a: `pgroup.session` is a generational `Sid` (see the thread
+        // edge above) — `!is_none()` is the structural analog of `!is_null()`.
+        if !(*pg).session.is_none() {
             return -EEXIST;
         }
-        (*pg).session = s;
+        (*pg).session = session_key_of(s);
         ll_init(&raw mut (*pg).list_entry);
         ll_push_back(&raw mut (*s).pgrps, &raw mut (*pg).list_entry);
         (*s).pg_cnt += 1;
@@ -1049,7 +1098,8 @@ pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgro
     }
     // SAFETY: see fn doc.
     unsafe {
-        if (*pg).session != s {
+        // N-R6d-2a: `Sid` analog of `!= s` (see `session_remove_thread`).
+        if (*pg).session != session_key_of(s) {
             return -EINVAL;
         }
         if !ll_is_detached(&raw mut (*pg).list_entry) {
@@ -1060,7 +1110,7 @@ pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgro
         if (*s).fg_pgrp == pg {
             (*s).fg_pgrp = ptr::null_mut();
         }
-        (*pg).session = ptr::null_mut();
+        (*pg).session = Sid::NONE;
         // Capture the empty transition BEFORE the member unref below (counts
         // are already decremented here). While this member's own reference is
         // still held, `ref_cnt >= 2` (baseline + this ref), so the member
@@ -1197,7 +1247,8 @@ pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t
         if (*pg).flags.exited() != 0 {
             return; // cannot set an exited pgroup as foreground
         }
-        if (*pg).session != s {
+        // N-R6d-2a: `Sid` analog of `!= s` — the pgroup must belong to `s`.
+        if (*pg).session != session_key_of(s) {
             return; // pgroup must belong to this session
         }
         (*s).fg_pgrp = pg;
@@ -1367,8 +1418,12 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
             pgroup_remove_tg(tg);
         }
         pgroup_remove_thread(p);
-        if !(*p).session.is_null() {
-            session_remove_thread((*p).session, p);
+        // N-R6d-2a: resolve the thread's stored session `Sid` to a live pointer
+        // (null if `NONE`/stale) before removing it from that session — same
+        // "detach from current session if any" as the old raw-pointer read.
+        let cur_sess = session_lookup((*p).session).unwrap_or(ptr::null_mut());
+        if !cur_sess.is_null() {
+            session_remove_thread(cur_sess, p);
         }
 
         session_add_pg(SRef::as_ptr(&s), pg);
@@ -1438,7 +1493,10 @@ fn get_session_inner(sid: pid_t) -> KResult<*mut session> {
     // SAFETY: `t` is a live thread (not an ERR_PTR, checked above) for
     // as long as the caller's RCU read-side section / `pid_lock` hold
     // lasts (fn doc).
-    let s = unsafe { (*t).session };
+    // N-R6d-2a: resolve the thread's session `Sid` to a live pointer — a stale
+    // key (session freed) resolves to null → `Srch`, the correct "session gone"
+    // answer this getsid path already returns for a null session.
+    let s = session_lookup(unsafe { (*t).session }).unwrap_or(ptr::null_mut());
     if s.is_null() {
         return Err(Errno::Srch);
     }

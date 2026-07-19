@@ -137,7 +137,7 @@ use crate::irq::irq_core::register_irq_handler;
 // `safe`, but every call site here already sits inside a broader
 // `unsafe { }` block (verified per call site), so no behavior changes.
 use crate::tty::tty::{tty_alloc, tty_input, tty_ioctl, tty_output, tty_poll, tty_read};
-use crate::tty::session::session_set_ctrl_tty;
+use crate::tty::session::{session_lookup, session_set_ctrl_tty};
 use crate::vfs::pipe::pipe_set_flags;
 
 const EINTR: c_int = 4;
@@ -934,9 +934,18 @@ pub(crate) extern "C" fn consoledevinit() {
         // Attach the console TTY to init's session as the controlling
         // terminal.
         let initproc = __proctab_get_initproc();
-        if !initproc.is_null() && !(*initproc).session.is_null() {
+        if !initproc.is_null() {
+            // N-R6d-2a: `thread.session` is now a generational `Sid`; resolve
+            // it to a live `*mut session` under `pid_wlock` (required by
+            // `session_lookup`). Init always has its boot session here, so this
+            // attaches the console as its controlling terminal exactly as
+            // before; a null (no/stale session) simply skips, as the old
+            // null-pointer guard did.
             pid_wlock();
-            session_set_ctrl_tty((*initproc).session, t);
+            let sess = session_lookup((*initproc).session).unwrap_or(core::ptr::null_mut());
+            if !sess.is_null() {
+                session_set_ctrl_tty(sess, t);
+            }
             pid_wunlock();
         }
 

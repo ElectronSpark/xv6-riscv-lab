@@ -88,7 +88,18 @@ pub struct Pgroup {
     pub(crate) threads: crate::list::ListNode,
     pub(crate) p_cnt: core::ffi::c_int,
     pub(crate) thread_groups: crate::list::ListNode,
-    pub(crate) session: *mut crate::bindings::session,
+    // N-R6d-2a: the session back-edge converted off `*mut session` to the
+    // session family's generational key [`Sid`] (`GenKey<SID_TAG>`, 8
+    // bytes/align 4 — the exact span the `*mut session` occupied, so this
+    // offset (88, already 8-aligned) and the struct size (96) are unchanged;
+    // the layout asserts below prove it). `Sid::NONE` (`generation == 0`) is
+    // the "no session" edge. Resolved to a `*mut session` through the pilot's
+    // `SESSION_TABLE` by the `session` accessors
+    // (`PgroupAccess::session_ptr`/`set_session` → `proc_shims::pg_session`/
+    // `pg_set_session` → `pgroup_session_resolve`/`pgroup_session_store`); a
+    // stale `Sid` (session freed) resolves to null — the existing "session
+    // gone" semantics readers already null-check.
+    pub(crate) session: crate::tty::session::Sid,
 }
 
 // P3-N3 hardcoded layout proof — values captured from the
@@ -112,8 +123,46 @@ const _: () = {
     assert!(core::mem::offset_of!(Pgroup, threads) == 48, "pgroup.threads offset");
     assert!(core::mem::offset_of!(Pgroup, p_cnt) == 64, "pgroup.p_cnt offset");
     assert!(core::mem::offset_of!(Pgroup, thread_groups) == 72, "pgroup.thread_groups offset");
+    // N-R6d-2a: `session` is now an `Sid` (`GenKey`, 8 bytes/align 4), not a
+    // `*mut session` (8 bytes/align 8). Same 8-byte span at an already-8-aligned
+    // offset, so this offset and the `size == 96` assert above are unchanged.
+    assert!(
+        core::mem::size_of::<crate::tty::session::Sid>() == 8,
+        "Sid must be 8 bytes to preserve pgroup.session span"
+    );
     assert!(core::mem::offset_of!(Pgroup, session) == 88, "pgroup.session offset");
 };
+
+// N-R6d-2a: the `pgroup.session` back-edge resolve/store — mirror of the
+// thread edge (`thread_session_resolve`/`thread_session_store`), reading/
+// writing this struct's own generational `Sid` field and delegating the
+// Sid↔`*mut session` mapping to the pilot's `SESSION_TABLE`. Backing the
+// `pg_session`/`pg_set_session` shims (signatures unchanged, so every caller
+// — pgroup.rs itself, access.rs `PgroupAccess` — is untouched).
+
+/// Resolve pgroup `pg`'s stored `session` [`Sid`] to a live `*mut session`, or
+/// null if [`NONE`](crate::tty::session::Sid) ("no session") or stale (session
+/// freed → the "session gone" answer callers null-check). Caller holds
+/// `pid_lock` (reader or writer — [`session_lookup`](crate::tty::session::session_lookup)
+/// requires it; single non-looping generation-checked read, no `&Session`).
+pub(crate) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
+    // SAFETY: `pg` is a live `*mut pgroup` (shim contract); reading its own
+    // `session` `Sid` field is a plain aligned word read.
+    let sid = unsafe { (*pg).session };
+    crate::tty::session::session_lookup(sid).unwrap_or(ptr::null_mut())
+}
+
+/// Store `s` as pgroup `pg`'s `session` edge: `s == null` → `Sid::NONE`,
+/// otherwise `s`'s own cached [`Sid`] (`session.self_sid`). Caller holds
+/// `pid_wlock` (every `set_session` site does).
+pub(crate) fn pgroup_session_store(pg: *mut Pgroup, s: *mut Session) {
+    let sid = crate::tty::session::session_key_of(s);
+    // SAFETY: `pg` is a live `*mut pgroup`; writing its own `session` field
+    // under the caller's `pid_wlock` (exclusive) is race-free.
+    unsafe {
+        (*pg).session = sid;
+    }
+}
 
 // Errno constants used here (matches kernel/inc/errno.h).
 const EPERM:  i32 = 1;

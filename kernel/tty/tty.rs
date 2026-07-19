@@ -54,7 +54,9 @@ use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
 // `#[no_mangle]` exports are gone (identical signatures).
 use crate::proc::{kill_proc, pgroup_kill, signal_pending};
 
-use super::session::{session_get_fg_pgid, session_set_ctrl_tty, session_set_fg_pgid};
+use super::session::{
+    session_get_fg_pgid, session_lookup, session_set_ctrl_tty, session_set_fg_pgid,
+};
 use super::termios::termios_init_default;
 // P3-1C mesh sweep: vfs/pipe.rs is in scope for this wave; converted from
 // `extern "C"` redeclarations to plain crate-path items (identical
@@ -1347,7 +1349,12 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             // session leader and must not already have a controlling
             // terminal (enforced by `session_set_ctrl_tty`).
             let cur = crate::machine::current_thread_ptr();
-            let sess = unsafe { (*cur).session };
+            // N-R6d-2a: `thread.session` is a generational `Sid`; resolve it to
+            // a live `*mut session`. `pid_wlock` is held for this path (the
+            // `session_set_ctrl_tty` below asserts it), so `session_lookup` is
+            // race-free; a `NONE`/stale key resolves to null → `EPERM`, exactly
+            // the old "no session leader" outcome.
+            let sess = session_lookup(unsafe { (*cur).session }).unwrap_or(core::ptr::null_mut());
             if sess.is_null() {
                 return -EPERM;
             }

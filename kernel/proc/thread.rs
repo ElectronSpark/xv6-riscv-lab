@@ -30,6 +30,7 @@ use crate::proc::access::{
     SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
 };
 use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
+use crate::tty::session::{session_key_of, session_lookup, Sid};
 use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
 use crate::proc::__proctab_init;
@@ -215,7 +216,19 @@ pub struct Thread {
     pub vfork_parent: *mut Thread,
     pub thread_group: *mut thread_group,
     pub pgroup: *mut pgroup,
-    pub session: *mut session,
+    // N-R6d-2a: the session back-edge converted off `*mut session` to the
+    // session family's generational key [`Sid`] (`GenKey<SID_TAG>`, 8
+    // bytes/align 4 — the exact span the `*mut session` occupied, so offset
+    // 296 and every following offset are unchanged; the layout asserts below
+    // prove it). `Sid::NONE` (`generation == 0`) is the "no session" edge.
+    // Resolved to a `*mut session` through the pilot's [`SESSION_TABLE`] by
+    // the `session` accessors (`ThreadAccess::session_ptr`/`set_session` →
+    // `proc_shims::t_session`/`t_set_session` →
+    // `thread_session_resolve`/`thread_session_store`); a stale `Sid` (the
+    // session was freed) resolves to null — the existing "session gone"
+    // semantics every reader already null-checks. `thread_group`/`pgroup`
+    // above stay `*mut` (later sub-steps).
+    pub session: Sid,
     pub sid: pid_t,
     pub pgid: pid_t,
     pub tgid: pid_t,
@@ -289,6 +302,11 @@ const _: () = {
     assert!(core::mem::offset_of!(Thread, vfork_parent) == 272, "thread.vfork_parent offset");
     assert!(core::mem::offset_of!(Thread, thread_group) == 280, "thread.thread_group offset");
     assert!(core::mem::offset_of!(Thread, pgroup) == 288, "thread.pgroup offset");
+    // N-R6d-2a: `session` is now an `Sid` (`GenKey`), not a `*mut session`.
+    // Like `Tid`, an `Sid` is 8 bytes (align 4) — the same span the pointer
+    // occupied — so offset 296 (already 8-aligned) and every following offset
+    // are unchanged; the struct `size == 1152` assert above guards the tail.
+    assert!(core::mem::size_of::<Sid>() == 8, "Sid must be 8 bytes to preserve thread.session span");
     assert!(core::mem::offset_of!(Thread, session) == 296, "thread.session offset");
     assert!(core::mem::offset_of!(Thread, sid) == 304, "thread.sid offset");
     assert!(core::mem::offset_of!(Thread, pgid) == 308, "thread.pgid offset");
@@ -443,6 +461,38 @@ pub(crate) fn thread_parent_store(p: *mut thread, par: *mut thread) {
     // under the caller's `pid_wlock` (exclusive) is race-free.
     unsafe {
         (*p).parent = tid;
+    }
+}
+
+/// Resolve thread `p`'s stored `session` [`Sid`] to a live `*mut session`, or
+/// null if it is [`Sid::NONE`] ("no session") or stale (the session exited and
+/// was freed → the correct "session gone" answer every reader already
+/// null-checks). The backing read for `ThreadAccess::session_ptr` /
+/// `proc_shims::t_session`.
+///
+/// Caller holds `pid_lock` (reader or writer) — the resolution goes through
+/// [`session_lookup`], which requires it and does a single non-looping,
+/// generation-checked table read (no `&Session` formed — freeze-hazard note in
+/// the `GenTable` doc).
+pub(crate) fn thread_session_resolve(p: *mut thread) -> *mut session {
+    // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its own
+    // `session` `Sid` field is a plain aligned word read.
+    let sid: Sid = unsafe { (*p).session };
+    session_lookup(sid).unwrap_or(ptr::null_mut())
+}
+
+/// Store `s` as thread `p`'s `session` edge: `s == null` → [`Sid::NONE`] ("no
+/// session"), otherwise `s`'s own cached [`Sid`] (`session.self_sid`, stamped
+/// at registry insert). The backing write for `ThreadAccess::set_session` /
+/// `proc_shims::t_set_session`.
+///
+/// Caller holds `pid_wlock` (every `set_session` site does).
+pub(crate) fn thread_session_store(p: *mut thread, s: *mut session) {
+    let sid = session_key_of(s);
+    // SAFETY: `p` is a live `*mut thread`; writing its own `session` field
+    // under the caller's `pid_wlock` (exclusive) is race-free.
+    unsafe {
+        (*p).session = sid;
     }
 }
 

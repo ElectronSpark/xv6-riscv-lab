@@ -4008,6 +4008,95 @@ first relationship edge (`parent`) is generation-checked with zero behaviour
 change and zero layout disruption. Ready for 6d-2 (pgroup/session/thread_group
 edges → keys).
 
+### Iteration 87 — 2026-07-18 — Wave N-R6d-2a (thread/proc core, sub-step 2a): the two `*mut session` BACK-EDGES (`thread.session`, `pgroup.session`) → generational `Sid` keys
+
+**Goal (per `RUST_NATIVE_REDESIGN.md` §5c 6d-2):** convert the two session
+back-edges that resolve through the pilot's `SESSION_TABLE` (N-R6a) from raw
+`*mut session` to the session family's generational key `Sid`
+(`GenKey<SID_TAG>`, 8 bytes, `Sid::NONE`==no-session). Replicates the
+`thread.parent → Tid` edge pattern from N-R6d-1 (fa724f4). Everything else
+stays `*mut` (`session.fg_pgrp` needs a pgroup table = 6d-2b; `thread.pgroup`/
+`thread_group`, proc-table hlist, run/wait queues, `current` = later).
+
+**The two edge conversions (accessor before → after):**
+- `thread.session: *mut session` (offset 296) → `session: Sid`. The
+  `t_session`/`t_set_session` shims (`proc_shims.rs`) now delegate to new
+  `thread_session_resolve`/`thread_session_store` (`thread.rs`) — read the
+  stored `Sid` field, resolve via `session_lookup` (→ null if `NONE`/stale) /
+  encode via `session_key_of`. `ThreadAccess::session_ptr`/`set_session`
+  signatures unchanged → every caller (exit.rs, clone.rs, pid.rs, pgroup.rs)
+  untouched.
+- `pgroup.session: *mut session` (offset 88) → `session: Sid`, mirror
+  `pgroup_session_resolve`/`pgroup_session_store` (`pgroup.rs`) backing
+  `pg_session`/`pg_set_session`.
+
+**`Session.self_sid: Sid` added** (`#[repr(C)]` tail, offset 96): stamped by
+`session_table_insert` right after `SESSION_TABLE.insert` returns the key, so
+`set_session(s)` reads `(*s).self_sid` in **O(1)** instead of an O(N)
+`GenTable::key_of` reverse scan. Safe because **zero `.c` files remain**
+in-tree and every session is slab-allocated with `size_of::<session>()`, so
+growing the struct 96 → 104 is purely Rust-side.
+
+**Layout asserts (zero offset shift confirmed for both back-edge structs):**
+- `Thread`: `size_of::<Sid>()==8` added; `thread.session` stays at offset 296,
+  every following offset + `size==1152`/`align==64` unchanged (all 30 asserts
+  pass at compile time). `Sid` (8B/align 4) reuses the pointer's exact span.
+- `Pgroup`: `session` stays at offset 88, `size==96`/`align==8` unchanged.
+- `Session`: **grows 96 → 104** for the appended `self_sid` (offset-96 assert +
+  size assert updated); no other offset moves; `align` stays 8.
+
+**Null / `NONE` handling (zero behaviour change):** `set_session(null)` stores
+`Sid::NONE`; `session_ptr()` resolves `NONE`/stale → null — the exact "session
+gone" semantics every reader already null-checks. In-`session.rs` membership
+sites rewritten: `.is_null()` guards → `.is_none()` (structural analog — a
+*live* thread/pgroup never holds a stale key, it is detached before its session
+can be freed), `!= s` compares → `!= session_key_of(s)`, `= null`/`= s` stores →
+`Sid::NONE`/`session_key_of(s)`. Cross-module readers that took a raw pointer
+(`console.rs` ctrl-tty attach, `tty.rs` TIOCSCTTY, `tty_dev.rs` `ctrl_tty()`,
+`get_session_inner`/getsid, `session_setsid` detach) now resolve the `Sid` via
+`session_lookup` under the `pid_lock` they already hold (or take). `tty.session`
+stays `*mut` (a different struct, not in scope).
+
+**Freeze/`noalias` screening (`freeze-noalias-hazard`):** every resolve/store is
+a single non-looping generation-checked table access under `pid_lock`
+(`session_lookup` requires read-or-write; mutators hold `pid_wlock`); no
+`*mut → &Session` of the concurrently-mutated `SESSION_TABLE` is ever formed —
+raw pointers are handed straight back. `self_sid` is written once at insert
+(exclusive, pre-publication) and thereafter read-only while the session is live;
+`session_key_of` reads it via a raw-pointer field access, never `&Session`.
+
+**rust-skills applied:** `unsafe-safety-comment` (every new `unsafe` block/read
+carries a `// SAFETY:`), `unsafe-minimize-scope`, `type-newtype-ids` /
+`api-newtype-safety` (`Sid` is a distinct typed key, non-interchangeable with
+`Tid`/`Pid`), `mem-assert-type-size` (compile-time size/offset guards),
+`err-question-mark` (`?` in `session_table_insert`), `name-funcs-snake`,
+`doc-safety-section`. Crate stays **edition 2021**.
+
+**Verification (orchestrator recipe, `TOOLPREFIX` + `LAB=fs`; cache clean
+before+after — `CMAKE_BUILD_TYPE` empty, `C_COMPILER` = toolchain
+`riscv64-unknown-elf-gcc`):** `cargo clean` (rust target wiped) + full crate
+recompile **0 warnings**; kernel + `fs_img` built; all layout asserts pass
+(zero offset shift for both back-edge structs; `Session` grew 96→104 as
+intended). Boot gate: **exactly one** `init: starting sh` across **7+ boots**.
+**testsig ALL TESTS PASSED (21/21) ×2** (session create/destroy + setsid/getsid
+— the crux; twice = leak non-regression, no `reference count would go
+non-positive`), **usertests reparent / killstatus / exitwait OK**, **forkforkfork
+OK** (P3-BUG1 intact), **mmaptest all tests passed (16/16)**, **stressfs** ran
+clean, **`cat cat | wc`** pipe → wc printed (`0 0 0`), prompt returned,
+**`cat NONEXISTENT_FILE`** → cannot-open (ENOENT). **Interactive Ctrl-C on
+`sleep 1000`**: `^C` delivered SIGINT to the foreground pgroup via
+ctrl-tty→session→fg_pgrp (resolved *through* the converted `pgroup.session`
+edge), the fg job died and the shell prompt returned + ran the next command —
+job control intact end-to-end. Zero `panic`/non-positive/double-free/UAF across
+all runs. `FAILED -- lost some free pages` is the pre-existing accounting
+trailer (Known issues), not a regression. **NOT committed.**
+
+**Outcome: full success** — both session back-edges are generation-checked with
+zero behaviour change and zero layout disruption (thread/pgroup structs
+byte-identical; `Session` gained an O(1) self-key tail). `session.fg_pgrp`
+remains the last `*mut session→` neighbour, deferred to 6d-2b (needs a pgroup
+`GenTable`).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
