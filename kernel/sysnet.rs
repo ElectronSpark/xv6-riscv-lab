@@ -51,33 +51,27 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use crate::bindings::{mbuf, spinlock_t, thread, EFAULT, EINTR, ENOMEM};
+use crate::bindings::{mbuf, thread, EFAULT, EINTR, ENOMEM};
 use crate::proc::proc_shims::xv6_current_thread;
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
-// crate-path items instead of `extern "C"` redeclarations.
-use crate::proc::{sleep_on_chan_interruptible, wakeup_on_chan};
+// crate-path items instead of `extern "C"` redeclarations. N-R7e: the
+// recv wait now goes through the `SpinLockGuard::sleep_on_interruptible`
+// method (see [`sockread`]), so the free `sleep_on_chan_interruptible` is
+// no longer imported here -- only the wake side (`wakeup_on_chan`) is.
+use crate::proc::wakeup_on_chan;
 // P3-D2b: `killed` (proc/signal.rs) likewise (identical signature).
 use crate::proc::killed;
 use crate::net::mbufq;
 use crate::sync::SpinLock;
 
-// ---------------------------------------------------------------------------
-// Externs -- local per-file `unsafe extern "C"` block (this crate's
-// established cross-module convention).
-// ---------------------------------------------------------------------------
-// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
-// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
-// this file's original extern declarations asserted `safe fn` (usual
-// FFI-facade convention). Thin wrappers preserve that safe facade for the
-// unchanged call sites.
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
-fn spin_lock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(l) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
-fn spin_unlock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(l) }
-}
+// N-R7e: the per-socket `spin_lock`/`spin_unlock` wrapper pair that used
+// to live here is gone -- the per-socket lock now owns its state
+// ([`SockInner`] inside [`sock`], via `crate::sync::SpinLock`), so every
+// former manual `spin_lock(&(*si).lock) ... spin_unlock` critical section
+// is now a `(*si).inner.lock()` RAII guard whose `Deref`/`sleep_on_*`
+// handle the acquire/release/wait. Nothing else in this file drove those
+// wrappers, so both they and the `spinlock_t` import they needed are
+// retired.
 
 // P3-D3a: `vm_copyout`/`vm_copyin` (mm/vm.rs) are ordinary (safe) Rust
 // fns now that their `#[no_mangle]` exports are gone; reached as
@@ -116,8 +110,33 @@ pub struct sock {
     pub raddr: u32,      // the remote IPv4 address
     pub lport: u16,      // the local UDP port number
     pub rport: u16,      // the remote UDP port number
-    pub lock: spinlock_t, // protects the rxq
-    pub rxq: mbufq,      // a queue of packets waiting to be received
+    // N-R7e (lock-owns-data): the per-socket `lock: spinlock_t` +
+    // `rxq: mbufq` pair is now a single lock that OWNS the state it
+    // protects. `SpinLock<T>` is `#[repr(C)] { UnsafeCell<spinlock_t>,
+    // UnsafeCell<T> }` and `UnsafeCell`/[`SockInner`] are `#[repr(C)]`
+    // one-field transparent wrappers, so `SpinLock<SockInner>` lays out
+    // as `spinlock_t` immediately followed by `mbufq` -- byte-identical
+    // to the old `lock, rxq` pair. That layout-identity is load-bearing:
+    // `kernel/vfs/file.rs` keeps its own separate `struct sock` mirror
+    // (out of this wave's edit scope) that `spin_init`s the lock and
+    // `mbufq_init`s the rxq at these exact offsets on a raw `kalloc()`
+    // page, then hands the pointer to [`SOCKETS`]; that construction (and
+    // the `crate::bindings::sock` = `crate::sysnet::sock` re-export it
+    // casts through) stays valid unchanged because the bytes are the same.
+    pub inner: SpinLock<SockInner>,
+}
+
+/// Per-socket lock-protected state (N-R7e). Only the receive queue is
+/// actually guarded by the per-socket lock: `raddr`/`lport`/`rport` above
+/// are set once at `vfs_sockalloc` time and read lock-free thereafter
+/// (the match in [`sockrecvudp`] runs under [`SOCKETS`], not this lock;
+/// [`sockwrite`] reads them with no lock at all), matching the C original.
+/// `#[repr(C)]` single-field wrapper so `SpinLock<SockInner>` keeps the
+/// exact `spinlock_t`-then-`mbufq` byte layout the `vfs/file.rs` mirror
+/// depends on (see [`sock`]).
+#[repr(C)]
+pub struct SockInner {
+    pub rxq: mbufq, // a queue of packets waiting to be received
 }
 
 /// Head of the (unsorted) list of live sockets. Wave P3-8d: `sock_lock`
@@ -176,12 +195,21 @@ pub(crate) unsafe extern "C" fn sockclose(si: *mut sock) {
         }
     }
 
-    // Free any pending mbufs.
-    // SAFETY: caller contract; no other thread can reach `si` anymore
-    // (unlinked above), so its rxq is now exclusively owned.
+    // Free any pending mbufs. `si` is unlinked (above), so no other
+    // thread can reach it -- its `rxq` is exclusively owned and touched
+    // WITHOUT taking the per-socket lock, exactly as the C original did.
+    // `inner.data_ptr()` is the documented `UnsafeCell::get`-style escape
+    // hatch for precisely this case (state protected by an external
+    // protocol -- here exclusive ownership -- rather than the lock);
+    // producing the pointer is safe, and the raw mbufq list ops on it stay
+    // raw (the intrusive-list class, out of this wave's scope).
+    // SAFETY: caller contract (`si` a live, exclusively-owned `kalloc`'d
+    // `sock`); `rxq` reachable by no other thread now, so the unlocked
+    // drain is race-free.
     unsafe {
-        while mbufq_empty(&raw mut (*si).rxq) == 0 {
-            let m = mbufq_pophead(&raw mut (*si).rxq);
+        let rxq = &raw mut (*(*si).inner.data_ptr()).rxq;
+        while mbufq_empty(rxq) == 0 {
+            let m = mbufq_pophead(rxq);
             mbuffree(m);
         }
         kfree(si as *mut c_void);
@@ -201,24 +229,35 @@ pub(crate) unsafe extern "C" fn sockclose(si: *mut sock) {
 pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> c_int {
     let pr = xv6_current_thread();
 
-    spin_lock(unsafe { &raw mut (*si).lock });
-    // SAFETY: `si` live, lock held.
-    while unsafe { mbufq_empty(&raw mut (*si).rxq) } != 0 && killed(pr) == 0 {
-        // SAFETY: `si`'s rxq address is a stable, unique wait-channel
-        // value (never dereferenced as anything but an address, matches
-        // the C `&si->rxq` usage); `(*si).lock` held.
-        if sleep_on_chan_interruptible(unsafe { &raw mut (*si).rxq } as *mut c_void, unsafe { &raw mut (*si).lock }) != 0 {
-            spin_unlock(unsafe { &raw mut (*si).lock });
-            return neg(EINTR);
+    // N-R7e: acquire the per-socket lock-owns-data guard. `s` `DerefMut`s
+    // to the guarded [`SockInner`], and its `sleep_on_interruptible`
+    // atomically releases+reacquires THIS lock across the wait (the
+    // `sleep(chan,&lk)` protocol -- no lost-wakeup window), returning
+    // `-EINTR` if a signal arrives. The guard releases on every exit path
+    // below (RAII), replacing the four hand-matched `spin_unlock`s.
+    // SAFETY: `si` is a live socket (caller contract); creating the
+    // `&(*si).inner` borrow to lock it is the only pointer deref here.
+    let m = {
+        let mut s = unsafe { (*si).inner.lock() };
+        // The rxq address is the stable, unique wait channel (never
+        // dereferenced as anything but an address -- matches the C
+        // `&si->rxq`, and the deliver side [`sockrecvudp`] wakes on the
+        // same address). Computed once; the `&raw mut` borrow of the
+        // guard ends immediately, leaving a plain pointer.
+        let chan = &raw mut s.rxq as *mut c_void;
+        // SAFETY: `s.rxq` is the guarded rxq; the raw mbufq list op stays
+        // raw (intrusive-list class, out of scope). Lock held via `s`.
+        while unsafe { mbufq_empty(&raw mut s.rxq) } != 0 && killed(pr) == 0 {
+            if s.sleep_on_interruptible(chan) != 0 {
+                return neg(EINTR); // `s` drops here -> unlock
+            }
         }
-    }
-    if killed(pr) != 0 {
-        spin_unlock(unsafe { &raw mut (*si).lock });
-        return neg(EINTR);
-    }
-    // SAFETY: `si` live, lock held, rxq non-empty (loop invariant above).
-    let m = unsafe { mbufq_pophead(&raw mut (*si).rxq) };
-    spin_unlock(unsafe { &raw mut (*si).lock });
+        if killed(pr) != 0 {
+            return neg(EINTR); // `s` drops here -> unlock
+        }
+        // SAFETY: lock held via `s`, rxq non-empty (loop invariant above).
+        unsafe { mbufq_pophead(&raw mut s.rxq) }
+    }; // `s` drops here -> unlock
 
     // SAFETY: `m` live (popped above, exclusively owned by this call
     // now); `pr` is the live current thread.
@@ -283,16 +322,22 @@ pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16
     while !si.is_null() {
         // SAFETY: `si` is a live node on the `sockets` list.
         if unsafe { (*si).raddr == raddr && (*si).lport == lport && (*si).rport == rport } {
-            // Found -- deliver.
-            spin_lock(unsafe { &raw mut (*si).lock });
-            // SAFETY: `si` live; `m` caller-owned, transferred to the
-            // rxq.
-            unsafe {
-                mbufq_pushtail(&raw mut (*si).rxq, m);
-                wakeup_on_chan(&raw mut (*si).rxq as *mut c_void);
-            }
-            spin_unlock(unsafe { &raw mut (*si).lock });
-            return; // `guard` drops here (RAII).
+            // Found -- deliver. N-R7e: take the per-socket lock-owns-data
+            // guard; enqueue `m` and wake the sleeping reader while it is
+            // held (matches the C `acquire(&si->lock); push; wakeup;
+            // release` window exactly). `s` releases on scope exit (RAII).
+            // Held nested under `SOCKETS` (`guard`), same order as before.
+            // SAFETY: `si` is a live node on the sockets list; creating
+            // `&(*si).inner` to lock it is the only pointer deref here.
+            let mut s = unsafe { (*si).inner.lock() };
+            // Same wait channel the reader sleeps on (rxq address).
+            let chan = &raw mut s.rxq as *mut c_void;
+            // SAFETY: `m` is caller-owned, ownership transferred into the
+            // rxq; the raw mbufq list op stays raw (out of scope). Lock
+            // held via `s`.
+            unsafe { mbufq_pushtail(&raw mut s.rxq, m) };
+            wakeup_on_chan(chan);
+            return; // `s` then `guard` drop here (RAII).
         }
         si = unsafe { (*si).next };
     }
