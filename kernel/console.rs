@@ -60,8 +60,14 @@ use crate::bindings::{
 use crate::dev::cdev::{cdev_register, CdevOps};
 use crate::kstd::{cint_result, Errno, KResult};
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
-// crate-path items instead of `extern "C"` redeclarations.
-use crate::proc::{sleep_on_chan, wakeup, wakeup_on_chan};
+// crate-path items instead of `extern "C"` redeclarations. `sleep` is
+// now reached through `SpinLockGuard::sleep_on` (lock-owns-data), so
+// `sleep_on_chan` is no longer imported directly here.
+use crate::proc::{wakeup, wakeup_on_chan};
+// N-R7 (lock-owns-data): the console's raw-fallback input buffer + its
+// lock are now a single data-owning `SpinLock<ConsInner>` (was a bare
+// `static mut spinlock_t` beside four `static mut` state fields).
+use crate::sync::SpinLock;
 
 // ===========================================================================
 // Externs.
@@ -77,10 +83,6 @@ use crate::printf::{__panic_end, __panic_start};
 // FFI-facade convention). Thin wrappers preserve that safe facade for the
 // unchanged call sites. (`name` cast: old redeclaration said
 // `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
-fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
-}
 /// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
 fn spin_lock(lk: *mut spinlock_t) {
     unsafe { crate::lock::spinlock::spin_lock(lk) }
@@ -261,15 +263,45 @@ pub(crate) unsafe extern "C" fn consputs(s: *const c_char, n: c_int) {
 
 const INPUT_BUF_SIZE: usize = 128;
 
-static mut CONS_LOCK: spinlock_t = spinlock_t {
-    locked: 0,
-    name: core::ptr::null_mut(),
-    cpu: core::ptr::null_mut(),
-};
-static mut CONS_BUF: [u8; INPUT_BUF_SIZE] = [0; INPUT_BUF_SIZE];
-static mut CONS_R: u32 = 0; // Read index
-static mut CONS_W: u32 = 0; // Write index
-static mut CONS_E: u32 = 0; // Edit index
+/// The raw fallback input ring buffer and its indices (the C `cons`
+/// struct's `buf`/`r`/`w`/`e`). All four fields are guarded by the same
+/// single lock, so they live together inside one [`SpinLock`] that
+/// *owns* them (N-R7 lock-owns-data): every access goes through a guard
+/// that `Deref`s to `&ConsInner`/`&mut ConsInner`, so the borrow checker
+/// enforces "only while the lock is held" and no raw `static mut` access
+/// (nor its `unsafe`) remains.
+struct ConsInner {
+    /// Input ring buffer.
+    buf: [u8; INPUT_BUF_SIZE],
+    /// Read index.
+    r: u32,
+    /// Write index.
+    w: u32,
+    /// Edit index.
+    e: u32,
+}
+
+/// The console's raw-fallback input buffer + lock, as one data-owning
+/// primitive. `SpinLock::new` const-initialises the embedded lock to the
+/// exact post-`spin_init` state (`cons` name, `locked = 0`), so this is
+/// a plain `static`; `consoleinit` still calls `CONS.init()` at the old
+/// `spin_init(&CONS_LOCK)` site to keep the explicit init point.
+static CONS: SpinLock<ConsInner> = SpinLock::new(
+    c"cons",
+    ConsInner { buf: [0; INPUT_BUF_SIZE], r: 0, w: 0, e: 0 },
+);
+
+/// Sleep/wakeup channel for `consoleread` waiting on `consoleintr` to
+/// deliver a line into `CONS`. The C original used `&cons.r` as this
+/// token; here the single fixed address of the `CONS` static serves the
+/// same role -- it is only ever paired between `consoleread`'s
+/// [`SpinLockGuard::sleep_on`] and `consoleintr`'s `wakeup_on_chan`
+/// below (nothing else in the tree references it), so any consistent
+/// address is a faithful, race-free replacement.
+#[inline(always)]
+fn cons_chan() -> *mut c_void {
+    core::ptr::addr_of!(CONS) as *mut c_void
+}
 
 // ===========================================================================
 // consolewrite -- user write()s to the console go here.
@@ -397,97 +429,103 @@ unsafe fn consoleread(
     }
 
     // --- Early boot fallback (before TTY is allocated) ---
+    //
+    // N-R7 lock-owns-data: the raw buffer + its lock are now `CONS`
+    // (`SpinLock<ConsInner>`). The guard is acquired fresh at the top of
+    // each outer iteration and dropped before the userspace copy, so the
+    // lock is held exactly during collection and released during the
+    // copy -- byte-identical to the C original's
+    // `acquire ... release-before-copyout ... reacquire-if-continuing`
+    // hold pattern, but expressed as guard drop/reacquire. No raw
+    // `static mut` access, hence no `unsafe`, remains on this path
+    // (`killed`/`current_thread_ptr`/`either_copyout` are all safe fns).
     let target = n;
     let mut n = n;
     let mut dst = buffer as u64;
     let mut got_newline = false;
     let mut got_eof = false;
 
-    // SAFETY: `CONS_LOCK`/`CONS_BUF`/`CONS_R`/`CONS_W`/`CONS_E` are the
-    // module-private raw fallback buffer, guarded by `CONS_LOCK`
-    // throughout (matches the C `cons` struct's single-lock
-    // discipline).
-    unsafe {
-        spin_lock(&raw mut CONS_LOCK);
-        while n > 0 && !got_newline && !got_eof {
-            let mut kbuf = [0u8; 64];
-            let mut batch_count = 0usize;
+    while n > 0 && !got_newline && !got_eof {
+        let mut cons = CONS.lock();
+        let mut kbuf = [0u8; 64];
+        let mut batch_count = 0usize;
 
-            // Collect up to 64 chars (or until newline/EOF) while
-            // holding the lock.
-            while n > 0 && batch_count < 64 && !got_newline && !got_eof {
-                // Wait until the interrupt handler has put some input
-                // into cons.buf.
-                while CONS_R == CONS_W {
-                    if killed(crate::machine::current_thread_ptr()) != 0 {
-                        spin_unlock(&raw mut CONS_LOCK);
-                        // Copy any pending data before returning.
-                        if batch_count > 0 {
-                            if either_copyout(
-                                user_dst as c_int,
-                                dst,
-                                kbuf.as_mut_ptr() as *mut c_void,
-                                batch_count as u64,
-                            ) < 0
-                            {
-                                return (target - n) as c_int; // bytes read so far
-                            }
-                            dst += batch_count as u64;
-                            n -= batch_count;
+        // Collect up to 64 chars (or until newline/EOF) while holding
+        // the lock.
+        while n > 0 && batch_count < 64 && !got_newline && !got_eof {
+            // Wait until the interrupt handler has put some input into
+            // cons.buf.
+            while cons.r == cons.w {
+                if killed(crate::machine::current_thread_ptr()) != 0 {
+                    drop(cons);
+                    // Copy any pending data before returning.
+                    if batch_count > 0 {
+                        if either_copyout(
+                            user_dst as c_int,
+                            dst,
+                            kbuf.as_mut_ptr() as *mut c_void,
+                            batch_count as u64,
+                        ) < 0
+                        {
+                            return (target - n) as c_int; // bytes read so far
                         }
-                        return (target - n) as c_int;
+                        dst += batch_count as u64;
+                        n -= batch_count;
                     }
-                    sleep_on_chan((&raw mut CONS_R) as *mut c_void, &raw mut CONS_LOCK);
+                    return (target - n) as c_int;
                 }
-
-                let c = CONS_BUF[(CONS_R % INPUT_BUF_SIZE as u32) as usize];
-                CONS_R += 1;
-
-                if c as c_int == ctrl(b'D') {
-                    // End-of-file.
-                    if n < target || batch_count > 0 {
-                        // Save ^D for next time, to make sure caller
-                        // gets a 0-byte result.
-                        CONS_R -= 1;
-                    }
-                    got_eof = true;
-                    break;
-                }
-
-                kbuf[batch_count] = c;
-                batch_count += 1;
-                n -= 1;
-
-                if c == b'\n' {
-                    // A whole line has arrived.
-                    got_newline = true;
-                    break;
-                }
+                // Atomically release `CONS`, block on `cons_chan()`, and
+                // reacquire before returning -- the guard is still valid
+                // (lock re-held) afterward. Mirrors C `sleep(&cons.r,
+                // &cons.lock)`; `consoleintr` wakes this exact channel.
+                cons.sleep_on(cons_chan());
             }
 
-            // Release lock before copying to userspace.
-            spin_unlock(&raw mut CONS_LOCK);
+            let c = cons.buf[(cons.r % INPUT_BUF_SIZE as u32) as usize];
+            cons.r += 1;
 
-            // Copy batch to userspace (without holding the spinlock).
-            if batch_count > 0 {
-                if either_copyout(
-                    user_dst as c_int,
-                    dst,
-                    kbuf.as_mut_ptr() as *mut c_void,
-                    batch_count as u64,
-                ) < 0
-                {
-                    // Copy failed, return what we've read so far.
-                    return (target - n - batch_count) as c_int;
+            if c as c_int == ctrl(b'D') {
+                // End-of-file.
+                if n < target || batch_count > 0 {
+                    // Save ^D for next time, to make sure caller gets a
+                    // 0-byte result.
+                    cons.r -= 1;
                 }
-                dst += batch_count as u64;
+                got_eof = true;
+                break;
             }
 
-            // Re-acquire lock if we need to continue.
-            if n > 0 && !got_newline && !got_eof {
-                spin_lock(&raw mut CONS_LOCK);
+            kbuf[batch_count] = c;
+            batch_count += 1;
+            n -= 1;
+
+            if c == b'\n' {
+                // A whole line has arrived.
+                got_newline = true;
+                break;
             }
         }
+
+        // Release lock before copying to userspace.
+        drop(cons);
+
+        // Copy batch to userspace (without holding the spinlock).
+        if batch_count > 0 {
+            if either_copyout(
+                user_dst as c_int,
+                dst,
+                kbuf.as_mut_ptr() as *mut c_void,
+                batch_count as u64,
+            ) < 0
+            {
+                // Copy failed, return what we've read so far.
+                return (target - n - batch_count) as c_int;
+            }
+            dst += batch_count as u64;
+        }
+        // Loop condition re-tests `n > 0 && !got_newline && !got_eof`;
+        // if it holds we reacquire a fresh guard at the top next
+        // iteration (the C original's "reacquire to continue").
     }
 
     (target - n) as c_int
@@ -664,69 +702,72 @@ pub(crate) extern "C" fn consoleintr(c: c_int) {
     }
 
     // ---- Early boot fallback (raw buffer) ----
-    // SAFETY: `CONS_*` statics guarded by `CONS_LOCK` throughout.
-    unsafe {
-        spin_lock(&raw mut CONS_LOCK);
+    //
+    // N-R7 lock-owns-data: `CONS.lock()` acquires the guard; `cons`
+    // `DerefMut`s to `&mut ConsInner`, so `cons.buf`/`cons.r`/`cons.w`/
+    // `cons.e` are plain safe field accesses. The guard drops (unlocks)
+    // at the end of the function -- byte-identical to the old
+    // `spin_lock ... spin_unlock` bracket, with no `unsafe`.
+    let mut cons = CONS.lock();
 
-        match c {
-            _ if c == ctrl(b'P') => {
-                // Print process list.
-                procdump();
+    match c {
+        _ if c == ctrl(b'P') => {
+            // Print process list.
+            procdump();
+        }
+        _ if c == ctrl(b'U') => {
+            // Kill line.
+            while cons.e != cons.w
+                && cons.buf[((cons.e - 1) % INPUT_BUF_SIZE as u32) as usize] != b'\n'
+            {
+                cons.e -= 1;
+                consputc(BACKSPACE);
             }
-            _ if c == ctrl(b'U') => {
-                // Kill line.
-                while CONS_E != CONS_W
-                    && CONS_BUF[((CONS_E - 1) % INPUT_BUF_SIZE as u32) as usize] != b'\n'
+        }
+        _ if c == ctrl(b'H') || c == 0x7f => {
+            // Backspace / Delete key.
+            if cons.e != cons.w {
+                cons.e -= 1;
+                consputc(BACKSPACE);
+            }
+        }
+        _ => {
+            if c != 0 && cons.e.wrapping_sub(cons.r) < INPUT_BUF_SIZE as u32 {
+                let mut c = c;
+                if c == '\r' as c_int {
+                    c = '\n' as c_int;
+                }
+
+                // Echo back to the user.
+                if c == 0x1b {
+                    consputc('[' as c_int); // Escape sequence start
+                } else if c == '\t' as c_int {
+                    consputc(' ' as c_int); // Convert tab to space
+                } else if (c < 32 || c > 126) && c != '\n' as c_int {
+                    consputc('?' as c_int); // Non-printable
+                } else {
+                    consputc(c);
+                }
+
+                // Store for consumption by consoleread().
+                let idx = (cons.e % INPUT_BUF_SIZE as u32) as usize;
+                cons.buf[idx] = c as u8;
+                cons.e += 1;
+
+                if c == '\n' as c_int
+                    || c == '\t' as c_int
+                    || c == ctrl(b'D')
+                    || cons.e.wrapping_sub(cons.r) == INPUT_BUF_SIZE as u32
                 {
-                    CONS_E -= 1;
-                    consputc(BACKSPACE);
-                }
-            }
-            _ if c == ctrl(b'H') || c == 0x7f => {
-                // Backspace / Delete key.
-                if CONS_E != CONS_W {
-                    CONS_E -= 1;
-                    consputc(BACKSPACE);
-                }
-            }
-            _ => {
-                if c != 0 && CONS_E.wrapping_sub(CONS_R) < INPUT_BUF_SIZE as u32 {
-                    let mut c = c;
-                    if c == '\r' as c_int {
-                        c = '\n' as c_int;
-                    }
-
-                    // Echo back to the user.
-                    if c == 0x1b {
-                        consputc('[' as c_int); // Escape sequence start
-                    } else if c == '\t' as c_int {
-                        consputc(' ' as c_int); // Convert tab to space
-                    } else if (c < 32 || c > 126) && c != '\n' as c_int {
-                        consputc('?' as c_int); // Non-printable
-                    } else {
-                        consputc(c);
-                    }
-
-                    // Store for consumption by consoleread().
-                    CONS_BUF[(CONS_E % INPUT_BUF_SIZE as u32) as usize] = c as u8;
-                    CONS_E += 1;
-
-                    if c == '\n' as c_int
-                        || c == '\t' as c_int
-                        || c == ctrl(b'D')
-                        || CONS_E.wrapping_sub(CONS_R) == INPUT_BUF_SIZE as u32
-                    {
-                        // Wake up consoleread() if a whole line (or
-                        // end-of-file) has arrived.
-                        CONS_W = CONS_E;
-                        wakeup_on_chan((&raw mut CONS_R) as *mut c_void);
-                    }
+                    // Wake up consoleread() if a whole line (or
+                    // end-of-file) has arrived.
+                    cons.w = cons.e;
+                    wakeup_on_chan(cons_chan());
                 }
             }
         }
-
-        spin_unlock(&raw mut CONS_LOCK);
     }
+    // `cons` drops here -> unlock.
 }
 
 // ===========================================================================
@@ -734,11 +775,12 @@ pub(crate) extern "C" fn consoleintr(c: c_int) {
 // ===========================================================================
 
 pub(crate) extern "C" fn consoleinit() {
-    // SAFETY: runs once, before any other hart or interrupt handler can
-    // touch `CONS_LOCK`.
-    unsafe {
-        spin_init(&raw mut CONS_LOCK, c"cons".as_ptr());
-    }
+    // Initialise `CONS`'s embedded lock at the historical
+    // `spin_init(&CONS_LOCK)` site. Runs once, before any other hart or
+    // interrupt handler can touch `CONS`. (`SpinLock::new` already
+    // const-initialised the same fields, so this is belt-and-suspenders,
+    // preserving the explicit init point.)
+    CONS.init();
 
     // Try to initialize UART hardware. Returns 1 if successful (QEMU),
     // 0 if deferred (real hardware uses SBI).

@@ -322,6 +322,31 @@ impl<T> SpinLock<T> {
         SpinLockGuard { lock: self, _not_send_sync: PhantomData }
     }
 
+    /// Re-run `spin_init` on the embedded lock storage, preserving the
+    /// diagnostic `name` set by [`new`](Self::new).
+    ///
+    /// Optional: [`new`](Self::new) already const-initialises the exact
+    /// three fields `spin_init` writes (`locked = 0`, `name`, `cpu =
+    /// null`), so a `SpinLock` is fully usable straight out of a
+    /// `static` with no runtime call. This method exists only for call
+    /// sites that historically had an explicit `spin_init(&LOCK)` at
+    /// subsystem init and want to keep that init point verbatim; it is
+    /// idempotent (writes the same fields `new` did). Must be called
+    /// before any hart races to acquire the lock.
+    #[inline]
+    pub fn init(&self) {
+        let raw = self.raw.get();
+        // SAFETY: `raw` is the lock storage embedded in `self` (never
+        // freed while `self` is alive); this runs at subsystem init
+        // before any concurrent acquirer exists. `spin_init` only
+        // writes the three lock fields; we pass back the `name` already
+        // stored by `new` so the diagnostic name is preserved.
+        unsafe {
+            let name = (*raw).name;
+            crate::lock::spinlock::spin_init(raw, name);
+        }
+    }
+
     /// Non-blocking variant of [`lock`](Self::lock): returns `None`
     /// immediately, without side effects, if the lock is currently held
     /// (by this hart or another).
@@ -382,6 +407,37 @@ impl<'a, T> Drop for SpinLockGuard<'a, T> {
         // forged elsewhere -- `lock`/`_not_send_sync` are private
         // fields).
         unsafe { crate::lock::spinlock::spin_unlock(self.lock.raw.get()) };
+    }
+}
+
+impl<'a, T> SpinLockGuard<'a, T> {
+    /// Sleep on `chan`, atomically releasing this guard's lock and
+    /// reacquiring the **same** lock before returning -- the kernel
+    /// `sleep(chan, lk)` protocol.
+    ///
+    /// This mirrors the C idiom `sleep(chan, &lk)` exactly:
+    /// [`crate::proc::sleep_on_chan`] performs the release-and-block as
+    /// one step with respect to `wakeup(chan)`, so a wakeup racing the
+    /// sleep is never lost (no lost-wakeup window). The lock is re-held
+    /// on return, so this guard is still valid afterward and the
+    /// protected data is borrowable again -- typical use is to re-test
+    /// the wait condition in a loop.
+    ///
+    /// Takes `&mut self` deliberately: it forces any outstanding
+    /// `Deref`/`DerefMut` borrow of the protected data to end before
+    /// the lock is released, so no `&T`/`&mut T` can be held across the
+    /// sleep window (during which another hart may hold the lock and
+    /// mutate the data). This is the borrow-checker analogue of the C
+    /// rule "don't cache pointers into lock-protected state across a
+    /// `sleep`".
+    #[inline]
+    pub fn sleep_on(&mut self, chan: *mut core::ffi::c_void) {
+        // SAFETY: `self.lock.raw.get()` is the exact lock this guard
+        // holds. `sleep_on_chan` releases it, blocks until woken on
+        // `chan`, then reacquires it before returning -- restoring this
+        // guard's "lock is held by this hart" invariant, which every
+        // other method (`Deref`, `Drop`, ...) relies on.
+        unsafe { crate::proc::sleep_on_chan(chan, self.lock.raw.get()) };
     }
 }
 
