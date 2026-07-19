@@ -1205,22 +1205,29 @@ unsafe fn superblock_mountcount(sb: *mut vfs_superblock) -> c_int {
 
 /// Mirrors `fs.h`'s `static inline vfs_inode_is_local_root()`.
 ///
-/// # Safety
-/// `inode` must be null or a live, aligned `vfs_inode`.
-unsafe fn inode_is_local_root(inode: *mut vfs_inode) -> bool {
-    unsafe {
-        if inode.is_null() || (*inode).sb.is_null() {
-            return false;
-        }
-        if inode == (*(*inode).sb).root_inode {
-            kassert!(
-                (*inode).parent == inode,
-                "vfs_inode_is_local_root: root inode's parent is not itself"
-            );
-            return true;
-        }
-        false
+/// N-R5 (VFS-Arc diagnostic pilot): takes a borrowed `&vfs_inode` instead
+/// of a raw `*mut vfs_inode`. The sole caller (`turn_mountpoint`) holds a
+/// live, mutex-locked, non-null inode, so the borrow is sound and the
+/// null branch the raw form carried collapses (a reference is never null).
+/// Only the **set-once** `sb`/`parent` fields are touched here — no Freeze
+/// field (`flags`/`ref_count`/…), no loop — so this reference is free of
+/// the freeze-noalias hazard that gates the flags-reading paths.
+fn inode_is_local_root(inode: &vfs_inode) -> bool {
+    if inode.sb.is_null() {
+        return false;
     }
+    // SAFETY: `sb` is a live superblock (just null-checked); `root_inode`
+    // is a set-once pointer field. Only a raw-pointer identity compare
+    // against the borrowed inode's address follows — no aliasing/mutation.
+    let root = unsafe { (*inode.sb).root_inode };
+    if ptr::eq(inode, root) {
+        kassert!(
+            ptr::eq(inode.parent, inode),
+            "vfs_inode_is_local_root: root inode's parent is not itself"
+        );
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,7 +1536,7 @@ unsafe fn turn_mountpoint(mountpoint: *mut vfs_inode) -> c_int {
         if !is_dir((*mountpoint).mode) {
             return neg(ENOTDIR);
         }
-        if inode_is_local_root(mountpoint) {
+        if inode_is_local_root(&*mountpoint) {
             return neg(EBUSY);
         }
         if (*mountpoint).flags.mount() != 0 {
