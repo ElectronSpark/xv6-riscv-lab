@@ -24,8 +24,16 @@ C-transliteration patterns from this kernel.
 `asm!` + 104 volatile MMIO/CSR — the Redox/Theseus-scale target) + 207
 free-function shims (goal-1 targets). Goals 1+2 collapse the ~4,900
 reducible blocks toward the ~150 floor → that IS goal 3.
-**Target: `unsafe` → the low hundreds** (asm/PTE/MMIO/DMA floor + necessary
-boundary unsafe), approaching Redox's density (exact number being measured).
+**Target (measured 2026-07-18): approach Redox's `unsafe` density.**
+Redox kernel = 1,143 `\bunsafe\b` / 40.8k LOC = **28/1k** (blocks-only 18/1k;
+~50% of it in `arch/asm/MMIO/page-table` — the irreducible floor). Theseus
+= 1.9/1k (north-star, needs crate partitioning we lack; not the bar). Ours
+now = **5,134 `\bunsafe\b` / 98k LOC = 52.3/1k** (blocks-only 3,648) — ~1.9×
+Redox. **Goal: ≈20/1k (~60% cut), STAGED 35/1k → 20/1k.** Track **per-1k
+density** (not the absolute count — idiomatic Rust shrinks LOC, which would
+silently tighten a fixed budget), metric `grep -roE "\bunsafe\b" kernel
+--include=*.rs`. Keep a documented allow-list for the arch/asm/MMIO/CSR/
+DMA/FFI residue (the ~150-block floor: 46 `asm!` + 104 volatile).
 
 ## 1. Honest scope: what "full Rust native" means
 
