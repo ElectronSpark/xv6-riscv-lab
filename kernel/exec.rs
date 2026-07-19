@@ -345,24 +345,30 @@ const fn pg_round_down(a: u64) -> u64 {
     a & !(PGSIZE as u64 - 1)
 }
 
-/// Mirrors the C `flags2vmperm()`: translate an ELF program-header
-/// `p_flags` bitmask (`ELF_PROG_FLAG_{EXEC,WRITE,READ}`) into this
-/// kernel's `PROT_*` VMA permission bits. Not a `#[no_mangle]` C-ABI
-/// function: it has exactly one caller (`exec`, below) and is not
-/// declared in `kernel/inc/defs.h` (see the module doc's "dead code
-/// dropped" note).
-const fn flags2vmperm(flags: u32) -> u64 {
-    let mut perm: u64 = 0;
-    if flags & ELF_PROG_FLAG_EXEC != 0 {
-        perm = PROT_EXEC as u64;
+impl Proghdr {
+    /// Translate this segment's ELF `p_flags` bitmask
+    /// (`ELF_PROG_FLAG_{EXEC,WRITE,READ}`) into this kernel's `PROT_*` VMA
+    /// permission bits (was the C `flags2vmperm()` free helper — N-METH
+    /// goal #1: a free fn reading one `Proghdr` field is now the struct's
+    /// own method). Reads `self.flags` from an exclusively-owned local
+    /// `Proghdr` (`exec`'s `ph`, a `Copy` value freshly `assume_init`'d
+    /// from a `vfs_fileread`), so the shared `&self` carries no
+    /// Freeze-noalias hazard. Private (no `#[no_mangle]` C-ABI surface):
+    /// its sole caller is `exec` below, and it is not declared in
+    /// `kernel/inc/defs.h` (see the module doc's "dead code dropped" note).
+    const fn vmperm(&self) -> u64 {
+        let mut perm: u64 = 0;
+        if self.flags & ELF_PROG_FLAG_EXEC != 0 {
+            perm = PROT_EXEC as u64;
+        }
+        if self.flags & ELF_PROG_FLAG_WRITE != 0 {
+            perm |= PROT_WRITE as u64;
+        }
+        if self.flags & ELF_PROG_FLAG_READ != 0 {
+            perm |= PROT_READ as u64;
+        }
+        perm
     }
-    if flags & ELF_PROG_FLAG_WRITE != 0 {
-        perm |= PROT_WRITE as u64;
-    }
-    if flags & ELF_PROG_FLAG_READ != 0 {
-        perm |= PROT_READ as u64;
-    }
-    perm
 }
 
 // ===========================================================================
@@ -508,7 +514,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         let filesz = ph.filesz;
         let memsz = ph.memsz;
         let file_off = ph.off;
-        let vm_flags = flags2vmperm(ph.flags) | VMA_FLAG_USER as u64;
+        let vm_flags = ph.vmperm() | VMA_FLAG_USER as u64;
         let total_end = pg_round_up(va + memsz);
         // End of full pages entirely covered by file data.
         let file_pg_end = if filesz > 0 { pg_round_down(va + filesz) } else { va };
@@ -835,17 +841,11 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
     // `for (i = 0; i < NELEM(argv) && argv[i] != 0; i++) kfree(argv[i]);`.
     macro_rules! cleanup_and_fail {
         () => {{
-            for k in 0..MAXARG {
-                if argv[k].is_null() {
-                    break;
-                }
-                kfree(argv[k] as *mut c_void);
+            for &p in argv.iter().take_while(|p| !p.is_null()) {
+                kfree(p as *mut c_void);
             }
-            for k in 0..MAXENV {
-                if envp[k].is_null() {
-                    break;
-                }
-                kfree(envp[k] as *mut c_void);
+            for &p in envp.iter().take_while(|p| !p.is_null()) {
+                kfree(p as *mut c_void);
             }
             return (-1_i32) as u64;
         }};
@@ -909,17 +909,15 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
 
     let ret = exec(path.as_mut_ptr(), argv.as_mut_ptr(), envp.as_mut_ptr());
 
-    for k in 0..MAXARG {
-        if argv[k].is_null() {
-            break;
-        }
-        kfree(argv[k] as *mut c_void);
+    // Free every argv/envp buffer allocated above, stopping at the first
+    // still-NULL slot (N-METH goal #2: the C `for (i=0; i<NELEM && arr[i];
+    // i++) kfree(arr[i])` scan-until-null is now a `take_while` iterator
+    // over the fixed stack array — same order, same stop point).
+    for &p in argv.iter().take_while(|p| !p.is_null()) {
+        kfree(p as *mut c_void);
     }
-    for k in 0..MAXENV {
-        if envp[k].is_null() {
-            break;
-        }
-        kfree(envp[k] as *mut c_void);
+    for &p in envp.iter().take_while(|p| !p.is_null()) {
+        kfree(p as *mut c_void);
     }
 
     ret as u64
