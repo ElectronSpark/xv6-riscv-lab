@@ -27,9 +27,10 @@
 //!
 //! Two independent spinlock-protected ring buffers, exactly as in the
 //! C original:
-//!   * `UART_TX_LOCK` guards the TX software ring + `UART_IER`'s TX-enable
-//!     bit. [`uartputc`]/[`uartputs`] block (via `sleep_on_chan`) when the
-//!     ring is full — **not** IRQ-safe, only for `write()` paths.
+//!   * `UART_TX` (a `SpinLock<UartTx>`, N-R7 lock-owns-data) owns the TX
+//!     software ring; its lock also guards the `UART_IER` TX-enable bit.
+//!     [`uartputc`]/[`uartputs`] block (via the guard's `sleep_on`) when
+//!     the ring is full — **not** IRQ-safe, only for `write()` paths.
 //!     [`uartputc_sync`] is the IRQ-safe alternative used by printf/echo:
 //!     it never touches the software ring, only spin-waits on the
 //!     hardware `LSR.TX_IDLE` bit while holding `push_off`/`pop_off`
@@ -46,6 +47,11 @@
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::bindings::spinlock_t;
+// N-R7 (lock-owns-data): the TX software ring + its lock are now a
+// single data-owning `SpinLock<UartTx>` (was a bare `static mut
+// spinlock_t` beside three `static mut` ring fields). See the TX ring
+// section below. The RX ring is out of scope this wave and stays raw.
+use crate::sync::SpinLock;
 
 // ===========================================================================
 // FDT-configured MMIO base + layout (written once by `dev/fdt.c` during
@@ -184,8 +190,11 @@ fn spin_unlock(lk: *mut spinlock_t) {
 // `extern "C"` redeclaration (identical signature).
 use crate::console::consoleintr;
 // P3-D2a: proc/sched.rs chan sleep/wake entry points, reached as plain
-// crate-path items instead of `extern "C"` redeclarations.
-use crate::proc::{sleep_on_chan, sleep_on_chan_interruptible, wakeup_on_chan};
+// crate-path items instead of `extern "C"` redeclarations. N-R7: the
+// uninterruptible `sleep_on_chan` is now reached through the guard's
+// `SpinLockGuard::sleep_on` (lock-owns-data), so only the interruptible
+// waiter and the waker are imported directly here.
+use crate::proc::{sleep_on_chan_interruptible, wakeup_on_chan};
 
 const EINTR: c_int = 4;
 
@@ -195,32 +204,66 @@ const EINTR: c_int = 4;
 
 const UART_TX_BUF_SIZE: usize = 128;
 
-/// Mirrors the C `spinlock_t uart_tx_lock = SPINLOCK_INITIALIZED(...)`:
-/// valid for locking from the moment `.bss`/`.data` are live, no
-/// runtime `spin_init` call required (matches the C compile-time
-/// initializer convention).
-static mut UART_TX_LOCK: spinlock_t = spinlock_t {
-    locked: 0,
-    name: c"uart_tx_lock".as_ptr() as *mut c_char,
-    cpu: core::ptr::null_mut(),
-};
+/// The TX software ring buffer and its two indices (the C `uart_tx_buf`
+/// / `uart_tx_w` / `uart_tx_r`). All three were guarded by the same
+/// single `uart_tx_lock`, so they now live together inside one
+/// [`SpinLock`] that *owns* them (N-R7 lock-owns-data): every access
+/// goes through a guard that `Deref`s to `&UartTx`/`&mut UartTx`, so the
+/// borrow checker enforces "only while the lock is held" and no raw
+/// `static mut` access (nor its `unsafe`) remains on the TX ring.
+struct UartTx {
+    /// TX output ring buffer.
+    buf: [u8; UART_TX_BUF_SIZE],
+    /// Write index.
+    w: u64,
+    /// Read index (drained by `uartstart`).
+    r: u64,
+}
 
-static mut UART_TX_BUF: [u8; UART_TX_BUF_SIZE] = [0; UART_TX_BUF_SIZE];
-static mut UART_TX_W: u64 = 0;
-static mut UART_TX_R: u64 = 0;
+/// The UART TX ring + its lock, as one data-owning primitive.
+/// `SpinLock::new` const-initialises the embedded lock to the exact
+/// post-`spin_init` state (`uart_tx_lock` name, `locked = 0`), matching
+/// the C `SPINLOCK_INITIALIZED("uart_tx_lock")` compile-time
+/// initializer — valid for locking from the moment `.bss`/`.data` are
+/// live, no runtime `spin_init` call required.
+static UART_TX: SpinLock<UartTx> =
+    SpinLock::new(c"uart_tx_lock", UartTx { buf: [0; UART_TX_BUF_SIZE], w: 0, r: 0 });
+
 /// Current IER value, for dynamic TX-interrupt enable/disable. Mutated
-/// only while `UART_TX_LOCK` is held (mirrors the C `static uint32
+/// only while `UART_TX`'s lock is held (mirrors the C `static uint32
 /// uart_ier`), except during `uartinit()` which runs before any
-/// concurrency is possible.
+/// concurrency is possible. Kept a bare `static mut` (this wave moves
+/// only the tx-ring *buffer* state into the lock, per scope): its
+/// accesses stay `unsafe`, but every one of them happens on a path that
+/// provably holds `UART_TX`'s guard (or is single-threaded init).
 static mut UART_IER: u32 = 0;
 
 /// Address used as the `sleep_on_chan`/`wakeup_on_chan` wait channel
-/// for TX buffer space, mirroring the C `&uart_tx_r` (the channel
-/// value only needs to be a stable, unique address — never
-/// dereferenced as the `u64` it points to).
+/// for TX buffer space. The C original used `&uart_tx_r` as this token;
+/// here the single fixed address of the `UART_TX` static serves the
+/// same role — it is only ever paired between the TX waiters
+/// ([`uartputc`]/[`uartputs`] via `sleep_on`, [`uart_tx_wait`] via
+/// `sleep_on_chan_interruptible`) and [`uartstart`]'s `wakeup_on_chan`,
+/// and is never dereferenced, so any consistent unique address is a
+/// faithful replacement.
 #[inline(always)]
 fn tx_chan() -> *mut c_void {
-    &raw mut UART_TX_R as *mut c_void
+    core::ptr::addr_of!(UART_TX) as *mut c_void
+}
+
+/// The `*mut spinlock_t` embedded inside `UART_TX`.
+///
+/// `SpinLock<T>` is `#[repr(C)]` with its embedded `spinlock_t` as the
+/// first field (an `UnsafeCell<spinlock_t>`, which is
+/// `#[repr(transparent)]`), so the address of the `UART_TX` static *is*
+/// the address of that lock. This returns the exact same pointer
+/// `UART_TX.lock()`'s guard uses internally for `sleep_on`; it is needed
+/// raw only by [`uart_tx_wait`], whose *interruptible* wait the guard
+/// does not expose a method for (the guard offers uninterruptible
+/// `sleep_on` only). See the note in [`uart_tx_wait`].
+#[inline(always)]
+fn uart_tx_lock_ptr() -> *mut spinlock_t {
+    core::ptr::addr_of!(UART_TX) as *mut spinlock_t
 }
 
 // ===========================================================================
@@ -329,23 +372,27 @@ pub(crate) extern "C" fn uartinit() -> c_int {
 /// Because it may block, it can't be called from interrupts; it's
 /// only suitable for use by `write()`.
 pub(crate) extern "C" fn uartputc(c: c_int) {
-    // SAFETY: `UART_TX_LOCK` is a valid, compile-time-initialised
-    // spinlock (see its definition above); TX path is lock-protected
-    // and can sleep, so it must not run from IRQ context (matches the
-    // C comment).
-    unsafe {
-        spin_lock(&raw mut UART_TX_LOCK);
+    // N-R7 lock-owns-data: the TX ring + its lock are `UART_TX`
+    // (`SpinLock<UartTx>`); `tx` `DerefMut`s to `&mut UartTx`, so
+    // `tx.buf`/`tx.w`/`tx.r` are plain safe field accesses. The guard
+    // drops (unlocks) at scope end. TX path can sleep, so (as in C) it
+    // must not run from IRQ context.
+    let mut tx = UART_TX.lock();
 
-        while UART_TX_W == UART_TX_R + UART_TX_BUF_SIZE as u64 {
-            // Buffer full: sleep until uartstart() frees space.
-            sleep_on_chan(tx_chan(), &raw mut UART_TX_LOCK);
-        }
-        UART_TX_BUF[(UART_TX_W % UART_TX_BUF_SIZE as u64) as usize] = c as u8;
-        UART_TX_W += 1;
-        uartstart();
-
-        spin_unlock(&raw mut UART_TX_LOCK);
+    while tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
+        // Buffer full: atomically release `UART_TX`, block on
+        // `tx_chan()`, and reacquire before returning — the guard is
+        // still valid (lock re-held) afterward. Mirrors C `sleep(&uart_tx_r,
+        // &uart_tx_lock)`; `uartstart` wakes this exact channel. `sleep_on`
+        // takes `&mut self`, ending any `Deref` borrow before the sleep
+        // and barring the compiler from hoisting the `tx.w`/`tx.r` retest
+        // out of the wait loop (freeze-noalias defense).
+        tx.sleep_on(tx_chan());
     }
+    let idx = (tx.w % UART_TX_BUF_SIZE as u64) as usize;
+    tx.buf[idx] = c as u8;
+    tx.w += 1;
+    uartstart(&mut tx);
 }
 
 /// Batch version of [`uartputc`] — write multiple characters at once.
@@ -355,22 +402,22 @@ pub(crate) extern "C" fn uartputc(c: c_int) {
 /// # Safety
 /// `s` must point to at least `n` readable bytes.
 pub(crate) unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
-    // SAFETY: same lock contract as `uartputc`; `s`/`n` validity is
-    // this function's documented precondition.
-    unsafe {
-        spin_lock(&raw mut UART_TX_LOCK);
+    // N-R7 lock-owns-data: `UART_TX` guard, as in `uartputc`. Only the
+    // `*s.offset(i)` user-pointer read remains `unsafe` (this fn's
+    // documented precondition); the ring state is safe field access.
+    let mut tx = UART_TX.lock();
 
-        for i in 0..n as isize {
-            while UART_TX_W == UART_TX_R + UART_TX_BUF_SIZE as u64 {
-                sleep_on_chan(tx_chan(), &raw mut UART_TX_LOCK);
-            }
-            UART_TX_BUF[(UART_TX_W % UART_TX_BUF_SIZE as u64) as usize] = *s.offset(i) as u8;
-            UART_TX_W += 1;
+    for i in 0..n as isize {
+        while tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
+            tx.sleep_on(tx_chan());
         }
-
-        uartstart();
-        spin_unlock(&raw mut UART_TX_LOCK);
+        let idx = (tx.w % UART_TX_BUF_SIZE as u64) as usize;
+        // SAFETY: `s`/`n` validity is this function's documented precondition.
+        tx.buf[idx] = unsafe { *s.offset(i) } as u8;
+        tx.w += 1;
     }
+
+    uartstart(&mut tx);
 }
 
 /// Non-blocking batch enqueue: copy up to `n` bytes from `s` into the
@@ -382,40 +429,63 @@ pub(crate) unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
 /// `s` must point to at least `n` readable bytes.
 pub(crate) unsafe extern "C" fn uartputs_nb(s: *const c_char, n: c_int) -> c_int {
     let mut enqueued: c_int = 0;
-    // SAFETY: same lock contract as `uartputc`; `s`/`n` validity is
-    // this function's documented precondition.
-    unsafe {
-        spin_lock(&raw mut UART_TX_LOCK);
-        for i in 0..n as isize {
-            if UART_TX_W == UART_TX_R + UART_TX_BUF_SIZE as u64 {
-                break; // buffer full
-            }
-            UART_TX_BUF[(UART_TX_W % UART_TX_BUF_SIZE as u64) as usize] = *s.offset(i) as u8;
-            UART_TX_W += 1;
-            enqueued += 1;
+    // N-R7 lock-owns-data: `UART_TX` guard (non-blocking, never sleeps).
+    let mut tx = UART_TX.lock();
+    for i in 0..n as isize {
+        if tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
+            break; // buffer full
         }
-        if enqueued > 0 {
-            uartstart();
-        }
-        spin_unlock(&raw mut UART_TX_LOCK);
+        let idx = (tx.w % UART_TX_BUF_SIZE as u64) as usize;
+        // SAFETY: `s`/`n` validity is this function's documented precondition.
+        tx.buf[idx] = unsafe { *s.offset(i) } as u8;
+        tx.w += 1;
+        enqueued += 1;
+    }
+    if enqueued > 0 {
+        uartstart(&mut tx);
     }
     enqueued
+}
+
+/// Interruptible analogue of [`SpinLockGuard::sleep_on`](crate::sync::SpinLockGuard::sleep_on)
+/// for the TX ring, used by [`uart_tx_wait`].
+///
+/// Takes `&mut` the guard deliberately, exactly as `sleep_on(&mut self)`
+/// does: it forces any outstanding `Deref` borrow of `UartTx` to end
+/// before the sleep, so no `&UartTx` can be cached across the wait
+/// window and the compiler cannot hoist the `tx.w`/`tx.r` retest out of
+/// the wait loop (the freeze-noalias defense — `w`/`r` are `Freeze`
+/// `u64`s another hart mutates via `uartstart` under the same lock).
+///
+/// The guard exposes only the *uninterruptible* `sleep_on`, so this
+/// calls [`sleep_on_chan_interruptible`] on the guard's embedded lock
+/// ([`uart_tx_lock_ptr`], the identical `spinlock_t` the guard holds —
+/// see that fn's `repr(C)` note). `sleep_on_chan_common` atomically
+/// releases that lock, blocks on `chan`, and reacquires it before
+/// returning on *both* the woken and the signalled path (see
+/// `proc/sched.rs`), so `tx` is valid (lock re-held) on return. Returns
+/// 0 when woken (space may be available — recheck the condition) or
+/// `-EINTR` on a pending signal.
+#[inline]
+fn tx_sleep_interruptible(_tx: &mut crate::sync::SpinLockGuard<'_, UartTx>) -> c_int {
+    sleep_on_chan_interruptible(tx_chan(), uart_tx_lock_ptr())
 }
 
 /// Wait interruptibly for space in the UART TX buffer. Returns 0 when
 /// space is available, `-EINTR` on pending signal.
 pub(crate) extern "C" fn uart_tx_wait() -> c_int {
-    // SAFETY: same lock contract as `uartputc`.
-    unsafe {
-        spin_lock(&raw mut UART_TX_LOCK);
-        while UART_TX_W == UART_TX_R + UART_TX_BUF_SIZE as u64 {
-            let ret = sleep_on_chan_interruptible(tx_chan(), &raw mut UART_TX_LOCK);
-            if ret != 0 {
-                spin_unlock(&raw mut UART_TX_LOCK);
-                return -EINTR;
-            }
+    // N-R7 lock-owns-data: `UART_TX` guard. The wait is interruptible,
+    // which the guard has no method for, so it goes through
+    // `tx_sleep_interruptible` (see there) — which takes `&mut tx`,
+    // preserving the same borrow-ending / anti-hoist guarantees the
+    // guard's own `sleep_on` gives the blocking TX paths.
+    let mut tx = UART_TX.lock();
+    while tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
+        if tx_sleep_interruptible(&mut tx) != 0 {
+            // Interrupted by signal; lock is re-held, drop it and bail.
+            drop(tx);
+            return -EINTR;
         }
-        spin_unlock(&raw mut UART_TX_LOCK);
     }
     0
 }
@@ -433,20 +503,23 @@ pub(crate) extern "C" fn uartputc_sync(c: c_int) {
 }
 
 /// If the UART is idle, and a character is waiting in the transmit
-/// buffer, send it. Caller must hold `UART_TX_LOCK`. Called from both
-/// the top- and bottom-half.
+/// buffer, send it. Called from both the top- and bottom-half.
 ///
-/// # Safety
-/// Caller must hold `UART_TX_LOCK`.
-pub(crate) unsafe extern "C" fn uartstart() {
+/// N-R7 lock-owns-data: takes `&mut UartTx` — the caller passes its live
+/// `UART_TX` guard (`&mut tx`), which *is* the proof the lock is held
+/// (was the C `// caller must hold uart_tx_lock` comment). The ring
+/// state is now safe field access; only the `UART_IER` shadow (still a
+/// bare `static mut`, out of this wave's scope) keeps an `unsafe` block,
+/// itself sound because every caller holds the TX guard.
+fn uartstart(tx: &mut UartTx) {
     // Check if UART TX FIFO is ready (THR empty).
     if (read_reg(LSR) & LSR_TX_IDLE) == 0 {
         // The UART transmit holding register is full; enable TX
         // interrupt so we get notified when ready.
-        // SAFETY: caller holds `UART_TX_LOCK`, which is this static's
-        // documented invariant.
+        // SAFETY: `UART_IER` is guarded by the TX lock, which the caller
+        // holds (it passed us its live `UART_TX` guard as `tx`).
         unsafe {
-            if UART_TX_W != UART_TX_R && (UART_IER & IER_TX_ENABLE) == 0 {
+            if tx.w != tx.r && (UART_IER & IER_TX_ENABLE) == 0 {
                 UART_IER |= IER_TX_ENABLE;
                 write_reg(IER, UART_IER);
             }
@@ -458,22 +531,22 @@ pub(crate) unsafe extern "C" fn uartstart() {
     let max_batch = uart_fifo_size() / 2;
     let mut sent: u32 = 0;
 
-    // SAFETY: caller holds `UART_TX_LOCK`.
-    unsafe {
-        while sent < max_batch {
-            if UART_TX_W == UART_TX_R {
-                // transmit buffer is empty.
-                break;
-            }
-            let c = UART_TX_BUF[(UART_TX_R % UART_TX_BUF_SIZE as u64) as usize];
-            UART_TX_R += 1;
-            sent += 1;
-            write_reg(THR, c as u32);
+    while sent < max_batch {
+        if tx.w == tx.r {
+            // transmit buffer is empty.
+            break;
         }
+        let c = tx.buf[(tx.r % UART_TX_BUF_SIZE as u64) as usize];
+        tx.r += 1;
+        sent += 1;
+        write_reg(THR, c as u32);
+    }
 
-        // Enable or disable TX interrupt based on whether more data is
-        // pending.
-        if UART_TX_W != UART_TX_R {
+    // Enable or disable TX interrupt based on whether more data is
+    // pending.
+    // SAFETY: `UART_IER` guarded by the TX lock the caller holds (see above).
+    unsafe {
+        if tx.w != tx.r {
             // More data to send - enable TX interrupt.
             if (UART_IER & IER_TX_ENABLE) == 0 {
                 UART_IER |= IER_TX_ENABLE;
@@ -580,8 +653,10 @@ pub(crate) unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
 /// void*, device_t*)`); `data`/`dev` are unused, forwarded only for
 /// ABI compatibility with the registered `irq_desc`.
 pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
-    // SAFETY: `UART_RX_LOCK`/`UART_TX_LOCK` are valid,
-    // compile-time-initialised spinlocks.
+    // SAFETY: `UART_RX_LOCK` is a valid, compile-time-initialised
+    // spinlock; the RX ring is out of this wave's scope and stays raw.
+    // (The TX ring moved into `UART_TX`; its acquire is below, outside
+    // this block.)
     unsafe {
         spin_lock(&raw mut UART_RX_LOCK);
         uartrecv();
@@ -597,10 +672,12 @@ pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_
             spin_lock(&raw mut UART_RX_LOCK);
         }
         spin_unlock(&raw mut UART_RX_LOCK);
-
-        // Send buffered characters.
-        spin_lock(&raw mut UART_TX_LOCK);
-        uartstart();
-        spin_unlock(&raw mut UART_TX_LOCK);
     }
+
+    // Send buffered characters. N-R7 lock-owns-data: the TX ring is now
+    // `UART_TX` (`SpinLock<UartTx>`); acquire its guard and hand it to
+    // `uartstart`. Guard drops (unlocks) at scope end — byte-identical
+    // to the old `spin_lock(uart_tx_lock); uartstart(); spin_unlock`.
+    let mut tx = UART_TX.lock();
+    uartstart(&mut tx);
 }
