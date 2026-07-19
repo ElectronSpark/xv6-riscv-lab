@@ -31,6 +31,7 @@ use crate::proc::access::{
 };
 use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
 use crate::tty::session::{session_key_of, session_lookup, Sid};
+use crate::proc::pgroup::{pgroup_key_of, pgroup_lookup, Pgid};
 use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
 use crate::proc::__proctab_init;
@@ -215,7 +216,18 @@ pub struct Thread {
     pub parent: Tid,
     pub vfork_parent: *mut Thread,
     pub thread_group: *mut thread_group,
-    pub pgroup: *mut pgroup,
+    // N-R6d-2b: the pgroup edge converted off `*mut pgroup` to the process-group
+    // family's generational key [`Pgid`] (`GenKey<PGID_TAG>`, 8 bytes/align 4 —
+    // the exact span the `*mut pgroup` occupied, so offset 288 (already
+    // 8-aligned) and every following offset are unchanged; the layout asserts
+    // below prove it). `Pgid::NONE` (`generation == 0`) is the "no pgroup" edge.
+    // Resolved to a `*mut pgroup` through [`PGROUP_TABLE`] by the `pgroup`
+    // accessors (`ThreadAccess::pgroup_ptr`/`set_pgroup` →
+    // `proc_shims::t_pgroup`/`t_set_pgroup` →
+    // `thread_pgroup_resolve`/`thread_pgroup_store`); a stale `Pgid` (the pgroup
+    // was freed) resolves to null — the existing "pgroup gone" semantics readers
+    // already null-check. `thread_group` above stays `*mut` (later sub-step).
+    pub pgroup: Pgid,
     // N-R6d-2a: the session back-edge converted off `*mut session` to the
     // session family's generational key [`Sid`] (`GenKey<SID_TAG>`, 8
     // bytes/align 4 — the exact span the `*mut session` occupied, so offset
@@ -301,6 +313,11 @@ const _: () = {
     assert!(core::mem::offset_of!(Thread, parent) == 264, "thread.parent offset");
     assert!(core::mem::offset_of!(Thread, vfork_parent) == 272, "thread.vfork_parent offset");
     assert!(core::mem::offset_of!(Thread, thread_group) == 280, "thread.thread_group offset");
+    // N-R6d-2b: `pgroup` is now a `Pgid` (`GenKey`, 8 bytes/align 4), not a
+    // `*mut pgroup` (8 bytes/align 8). Same 8-byte span at an already-8-aligned
+    // offset, so offset 288 and every following offset are unchanged; the struct
+    // `size == 1152` assert above guards the tail.
+    assert!(core::mem::size_of::<Pgid>() == 8, "Pgid must be 8 bytes to preserve thread.pgroup span");
     assert!(core::mem::offset_of!(Thread, pgroup) == 288, "thread.pgroup offset");
     // N-R6d-2a: `session` is now an `Sid` (`GenKey`), not a `*mut session`.
     // Like `Tid`, an `Sid` is 8 bytes (align 4) — the same span the pointer
@@ -493,6 +510,38 @@ pub(crate) fn thread_session_store(p: *mut thread, s: *mut session) {
     // under the caller's `pid_wlock` (exclusive) is race-free.
     unsafe {
         (*p).session = sid;
+    }
+}
+
+/// Resolve thread `p`'s stored `pgroup` [`Pgid`] to a live `*mut pgroup`, or
+/// null if it is [`Pgid::NONE`] ("no pgroup") or stale (the pgroup emptied and
+/// was freed → the correct "pgroup gone" answer every reader already
+/// null-checks). The backing read for `ThreadAccess::pgroup_ptr` /
+/// `proc_shims::t_pgroup`.
+///
+/// Caller holds `pid_lock` (reader or writer) — the resolution goes through
+/// [`pgroup_lookup`], which requires it and does a single non-looping,
+/// generation-checked table read (no `&Pgroup` formed — freeze-hazard note in
+/// the `GenTable` doc).
+pub(crate) fn thread_pgroup_resolve(p: *mut thread) -> *mut pgroup {
+    // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its own
+    // `pgroup` `Pgid` field is a plain aligned word read.
+    let pgid: Pgid = unsafe { (*p).pgroup };
+    pgroup_lookup(pgid).unwrap_or(ptr::null_mut())
+}
+
+/// Store `pg` as thread `p`'s `pgroup` edge: `pg == null` → [`Pgid::NONE`] ("no
+/// pgroup"), otherwise `pg`'s own cached [`Pgid`] (`pgroup.self_pgid`, stamped
+/// at registry insert). The backing write for `ThreadAccess::set_pgroup` /
+/// `proc_shims::t_set_pgroup`.
+///
+/// Caller holds `pid_wlock` (every `set_pgroup` site does).
+pub(crate) fn thread_pgroup_store(p: *mut thread, pg: *mut pgroup) {
+    let pgid = pgroup_key_of(pg);
+    // SAFETY: `p` is a live `*mut thread`; writing its own `pgroup` field under
+    // the caller's `pid_wlock` (exclusive) is race-free.
+    unsafe {
+        (*p).pgroup = pgid;
     }
 }
 

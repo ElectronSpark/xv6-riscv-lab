@@ -153,7 +153,18 @@ pub struct Session {
     pub(crate) threads: crate::list::ListNode,
     pub(crate) pg_cnt: core::ffi::c_int,
     pub(crate) pgrps: crate::list::ListNode,
-    pub(crate) fg_pgrp: *mut pgroup,
+    // N-R6d-2b: the foreground-pgroup edge converted off `*mut pgroup` to the
+    // process-group family's generational key [`Pgid`] (`GenKey<PGID_TAG>`, 8
+    // bytes/align 4 — the exact span the `*mut pgroup` occupied, so this offset
+    // (80, already 8-aligned) and the struct size (104) are unchanged; the
+    // layout asserts below prove it). `Pgid::NONE` (`generation == 0`) is the
+    // "no foreground group" edge. Resolved to a `*mut pgroup` through
+    // [`PGROUP_TABLE`] by `session_fg_pgrp`/`session_get_fg_pgid` (and the
+    // in-file readers); a stale `Pgid` (the pgroup was freed) resolves to null —
+    // the existing "no fg / fg gone" semantics every reader already null-checks.
+    // This makes the controlling-tty → session → foreground-group signal path
+    // (Ctrl-C) fully key-based.
+    pub(crate) fg_pgrp: Pgid,
     pub(crate) ctrl_tty: *mut tty,
     // N-R6d-2a: the session caches its own generational key here, stamped by
     // `session_table_insert` right after `SESSION_TABLE.insert` hands it out.
@@ -194,6 +205,11 @@ const _: () = {
     assert!(core::mem::offset_of!(Session, threads) == 40, "session.threads offset");
     assert!(core::mem::offset_of!(Session, pg_cnt) == 56, "session.pg_cnt offset");
     assert!(core::mem::offset_of!(Session, pgrps) == 64, "session.pgrps offset");
+    // N-R6d-2b: `fg_pgrp` is now a `Pgid` (`GenKey`, 8 bytes/align 4), not a
+    // `*mut pgroup` (8 bytes/align 8). Same 8-byte span at an already-8-aligned
+    // offset, so this offset, `ctrl_tty`/`self_sid` after it, and `size == 104`
+    // are all unchanged.
+    assert!(core::mem::size_of::<Pgid>() == 8, "Pgid must be 8 bytes to preserve session.fg_pgrp span");
     assert!(core::mem::offset_of!(Session, fg_pgrp) == 80, "session.fg_pgrp offset");
     assert!(core::mem::offset_of!(Session, ctrl_tty) == 88, "session.ctrl_tty offset");
 };
@@ -274,6 +290,8 @@ const SIGCONT: c_int = 18;
 // and encodes it to the ABI-fixed `ERR_PTR` exactly once at the `extern "C"`
 // boundary via `result_to_errptr`; only the error-return encoding changed.
 use crate::kstd::{is_err, result_to_errptr, Errno, GenKey, GenTable, KResult};
+use crate::proc::pgroup::{pgroup_key_of, pgroup_lookup, Pgid};
+use crate::proc::proc_shims::{xv6_pid_rlock, xv6_pid_runlock};
 
 // ===========================================================================
 // Panic helper -- replicates the C `assert(expr, fmt, ...)` macro
@@ -605,7 +623,11 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
         let tg = (*initproc).thread_group;
         session_assert!(!tg.is_null(), "session_init", "session_init: initproc has no thread_group");
 
-        let pg = (*initproc).pgroup;
+        // N-R6d-2b: `thread.pgroup` is now a generational `Pgid`; resolve it to
+        // a live `*mut pgroup` under `pid_wlock` (held by `userinit`). Init was
+        // just given its boot pgroup by `pgroup_init`, so this resolves exactly
+        // as the old raw-pointer read did.
+        let pg = pgroup_lookup((*initproc).pgroup).unwrap_or(ptr::null_mut());
         session_assert!(!pg.is_null(), "session_init", "session_init: initproc has no pgroup");
 
         let s_raw = session_alloc((*initproc).pid);
@@ -622,7 +644,9 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
 
         session_add_pg(SRef::as_ptr(&s), pg);
         session_add_thread(SRef::as_ptr(&s), initproc);
-        (*SRef::as_ptr(&s)).fg_pgrp = pg;
+        // N-R6d-2b: `fg_pgrp` is a `Pgid`; store `pg`'s own key (O(1) via its
+        // cached `self_pgid`).
+        (*SRef::as_ptr(&s)).fg_pgrp = pgroup_key_of(pg);
         let _ = SRef::into_raw(s);
     }
 }
@@ -666,7 +690,9 @@ pub(crate) extern "C" fn session_alloc(sid: pid_t) -> *mut session {
         }
         (*s).sid = sid;
         (*s).ctrl_tty = ptr::null_mut();
-        (*s).fg_pgrp = ptr::null_mut();
+        // N-R6d-2b: `fg_pgrp` is a `Pgid`; `NONE` is the "no foreground group"
+        // edge (the analog of the old null pointer).
+        (*s).fg_pgrp = Pgid::NONE;
         (*s).ref_cnt = 1;
         (*s).t_cnt = 0;
         (*s).pg_cnt = 0;
@@ -1106,9 +1132,11 @@ pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgro
             ll_detach(&raw mut (*pg).list_entry);
         }
         (*s).pg_cnt -= 1;
-        // If the foreground pgroup is being removed, clear it.
-        if (*s).fg_pgrp == pg {
-            (*s).fg_pgrp = ptr::null_mut();
+        // If the foreground pgroup is being removed, clear it. N-R6d-2b: compare
+        // the stored `Pgid` against `pg`'s own key (both name the same live
+        // pgroup iff equal) — the `Pgid` analog of `== pg`.
+        if (*s).fg_pgrp == pgroup_key_of(pg) {
+            (*s).fg_pgrp = Pgid::NONE;
         }
         (*pg).session = Sid::NONE;
         // Capture the empty transition BEFORE the member unref below (counts
@@ -1251,7 +1279,8 @@ pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t
         if (*pg).session != session_key_of(s) {
             return; // pgroup must belong to this session
         }
-        (*s).fg_pgrp = pg;
+        // N-R6d-2b: store `pg`'s generational key (O(1) via its `self_pgid`).
+        (*s).fg_pgrp = pgroup_key_of(pg);
     }
 }
 
@@ -1263,11 +1292,21 @@ pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
     }
     // SAFETY: see fn doc.
     unsafe {
-        let fg = (*s).fg_pgrp;
-        if fg.is_null() {
+        // N-R6d-2b: `fg_pgrp` is a generational `Pgid`. Read the key (a plain
+        // aligned field read on the live session), then resolve it to a live
+        // pgroup under `pid_rlock` (required by `pgroup_lookup`) — both callers
+        // (`tty_signal_fg_pgroup`, `TIOCGPGRP`) hold no pid_lock, so take it
+        // here for the short, non-looping lookup. A `NONE`/stale key resolves to
+        // null → -1, exactly the old "no foreground group" outcome.
+        let pgid = (*s).fg_pgrp;
+        if pgid.is_none() {
             return -1;
         }
-        (*fg).pgid
+        xv6_pid_rlock();
+        let fg = pgroup_lookup(pgid).unwrap_or(ptr::null_mut());
+        let ret = if fg.is_null() { -1 } else { (*fg).pgid };
+        xv6_pid_runlock();
+        ret
     }
 }
 
@@ -1339,7 +1378,9 @@ pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
 
         (*s).flags.set_exited(1);
 
-        let fg = (*s).fg_pgrp;
+        // N-R6d-2b: resolve the foreground pgroup `Pgid` to a live pointer (null
+        // if `NONE`/stale) under the held `pid_wlock` (asserted above).
+        let fg = pgroup_lookup((*s).fg_pgrp).unwrap_or(ptr::null_mut());
         if !fg.is_null() && (*fg).flags.exited() == 0 {
             let head = &raw mut (*fg).threads;
             let off = core::mem::offset_of!(thread, pg_entry);
@@ -1349,7 +1390,7 @@ pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
         }
 
         __session_detach_ctrl_tty(s);
-        (*s).fg_pgrp = ptr::null_mut();
+        (*s).fg_pgrp = Pgid::NONE;
     }
 }
 
@@ -1432,7 +1473,8 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
         }
         pgroup_add_thread(pg, p);
         session_add_thread(SRef::as_ptr(&s), p);
-        (*SRef::as_ptr(&s)).fg_pgrp = pg; // becomes foreground group
+        // N-R6d-2b: becomes foreground group — store `pg`'s generational key.
+        (*SRef::as_ptr(&s)).fg_pgrp = pgroup_key_of(pg);
 
         // Success: hand `s`'s baseline reference back out as a bare
         // pointer without dropping it. The baseline is now released

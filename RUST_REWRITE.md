@@ -4097,6 +4097,118 @@ byte-identical; `Session` gained an O(1) self-key tail). `session.fg_pgrp`
 remains the last `*mut session→` neighbour, deferred to 6d-2b (needs a pgroup
 `GenTable`).
 
+### Iteration 88 — 2026-07-18 — Wave N-R6d-2b (thread/proc core, sub-step 2b): a new `PGROUP_TABLE` + the two `*mut pgroup` edges (`thread.pgroup`, `session.fg_pgrp`) → generational `Pgid` keys
+
+**Goal (per `RUST_NATIVE_REDESIGN.md` §5c 6d-2):** give the pgroup family its
+first generational registry and convert the two `*mut pgroup` edges that resolve
+through it — `thread.pgroup` and the deferred `session.fg_pgrp` — from raw
+pointers to the process-group family's generational key `Pgid`
+(`GenKey<PGID_TAG>`, 8 bytes, `Pgid::NONE`==no-pgroup). Mirrors the N-R6d-2a
+session-edge pattern (5c0bc2b) and the N-R6a `SESSION_TABLE` pilot (3da67d9).
+`Pgid` is the INTERNAL generational handle — SEPARATE from and unchanged
+alongside the pgroup's numeric userspace `pgid` (setpgid/getpgid/kill(-pgid)).
+Everything else stays `*mut` (`thread.thread_group`=6d-2c, pgroup/thread_group
+membership lists=6d-3, proc-table hlist / run-wait queues / `current`=later).
+
+**The new registry (`kernel/proc/pgroup.rs`):** `PGID_TAG` (distinct const,
+`b"PGROUP\0\0"`), `type Pgid = GenKey<PGID_TAG>`, `static PGROUP_TABLE:
+GenTable<Pgroup, NPGROUP=10_000, PGID_TAG>` in the `SESSION_TABLE`/`THREAD_TABLE`
+`UnsafeCell`+`unsafe impl Sync` idiom (all access under `pid_lock`; mutators
+assert `pid_wlock`). Pgroup had NO prior registry (reachable only by walking
+`thread.pgroup`/`session.pgrps`); this is the family's first. Registered at
+**alloc** (`pgroup_alloc`, after the field setters, under `pid_wlock` — verified
+at all 4 sites: boot `pgroup_init`/kthread-hierarchy both under `userinit`'s /
+`kthread_hierarchy_init_locked`'s wlock, plus `setpgid`/`setsid`; table-full
+frees the slab and returns null, the existing alloc-failure contract);
+deregistered at **cleanup** (`__pgroup_cleanup`, before `xv6_pgroup_slab_free`,
+bumping the slot generation so outstanding edges go stale). `pgroup_lookup(Pgid)
+-> Option<*mut pgroup>` generation-checked; `pgroup_key_of(*mut pgroup) -> Pgid`
+O(1).
+
+**`Pgroup.self_pgid: Pgid` added** (`#[repr(C)]` tail, offset 96): stamped by
+`pgroup_table_insert` right after `PGROUP_TABLE.insert` hands out the key, so
+edge stores read `(*pg).self_pgid` in O(1) (no `GenTable::key_of` scan) — exact
+mirror of `Session.self_sid`. Pgroup size **96 → 104** (Rust-only: 0 `.c` files,
+slab-alloc'd by `size_of`); align stays 8; every prior offset unchanged.
+
+**The two edge conversions (accessor before → after):**
+- `thread.pgroup: *mut pgroup` (offset 288) → `pgroup: Pgid`. The `t_pgroup`/
+  `t_set_pgroup` shims (`proc_shims.rs`) now delegate to new
+  `thread_pgroup_resolve`/`thread_pgroup_store` (`thread.rs`) — read the stored
+  `Pgid` and resolve via `pgroup_lookup` (→ null if `NONE`/stale) / encode via
+  `pgroup_key_of`. `ThreadAccess::pgroup_ptr`/`set_pgroup` signatures unchanged →
+  every caller (pgroup.rs, clone/exit paths, `get_pgroup`) untouched; the
+  `get_pgroup(pgid_num)` mechanism is unchanged (it follows the now-key-resolved
+  `thread.pgroup`).
+- `session.fg_pgrp: *mut pgroup` (offset 80) → `fg_pgrp: Pgid`, the last edge
+  deferred from the pilot — making the controlling-tty → session → foreground
+  process-group signal path (Ctrl-C) fully key-based. In-`session.rs` sites
+  rewritten: `.is_null()`→`.is_none()`, `== pg`→`== pgroup_key_of(pg)`, stores
+  `= pg`/`= null`→`pgroup_key_of(pg)`/`Pgid::NONE`, reads → `pgroup_lookup`.
+  `session_get_fg_pgid` (called with NO pid_lock by `tty_signal_fg_pgroup` /
+  `TIOCGPGRP`) takes `pid_rlock` around its `pgroup_lookup` (short, non-looping);
+  `session_fg_pgrp` shim + `session_hangup` (already under a lock) resolve
+  likewise; procdump `xv6_dump_session` uses `is_none()`/`pgroup_key_of` (best
+  -effort debug).
+
+**Layout asserts (zero offset shift confirmed):** `Thread` size 1152 + all 30
+offsets UNCHANGED (`pgroup` stays 288, `size_of::<Pgid>()==8` added). `Session`
+`fg_pgrp` stays 80, size 104 unchanged (`Pgid` reuses the pointer's 8-byte span).
+`Pgroup` grows 96 → 104 for the appended `self_pgid` (offset-96 + size asserts
+updated). All compile-time asserts pass.
+
+**Null / `NONE` handling (zero behaviour change):** a store of null → `Pgid::NONE`;
+a resolve of `NONE`/stale → null — the exact "no pgroup / pgroup gone" semantics
+every reader already null-checks. A *live* thread/session never holds a stale key
+(the pgroup is detached / `fg_pgrp` cleared in `session_remove_pg` before the
+pgroup can be freed in `__pgroup_cleanup`), so `is_none()` is the precise
+structural analog of the old `is_null()`.
+
+**Freeze/`noalias` screening (`freeze-noalias-hazard`):** every resolve/store is a
+single non-looping generation-checked `PGROUP_TABLE` access under `pid_lock`
+(mutators hold `pid_wlock`); the table hands out only raw `NonNull`/`*mut`, never
+`&Pgroup`, so no `&Freeze` of the concurrently-mutated table/pointee is formed.
+`self_pgid` is written once at insert (exclusive, pre-publication under
+`pid_wlock`) and read-only while the pgroup is live. `session_get_fg_pgid` newly
+takes `pid_rlock` precisely to make its lookup race-free (its callers held none).
+
+**rust-skills applied:** `unsafe-safety-comment` / `unsafe-minimize-scope` (every
+new `unsafe` read carries a scoped `// SAFETY:`; no whole-body unsafe added — the
+`field_get!`-based shim reuses its own `u!`, no redundant outer `unsafe` →
+no `unused_unsafe`), `type-newtype-ids` / `api-newtype-safety` (`Pgid` a distinct
+typed key, non-interchangeable with `Tid`/`Sid` via `PGID_TAG`),
+`mem-assert-type-size` (compile-time size/offset guards for all three structs),
+`err-question-mark` (`?` in `pgroup_table_insert`), `pat-let-else`
+(`let Some(nn) = … else { return }` in `pgroup_table_remove`), `name-funcs-snake`,
+`doc-safety-section`. Crate stays **edition 2021**.
+
+**Verification (orchestrator recipe, `TOOLPREFIX` + `LAB=fs`; cache clean
+before+after — `CMAKE_BUILD_TYPE` empty, `C_COMPILER` = toolchain
+`riscv64-unknown-elf-gcc`, `Lab: fs`):** kernel crate recompiled from scratch
+(`riscv64gc-unknown-none-elf` target wiped) → **0 warnings**; kernel + `fs_img`
+built; all layout asserts pass (Thread/Session byte-identical, Pgroup 96→104).
+Boot gate: **exactly one** `init: starting sh` across **5+ boots**. **testsig ALL
+TESTS PASSED (21/21) ×2** (setsid/setpgid/getpgid/session — the crux; twice = leak
+non-regression, no `reference count would go non-positive`), **usertests reparent
+/ killstatus / exitwait OK**, **forkforkfork OK** (P3-BUG1 intact), **mmaptest all
+tests passed**, **stressfs** ran clean, **`cat cat | wc`** pipe → wc printed
+`0 0 0`, **`cat NONEXISTENT_FILE`** → cannot-open (ENOENT). **Interactive Ctrl-C
+on `sleep 1000`**: `^C` delivered SIGINT to the foreground pgroup via
+ctrl-tty→session→`fg_pgrp` (now fully `Pgid`-keyed, resolved through
+`PGROUP_TABLE`), the fg job died and the prompt returned + ran the next command —
+job control intact end-to-end across BOTH converted edges. Zero
+`panic`/fault/non-positive/double-free/UAF across all runs. `FAILED -- lost some
+free pages` is the pre-existing accounting trailer (Known issues), not a
+regression. **NOT committed.**
+
+**Outcome: full success** — the pgroup family gains a generational registry and
+both `*mut pgroup` edges (`thread.pgroup`, `session.fg_pgrp`) are
+generation-checked with zero behaviour change and zero layout disruption
+(Thread/Session byte-identical; Pgroup gained an O(1) self-key tail). The
+controlling-tty foreground-group path is now fully key-based. Remaining
+`*mut pgroup` (thread_group membership, `thread_group.pgroup`) and
+`thread.thread_group` are the next sub-steps (6d-2c/6d-3).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

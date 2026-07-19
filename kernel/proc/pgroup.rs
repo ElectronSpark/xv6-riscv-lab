@@ -13,7 +13,9 @@
 
 use core::ffi::c_void;
 use core::ptr;
+use core::ptr::NonNull;
 
+use crate::kstd::{GenKey, GenTable};
 use crate::proc::access::{err_ptr, is_err_const};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +79,30 @@ const _: () = {
     assert!(core::mem::align_of::<PgroupFlagBits>() == 8, "pgroup anon bitfield alignment");
 };
 
+// ---------------------------------------------------------------------------
+// `Pgid` / `PGID_TAG` — the process-group family's generational key  [N-R6d-2b]
+//
+// A pgroup gains a generational registry ([`PGROUP_TABLE`] below) for the first
+// time this sub-step. `Pgid` is the internal generational handle into it — a
+// `Copy` typed key, distinct at compile time (via `PGID_TAG`) from `Tid`/`Sid`,
+// so handles cannot be crossed between tables. It is SEPARATE from the pgroup's
+// numeric userspace `pgid` field (setpgid/getpgid/kill(-pgid) identity), which
+// is unchanged. The two `*mut pgroup` edges converted this sub-step
+// (`thread.pgroup`, `session.fg_pgrp`) store a `Pgid`; a stale one (the pgroup
+// was freed) resolves to null through [`pgroup_lookup`] — the existing "pgroup
+// gone" answer readers already null-check.
+// ---------------------------------------------------------------------------
+
+/// Family tag for process-group keys — an ASCII marker, only its distinctness
+/// matters (it makes [`Pgid`] a different type from `Tid`/`Sid`).
+pub(crate) const PGID_TAG: u64 = u64::from_le_bytes(*b"PGROUP\0\0");
+
+/// Typed generational handle to a live pgroup in [`PGROUP_TABLE`], distinct
+/// from the userspace numeric process-group id (the `Pgroup::pgid` field, still
+/// used by setpgid/getpgid/kill). A stale `Pgid` (its pgroup was freed)
+/// resolves to `None` through [`pgroup_lookup`].
+pub(crate) type Pgid = GenKey<PGID_TAG>;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct Pgroup {
@@ -100,6 +126,17 @@ pub struct Pgroup {
     // stale `Sid` (session freed) resolves to null — the existing "session
     // gone" semantics readers already null-check.
     pub(crate) session: crate::tty::session::Sid,
+    // N-R6d-2b: the pgroup caches its own generational key here, stamped by
+    // `pgroup_table_insert` right after `PGROUP_TABLE.insert` hands it out. The
+    // `thread.pgroup`/`session.fg_pgrp` back-edges (converted to `Pgid` this
+    // sub-step) read it via `pgroup_key_of` to encode a store in O(1) — cheaper
+    // than an O(N) `GenTable::key_of` reverse scan (mirror of `Session.self_sid`
+    // from N-R6d-2a). A `#[repr(C)]` tail field: no C consumer remains (0 `.c`
+    // files in-tree) and every pgroup is slab-allocated with `size_of::<pgroup>()`,
+    // so growing the struct 96 → 104 is self-contained. `Pgid`'s internal layout
+    // is unobserved externally; only its 8-byte tail placement matters (the
+    // offset assert below pins it).
+    pub(crate) self_pgid: Pgid,
 }
 
 // P3-N3 hardcoded layout proof — values captured from the
@@ -113,8 +150,14 @@ pub struct Pgroup {
 // 0/16/24/[32]/40/48/64/72/88 (the anonymous bitfield struct occupies
 // [32,40), pinned in the probe by both neighbours).
 const _: () = {
-    assert!(core::mem::size_of::<Pgroup>() == 96, "pgroup size");
+    // N-R6d-2b: size 96 → 104 for the appended `self_pgid: Pgid` (8-byte tail).
+    // `Pgroup` align stays 8 (pointer/ListNode fields dominate `Pgid`'s align 4).
+    // No C consumer remains, so this is a pure Rust-side growth (mirror of the
+    // N-R6d-2a `Session` 96 → 104 growth).
+    assert!(core::mem::size_of::<Pgroup>() == 104, "pgroup size");
     assert!(core::mem::align_of::<Pgroup>() == 8, "pgroup alignment");
+    assert!(core::mem::size_of::<Pgid>() == 8, "Pgid must be 8 bytes (pgroup.self_pgid tail)");
+    assert!(core::mem::offset_of!(Pgroup, self_pgid) == 96, "pgroup.self_pgid offset");
     assert!(core::mem::offset_of!(Pgroup, list_entry) == 0, "pgroup.list_entry offset");
     assert!(core::mem::offset_of!(Pgroup, pgid) == 16, "pgroup.pgid offset");
     assert!(core::mem::offset_of!(Pgroup, leader) == 24, "pgroup.leader offset");
@@ -161,6 +204,120 @@ pub(crate) fn pgroup_session_store(pg: *mut Pgroup, s: *mut Session) {
     // under the caller's `pid_wlock` (exclusive) is race-free.
     unsafe {
         (*pg).session = sid;
+    }
+}
+
+// ===========================================================================
+// Pgroup registry — a `GenTable` (N-R6d-2b).
+//
+// The pgroup family gains its first generational registry here. Unlike the
+// session pilot (which retired an intrusive `session_list`), pgroups never had
+// a global registry — they were reachable only by walking `thread.pgroup` /
+// `session.pgrps`. This table gives the two converted edges (`thread.pgroup`,
+// `session.fg_pgrp`) a liveness-checked handle: a `Pgid` for a pgroup that later
+// empties and is freed goes stale, and [`pgroup_lookup`] returns `None` instead
+// of dangling. Pgroups keep their slab allocation (the table stores a stable
+// `NonNull<Pgroup>`, never the object by value — nothing moves).
+//
+// Not internally synchronized (see the `GenTable` doc); every access is
+// serialized by `pid_lock` — `pid_wlock` for the `&mut self` mutators
+// (`insert`/`remove_ptr`), a held `pid_lock` for the `&self` reader (`get`).
+//
+// Freeze/`noalias` screening (memory `freeze-noalias-hazard`): `GenTable` is
+// `Freeze`, but mutators form `&mut` only under `pid_wlock` (exclusive) and the
+// resolve/store helpers do a single, non-looping generation-checked lookup —
+// never a `&Freeze` field read hoisted out of a spin/wait loop. The table hands
+// out only raw `NonNull`/`*mut` (never `&Pgroup`), so no `&Freeze` of a
+// concurrently-mutated pointee is formed either.
+// ===========================================================================
+
+/// Registry capacity — `NR_THREAD` (`kernel/inc/param.h`, the kernel's hard cap
+/// on live threads). Every live pgroup contains at least one thread group with
+/// at least one live thread, so the number of concurrent pgroups can never
+/// exceed the number of live threads — sizing the table at that true upper
+/// bound guarantees [`GenTable::insert`] never returns `None` where a pgroup was
+/// successfully allocated (no capacity regression). All-`None`/zero at rest →
+/// BSS, not data-segment.
+const NPGROUP: usize = 10_000;
+
+/// `UnsafeCell` + `unsafe impl Sync` newtype so the registry can be a
+/// file-scope `static`, exactly like the session pilot's `SESSION_TABLE` and
+/// `THREAD_TABLE`. The `GenTable` is **not** internally synchronized; all access
+/// is serialized by `pid_lock` (see the section note above).
+struct PgroupTableCell(core::cell::UnsafeCell<GenTable<Pgroup, NPGROUP, PGID_TAG>>);
+// SAFETY: every access below is taken while holding `pid_lock` at the required
+// strength (mutators assert `pid_wlock`); the raw `UnsafeCell` access is thus
+// race-free, same discipline as `SESSION_TABLE`/`THREAD_TABLE`.
+unsafe impl Sync for PgroupTableCell {}
+
+static PGROUP_TABLE: PgroupTableCell =
+    PgroupTableCell(core::cell::UnsafeCell::new(GenTable::new()));
+
+/// Register `pg` in [`PGROUP_TABLE`], returning its fresh [`Pgid`] and caching
+/// it in the pgroup's own `self_pgid` (so [`pgroup_key_of`] is O(1)). `None`
+/// only if the table is full — impossible given [`NPGROUP`]'s sizing, handled
+/// defensively by [`pgroup_alloc`]. Caller must hold `pid_wlock` (every
+/// `pgroup_alloc` site does — boot hierarchy init and `setpgid`/`setsid`).
+fn pgroup_table_insert(pg: *mut Pgroup) -> Option<Pgid> {
+    pid_assert_wholding();
+    let nn = NonNull::new(pg)?;
+    // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
+    // registry is exclusive — no other hart holds a reference into the table
+    // (readers need `pid_lock`, excluded by our write lock).
+    let table = unsafe { &mut *PGROUP_TABLE.0.get() };
+    let pgid = table.insert(nn)?;
+    // Cache the freshly-issued key so the back-edge accessors can stamp it in
+    // O(1) (`pgroup_key_of`) instead of an O(N) `GenTable::key_of` scan.
+    // SAFETY: `pg` is live and exclusively ours here — just allocated,
+    // pre-publication, under `pid_wlock`; `self_pgid` is a plain aligned word.
+    unsafe { (*pg).self_pgid = pgid };
+    Some(pgid)
+}
+
+/// Deregister `pg` from [`PGROUP_TABLE`] (by its stable pointer — the cached
+/// `self_pgid` is only ever read while the pgroup is live), bumping the slot
+/// generation so any outstanding [`Pgid`] to it (a `thread.pgroup` or
+/// `session.fg_pgrp` edge) goes stale → resolves to null. A no-op if `pg` was
+/// never registered. Caller must hold `pid_wlock` (the `__pgroup_cleanup`
+/// teardown path does).
+fn pgroup_table_remove(pg: *mut Pgroup) {
+    pid_assert_wholding();
+    let Some(nn) = NonNull::new(pg) else { return };
+    // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
+    let table = unsafe { &mut *PGROUP_TABLE.0.get() };
+    table.remove_ptr(nn);
+}
+
+/// Generation-checked lookup: resolve a [`Pgid`] to a live `*mut pgroup`, or
+/// `None` if the pgroup it named has been freed (stale key) — the safe
+/// replacement for a raw `*mut pgroup` traversal of the converted edges.
+///
+/// Caller must hold `pid_lock` (reader or writer); the returned pointer is only
+/// stable under that same protection.
+pub(crate) fn pgroup_lookup(pgid: Pgid) -> Option<*mut Pgroup> {
+    // SAFETY: the caller holds `pid_lock` (read or write), which excludes every
+    // `&mut self` mutator (they hold the write lock) — so this shared reference
+    // into the registry is race-free for its (short, non-looping) lifetime. No
+    // `&Pgroup` is formed here; the raw pointer is handed straight back
+    // (freeze-hazard note in the section above).
+    let table = unsafe { &*PGROUP_TABLE.0.get() };
+    table.get(pgid).map(|nn| nn.as_ptr())
+}
+
+/// Encode a `*mut pgroup` as the generational [`Pgid`] to store in a back-edge
+/// (`thread.pgroup`/`session.fg_pgrp`): null → [`Pgid::NONE`] ("no pgroup"),
+/// otherwise the pgroup's own cached key `self_pgid` (stamped at
+/// [`pgroup_table_insert`]). O(1) — the write side of the converted edges,
+/// avoiding an O(N) [`GenTable::key_of`] reverse scan.
+///
+/// Caller holds `pid_wlock` (every store site does — the read of `self_pgid` on
+/// a live pgroup is race-free under it).
+pub(crate) fn pgroup_key_of(pg: *mut Pgroup) -> Pgid {
+    match NonNull::new(pg) {
+        None => Pgid::NONE,
+        // SAFETY: `pg` is a live `*mut pgroup` (caller passes an owned/looked-up
+        // pgroup under `pid_wlock`); `self_pgid` is a plain aligned word read.
+        Some(nn) => unsafe { (*nn.as_ptr()).self_pgid },
     }
 }
 
@@ -306,6 +463,10 @@ fn __pgroup_cleanup(pg: *mut Pgroup) {
     if pg_list_entry_is_detached(pg) == 0 {
         pg_list_entry_detach(pg);
     }
+    // N-R6d-2b: deregister from the generational table BEFORE freeing the slab,
+    // bumping the slot generation so every outstanding `Pgid` edge to this
+    // pgroup (`thread.pgroup`, `session.fg_pgrp`) goes stale → resolves to null.
+    pgroup_table_remove(pg);
     xv6_pgroup_slab_free(pg);
 }
 
@@ -333,6 +494,15 @@ pub(crate) fn pgroup_alloc(
     pg_set_p_cnt(pg, 0);
     pg_set_exited(pg, 0);
     pg_set_session(pg, ptr::null_mut());
+    // N-R6d-2b: register in the generational pgroup table (stamps `self_pgid`).
+    // On the impossible "table full" case (see `NPGROUP`'s sizing) fail the
+    // alloc cleanly — free the slab object and return null, exactly the contract
+    // `pgroup_alloc` already has for allocation failure — rather than hand back
+    // an unregistered pgroup whose `Pgid` edges would never resolve.
+    if pgroup_table_insert(pg).is_none() {
+        xv6_pgroup_slab_free(pg);
+        return ptr::null_mut();
+    }
     pg
 }
 

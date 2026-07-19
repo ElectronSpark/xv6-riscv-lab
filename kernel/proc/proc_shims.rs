@@ -385,7 +385,13 @@ pub(crate) fn t_set_pgid(p: *mut thread, v: c_int) { field_set!(p, pgid, v) }
 pub(crate) fn t_parent(p: *mut thread) -> *mut thread {
     crate::proc::thread::thread_parent_resolve(p)
 }
-pub(crate) fn t_pgroup(p: *mut thread) -> *mut pgroup { field_get!(p, pgroup) }
+// N-R6d-2b: `thread.pgroup` is now a generational `Pgid`, not a `*mut pgroup`.
+// The get/set shims resolve/store it through `PGROUP_TABLE`; a stale `Pgid`
+// (pgroup freed) resolves to null — the "pgroup gone" semantics callers already
+// null-check. Signatures unchanged, so every caller is untouched.
+pub(crate) fn t_pgroup(p: *mut thread) -> *mut pgroup {
+    crate::proc::thread::thread_pgroup_resolve(p)
+}
 // N-R6d-2a: `thread.session` is now a generational `Sid`, not a `*mut session`.
 // The get/set shims resolve/store it through the pilot's `SESSION_TABLE`; a
 // stale `Sid` (session freed) resolves to null — the "session gone" semantics
@@ -398,7 +404,7 @@ pub(crate) fn t_thread_group(p: *mut thread) -> *mut thread_group {
     field_get!(p, thread_group)
 }
 pub(crate) fn t_set_pgroup(p: *mut thread, pg: *mut pgroup) {
-    field_set!(p, pgroup, pg)
+    crate::proc::thread::thread_pgroup_store(p, pg)
 }
 
 pub(crate) fn t_vm(p: *mut thread) -> *mut crate::bindings::vm_t { field_get!(p, vm) }
@@ -471,8 +477,15 @@ pub(crate) fn tg_set_tgid(tg: *mut thread_group, v: c_int) { field_set!(tg, tgid
 pub(crate) fn session_sid(s: *mut session) -> c_int { field_get!(s, sid) }
 pub(crate) fn session_t_cnt(s: *mut session) -> c_int { field_get!(s, t_cnt) }
 pub(crate) fn session_pg_cnt(s: *mut session) -> c_int { field_get!(s, pg_cnt) }
+// N-R6d-2b: `session.fg_pgrp` is now a generational `Pgid` — resolve it through
+// `PGROUP_TABLE`; a stale key (foreground pgroup freed) resolves to null, the
+// "no foreground group" answer readers already null-check. Caller holds
+// `pid_lock` (required by `pgroup_lookup`).
 pub(crate) fn session_fg_pgrp(s: *mut session) -> *mut pgroup {
-    field_get!(s, fg_pgrp)
+    // `field_get!` reads the `fg_pgrp` `Pgid` (its own `u!`/`// SAFETY:` covers
+    // the pointer deref); resolve it to a live pgroup through the table.
+    let pgid = field_get!(s, fg_pgrp);
+    crate::proc::pgroup::pgroup_lookup(pgid).unwrap_or(core::ptr::null_mut())
 }
 
 // silence unused warnings during incremental porting
@@ -2345,7 +2358,9 @@ pub(crate) fn xv6_dump_session(s: *mut Session) {
     // best-effort, lock-free debug dump, same trade-off as
     // `xv6_procdump_tree_node`.
     u! {
-        let fg_note = if (*s).fg_pgrp.is_null() { ", no fg" } else { "" };
+        // N-R6d-2b: `fg_pgrp` is a generational `Pgid`; `is_none()` is the
+        // structural analog of the old null check ("no foreground group").
+        let fg_note = if (*s).fg_pgrp.is_none() { ", no fg" } else { "" };
         crate::kprintln!(
             "\nSession {}  (threads={}, pgroups={}{})",
             (*s).sid, (*s).t_cnt, (*s).pg_cnt, fg_note,
@@ -2353,7 +2368,10 @@ pub(crate) fn xv6_dump_session(s: *mut Session) {
 
         let pg_off = core::mem::offset_of!(Pgroup, list_entry);
         list_foreach_safe::<Pgroup>(&raw mut (*s).pgrps, pg_off, |pg| {
-            let fg = if (*s).fg_pgrp == pg { " [fg]" } else { "" };
+            // N-R6d-2b: compare the stored `Pgid` against this pgroup's own key
+            // (both name the same live pgroup iff equal) — the `Pgid` analog of
+            // `== pg`.
+            let fg = if (*s).fg_pgrp == crate::proc::pgroup::pgroup_key_of(pg) { " [fg]" } else { "" };
             let exited = if (*pg).flags.exited() != 0 { ", exited" } else { "" };
             crate::kprintln!(
                 "  PGroup {}{}  (threads={}, tgroups={}{})",
