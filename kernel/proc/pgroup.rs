@@ -412,12 +412,14 @@ use crate::proc::proc_shims::{
 // below) — so they are simply deleted now that lock/rcu.rs's
 // `#[no_mangle]` exports are gone.
 
-// P3-D2b: `get_pid_thread` (proc/pid.rs) and `thread_tgid`
-// (proc/thread_group.rs) are plain (file-private, so no E0659
-// glob-reexport ambiguity) crate-path items now that their
-// `#[no_mangle]` exports are gone (identical signatures) -- they used
-// to be `extern "C"` redeclarations in the block above.
-use crate::proc::{get_pid_thread, thread_tgid};
+// P3-D2b: `get_pid_thread` (proc/pid.rs) is a plain (file-private, so no E0659
+// glob-reexport ambiguity) crate-path item now that its `#[no_mangle]` export
+// is gone (identical signature) -- it used to be an `extern "C"` redeclaration
+// in the block above.
+// NO-STANDALONE-FN: `thread_tgid` is now the `ThreadAccess` method
+// `resolve_tgid`; the two call sites below construct the handle via `from_ptr`.
+use crate::proc::get_pid_thread;
+use crate::proc::access::ThreadAccess;
 
 // P3-1C mesh sweep: tty/session.rs is in scope for this wave, same
 // opaque-marker reinterpret precedent used throughout this file (this
@@ -751,7 +753,7 @@ pub(super) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
     let p = xv6_current_thread();
     let mut pid = pid;
     let mut pgid = pgid;
-    let tgid = thread_tgid(p);
+    let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
 
     if pid == 0 {
         pid = tgid;
@@ -783,7 +785,7 @@ pub(super) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
         return -ESRCH;
     }
 
-    let target_tgid = thread_tgid(target);
+    let target_tgid = ThreadAccess::from_ptr(target).map_or(-1, |ta| ta.resolve_tgid());
     // Cannot change session leader's pgid.
     if t_sid(target) == target_tgid {
         xv6_pid_wunlock();

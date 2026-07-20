@@ -151,8 +151,9 @@ fn vm_copy(vm: *mut Vm) -> *mut Vm {
 //    the old ABI did.
 use crate::proc::{
     pgroup_add_thread, pgroup_add_tg, sigacts_dup, sigpending_clone,
-    thread_group_add, thread_group_alloc,
 };
+use crate::proc::access::ThreadGroupAccess;
+use crate::proc::thread_group::ThreadGroup;
 
 // P3-D2a: `rq_task_fork` (kernel/proc/rq.rs) and `scheduler_wakeup`/
 // `scheduler_yield`/`context_switch_finish` (kernel/proc/sched.rs) are
@@ -423,10 +424,12 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
         if parent_tg.is_null() {
             panic_clone("clone: parent has no thread_group for CLONE_THREAD");
         }
-        thread_group_add(parent_tg, child);
+        // NO-STANDALONE-FN: former `thread_group_add(parent_tg, child)` delegator.
+        // SAFETY: `parent_tg` is checked non-null immediately above.
+        unsafe { ThreadGroupAccess::assume(parent_tg) }.add_thread(child);
         xv6_t_set_tgid(child, xv6_t_tgid(p));
     } else {
-        let rc = thread_group_alloc(child);
+        let rc = ThreadGroup::alloc(child);
         if rc != 0 {
             panic_clone("clone: thread_group_alloc failed");
         }

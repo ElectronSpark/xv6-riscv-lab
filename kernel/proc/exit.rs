@@ -47,6 +47,10 @@ use crate::proc::access::is_err_const;
 pub(crate) type Thread = crate::bindings::thread;
 type ThreadGroup = crate::bindings::thread_group;
 type Session     = crate::bindings::session;
+// NO-STANDALONE-FN: the `ffi::` thread-group wrappers construct these handles
+// (in place of the deleted `thread_group_put`/`_remove`/`thread_is_group_leader`
+// free fns) and invoke the corresponding method.
+use crate::proc::access::{ThreadAccess, ThreadGroupAccess};
 #[repr(C)] struct Pgroup       { _p: [u8; 0] }
 type Vm         = c_void;
 type FsStruct   = c_void;
@@ -118,14 +122,16 @@ mod raw {
         pgroup_remove_thread,
         signal_pending,
     };
-    // RUSTIFY-PROC: `thread_group_{put,remove}` + `thread_is_group_leader`
-    // (thread_group.rs) and `kill_thread`/`sigpending_destroy`/
-    // `sigpending_empty` (signal.rs) tightened to `pub(super)` (in-proc
-    // callers only); re-export them at the matching narrower visibility so
-    // this file's `raw::NAME` -> `ffi::NAME` shim keeps resolving.
+    // RUSTIFY-PROC: `kill_thread`/`sigpending_destroy`/`sigpending_empty`
+    // (signal.rs) tightened to `pub(super)` (in-proc callers only); re-export
+    // them at the matching narrower visibility so this file's `raw::NAME` ->
+    // `ffi::NAME` shim keeps resolving.
+    // NO-STANDALONE-FN: `thread_group_put`/`thread_group_remove`/
+    // `thread_is_group_leader` are no longer free fns — the `ffi::` wrappers
+    // below construct a `ThreadGroupAccess`/`ThreadAccess` handle and invoke the
+    // corresponding method, so nothing is re-exported for them here.
     pub(super) use crate::proc::{
         kill_thread, sigpending_destroy, sigpending_empty,
-        thread_group_put, thread_group_remove, thread_is_group_leader,
     };
 
     // This file's `Sigacts` is an opaque `c_void` stand-in; the real
@@ -221,7 +227,7 @@ mod ffi {
     pub fn children_count(t: *mut Thread) -> c_int      { raw::xv6_t_children_count(t) }
     pub fn is_zombie(t: *mut Thread) -> bool            { (raw::xv6_thread_is_zombie(t)) != 0 }
     pub fn is_stopped(t: *mut Thread) -> bool           { (raw::xv6_thread_is_stopped(t)) != 0 }
-    pub fn is_group_leader(t: *mut Thread) -> bool      { raw::thread_is_group_leader(t) }
+    pub fn is_group_leader(t: *mut Thread) -> bool      { ThreadAccess::from_ptr(t).map_or(true, |ta| ta.is_group_leader()) }
     pub fn signal_pending(t: *mut Thread) -> bool       { raw::signal_pending(t) }
 
     pub fn tg_is_exiting(tg: *mut ThreadGroup) -> bool         { (raw::xv6_tg_is_exiting(tg)) != 0 }
@@ -258,8 +264,8 @@ mod ffi {
     // pgroup / session / thread group plumbing --------------------------------
     pub fn pgroup_remove_thread(p: *mut Thread)                { raw::pgroup_remove_thread(p) }
     pub fn session_remove_thread(s: *mut Session, t: *mut Thread) { raw::session_remove_thread(s, t) }
-    pub fn thread_group_remove(p: *mut Thread) -> bool         { raw::thread_group_remove(p) }
-    pub fn thread_group_put(tg: *mut ThreadGroup)              { raw::thread_group_put(tg) }
+    pub fn thread_group_remove(p: *mut Thread) -> bool         { ThreadAccess::from_ptr(p).map_or(true, |ta| ta.group_remove()) }
+    pub fn thread_group_put(tg: *mut ThreadGroup)              { if let Some(tga) = ThreadGroupAccess::from_ptr(tg) { tga.put(); } }
 
     // resource release --------------------------------------------------------
     pub fn sigacts_put(sa: *mut Sigacts)                       { raw::sigacts_put(sa) }

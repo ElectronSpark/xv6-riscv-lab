@@ -1366,8 +1366,12 @@ pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
 use crate::proc::{
     get_pgroup, get_pid_thread, pgroup_add_tg, pgroup_add_thread,
     pgroup_alloc, pgroup_remove_tg, pgroup_remove_thread,
-    pid_assert_wholding, pid_wlock, pid_wunlock, tg_signal_send, thread_tgid,
+    pid_assert_wholding, pid_wlock, pid_wunlock,
 };
+// NO-STANDALONE-FN: the former `tg_signal_send`/`thread_tgid` free fns are now
+// the `ThreadGroupAccess::signal_send` / `ThreadAccess::resolve_tgid` methods;
+// the call sites below construct the handle via `from_ptr`.
+use crate::proc::access::{ThreadAccess, ThreadGroupAccess};
 
 // ===========================================================================
 // setsid / getsid (POSIX).
@@ -1392,9 +1396,9 @@ unsafe fn __hangup_signal_tg(t: *mut thread) {
         // here per this file's established cross-module convention).
         let mut info: ksiginfo = core::mem::zeroed();
         info.signo = SIGHUP;
-        tg_signal_send(tg, &raw mut info);
+        ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&raw mut info));
         info.signo = SIGCONT;
-        tg_signal_send(tg, &raw mut info);
+        ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&raw mut info));
     }
 }
 
@@ -1448,7 +1452,7 @@ pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
 /// group. POSIX: must not be called by a process-group leader.
 pub(crate) extern "C" fn session_setsid() -> pid_t {
     let p = crate::machine::current_thread_ptr();
-    let tgid = thread_tgid(p);
+    let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
 
     pid_wlock();
 

@@ -27,8 +27,10 @@ use crate::lock::rcu::rcu_check_callbacks;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
 use crate::proc::access::{
     is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
-    RqRef, SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
+    RqRef, SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadGroupAccess,
+    ThreadSignalAccess,
 };
+use crate::proc::thread_group::ThreadGroup;
 use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
 use crate::tty::session::{session_key_of, session_lookup, Sid};
 use crate::proc::pgroup::{pgroup_key_of, pgroup_lookup, Pgid};
@@ -51,7 +53,7 @@ use crate::proc::sigpending_init;
 // redeclarations (some inline above, some in the block below); now direct
 // crate-path items, same precedent as the `use` imports above.
 use crate::proc::{sigpending_empty, context_switch_finish, scheduler_wakeup,
-    rq_cpu_activate, get_rq_for_cpu, thread_group_init, thread_group_put};
+    rq_cpu_activate, get_rq_for_cpu};
 // P3-D2b: the pid/thread-group/pgroup entry points (proc/{pid,
 // thread_group,pgroup}.rs) are ordinary Rust fns now that their
 // `#[no_mangle]` exports are gone; reached as plain crate-path items
@@ -61,7 +63,6 @@ use crate::proc::{sigpending_empty, context_switch_finish, scheduler_wakeup,
 // pgroup handles; the call sites now use the real `*mut pgroup` type
 // (see `KERNEL_PG`).
 use crate::proc::{__proctab_get_initproc, pid_wlock, pid_wunlock,
-    thread_group_alloc_kernel, thread_group_add,
     pgroup_alloc, pgroup_add_tg, pgroup_add_thread};
 // P3-1B mesh sweep: all three cross top-level-module boundaries (proc's
 // submodules are private, so the fully-qualified submodule path is used
@@ -700,8 +701,11 @@ impl<'a> ThreadAccess<'a> {
         let s = self.state_load() as thread_state;
         s == THREAD_RUNNING || s == THREAD_WAKENING
     }
+    // NO-STANDALONE-FN: `pub(super)` so `thread_group.rs`'s `sigkill_all` reuses
+    // this identical predicate (in place of its former `THREAD_SLEEPING` free fn)
+    // rather than duplicating a second inherent `is_sleeping` on `ThreadAccess`.
     #[inline]
-    fn is_sleeping(&self) -> bool {
+    pub(super) fn is_sleeping(&self) -> bool {
         let s = self.state_load() as thread_state;
         s == THREAD_INTERRUPTIBLE || s == THREAD_UNINTERRUPTIBLE
             || s == THREAD_KIILABLE || s == THREAD_TIMER || s == THREAD_KIILABLE_TIMER
@@ -778,7 +782,7 @@ impl Thread {
         }
 
         let mut tg: *mut thread_group = ptr::null_mut();
-        let ret = thread_group_alloc_kernel(&mut tg as *mut _, KERNEL_HIERARCHY_ID);
+        let ret = ThreadGroup::alloc_kernel(&mut tg as *mut _, KERNEL_HIERARCHY_ID);
         kassert!(ret == 0 && !tg.is_null(), "kthread hierarchy: thread_group_alloc_kernel failed");
 
         let pg = pgroup_alloc(KERNEL_HIERARCHY_ID, ptr::null_mut());
@@ -811,7 +815,12 @@ impl Thread {
         kassert!(!p.is_null(), "kthread hierarchy: thread is NULL");
         Thread::kthread_hierarchy_init_locked();
 
-        thread_group_add(KERNEL_TG.load(Ordering::Acquire), p);
+        // NO-STANDALONE-FN: former `thread_group_add(tg, p)` delegator; the
+        // null-`tg` panic it did now lives here at the call site.
+        match ThreadGroupAccess::from_ptr(KERNEL_TG.load(Ordering::Acquire)) {
+            Some(tga) => tga.add_thread(p),
+            None => xv6_panic(c"thread_group_add: NULL tg".as_ptr()),
+        }
         let ret = pgroup_add_thread(KERNEL_PG.load(Ordering::Acquire), p);
         kassert!(ret == 0, "kthread hierarchy: pgroup_add_thread failed");
         // Inlined former `session_add_thread` facade (the sole call site).
@@ -1158,8 +1167,8 @@ impl<'a> ThreadAccess<'a> {
             sigpending_empty(p, 0);
             sigpending_destroy(p);
 
-            if !self.thread_group_ptr().is_null() {
-                thread_group_put(self.thread_group_ptr());
+            if let Some(tga) = ThreadGroupAccess::from_ptr(self.thread_group_ptr()) {
+                tga.put();
                 self.set_thread_group(ptr::null_mut());
             }
 
@@ -1209,7 +1218,7 @@ impl Thread {
 
             pid_wlock();
             Thread::proctab_add(p);
-            thread_group_init(p);
+            ThreadGroup::init(p);
             // SAFETY: `p` is a live `*mut thread` (just created by
             // `Thread::create` above); `crate::proc::pgroup::Thread` is an
             // opaque `#[repr(C)] struct { _p: [u8; 0] }` marker type standing

@@ -29,33 +29,13 @@ use crate::bindings::{
     thread_group, thread_state,
 };
 
-// P3-D3a: `slab_alloc`/`slab_free`/`slab_cache_init` used to be imported
-// from `crate::bindings` (bindgen extern decls resolved at link time
-// against mm/slab.rs's `#[no_mangle]` exports — now gone). Thin unsafe
-// cast adapters keep this file's bindgen `slab_cache_t` call-site types
-// (same layout as `crate::mm::slab::SlabCache`, see `cffi::raw`'s
-// identical note); genuinely `unsafe fn`, exactly like the old bindgen
-// declarations, so every call site keeps its existing `unsafe` context.
-/// # Safety
-/// See `crate::mm::slab::slab_cache_init`'s contract.
-#[inline]
-unsafe fn slab_cache_init(
-    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
-) -> c_int {
-    crate::mm::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
-}
-/// # Safety
-/// `cache` must originate from `slab_cache_init` above.
-#[inline]
-unsafe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
-    crate::mm::slab_alloc(cache as *mut crate::mm::slab::SlabCache)
-}
-/// # Safety
-/// `obj` must originate from `slab_alloc` above.
-#[inline]
-unsafe fn slab_free(obj: *mut c_void) {
-    crate::mm::slab_free(obj)
-}
+// NO-STANDALONE-FN: the thin `slab_cache_init`/`slab_alloc`/`slab_free` cast
+// adapters (each a single-expression forward to the real `crate::mm::slab`
+// `unsafe fn`, reinterpreting this file's bindgen `slab_cache_t` as the
+// layout-identical `crate::mm::slab::SlabCache`) had 1-2 call sites apiece and
+// have been inlined at those sites (`ThreadGroup::{init,alloc,alloc_kernel}` and
+// `ThreadGroupAccess::put`) and deleted. `crate::mm::slab_*` are `unsafe fn`,
+// so every inlined site keeps its existing `unsafe`/`u!{}` context.
 use crate::machine::{cpuid, CpuLocal};
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, ThreadAccess, ThreadGroupAccess,
@@ -224,72 +204,32 @@ unsafe extern "C" {
     // cpu id (trampoline from slab_shims.rs)
 }
 
-// Field offsets used for container_of.
-#[inline]
-fn tg_entry_offset_in_thread() -> usize {
-    core::mem::offset_of!(thread, tg_entry)
-}
-#[inline]
-fn list_entry_offset_in_ksiginfo() -> usize {
-    core::mem::offset_of!(ksiginfo_t, list_entry)
-}
+// Field offsets for `container_of` / list iteration — compile-time constants
+// (NO-STANDALONE-FN: the former `tg_entry_offset_in_thread` /
+// `list_entry_offset_in_ksiginfo` free fns are now `const`s; `offset_of!` is
+// const-stable, so the two iterator methods / `container_of` sites read them
+// directly).
+const TG_ENTRY_OFF: usize = core::mem::offset_of!(thread, tg_entry);
+const KSI_LIST_ENTRY_OFF: usize = core::mem::offset_of!(ksiginfo_t, list_entry);
 
-#[inline(always)]
-fn ta_of<'a>(p: *mut thread) -> Option<ThreadAccess<'a>> {
-    ThreadAccess::from_ptr(p)
-}
+// NO-STANDALONE-FN: the module-private `ta_of` alias for
+// `ThreadAccess::from_ptr`, the thread-pointer flag setters
+// (`thread_set_killed`/`thread_set_sigpending`), the state predicates
+// (`thread_state_load`/`THREAD_SLEEPING`/`THREAD_STOPPED_p`/`THREAD_RUNNING_p`/
+// `THREAD_INTERRUPTIBLE_p`/`THREAD_ZOMBIE_p`), and the thread->tg navigators
+// (`thread_group_remove`/`thread_is_group_leader`/`thread_tgid`/
+// `thread_group_exit`) are now inherent methods on the `ThreadAccess` handle
+// (the `impl<'a> ThreadAccess<'a>` block below) — each reads/writes through the
+// handle's own pointer, never forming a `&thread`, keeping the same
+// no-Freeze-hazard profile as every other accessor. The former free fns'
+// leading `p.is_null()` guards move to the call sites, which construct the
+// handle via `from_ptr`. Dead helpers (`thread_clear_sigpending`,
+// `thread_is_zombie_state`, `sigaddset`, `sigdelset`) had no callers and are
+// deleted.
 
-// thread flag helpers
-#[inline]
-fn thread_set_killed(t: *mut thread) {
-    if let Some(ta) = ta_of(t) { ta.flags_set_bit(THREAD_FLAG_KILLED); }
-}
-#[inline]
-fn thread_set_sigpending(t: *mut thread) {
-    if let Some(ta) = ta_of(t) { ta.flags_set_bit(THREAD_FLAG_SIGPENDING); }
-}
-#[inline]
-fn thread_clear_sigpending(t: *mut thread) {
-    if let Some(ta) = ta_of(t) { ta.flags_clear_bit(THREAD_FLAG_SIGPENDING); }
-}
-
-// thread state predicates
-#[inline]
-fn thread_state_load(t: *mut thread) -> thread_state {
-    ta_of(t).map_or(THREAD_UNUSED, |ta| ta.state_load() as thread_state)
-}
-#[inline]
-fn thread_is_zombie_state(t: *mut thread) -> bool {
-    thread_state_load(t) == THREAD_ZOMBIE
-}
-#[inline]
-fn THREAD_SLEEPING(t: *mut thread) -> bool {
-    if t.is_null() { return false; }
-    let st = thread_state_load(t);
-    st == THREAD_INTERRUPTIBLE
-        || st == THREAD_UNINTERRUPTIBLE
-        || st == THREAD_KIILABLE
-        || st == THREAD_TIMER
-        || st == THREAD_KIILABLE_TIMER
-}
-#[inline]
-fn THREAD_STOPPED_p(t: *mut thread) -> bool {
-    !t.is_null() && thread_state_load(t) == THREAD_STOPPED
-}
-#[inline]
-fn THREAD_RUNNING_p(t: *mut thread) -> bool {
-    !t.is_null() && thread_state_load(t) == THREAD_RUNNING
-}
-#[inline]
-fn THREAD_INTERRUPTIBLE_p(t: *mut thread) -> bool {
-    !t.is_null() && thread_state_load(t) == THREAD_INTERRUPTIBLE
-}
-#[inline]
-fn THREAD_ZOMBIE_p(t: *mut thread) -> bool {
-    !t.is_null() && thread_state_load(t) == THREAD_ZOMBIE
-}
-
-// sigset helpers (sigset_t is u64)
+// sigset helpers (GENUINE FLOOR): `sigbad`/`sigismember` operate on a bare
+// `sigset_t = u64` (a foreign scalar with no sound domain type to host them as
+// methods), so per the wave rule they stay free.
 type sigset_t = u64;
 #[inline]
 fn sigbad(signo: c_int) -> bool { signo < 1 || signo > NSIG as c_int }
@@ -298,349 +238,302 @@ fn sigismember(set: sigset_t, signo: c_int) -> bool {
     if sigbad(signo) { return false; }
     (set & (1u64 << (signo - 1))) != 0
 }
-#[inline]
-fn sigaddset(set: &mut sigset_t, signo: c_int) {
-    if !sigbad(signo) { *set |= 1u64 << (signo - 1); }
-}
-#[inline]
-fn sigdelset(set: &mut sigset_t, signo: c_int) {
-    if !sigbad(signo) { *set &= !(1u64 << (signo - 1)); }
+
+// NO-STANDALONE-FN: derived thread-pointer/state operations and the thread->tg
+// navigators as inherent methods on the `ThreadAccess` handle (extended
+// in-crate, same precedent as `thread.rs`). Kept module-private except where an
+// out-of-`crate::proc` caller forces a wider visibility (`resolve_tgid` reaches
+// `tty::session`).
+impl<'a> ThreadAccess<'a> {
+    /// Mark this thread killed (former free fn `thread_set_killed`).
+    #[inline]
+    fn set_killed(&self) { self.flags_set_bit(THREAD_FLAG_KILLED); }
+    /// Flag a pending signal on this thread (former `thread_set_sigpending`).
+    #[inline]
+    fn set_sigpending(&self) { self.flags_set_bit(THREAD_FLAG_SIGPENDING); }
+    /// This thread's scheduler state (former `thread_state_load`, non-null self).
+    #[inline]
+    fn state_of(&self) -> thread_state { self.state_load() as thread_state }
+    // The former `THREAD_SLEEPING` predicate is the `ThreadAccess::is_sleeping`
+    // method defined (identically) in `thread.rs` and reused here.
+    /// Former `THREAD_STOPPED_p` predicate (self non-null).
+    #[inline]
+    fn is_stopped(&self) -> bool { self.state_of() == THREAD_STOPPED }
+    /// Former `THREAD_RUNNING_p` predicate (self non-null).
+    #[inline]
+    fn is_running(&self) -> bool { self.state_of() == THREAD_RUNNING }
+    /// Former `THREAD_INTERRUPTIBLE_p` predicate (self non-null).
+    #[inline]
+    fn is_interruptible(&self) -> bool { self.state_of() == THREAD_INTERRUPTIBLE }
+    /// Former `THREAD_ZOMBIE_p` predicate (self non-null).
+    #[inline]
+    fn is_zombie_state(&self) -> bool { self.state_of() == THREAD_ZOMBIE }
+
+    /// Detach this thread from its group; return `true` if it was the last live
+    /// member (former free fn `thread_group_remove`; caller must hold pid_wlock).
+    /// The former `p.is_null()` early-`true` guard now lives at the call site.
+    pub(super) fn group_remove(&self) -> bool {
+        let tg = self.thread_group_ptr();
+        if tg.is_null() { return true; }
+        if xv6_pid_wholding() == 0 {
+            xv6_panic(c"thread_group_remove: caller must hold pid_wlock".as_ptr());
+        }
+        let mut last = false;
+        if !self.tg_entry_ref().is_detached() {
+            self.tg_entry_ref().detach();
+        }
+        // atomic_sub returns the *previous* value
+        // SAFETY: `tg` is checked non-null immediately above.
+        let prev = unsafe { ThreadGroupAccess::assume(tg) }.live_threads_fetch_sub(1);
+        if prev <= 1 { last = true; }
+        if last {
+            pgroup_remove_tg(tg);
+        }
+        last
+    }
+
+    /// Whether this thread is its group's leader (former free fn
+    /// `thread_is_group_leader`); a thread with no group is trivially its own
+    /// leader. The former `p.is_null()` early-`true` guard is at the call site.
+    pub(super) fn is_group_leader(&self) -> bool {
+        let tg = self.thread_group_ptr();
+        if tg.is_null() { return true; }
+        // SAFETY: `tg` is checked non-null immediately above.
+        unsafe { ThreadGroupAccess::assume(tg) }.group_leader_ptr() == self.as_ptr()
+    }
+
+    /// Resolve this thread's thread-group id (former free fn `thread_tgid`);
+    /// falls back to the thread's own pid when it has no group or an unset tgid.
+    /// The former `p.is_null()` early-`-1` guard is at the call site.
+    pub(crate) fn resolve_tgid(&self) -> c_int {
+        let tg = self.thread_group_ptr();
+        if tg.is_null() { return self.pid(); }
+        // SAFETY: `tg` is checked non-null immediately above.
+        let tga = unsafe { ThreadGroupAccess::assume(tg) };
+        let tgid = tga.tgid();
+        if tgid > 0 { tgid } else { self.pid() }
+    }
+
+    /// Initiate a group-wide exit with `code` (former free fn
+    /// `thread_group_exit`): CAS this thread as the exit task, broadcast SIGKILL
+    /// to the siblings, then `exit`. The former `p.is_null()` early-return guard
+    /// is at the call site.
+    pub(super) fn group_exit(&self, code: c_int) {
+        let tg = self.thread_group_ptr();
+        if tg.is_null() { exit(code); }
+        // SAFETY: `tg` is checked non-null immediately above.
+        let tga = unsafe { ThreadGroupAccess::assume(tg) };
+        // CAS group_exit_task from NULL to self; only the first wins.
+        let cas_ok = tga.group_exit_task_compare_exchange_null(self.as_ptr());
+        if !cas_ok {
+            exit(code);
+        }
+        tga.set_group_exit_code(code);
+        tga.set_group_exit_task(self.as_ptr());
+        // Broadcast SIGKILL to siblings (skip self).
+        tga.sigkill_all(self.as_ptr());
+        exit(code);
+    }
 }
 
-// SET_NEEDS_RESCHED: mycpu()->flags |= CPU_FLAG_NEEDS_RESCHED.
-// mycpu() = (struct cpu_local *)r_tp().
-#[inline]
-unsafe fn set_needs_resched() {
-    CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
+// ---------------- list iteration as handle methods ----------------------
+// NO-STANDALONE-FN: the `tg_threads` / `siginfo_queue` iterator builders and
+// the `siginfo_queue_len` counter that used to be free fns are now inherent
+// methods on the handles that own the underlying list head — `tg_threads` ->
+// `ThreadGroupAccess::threads` (all callers passed `self.thread_list_ptr()`),
+// `siginfo_queue` -> `SigPendingRef::entries` (all callers derived the head
+// from a `SigPendingRef`). `siginfo_queue_len` had a single call site and is
+// inlined there as `SigPendingRef::assume(sq).queue_len()`.
+impl<'a> ThreadGroupAccess<'a> {
+    /// A lazy [`Iterator`] over this group's `thread_list` (entries are
+    /// `tg_entry` in struct thread), yielding `*mut thread`. Drive with
+    /// `for t in self.threads() { … }`. (Former free fn `tg_threads`.)
+    ///
+    /// Safe under concurrent removal of the *current* node (Linux
+    /// `list_foreach_node_safe` semantics: [`crate::list::ListIterator::next`]
+    /// caches the next pointer before yielding the current one, so the loop body
+    /// may detach `t` itself). An empty list yields nothing.
+    #[inline]
+    fn threads(&self) -> crate::list::ListIterator<'a, thread> {
+        // SAFETY: `self` wraps a live `thread_group` held under `pid_lock`;
+        // `thread_list_ptr()` is its real `thread_list` sentinel head and
+        // `TG_ENTRY_OFF` is `thread::tg_entry`'s real member offset, upholding
+        // `ListIterator::new`'s contract (a null head yields nothing).
+        unsafe { crate::list::ListIterator::new(self.thread_list_ptr(), TG_ENTRY_OFF) }
+    }
 }
 
-// ---------------- list_foreach over tg_entry / list_entry ---------------
-/// A lazy [`Iterator`] over the `thread_list` of a thread_group (entries are
-/// `tg_entry` in struct thread), yielding `*mut thread` for each element.
-/// Drive it with `for t in tg_threads(head) { … }`.
-///
-/// Safe under concurrent removal of the *current* node (Linux
-/// `list_foreach_node_safe` semantics: [`crate::list::ListIterator::next`]
-/// caches the next pointer before yielding the current one, so the loop body
-/// may detach `t` itself). A null `head` yields nothing.
-#[inline]
-fn tg_threads<'a>(head: *mut list_node_t) -> crate::list::ListIterator<'a, thread> {
-    let off = tg_entry_offset_in_thread();
-    // SAFETY: every caller passes a live `thread_list` sentinel head of a
-    // `thread_group` held under `pid_lock`; `off` is `thread::tg_entry`'s
-    // real member offset, upholding `ListIterator::new`'s contract. A null
-    // head is handled by `ListIterator` (yields nothing).
-    unsafe { crate::list::ListIterator::new(head, off) }
-}
-
-/// Count entries on a sigpending queue (header list_node_t with embedded
-/// ksiginfo entries linked via `list_entry`).
-fn siginfo_queue_len(sq: *mut sigpending_t) -> c_int {
-    // SAFETY: `sq`'s sole call site (`tg_signal_send`, below) passes the address of an
-    // in-bounds element of the fixed-size `sig_pending` array embedded in an
-    // already-valid `shared` struct; never null.
-    unsafe { SigPendingRef::assume(sq) }.queue_len()
-}
-
-/// A lazy [`Iterator`] over one sigpending queue (a `list_node_t` sentinel
-/// `head` with embedded `ksiginfo` entries linked via `list_entry`), yielding
-/// `*mut ksiginfo_t` for each element.
-///
-/// Like [`tg_threads`], this is a `list_foreach_node_safe`-equivalent walk:
-/// [`crate::list::ListIterator::next`] caches each node's successor *before*
-/// yielding the current node, so a loop body may `detach` **and free** the
-/// yielded entry (the drain pattern used by `shared_pending_destroy` /
-/// `sigpending_empty_sig`). A null `head` yields nothing. Every touch of a
-/// node is a raw pointer load through the iterator's `curr` cursor — no
-/// `&ksiginfo` reference is formed.
-#[inline]
-fn siginfo_queue<'a>(head: *mut list_node_t) -> crate::list::ListIterator<'a, ksiginfo_t> {
-    let off = list_entry_offset_in_ksiginfo();
-    // SAFETY: every caller passes a live `sig_pending` queue sentinel head
-    // (a `list_node_t` embedded by value in an already-valid
-    // `tg_shared_pending`), and `off` is `ksiginfo::list_entry`'s real member
-    // offset, upholding `ListIterator::new`'s contract. A null head is
-    // handled by `ListIterator` (yields nothing).
-    unsafe { crate::list::ListIterator::new(head, off) }
+impl<'a> SigPendingRef<'a> {
+    /// A lazy [`Iterator`] over this sigpending queue (embedded `ksiginfo`
+    /// entries linked via `list_entry`), yielding `*mut ksiginfo_t`. (Former
+    /// free fn `siginfo_queue`.)
+    ///
+    /// A `list_foreach_node_safe`-equivalent walk: [`crate::list::ListIterator::next`]
+    /// caches each node's successor *before* yielding it, so a loop body may
+    /// `detach` **and free** the yielded entry (the drain pattern used by
+    /// `shared_pending_destroy` / `sigpending_empty_sig`). An empty queue yields
+    /// nothing. Every touch is a raw pointer load through the iterator's cursor
+    /// — no `&ksiginfo` reference is formed.
+    #[inline]
+    fn entries(&self) -> crate::list::ListIterator<'a, ksiginfo_t> {
+        // SAFETY: `self` wraps a live `sig_pending` queue (a `list_node_t`
+        // embedded by value in an already-valid `tg_shared_pending`);
+        // `queue_ptr()` is its real sentinel head and `KSI_LIST_ENTRY_OFF` is
+        // `ksiginfo::list_entry`'s real member offset, upholding
+        // `ListIterator::new`'s contract (a null head yields nothing).
+        unsafe { crate::list::ListIterator::new(self.queue_ptr(), KSI_LIST_ENTRY_OFF) }
+    }
 }
 
 // ---------------- slab cache storage ------------------------------------
 #[repr(transparent)]
 struct CacheCell(UnsafeCell<MaybeUninit<slab_cache_t>>);
 // SAFETY: `TG_POOL` is written in full by `slab_cache_init` (called
-// once from `thread_group_init` below, before any `slab_alloc` on this
+// once from `ThreadGroup::init` below, before any `slab_alloc` on this
 // cache) and otherwise only accessed through the C slab allocator's
 // own internally-synchronized primitives (`slab_alloc`/`slab_free`),
 // which serialize concurrent access via the cache's embedded locks.
 unsafe impl Sync for CacheCell {}
 static TG_POOL: CacheCell = CacheCell(UnsafeCell::new(MaybeUninit::zeroed()));
-#[inline]
-fn tg_pool() -> *mut slab_cache_t { TG_POOL.0.get() as *mut slab_cache_t }
 
 // ===========================================================================
-// SECTION 15.1  subsystem init
+// SECTION 15.1/15.4  subsystem init + thread group lifecycle
 // ===========================================================================
-pub(super) fn thread_group_init(initproc: *mut thread) {
-    // SAFETY: `slab_cache_init` is a bindgen `unsafe extern "C"`
-    // function. `tg_pool()` points into the static `TG_POOL` cell,
-    // which is valid for `'static` and not yet visible to any other
-    // thread this early in boot, so passing it (with a `'static` name
-    // pointer and the correctly computed `size_of::<thread_group>()`)
-    // is sound.
-    u! {
-        slab_cache_init(
-            tg_pool(),
-            c"thread_group".as_ptr() as *mut c_char,
-            core::mem::size_of::<thread_group>(),
-            SLAB_FLAG_STATIC as _,
-        );
-        let ret = thread_group_alloc(initproc);
-        if ret != 0 {
-            xv6_panic(c"thread_group_init: thread_group_alloc failed".as_ptr());
+// NO-STANDALONE-FN: the slab-pool accessor (`tg_pool`) and the constructors
+// (`thread_group_init`/`thread_group_alloc`/`thread_group_alloc_kernel`) are now
+// associated functions on `ThreadGroup` itself (namespaced under the type, no
+// receiver). The thin `slab_cache_init`/`slab_alloc`/`slab_free` FFI adapters
+// they used are inlined here as direct `crate::mm::slab_*` calls.
+impl ThreadGroup {
+    /// The `'static` thread_group slab cache (former free fn `tg_pool`).
+    #[inline]
+    fn pool() -> *mut slab_cache_t { TG_POOL.0.get() as *mut slab_cache_t }
+
+    /// Subsystem init: create the slab cache and allocate `initproc`'s group.
+    /// (Former free fn `thread_group_init`.)
+    pub(super) fn init(initproc: *mut thread) {
+        // SAFETY: `crate::mm::slab_cache_init` is an `unsafe fn`. `Self::pool()`
+        // points into the static `TG_POOL` cell, valid for `'static` and not
+        // yet visible to any other thread this early in boot, so passing it
+        // (with a `'static` name pointer and the correct
+        // `size_of::<thread_group>()`) is sound.
+        u! {
+            crate::mm::slab_cache_init(
+                Self::pool() as *mut crate::mm::slab::SlabCache,
+                c"thread_group".as_ptr() as *mut c_char,
+                core::mem::size_of::<thread_group>(),
+                SLAB_FLAG_STATIC as _,
+            );
+            let ret = Self::alloc(initproc);
+            if ret != 0 {
+                xv6_panic(c"thread_group_init: thread_group_alloc failed".as_ptr());
+            }
+        }
+    }
+
+    /// Allocate a user thread_group with `leader` as its group leader.
+    /// (Former free fn `thread_group_alloc`.)
+    pub(super) fn alloc(leader: *mut thread) -> c_int {
+        if leader.is_null() {
+            xv6_panic(c"thread_group_alloc: NULL leader".as_ptr());
+        }
+        // SAFETY: `leader` is checked non-null above (panics otherwise).
+        // `crate::mm::slab_alloc`/`memset` are `unsafe fn`; `tg` is null-checked
+        // immediately after allocation, and `memset` writes exactly
+        // `size_of::<thread_group>()` zeroed bytes into it before the subsequent
+        // `ThreadGroupAccess::assume(tg)` operates on a valid, freshly
+        // zero-initialized `thread_group`.
+        u! {
+            let tg = crate::mm::slab_alloc(Self::pool() as *mut crate::mm::slab::SlabCache)
+                as *mut thread_group;
+            if tg.is_null() { return -ENOMEM; }
+            memset(tg as *mut c_void, 0, core::mem::size_of::<thread_group>());
+            let lta = ThreadAccess::assume(leader);
+            let tga = ThreadGroupAccess::assume(tg);
+            tga.thread_list_ref().init();
+            tga.list_entry_ref().init();
+            tga.set_group_leader(leader);
+            tga.set_tgid(lta.pid());
+            tga.live_threads_store(1);
+            tga.refcount_store(1);
+            tga.group_exit_store(0);
+            tga.set_group_exit_code(0);
+            tga.set_group_exit_task(ptr::null_mut());
+            tga.set_group_stop_count(0);
+            tga.set_group_stop_signo(0);
+            tga.set_pgroup(ptr::null_mut());
+            tga.set_is_kernel(0);
+
+            tga.shared_pending_init();
+
+            // Link leader into the group
+            lta.set_thread_group(tg);
+            lta.set_tgid(lta.pid());
+            lta.tg_entry_ref().init();
+            lta.tg_entry_ref().push_back(tga.thread_list_ptr());
+            0
+        }
+    }
+
+    /// Allocate a leaderless kernel thread_group with id `tgid`, storing it in
+    /// `*out_tg`. (Former free fn `thread_group_alloc_kernel`.)
+    pub(super) fn alloc_kernel(out_tg: *mut *mut thread_group, tgid: pid_t) -> c_int {
+        if out_tg.is_null() { return -EINVAL; }
+        // SAFETY: `out_tg` is checked non-null above; `crate::mm::slab_alloc`/
+        // `memset` are `unsafe fn`, and `tg` is null-checked before `memset`
+        // zero-initializes exactly `size_of::<thread_group>()` bytes, so
+        // `ThreadGroupAccess::assume(tg)` sees a valid struct and the final
+        // `*out_tg = tg` writes through the caller-supplied non-null pointer.
+        u! {
+            let tg = crate::mm::slab_alloc(Self::pool() as *mut crate::mm::slab::SlabCache)
+                as *mut thread_group;
+            if tg.is_null() { return -ENOMEM; }
+            memset(tg as *mut c_void, 0, core::mem::size_of::<thread_group>());
+            let tga = ThreadGroupAccess::assume(tg);
+            tga.thread_list_ref().init();
+            tga.list_entry_ref().init();
+            tga.set_group_leader(ptr::null_mut());
+            tga.set_tgid(tgid);
+            tga.live_threads_store(0);
+            tga.refcount_store(1);
+            tga.group_exit_store(0);
+            tga.set_group_exit_code(0);
+            tga.set_group_exit_task(ptr::null_mut());
+            tga.set_group_stop_count(0);
+            tga.set_group_stop_signo(0);
+            tga.set_pgroup(ptr::null_mut());
+            tga.set_is_kernel(1);
+            tga.shared_pending_init();
+            *out_tg = tg;
+            0
         }
     }
 }
 
 // ===========================================================================
-// SECTION 15.2  reference counting
+// SECTION 15.2/15.3  reference counting + shared pending signal helpers
 // ===========================================================================
-// P3-D2b: the `thread_group_get` wrapper deleted -- zero callers
-// anywhere in the tree. N-METH: `thread_group_get_impl` is now the
-// private `ThreadGroupAccess::inc_ref` method (sole caller
-// `ThreadGroupAccess::add_thread`).
-
-// N-METH: the free-fn `thread_group_put` body moved to the
-// `ThreadGroupAccess::put` method; this is the thin `pub(super)` entry
-// point (callers in `crate::proc::{thread,exit}` hold raw `*mut
-// thread_group` into slab storage). Null tg is a no-op, exactly as before.
-pub(super) fn thread_group_put(tg: *mut thread_group) {
-    if let Some(tga) = ThreadGroupAccess::from_ptr(tg) { tga.put(); }
-}
-
-// P3-D2b: `thread_group_live_dec` deleted -- zero callers anywhere in
-// the tree (kernel/inc/proc/thread_group.h's legacy prototype does not
-// count).
-
-// P3-D2b: `get_thread_group` (+ its `_inner`) deleted -- zero callers
-// anywhere in the tree.
+// NO-STANDALONE-FN: the `thread_group_put` delegator free fn is gone; callers
+// construct a `ThreadGroupAccess` and invoke `.put()` (the null-`tg` no-op moves
+// to the call site's `from_ptr`). `ThreadGroupAccess::inc_ref`/`put`/
+// `shared_pending_init`/`shared_pending_destroy` remain methods on the handle
+// (SECTION 15.9). (`thread_group_get`/`live_dec`/`get_thread_group` were deleted
+// earlier as caller-less; the P3-D2b notes have been folded away here.)
 
 // ===========================================================================
-// SECTION 15.3  shared pending signal helpers
+// SECTION 15.4/15.5/15.6/15.8  add / remove / queries / group-exit / signals
 // ===========================================================================
-// N-METH: `tg_shared_pending_init` / `tg_shared_pending_destroy` had no
-// callers outside this file; their bodies are now the private
-// `ThreadGroupAccess::shared_pending_init` / `shared_pending_destroy`
-// methods (called from the constructors and `put`). The former's
-// `for i in 0..NSIG` range loops carry over unchanged; the latter's inner
-// `while cur != head` detach+free drain is now the `siginfo_queue`
-// iterator (see `SECTION 15.9`).
-
-// ===========================================================================
-// SECTION 15.4  thread group lifecycle
-// ===========================================================================
-pub(super) fn thread_group_alloc(leader: *mut thread) -> c_int {
-    if leader.is_null() {
-        xv6_panic(c"thread_group_alloc: NULL leader".as_ptr());
-    }
-    // SAFETY: `leader` is checked non-null above (panics otherwise).
-    // `slab_alloc`/`memset` are bindgen `unsafe extern "C"` functions;
-    // `tg` is null-checked immediately after allocation, and before
-    // `memset` writes exactly `size_of::<thread_group>()` zeroed bytes
-    // into it, so the subsequent `ThreadGroupAccess::assume(tg)`
-    // operates on a valid, freshly zero-initialized `thread_group`.
-    u! {
-        let tg = slab_alloc(tg_pool()) as *mut thread_group;
-        if tg.is_null() { return -ENOMEM; }
-        memset(tg as *mut c_void, 0, core::mem::size_of::<thread_group>());
-        let lta = ThreadAccess::assume(leader);
-        let tga = ThreadGroupAccess::assume(tg);
-        tga.thread_list_ref().init();
-        tga.list_entry_ref().init();
-        tga.set_group_leader(leader);
-        tga.set_tgid(lta.pid());
-        tga.live_threads_store(1);
-        tga.refcount_store(1);
-        tga.group_exit_store(0);
-        tga.set_group_exit_code(0);
-        tga.set_group_exit_task(ptr::null_mut());
-        tga.set_group_stop_count(0);
-        tga.set_group_stop_signo(0);
-        tga.set_pgroup(ptr::null_mut());
-        tga.set_is_kernel(0);
-
-        tga.shared_pending_init();
-
-        // Link leader into the group
-        lta.set_thread_group(tg);
-        lta.set_tgid(lta.pid());
-        lta.tg_entry_ref().init();
-        lta.tg_entry_ref().push_back(tga.thread_list_ptr());
-        0
-    }
-}
-
-pub(super) fn thread_group_alloc_kernel(
-    out_tg: *mut *mut thread_group,
-    tgid: pid_t,
-) -> c_int {
-    if out_tg.is_null() { return -EINVAL; }
-    // SAFETY: `out_tg` is checked non-null above; `slab_alloc`/`memset`
-    // are bindgen `unsafe extern "C"` functions, and `tg` is
-    // null-checked before `memset` zero-initializes exactly
-    // `size_of::<thread_group>()` bytes, so `ThreadGroupAccess::assume(tg)`
-    // sees a valid struct and the final `*out_tg = tg` writes through
-    // the caller-supplied non-null out-pointer.
-    u! {
-        let tg = slab_alloc(tg_pool()) as *mut thread_group;
-        if tg.is_null() { return -ENOMEM; }
-        memset(tg as *mut c_void, 0, core::mem::size_of::<thread_group>());
-        let tga = ThreadGroupAccess::assume(tg);
-        tga.thread_list_ref().init();
-        tga.list_entry_ref().init();
-        tga.set_group_leader(ptr::null_mut());
-        tga.set_tgid(tgid);
-        tga.live_threads_store(0);
-        tga.refcount_store(1);
-        tga.group_exit_store(0);
-        tga.set_group_exit_code(0);
-        tga.set_group_exit_task(ptr::null_mut());
-        tga.set_group_stop_count(0);
-        tga.set_group_stop_signo(0);
-        tga.set_pgroup(ptr::null_mut());
-        tga.set_is_kernel(1);
-        tga.shared_pending_init();
-        *out_tg = tg;
-        0
-    }
-}
-
-// Caller must hold pid_wlock. N-METH: the group-mutation body lives in
-// `ThreadGroupAccess::add_thread`; this thin `pub(super)` entry point
-// (callers in `crate::proc::{thread,clone}`) null-checks the raw group
-// pointer and delegates, preserving the original panic on a NULL `tg`.
-pub(super) fn thread_group_add(tg: *mut thread_group, child: *mut thread) {
-    match ThreadGroupAccess::from_ptr(tg) {
-        Some(tga) => tga.add_thread(child),
-        None => xv6_panic(c"thread_group_add: NULL tg".as_ptr()),
-    }
-}
-
-// Caller must hold pid_wlock.
-pub(super) fn thread_group_remove(p: *mut thread) -> bool {
-    if p.is_null() { return true; }
-    // SAFETY: `p` is checked non-null at the top of `thread_group_remove` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let tg = ta.thread_group_ptr();
-    if tg.is_null() { return true; }
-    if xv6_pid_wholding() == 0 {
-        xv6_panic(c"thread_group_remove: caller must hold pid_wlock".as_ptr());
-    }
-    let mut last = false;
-    if !ta.tg_entry_ref().is_detached() {
-        ta.tg_entry_ref().detach();
-    }
-    // atomic_sub returns the *previous* value
-    // SAFETY: `tg` is checked non-null immediately above (`if tg.is_null() { return
-    // true; }`).
-    let prev = unsafe { ThreadGroupAccess::assume(tg) }.live_threads_fetch_sub(1);
-    if prev <= 1 { last = true; }
-    if last {
-        pgroup_remove_tg(tg);
-    }
-    last
-}
-
-// ===========================================================================
-// SECTION 15.5  queries
-// ===========================================================================
-pub(super) fn thread_is_group_leader(p: *mut thread) -> bool {
-    if p.is_null() { return true; }
-    // SAFETY: `p` is checked non-null at the top of `thread_is_group_leader` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let tg = ta.thread_group_ptr();
-    if tg.is_null() { return true; }
-    // SAFETY: `tg` is checked non-null immediately above (`if tg.is_null() { return
-    // true; }`).
-    unsafe { ThreadGroupAccess::assume(tg) }.group_leader_ptr() == p
-}
-
-pub(crate) fn thread_tgid(p: *mut thread) -> c_int {
-    if p.is_null() { return -1; }
-    // SAFETY: `p` is checked non-null at the top of `thread_tgid` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let tg = ta.thread_group_ptr();
-    if tg.is_null() { return ta.pid(); }
-    // SAFETY: `tg` is checked non-null immediately above (`if tg.is_null() { return
-    // ta.pid(); }`).
-    let tga = unsafe { ThreadGroupAccess::assume(tg) };
-    let tgid = tga.tgid();
-    if tgid > 0 { tgid } else { ta.pid() }
-}
-
-// ===========================================================================
-// SECTION 15.6  group exit
-// ===========================================================================
-pub(super) fn thread_group_exit(p: *mut thread, code: c_int) {
-    if p.is_null() { return; }
-    // SAFETY: `p` is checked non-null above; `ThreadAccess::assume(p)`
-    // therefore operates on a live thread. `tg` is checked non-null
-    // immediately after being read from `ta.thread_group_ptr()`, so
-    // `ThreadGroupAccess::assume(tg)` yields a handle to a live group.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let tg = ta.thread_group_ptr();
-    if tg.is_null() { exit(code); }
-    // SAFETY: `tg` is checked non-null immediately above.
-    let tga = unsafe { ThreadGroupAccess::assume(tg) };
-    // CAS group_exit_task from NULL to p; only the first wins.
-    let cas_ok = tga.group_exit_task_compare_exchange_null(p);
-    if !cas_ok {
-        exit(code);
-    }
-    tga.set_group_exit_code(code);
-    tga.set_group_exit_task(p);
-    // Broadcast SIGKILL to siblings (skip self).
-    tga.sigkill_all(p);
-    exit(code);
-}
-
-// ===========================================================================
-// SECTION 15.8  tg_signal_send / pending / dequeue / sigpending_empty
-// ===========================================================================
-// N-METH: the delivery body lives in `ThreadGroupAccess::signal_send`;
-// this thin `pub(crate)` entry point (out-of-proc callers in
-// `crate::tty::session`, plus `crate::proc::{proc_shims,signal}`) maps a
-// NULL group to the original `-EINVAL`. The NULL-`info` case stays in the
-// method.
-pub(crate) fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_int {
-    match ThreadGroupAccess::from_ptr(tg) {
-        Some(tga) => tga.signal_send(info),
-        None => -EINVAL,
-    }
-}
-
-// P3-D2b: `tg_signal_pending` deleted -- zero callers anywhere in the
-// tree.
-
-// Caller must hold sigacts lock and pid_rlock (or pid_wlock). N-METH:
-// body in `ThreadGroupAccess::dequeue_signal`; thin `pub(super)` entry
-// point (sole caller `crate::proc::signal`). NULL group -> null, as before.
-pub(super) fn tg_dequeue_signal(tg: *mut thread_group, signo: c_int) -> *mut ksiginfo_t {
-    match ThreadGroupAccess::from_ptr(tg) {
-        Some(tga) => tga.dequeue_signal(signo),
-        None => ptr::null_mut(),
-    }
-}
-
-// Caller must hold sigacts lock. N-METH: body in
-// `ThreadGroupAccess::sigpending_empty_sig`; thin `pub(super)` entry point
-// (sole caller `crate::proc::signal`). NULL group is a no-op, as before.
-pub(super) fn tg_sigpending_empty(tg: *mut thread_group, signo: c_int) {
-    if let Some(tga) = ThreadGroupAccess::from_ptr(tg) { tga.sigpending_empty_sig(signo); }
-}
-
-// Caller must hold pid_rlock or pid_wlock.
-// P3-D2b: `tg_recalc_sigpending` deleted -- zero callers anywhere in
-// the tree.
+// NO-STANDALONE-FN: the thin `tg`-taking delegator entry points
+// (`thread_group_add` + the signal trio `tg_signal_send`/`tg_dequeue_signal`/
+// `tg_sigpending_empty`) are gone — every caller now constructs a
+// `ThreadGroupAccess` via `from_ptr` and invokes the corresponding method
+// (`add_thread`/`signal_send`/`dequeue_signal`/`sigpending_empty_sig`, SECTION
+// 15.9), mapping the null-`tg` case (panic / -EINVAL / null / no-op) at the call
+// site exactly as the delegators did. The `p`-taking navigators
+// (`thread_group_remove`/`thread_is_group_leader`/`thread_tgid`/
+// `thread_group_exit`) became `ThreadAccess` methods (`group_remove`/
+// `is_group_leader`/`resolve_tgid`/`group_exit`, defined above). The
+// caller-less `tg_signal_pending`/`tg_recalc_sigpending` were deleted earlier.
 
 // ===========================================================================
 // SECTION 15.9  per-thread_group algorithms as METHODS on the handle
@@ -671,16 +564,16 @@ impl<'a> ThreadGroupAccess<'a> {
 
     /// Drop one group reference; on the last, tear down shared-pending state
     /// and return the slab object. (Former body of `thread_group_put`.)
-    fn put(&self) {
+    pub(super) fn put(&self) {
         if self.refcount_dec_unless(1) {
             return; // refcount > 1, still alive
         }
         self.shared_pending_destroy();
         // SAFETY: `refcount_dec_unless` returning `false` means this call
         // observed (and dropped) the last reference, so no other holder can
-        // still be using the group; `slab_free` (bindgen `unsafe extern "C"`)
-        // may now reclaim it, and no field of `self` is touched afterward.
-        unsafe { slab_free(self.as_ptr() as *mut c_void); }
+        // still be using the group; `crate::mm::slab_free` (`unsafe fn`) may now
+        // reclaim it, and no field of `self` is touched afterward.
+        unsafe { crate::mm::slab_free(self.as_ptr() as *mut c_void); }
     }
 
     /// Initialize the shared-pending signal state to empty.
@@ -700,11 +593,10 @@ impl<'a> ThreadGroupAccess<'a> {
     fn shared_pending_destroy(&self) {
         let sp = self.shared_pending_ref();
         for i in 0..NSIG {
-            let head = sp.sig_pending_ref_index(i).queue_ptr();
-            for ksi in siginfo_queue(head) {
+            for ksi in sp.sig_pending_ref_index(i).entries() {
                 // SAFETY: `ksi` is a `container_of` recovery from a live node
                 // of the shared-pending queue, only ever populated with real
-                // `ksiginfo` entries from `ksiginfo_alloc`; `siginfo_queue`
+                // `ksiginfo` entries from `ksiginfo_alloc`; `SigPendingRef::entries`
                 // caches each node's successor before yielding it, so
                 // detach+free of the current node here is sound.
                 unsafe { KsigInfoAccess::assume(ksi) }.list_entry_ref().detach();
@@ -715,8 +607,9 @@ impl<'a> ThreadGroupAccess<'a> {
     }
 
     /// Link `child` into this group and bump the live/ref counts.
-    /// Caller must hold pid_wlock. (Former body of `thread_group_add`.)
-    fn add_thread(&self, child: *mut thread) {
+    /// Caller must hold pid_wlock. (Former body of `thread_group_add`; the
+    /// former delegator's null-`self` panic now lives at the call site.)
+    pub(super) fn add_thread(&self, child: *mut thread) {
         if child.is_null() {
             xv6_panic(c"thread_group_add: NULL child".as_ptr());
         }
@@ -734,7 +627,7 @@ impl<'a> ThreadGroupAccess<'a> {
         cta.tg_entry_ref().init();
         cta.tg_entry_ref().push_back(self.thread_list_ptr());
         self.inc_ref();
-        if !THREAD_ZOMBIE_p(child) {
+        if !cta.is_zombie_state() {
             self.live_threads_fetch_add(1);
         }
     }
@@ -742,16 +635,19 @@ impl<'a> ThreadGroupAccess<'a> {
     /// Broadcast SIGKILL to every group member except `skip`, waking sleepers
     /// and stopped threads. (Former `unsafe fn tg_sigkill_all`; the handle's
     /// liveness invariant subsumes the old `unsafe`, so this is a safe method
-    /// -- the `thread_list` walk is the RCU-read `tg_threads` iterator.)
+    /// -- the `thread_list` walk is the RCU-read `self.threads()` iterator.)
     fn sigkill_all(&self, skip: *mut thread) {
         xv6_pid_rlock();
-        for t in tg_threads(self.thread_list_ptr()) {
+        for t in self.threads() {
             if t == skip { continue; }
-            thread_set_killed(t);
-            thread_set_sigpending(t);
-            if THREAD_SLEEPING(t) {
+            // SAFETY: `t` is a live, non-null `*mut thread` yielded by
+            // `self.threads()` (an RCU-read walk of this group's members).
+            let ta = unsafe { ThreadAccess::assume(t) };
+            ta.set_killed();
+            ta.set_sigpending();
+            if ta.is_sleeping() {
                 scheduler_wakeup_interruptible(t);
-            } else if THREAD_STOPPED_p(t) {
+            } else if ta.is_stopped() {
                 scheduler_wakeup_stopped(t);
             }
         }
@@ -768,20 +664,20 @@ impl<'a> ThreadGroupAccess<'a> {
             if !lta.sigacts_ptr().is_null() {
                 // SAFETY: `leader` is a live thread (non-null, group leader).
                 let mask = unsafe { ThreadSignalAccess::assume_thread(leader) }.sig_mask();
-                let st = thread_state_load(leader);
+                let st = lta.state_of();
                 if !sigismember(mask, signo) && st != THREAD_ZOMBIE && st != THREAD_UNUSED {
                     return leader;
                 }
             }
         }
         let mut chosen: *mut thread = ptr::null_mut();
-        for t in tg_threads(self.thread_list_ptr()) {
+        for t in self.threads() {
             if !chosen.is_null() { continue; }
             if t == leader { continue; }
-            let st = thread_state_load(t);
-            if st == THREAD_UNUSED || st == THREAD_ZOMBIE { continue; }
-            // SAFETY: `t` is a live `*mut thread` node yielded by `tg_threads`.
+            // SAFETY: `t` is a live `*mut thread` node yielded by `self.threads()`.
             let tt = unsafe { ThreadAccess::from_raw(t).unwrap_unchecked() };
+            let st = tt.state_of();
+            if st == THREAD_UNUSED || st == THREAD_ZOMBIE { continue; }
             if tt.sigacts_ptr().is_null() { continue; }
             // SAFETY: `t` is a live thread (see above).
             let tmask = unsafe { ThreadSignalAccess::assume_thread(t) }.sig_mask();
@@ -795,8 +691,9 @@ impl<'a> ThreadGroupAccess<'a> {
 
     /// Deliver `info`'s signal to the group: update shared-pending state,
     /// queue SA_SIGINFO payloads, pick a target, and wake it. Returns 0 on
-    /// success or a negative errno. (Former body of `tg_signal_send`.)
-    fn signal_send(&self, info: *mut ksiginfo_t) -> c_int {
+    /// success or a negative errno. (Former body of `tg_signal_send`; the former
+    /// delegator's null-`self` `-EINVAL` now lives at the call site.)
+    pub(crate) fn signal_send(&self, info: *mut ksiginfo_t) -> c_int {
         if info.is_null() { return -EINVAL; }
         // SAFETY: `info` is checked non-null above, so `(*info).signo` is
         // valid; `sigbad` bounds `signo` to `1..=NSIG` before any array
@@ -851,13 +748,13 @@ impl<'a> ThreadGroupAccess<'a> {
 
             if is_cont {
                 shared.and_sig_pending_mask(!stop_mask);
-                for t in tg_threads(self.thread_list_ptr()) {
+                for t in self.threads() {
                     ThreadSignalAccess::assume_thread(t).and_sig_pending_mask(!stop_mask);
                 }
             }
             if is_stop {
                 shared.and_sig_pending_mask(!cont_mask);
-                for t in tg_threads(self.thread_list_ptr()) {
+                for t in self.threads() {
                     ThreadSignalAccess::assume_thread(t).and_sig_pending_mask(!cont_mask);
                 }
             }
@@ -865,12 +762,13 @@ impl<'a> ThreadGroupAccess<'a> {
             let act = &raw mut (*sigacts).sa[signo as usize];
             if ((*act).sa_flags & SA_SIGINFO) != 0 {
                 let sq = shared.sig_pending_ptr_index((signo - 1) as usize);
-                let qlen = siginfo_queue_len(sq);
+                // Inlined former `siginfo_queue_len(sq)` facade (sole call site).
+                let qlen = SigPendingRef::assume(sq).queue_len();
                 if qlen >= TG_MAX_SIGINFO_PER_SIGNAL {
                     let head = SigPendingRef::assume(sq).queue_ptr();
                     if !list_node_is_empty_raw(head) {
                         let first = list_node_next_raw(head);
-                        let old = container_of::<ksiginfo_t>(first, list_entry_offset_in_ksiginfo());
+                        let old = container_of::<ksiginfo_t>(first, KSI_LIST_ENTRY_OFF);
                         if !old.is_null() {
                             KsigInfoAccess::assume(old).list_entry_ref().detach();
                             ksiginfo_free(old);
@@ -898,33 +796,37 @@ impl<'a> ThreadGroupAccess<'a> {
             if !is_cont {
                 target = self.pick_thread(signo);
                 if !target.is_null() {
-                    thread_set_sigpending(target);
+                    ThreadAccess::assume(target).set_sigpending();
                 }
             }
 
             sigacts_unlock(sigacts);
 
             if is_cont {
-                for t in tg_threads(self.thread_list_ptr()) {
-                    thread_set_sigpending(t);
-                    if THREAD_STOPPED_p(t) {
+                for t in self.threads() {
+                    let ta = ThreadAccess::assume(t);
+                    ta.set_sigpending();
+                    if ta.is_stopped() {
                         scheduler_wakeup_stopped(t);
-                    } else if THREAD_INTERRUPTIBLE_p(t) {
+                    } else if ta.is_interruptible() {
                         scheduler_wakeup_interruptible(t);
                     }
                 }
             } else if !target.is_null() {
-                if is_term && THREAD_STOPPED_p(target) {
+                let tta = ThreadAccess::assume(target);
+                if is_term && tta.is_stopped() {
                     scheduler_wakeup_stopped(target);
-                } else if THREAD_INTERRUPTIBLE_p(target) {
+                } else if tta.is_interruptible() {
                     scheduler_wakeup_interruptible(target);
-                } else if THREAD_RUNNING_p(target) {
-                    let se = ThreadAccess::assume(target).sched_entity_ptr();
+                } else if tta.is_running() {
+                    let se = tta.sched_entity_ptr();
                     let target_cpu = SchedEntityRef::assume(se).cpu_id_load_acquire();
                     if target_cpu != cpuid() {
                         ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
                     } else {
-                        set_needs_resched();
+                        // Inlined former `set_needs_resched()` facade:
+                        // mycpu()->flags |= CPU_FLAG_NEEDS_RESCHED.
+                        CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
                     }
                 }
             }
@@ -936,8 +838,9 @@ impl<'a> ThreadGroupAccess<'a> {
 
     /// Dequeue the first queued `ksiginfo` for `signo`, clearing the pending
     /// bit when the queue drains. Caller holds the sigacts lock and pid_rlock/
-    /// wlock. (Former body of `tg_dequeue_signal`.)
-    fn dequeue_signal(&self, signo: c_int) -> *mut ksiginfo_t {
+    /// wlock. (Former body of `tg_dequeue_signal`; the former delegator's
+    /// null-`self` null-return now lives at the call site.)
+    pub(super) fn dequeue_signal(&self, signo: c_int) -> *mut ksiginfo_t {
         if sigbad(signo) { return ptr::null_mut(); }
         let shared = self.shared_pending_ref();
         let sq = shared.sig_pending_ref_index((signo - 1) as usize);
@@ -945,7 +848,7 @@ impl<'a> ThreadGroupAccess<'a> {
         let mut ksi: *mut ksiginfo_t = ptr::null_mut();
         if !list_node_is_empty_raw(head) {
             let first = list_node_next_raw(head);
-            ksi = container_of::<ksiginfo_t>(first, list_entry_offset_in_ksiginfo());
+            ksi = container_of::<ksiginfo_t>(first, KSI_LIST_ENTRY_OFF);
             // SAFETY: `ksi` is a `container_of` recovery from the just-verified
             // non-empty (`!list_node_is_empty_raw(head)`) queue, so it is a
             // live `ksiginfo` entry.
@@ -960,16 +863,16 @@ impl<'a> ThreadGroupAccess<'a> {
     /// Drain and free every queued `ksiginfo` for `signo`, then clear its
     /// pending bit. Caller holds the sigacts lock. (Former body of
     /// `tg_sigpending_empty`; its `while cur != head` drain is now the
-    /// `siginfo_queue` iterator.)
-    fn sigpending_empty_sig(&self, signo: c_int) {
+    /// `SigPendingRef::entries` iterator.; the former delegator's null-`self`
+    /// no-op now lives at the call site.)
+    pub(super) fn sigpending_empty_sig(&self, signo: c_int) {
         if sigbad(signo) { return; }
         let shared = self.shared_pending_ref();
-        let head = shared.sig_pending_ref_index((signo - 1) as usize).queue_ptr();
-        for ksi in siginfo_queue(head) {
+        for ksi in shared.sig_pending_ref_index((signo - 1) as usize).entries() {
             // SAFETY: `ksi` is a `container_of` recovery from a live node of
             // the queue being drained (sigacts lock held), only ever populated
-            // with real `ksiginfo` entries; `siginfo_queue` caches each node's
-            // successor before yielding it, so detach+free is sound.
+            // with real `ksiginfo` entries; `SigPendingRef::entries` caches each
+            // node's successor before yielding it, so detach+free is sound.
             unsafe { KsigInfoAccess::assume(ksi) }.list_entry_ref().detach();
             ksiginfo_free(ksi);
         }

@@ -148,7 +148,10 @@ use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
 // return actually was declared `c_int` here vs the real `bool` --
 // harmless in practice, same as `sys_signal.rs`'s identical case, but
 // now moot) -- pulled in alongside for the same reason.
-use crate::proc::{thread_group_exit, thread_tgid, signal_pending};
+// NO-STANDALONE-FN: `thread_group_exit`/`thread_tgid` are now the `ThreadAccess`
+// methods `group_exit` / `resolve_tgid` (reached via the full access path below).
+use crate::proc::signal_pending;
+use crate::proc::access::ThreadAccess;
 
 /// `thread_clone`'s real definition (`proc/clone.rs`) takes
 /// `*mut crate::proc::CloneArgs` -- a distinct (but `#[repr(C)]`,
@@ -187,7 +190,7 @@ pub(crate) extern "C" fn sys_exit() -> u64 {
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_getpid() -> u64 {
-    thread_tgid(current()) as u64
+    ThreadAccess::from_ptr(current()).map_or(-1, |ta| ta.resolve_tgid()) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -202,7 +205,7 @@ pub(crate) extern "C" fn sys_getppid() -> u64 {
     if parent.is_null() {
         return 1;
     }
-    thread_tgid(parent) as u64
+    ThreadAccess::from_ptr(parent).map_or(-1, |ta| ta.resolve_tgid()) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -225,7 +228,10 @@ pub(crate) extern "C" fn sys_exit_group() -> u64 {
     // null) actually diverges internally via `exit(code)`, but the type
     // system no longer takes that on faith, so an explicit trailing
     // value is required here same as any ordinary `-> u64` fn.
-    thread_group_exit(current(), n);
+    // NO-STANDALONE-FN: former `thread_group_exit(current(), n)`; the delegator's
+    // null-`p` early-return maps to the `None` arm here (`current()` is never null,
+    // so the method runs and diverges internally via `exit(n)`).
+    if let Some(t) = ThreadAccess::from_ptr(current()) { t.group_exit(n); }
     0
 }
 

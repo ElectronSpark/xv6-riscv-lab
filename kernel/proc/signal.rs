@@ -403,9 +403,6 @@ use crate::proc::proc_shims::{
 // `extern "C"` redeclarations in the block below are gone).
 use crate::proc::{scheduler_wakeup, scheduler_wakeup_interruptible, scheduler_yield};
 use crate::proc::scheduler_wakeup_stopped;
-use crate::proc::tg_dequeue_signal;
-use crate::proc::tg_signal_send;
-use crate::proc::tg_sigpending_empty;
 use crate::ipi::ipi_send_single;
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, SigactsAccess, SpinLockRef, ThreadAccess,
@@ -525,7 +522,7 @@ use super::exit::exit;
 // crate-path items now that their `#[no_mangle]` exports are gone
 // (identical signatures) -- they used to be `extern "C"` redeclarations
 // in the block above.
-use crate::proc::{__proctab_get_initproc, get_pid_thread, pgroup_kill, thread_tgid};
+use crate::proc::{__proctab_get_initproc, get_pid_thread, pgroup_kill};
 
 // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
 // (`irq/trap.rs`, only caller anywhere in the tree is this file) --
@@ -1244,7 +1241,7 @@ pub(super) fn signal_send(pid: c_int, info: *mut ksiginfo_t)-> c_int  {
     if !tg.is_null() && unsafe { ThreadGroupAccess::assume(tg) }.is_kernel() != 0 {
         __signal_send(p, info)
     } else if matches!(ThreadGroupAccess::from_ptr(tg), Some(tga) if tga.tgid() == pid) {
-        tg_signal_send(tg, info)
+        ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(info))
     } else {
         __signal_send(p, info)
     }
@@ -1376,8 +1373,8 @@ pub(super) fn sigaction(signum: c_int, act: *mut sigaction_t,
                     return -EINVAL;
                 }
                 let tg_ptr = ta.thread_group_ptr();
-                if !tg_ptr.is_null() {
-                    tg_sigpending_empty(tg_ptr, signum);
+                if let Some(tga) = ThreadGroupAccess::from_ptr(tg_ptr) {
+                    tga.sigpending_empty_sig(signum);
                 }
             }
         }
@@ -1710,7 +1707,7 @@ pub(crate) fn handle_signal() {
             let mut repeat = false;
             let info: *mut ksiginfo_t;
             if from_shared && !tg.is_null() {
-                info = tg_dequeue_signal(tg, signo);
+                info = ThreadGroupAccess::from_ptr(tg).map_or(ptr::null_mut(), |tga| tga.dequeue_signal(signo));
             } else {
                 info = match dequeue_signal_update_pending_nolock(p, signo,
                     &raw const sa_copy as *mut sigaction_t) {
@@ -1757,13 +1754,13 @@ pub(crate) fn kill(pid: c_int, signum: c_int) -> c_int {
     if pid < -1 { return pgroup_kill(-pid, signum); }
     if pid == -1 { return -EINVAL; }
     let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, thread_tgid(cur));
+    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
     signal_send(pid, &mut info)
 }
 
 pub(super) fn kill_thread(p: *mut thread, signum: c_int)-> c_int  {
     let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, thread_tgid(cur));
+    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
     let _rcu = crate::lock::rcu::KRcuRead::new();
     __signal_send(p, &mut info)
 }
@@ -1782,7 +1779,7 @@ pub(super) fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
         _ => return -ESRCH,
     }
     let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, thread_tgid(cur));
+    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
     __signal_send(p, &mut info)
 }
 
@@ -1792,7 +1789,7 @@ pub(super) fn tkill(tid: c_int, signum: c_int) -> c_int {
     let p = get_pid_thread(tid);
     if is_err(p) { return -ESRCH; }
     let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, thread_tgid(cur));
+    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
     __signal_send(p, &mut info)
 }
 
@@ -1810,12 +1807,12 @@ fn signal_send_to_tgroup(tgid: c_int, info: *mut ksiginfo_t)-> c_int  {
     // pointer.
     let tg = unsafe { ThreadAccess::assume(leader) }.thread_group_ptr();
     if matches!(ThreadGroupAccess::from_ptr(tg), Some(tga) if tga.tgid() == tgid) {
-        return tg_signal_send(tg, info);
+        return ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(info));
     }
     // SAFETY: `tg` is proven non-null by the short-circuiting `&&` (`!tg.is_null() &&
     // ...`).
     if !tg.is_null() && !unsafe { ThreadGroupAccess::assume(tg) }.group_leader_ptr().is_null() {
-        return tg_signal_send(tg, info);
+        return ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(info));
     }
     __signal_send(leader, info)
 }
@@ -1826,12 +1823,12 @@ fn signal_send_to_tgroup(tgid: c_int, info: *mut ksiginfo_t)-> c_int  {
 pub(crate) fn kill_proc(p: *mut thread, signum: c_int)-> c_int  {
     if p.is_null() || sigbad(signum) { return -EINVAL; }
     let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, if cur.is_null() { 0 } else { thread_tgid(cur) });
+    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.resolve_tgid()));
     let _rcu = crate::lock::rcu::KRcuRead::new();
     // SAFETY: `p` is checked non-null at the top of `kill_proc` above.
     let tg = unsafe { ThreadAccess::assume(p) }.thread_group_ptr();
     if !tg.is_null() {
-        return tg_signal_send(tg, &mut info);
+        return ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&mut info));
     }
     __signal_send(p, &mut info)
 }
@@ -1902,7 +1899,7 @@ pub(super) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
                             sigdelset(&mut (*p).signal.sig_pending_mask, signo);
                         }
                     } else if !tg.is_null() && sigismember((*tg).shared_pending.sig_pending_mask, signo) > 0 {
-                        let ksi = tg_dequeue_signal(tg, signo);
+                        let ksi = ThreadGroupAccess::from_ptr(tg).map_or(ptr::null_mut(), |tga| tga.dequeue_signal(signo));
                         if !ksi.is_null() { ksiginfo_free(ksi); }
                     }
                     *sig = signo;

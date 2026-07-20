@@ -198,11 +198,12 @@ macro_rules! atomic_fetch_sub_i32_field {
 // `xv6_thport_*` C-ABI alias layers (`extern "C"` redeclarations); now
 // direct crate-path calls to the real, already-Rust definitions in
 // `thread_group.rs`/`thread.rs`.
-use crate::proc::tg_signal_send;
 // NO-STANDALONE-FN: `tcb_lock`/`tcb_unlock` are now handle methods on
 // `ThreadAccess`; the `xv6_tcb_lock`/`xv6_tcb_unlock` shims construct the
-// handle below instead of calling a free fn.
-use crate::proc::access::ThreadAccess;
+// handle below instead of calling a free fn. Likewise the former
+// `tg_signal_send`/`thread_is_group_leader` free fns are now the
+// `ThreadGroupAccess::signal_send` / `ThreadAccess::is_group_leader` methods.
+use crate::proc::access::{ThreadAccess, ThreadGroupAccess};
 
 // ===========================================================================
 // xv6_panic — PORTED from proc_rust_bridge.c. The C bridge wrapped the
@@ -292,8 +293,9 @@ pub(super) fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
     info.signo = signo;
     // SAFETY: tg comes from a Rust caller that already holds an appropriate
     // reference; info points to our own stack frame for the duration of the
-    // call (tg_signal_send is synchronous and does not retain it).
-    u! { tg_signal_send(tg, &mut info as *mut ksiginfo) }
+    // call (signal_send is synchronous and does not retain it). Null `tg` maps
+    // to -EINVAL (-22), exactly as the former `tg_signal_send` delegator did.
+    u! { ThreadGroupAccess::from_ptr(tg).map_or(-22, |tga| tga.signal_send(&mut info as *mut ksiginfo)) }
 }
 
 // ===========================================================================
@@ -2026,7 +2028,8 @@ use crate::bindings::{pgroup as Pgroup, session as Session, thread_group as Tgro
 // `thread_group_exit -> !` finding in `sysproc.rs`), harmless in practice
 // only because both are 0/1 in the return register; call sites below are
 // updated to use the `bool` result directly instead of `!= 0`.
-use crate::proc::thread_is_group_leader;
+// NO-STANDALONE-FN: `thread_is_group_leader` is now the `ThreadAccess`
+// method `is_group_leader` (imported via the access block above).
 
 // P3-1D mesh sweep: backtrace.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
@@ -2416,7 +2419,7 @@ pub(super) fn xv6_dump_session(s: *mut Session) {
                     let st = xv6_thread_state_to_str(t_state_load(t));
                     let on_cpu = se_on_cpu(t);
                     let ustr = if s10_t_user_space(t) { "U" } else { "K" };
-                    let leader = if thread_is_group_leader(t) { " (leader)" } else { "" };
+                    let leader = if ThreadAccess::from_ptr(t).map_or(true, |ta| ta.is_group_leader()) { " (leader)" } else { "" };
                     let cpu_n = if on_cpu { " *cpu" } else { "" };
                     crate::kprintln!(
                         "      tid {:<4} [{}] {:<2} {}{}{}",
