@@ -411,11 +411,8 @@ use crate::proc::access::{
     list_node_push_back_raw, write_out,
 };
 use crate::kstd::{Errno, KResult};
-// NO-STANDALONE-FN: `make_ksiginfo`'s real definition lives in `access.rs`
-// (out of this wave's scope). The file-local delegator that used to front
-// it was deleted; callers reach the access-module builder directly through
-// this import.
-use crate::proc::access::make_ksiginfo;
+// NO-STANDALONE-FN: `make_ksiginfo` is now the `KsigInfoAccess::make`
+// associated fn (access.rs); already imported via `KsigInfoAccess` above.
 
 /// Zero-sized marker carrying the pid/current-keyed signal ABI entry points
 /// as associated functions.
@@ -523,7 +520,7 @@ unsafe extern "C" {
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path (the `crate::proc` glob would work too, but the direct path is
 // unambiguous by construction).
-use super::exit::exit;
+use crate::proc::Proc;
 
 // P3-D3b: `tcb_lock`/`tcb_unlock` (kernel/proc/thread.rs) are plain safe
 // Rust fns now that their `#[no_mangle]` exports are gone; reached by
@@ -537,7 +534,7 @@ use super::exit::exit;
 // crate-path items now that their `#[no_mangle]` exports are gone
 // (identical signatures) -- they used to be `extern "C"` redeclarations
 // in the block above.
-use crate::proc::{__proctab_get_initproc, get_pid_thread, pgroup_kill};
+use crate::proc::{ProcTable, Pgroup};
 
 // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
 // (`irq/trap.rs`, only caller anywhere in the tree is this file) --
@@ -1272,7 +1269,7 @@ impl Signal {
         // SAFETY: `info` is checked non-null immediately above.
         if sigbad(unsafe { KsigInfoAccess::assume(info) }.signo()) { return -EINVAL; }
         let _rcu = crate::lock::rcu::KRcuRead::new();
-        let p = get_pid_thread(pid);
+        let p = ProcTable::get_thread(pid);
         if is_err(p) || p.is_null() {
             return -ESRCH;
         }
@@ -1551,7 +1548,7 @@ pub(crate) fn sigreturn()-> c_int  {
             // `-1` argument.
             THREAD_SET_KILLED(p);
             set_term_signal_first(p, SIGSEGV);
-            exit(-1);
+            Proc::exit(-1);
         }
         if signal_restore(p, &raw mut uc as *mut c_void) != 0 {
             xv6_panic(c"sigreturn: signal_restore failed".as_ptr());
@@ -1686,7 +1683,7 @@ pub(crate) fn handle_signal() {
 
             // Termination
             if (masked & sigterm) != 0 || THREAD_KILLED(p) {
-                if p == __proctab_get_initproc() && !THREAD_KILLED(p) {
+                if p == ProcTable::get_initproc() && !THREAD_KILLED(p) {
                     (*p).signal.sig_pending_mask &= !sigterm;
                     if !tg.is_null() {
                         (*tg).shared_pending.sig_pending_mask &= !sigterm;
@@ -1801,7 +1798,7 @@ pub(crate) fn handle_signal() {
 
         recalc_sigpending();
 
-        if THREAD_KILLED(p) { exit(-1); }
+        if THREAD_KILLED(p) { Proc::exit(-1); }
     }
 }
 }
@@ -1817,7 +1814,7 @@ impl<'a> ThreadAccess<'a> {
     pub(crate) fn kill_thread(&self, signum: c_int) -> c_int {
         let p = self.as_ptr();
         let cur = xv6_current_thread();
-        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        let mut info = KsigInfoAccess::make(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
         let _rcu = crate::lock::rcu::KRcuRead::new();
         __signal_send(p, &mut info)
     }
@@ -1826,7 +1823,7 @@ impl<'a> ThreadAccess<'a> {
         let p = self.as_ptr();
         if sigbad(signum) { return -EINVAL; }
         let cur = xv6_current_thread();
-        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.resolve_tgid()));
+        let mut info = KsigInfoAccess::make(signum, cur, ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.resolve_tgid()));
         let _rcu = crate::lock::rcu::KRcuRead::new();
         // SAFETY: `p` is `self`'s non-null pointer.
         let tg = unsafe { ThreadAccess::assume(p) }.thread_group_ptr();
@@ -1839,17 +1836,17 @@ impl<'a> ThreadAccess<'a> {
 
 impl Signal {
     pub(crate) fn kill(pid: c_int, signum: c_int) -> c_int {
-        if pid < -1 { return pgroup_kill(-pid, signum); }
+        if pid < -1 { return Pgroup::kill(-pid, signum); }
         if pid == -1 { return -EINVAL; }
         let cur = xv6_current_thread();
-        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        let mut info = KsigInfoAccess::make(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
         Self::signal_send(pid, &mut info)
     }
 
     pub(crate) fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
         if tgid < 0 || tid < 0 || sigbad(signum) { return -EINVAL; }
         let _rcu = crate::lock::rcu::KRcuRead::new();
-        let p = get_pid_thread(tid);
+        let p = ProcTable::get_thread(tid);
         if is_err(p) { return -ESRCH; }
         // SAFETY: `p` is non-null: `get_pid_thread` only ever returns an err-encoded
         // pointer (caught by `is_err(p)` above) or a live, non-null thread
@@ -1860,24 +1857,24 @@ impl Signal {
             _ => return -ESRCH,
         }
         let cur = xv6_current_thread();
-        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        let mut info = KsigInfoAccess::make(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
         __signal_send(p, &mut info)
     }
 
     pub(crate) fn tkill(tid: c_int, signum: c_int) -> c_int {
         if tid < 0 || sigbad(signum) { return -EINVAL; }
         let _rcu = crate::lock::rcu::KRcuRead::new();
-        let p = get_pid_thread(tid);
+        let p = ProcTable::get_thread(tid);
         if is_err(p) { return -ESRCH; }
         let cur = xv6_current_thread();
-        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        let mut info = KsigInfoAccess::make(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
         __signal_send(p, &mut info)
     }
 }
 
 fn signal_send_to_tgroup(tgid: c_int, info: *mut ksiginfo_t)-> c_int  {
     let _rcu = crate::lock::rcu::KRcuRead::new();
-    let leader = get_pid_thread(tgid);
+    let leader = ProcTable::get_thread(tgid);
     if is_err(leader) { return -ESRCH; }
     // SAFETY: `leader` is non-null: `get_pid_thread` only ever returns an err-encoded
     // pointer (caught by `is_err(leader)` above) or a live, non-null thread

@@ -382,7 +382,7 @@ unsafe extern "C" {
 // exactly as `proc/rq.rs`/`lock/rcu.rs` do.
 use crate::mm::kvmmap;
 use crate::printf::{__panic_end, __panic_start};
-use crate::proc::exit;
+use crate::proc::Proc;
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; reached as crate-path items
@@ -897,7 +897,7 @@ pub extern "C" fn usertrap() {
             RISCV_ENV_CALL_FROM_U_MODE => {
                 // system call
                 if crate::proc::access::ThreadAccess::from_ptr(p).map_or(0, |ta| ta.killed()) != 0 {
-                    exit(-1);
+                    Proc::exit(-1);
                 }
                 // sepc points to the ecall instruction, but we want to
                 // return to the next instruction.
@@ -1109,10 +1109,10 @@ pub(crate) extern "C" fn push_sigframe(
 
         if ((*sa).sa_flags & SA_ONSTACK) == 0 {
             if (*p).vm.is_null() {
-                exit(-1); // No stack area available
+                Proc::exit(-1); // No stack area available
             }
             if vm_try_growstack((*p).vm, new_sp) != 0 {
-                exit(-1); // No stack area available
+                Proc::exit(-1); // No stack area available
             }
         }
 
@@ -1283,7 +1283,7 @@ pub(crate) extern "C" fn usertrapret() {
 
     if crate::proc::access::ThreadAccess::from_ptr(p).map_or(0, |ta| ta.killed()) != 0 {
         // If the thread is terminated, exit it.
-        exit(-1);
+        Proc::exit(-1);
     }
 
     crate::proc::Signal::handle_signal();

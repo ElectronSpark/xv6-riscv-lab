@@ -68,7 +68,7 @@ use crate::proc::access::TqRef;
 // P3-D2b: `signal_pending`/`kill_proc` (proc/signal.rs) and `pgroup_kill`
 // (proc/pgroup.rs) are plain crate-path items now that their
 // `#[no_mangle]` exports are gone (identical signatures).
-use crate::proc::pgroup_kill;
+use crate::proc::Pgroup;
 
 use super::session::{
     session_get_fg_pgid, session_lookup, session_set_ctrl_tty, session_set_fg_pgid,
@@ -920,7 +920,7 @@ impl Tty {
             // original's lock-free access, a live `session` for `self`.
             let fg = unsafe { session_get_fg_pgid(sess) };
             if fg > 0 {
-                pgroup_kill(fg, signum);
+                Pgroup::kill(fg, signum);
                 return;
             }
         }

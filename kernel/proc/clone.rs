@@ -149,9 +149,7 @@ fn vm_copy(vm: *mut Vm) -> *mut Vm {
 //  - `pgroup_add_tg`/`pgroup_add_thread` were declared `-> ()`; the
 //    real fns return `c_int`, which the call sites discard exactly as
 //    the old ABI did.
-use crate::proc::{
-    pgroup_add_thread, pgroup_add_tg,
-};
+use crate::proc::Pgroup;
 use crate::proc::access::ThreadGroupAccess;
 use crate::proc::thread_group::ThreadGroup;
 
@@ -172,10 +170,10 @@ use crate::proc::{Scheduler, Rq};
 // identical) opaque marker from this file's own `Thread` -- reinterpret
 // via a thin wrapper, same precedent as `sysproc.rs`'s `thread_clone`.
 use crate::irq::trap::usertrapret;
-use crate::proc::pid::{__alloc_pid, __free_pid};
+use crate::proc::pid::Pid;
 #[inline(always)]
 fn proctab_proc_add(t: *mut Thread) {
-    crate::proc::pid::proctab_proc_add(t as *mut c_void as *mut crate::proc::pid::Thread);
+    crate::proc::pid::ProcTable::proc_add(t as *mut c_void as *mut crate::proc::pid::Thread);
 }
 
 // P3-1C mesh sweep: vfs/{fs,fdtable}.rs and tty/session.rs are in scope
@@ -269,7 +267,11 @@ fn check_ptr<T>(ptr: *mut T) -> Result<*mut T, c_int> {
 // (`proc/sysproc.rs`) already reaches it via `crate::proc::thread_clone`.
 // RUSTIFY-PROC: that caller is in `crate::proc` (via the `pub use clone::*`
 // glob) -> pub(super).
-pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
+impl CloneArgs {
+    /// NO-STANDALONE-FN: former free fn `thread_clone`. Full port of C
+    /// `thread_clone`; associated fn on [`CloneArgs`] (null-tolerant of `args`,
+    /// so it takes the raw pointer rather than `&self`).
+    pub(super) fn spawn(args: *mut CloneArgs) -> c_int {
     let Some(args) = clone_args_mut(args) else { return -EINVAL };
     let p = xv6_current_thread();
 
@@ -300,7 +302,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     }
 
     // Reserve a PID slot
-    if __alloc_pid() < 0 {
+    if Pid::alloc() < 0 {
         return -EAGAIN;
     }
 
@@ -309,7 +311,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     let child = match check_ptr(Thread::create(forkret_entry as *mut c_void, 0, 0, kstack_order)) {
         Ok(c) => c,
         Err(e) => {
-            __free_pid();
+            Pid::free();
             return e;
         }
     };
@@ -326,7 +328,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
                 // SAFETY: `child` is the live thread just created by `Thread::create`
                 // above; the handle only tears it down.
                 unsafe { ThreadAccess::assume(child) }.destroy();
-                __free_pid();
+                Pid::free();
                 return e;
             }
         }
@@ -339,7 +341,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
         Err(e) => {
             // SAFETY: `child` is the live thread just created above.
             unsafe { ThreadAccess::assume(child) }.destroy();
-            __free_pid();
+            Pid::free();
             return e;
         }
     };
@@ -351,7 +353,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
         Err(e) => {
             // SAFETY: `child` is the live thread just created above.
             unsafe { ThreadAccess::assume(child) }.destroy();
-            __free_pid();
+            Pid::free();
             return e;
         }
     };
@@ -364,7 +366,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
         if dup.is_null() {
             // SAFETY: `child` is the live thread just created above.
             unsafe { ThreadAccess::assume(child) }.destroy();
-            __free_pid();
+            Pid::free();
             return -ENOMEM;
         }
         xv6_t_set_sigacts(child, dup as *mut c_void);
@@ -439,9 +441,9 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     let parent_sess = xv6_t_session(p);
     if !parent_pg.is_null() {
         if args.flags & CLONE_THREAD == 0 {
-            pgroup_add_tg(parent_pg, xv6_t_thread_group(child));
+            Pgroup::add_tg(parent_pg, xv6_t_thread_group(child));
         }
-        pgroup_add_thread(parent_pg, child);
+        Pgroup::add_thread(parent_pg, child);
     }
     if !parent_sess.is_null() {
         session_add_thread(parent_sess, child);
@@ -455,4 +457,5 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     }
 
     xv6_t_pid(child)
+    }
 }

@@ -185,12 +185,12 @@ const THREAD_ZOMBIE: thread_state = 11;
 // (proc/pgroup.rs) are plain crate-path items now that their
 // `#[no_mangle]` exports are gone (identical signatures) -- they used
 // to be `extern "C"` redeclarations in the block below.
-use crate::proc::{get_pid_thread, pgroup_remove_tg};
+use crate::proc::Pgroup;
 
 // P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path.
-use super::exit::exit;
+use crate::proc::Proc;
 // ---------------- extern C primitives -----------------------------------
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
@@ -283,7 +283,7 @@ impl<'a> ThreadAccess<'a> {
         let prev = unsafe { ThreadGroupAccess::assume(tg) }.live_threads_fetch_sub(1);
         if prev <= 1 { last = true; }
         if last {
-            pgroup_remove_tg(tg);
+            Pgroup::remove_tg(tg);
         }
         last
     }
@@ -316,19 +316,19 @@ impl<'a> ThreadAccess<'a> {
     /// is at the call site.
     pub(super) fn group_exit(&self, code: c_int) {
         let tg = self.thread_group_ptr();
-        if tg.is_null() { exit(code); }
+        if tg.is_null() { Proc::exit(code); }
         // SAFETY: `tg` is checked non-null immediately above.
         let tga = unsafe { ThreadGroupAccess::assume(tg) };
         // CAS group_exit_task from NULL to self; only the first wins.
         let cas_ok = tga.group_exit_task_compare_exchange_null(self.as_ptr());
         if !cas_ok {
-            exit(code);
+            Proc::exit(code);
         }
         tga.set_group_exit_code(code);
         tga.set_group_exit_task(self.as_ptr());
         // Broadcast SIGKILL to siblings (skip self).
         tga.sigkill_all(self.as_ptr());
-        exit(code);
+        Proc::exit(code);
     }
 }
 

@@ -320,7 +320,7 @@ const SIGCONT: c_int = 18;
 // and encodes it to the ABI-fixed `ERR_PTR` exactly once at the `extern "C"`
 // boundary via `result_to_errptr`; only the error-return encoding changed.
 use crate::kstd::{is_err, result_to_errptr, Errno, GenKey, GenTable, KResult};
-use crate::proc::pgroup::{pgroup_key_of, pgroup_lookup, Pgid};
+use crate::proc::pgroup::{Pgid, Pgroup};
 use crate::proc::proc_shims::{xv6_pid_rlock, xv6_pid_runlock};
 
 // ===========================================================================
@@ -539,7 +539,7 @@ static SESSION_TABLE: SessionTableCell =
 /// Caller must hold `pid_wlock` (matches every `session_alloc` site:
 /// `session_init`/kthread-hierarchy at boot and `session_setsid`).
 fn session_table_insert(s: *mut session) -> Option<Sid> {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     let nn = NonNull::new(s)?;
     // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
     // registry is exclusive — no other hart holds a reference into the table
@@ -564,7 +564,7 @@ fn session_table_insert(s: *mut session) -> Option<Sid> {
 /// Caller must hold `pid_wlock` (the session teardown/free path — matches
 /// where the old code unlinked `session_list`).
 fn session_table_remove(s: *mut session) {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     let Some(nn) = NonNull::new(s) else { return };
     // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`, as in
     // `session_table_insert`.
@@ -661,7 +661,7 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
         // a live `*mut pgroup` under `pid_wlock` (held by `userinit`). Init was
         // just given its boot pgroup by `pgroup_init`, so this resolves exactly
         // as the old raw-pointer read did.
-        let pg = pgroup_lookup((*initproc).pgroup).unwrap_or(ptr::null_mut());
+        let pg = Pgroup::lookup((*initproc).pgroup).unwrap_or(ptr::null_mut());
         session_assert!(!pg.is_null(), "session_init", "session_init: initproc has no pgroup");
 
         let s_raw = session_alloc((*initproc).pid);
@@ -680,7 +680,7 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
         session_add_thread(SRef::as_ptr(&s), initproc);
         // N-R6d-2b: `fg_pgrp` is a `Pgid`; store `pg`'s own key (O(1) via its
         // cached `self_pgid`).
-        (*SRef::as_ptr(&s)).fg_pgrp = pgroup_key_of(pg);
+        (*SRef::as_ptr(&s)).fg_pgrp = Pgroup::key_of(pg);
         let _ = SRef::into_raw(s);
     }
 }
@@ -1055,7 +1055,7 @@ impl Deref for SRef {
 /// unconditional derefs once past the null checks). Caller must hold
 /// `pid_wlock`.
 pub(crate) unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thread) -> c_int {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     if s.is_null() || t.is_null() {
         return -EINVAL;
     }
@@ -1087,7 +1087,7 @@ pub(crate) unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thre
 /// # Safety
 /// `s` and `t`, if non-null, must be live. Caller must hold `pid_wlock`.
 pub(crate) unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut thread) -> c_int {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     if s.is_null() || t.is_null() {
         return -EINVAL;
     }
@@ -1129,7 +1129,7 @@ pub(crate) unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut t
 /// # Safety
 /// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
 pub(crate) unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup) -> c_int {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     if s.is_null() || pg.is_null() {
         return -EINVAL;
     }
@@ -1155,7 +1155,7 @@ pub(crate) unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup)
 /// # Safety
 /// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
 pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgroup) -> c_int {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     if s.is_null() || pg.is_null() {
         return -EINVAL;
     }
@@ -1172,7 +1172,7 @@ pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgro
         // If the foreground pgroup is being removed, clear it. N-R6d-2b: compare
         // the stored `Pgid` against `pg`'s own key (both name the same live
         // pgroup iff equal) — the `Pgid` analog of `== pg`.
-        if (*s).fg_pgrp == pgroup_key_of(pg) {
+        if (*s).fg_pgrp == Pgroup::key_of(pg) {
             (*s).fg_pgrp = Pgid::NONE;
         }
         (*pg).session = Sid::NONE;
@@ -1268,7 +1268,7 @@ impl Session {
 /// [`tty_ref`]/[`tty_unref`]'s own contract). Caller must hold
 /// `pid_wlock`.
 pub(crate) unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *mut tty) {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     if s.is_null() {
         return;
     }
@@ -1293,7 +1293,7 @@ pub(crate) unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *
 /// # Safety
 /// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
 pub(crate) unsafe extern "C" fn session_get_ctrl_tty(s: *mut session) -> *mut tty {
-    pid_assert_wholding();
+    ProcTable::assert_wholding();
     if s.is_null() {
         return ptr::null_mut();
     }
@@ -1316,7 +1316,7 @@ pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t
         if (*s).flags.exited() != 0 {
             return;
         }
-        let pg = get_pgroup(pgid);
+        let pg = Pgroup::get(pgid);
         if is_err(pg) {
             return;
         }
@@ -1328,7 +1328,7 @@ pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t
             return; // pgroup must belong to this session
         }
         // N-R6d-2b: store `pg`'s generational key (O(1) via its `self_pgid`).
-        (*s).fg_pgrp = pgroup_key_of(pg);
+        (*s).fg_pgrp = Pgroup::key_of(pg);
     }
 }
 
@@ -1351,7 +1351,7 @@ pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
             return -1;
         }
         xv6_pid_rlock();
-        let fg = pgroup_lookup(pgid).unwrap_or(ptr::null_mut());
+        let fg = Pgroup::lookup(pgid).unwrap_or(ptr::null_mut());
         let ret = if fg.is_null() { -1 } else { (*fg).pgid };
         xv6_pid_runlock();
         ret
@@ -1363,11 +1363,7 @@ pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
 // exports are gone (identical signatures) -- this replaces both the
 // `extern "C"` redeclarations that sat in the block above and the
 // `#[link_name = "get_pgroup"]` block that used to sit here.
-use crate::proc::{
-    get_pgroup, get_pid_thread, pgroup_add_tg, pgroup_add_thread,
-    pgroup_alloc, pgroup_remove_tg, pgroup_remove_thread,
-    pid_assert_wholding, pid_wlock, pid_wunlock,
-};
+use crate::proc::ProcTable;
 // NO-STANDALONE-FN: the former `tg_signal_send`/`thread_tgid` free fns are now
 // the `ThreadGroupAccess::signal_send` / `ThreadAccess::resolve_tgid` methods;
 // the call sites below construct the handle via `from_ptr`.
@@ -1426,13 +1422,13 @@ pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
         if (*s).flags.exited() != 0 {
             return;
         }
-        pid_assert_wholding();
+        ProcTable::assert_wholding();
 
         (*s).flags.set_exited(1);
 
         // N-R6d-2b: resolve the foreground pgroup `Pgid` to a live pointer (null
         // if `NONE`/stale) under the held `pid_wlock` (asserted above).
-        let fg = pgroup_lookup((*s).fg_pgrp).unwrap_or(ptr::null_mut());
+        let fg = Pgroup::lookup((*s).fg_pgrp).unwrap_or(ptr::null_mut());
         if !fg.is_null() && (*fg).flags.exited() == 0 {
             let head = &raw mut (*fg).threads;
             let off = core::mem::offset_of!(thread, pg_entry);
@@ -1454,7 +1450,7 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
     let p = crate::machine::current_thread_ptr();
     let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
 
-    pid_wlock();
+    ProcTable::wlock();
 
     // SAFETY: `p` is the live current thread (kernel invariant --
     // `current_thread_ptr` always returns a valid running thread's
@@ -1462,13 +1458,13 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
     // below explicitly unlocks first.
     unsafe {
         if (*p).pgid == tgid {
-            pid_wunlock();
+            ProcTable::wunlock();
             return -EPERM;
         }
 
         let s_raw = session_alloc(tgid);
         if s_raw.is_null() {
-            pid_wunlock();
+            ProcTable::wunlock();
             return -ENOMEM;
         }
         // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
@@ -1481,7 +1477,7 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
         let s = SRef::from_raw(s_raw);
 
         let tg = (*p).thread_group;
-        let pg = pgroup_alloc(tgid, tg);
+        let pg = Pgroup::alloc(tgid, tg);
         if pg.is_null() {
             // Deliberate fix (Wave 12): the C original called
             // `slab_free(s)` directly here, bypassing the registry
@@ -1504,14 +1500,14 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
             // finalization branch require `pid_wlock` held, same as every
             // other mutation site -- module doc).
             drop(s);
-            pid_wunlock();
+            ProcTable::wunlock();
             return -ENOMEM;
         }
 
         if !tg.is_null() {
-            pgroup_remove_tg(tg);
+            Pgroup::remove_tg(tg);
         }
-        pgroup_remove_thread(p);
+        Pgroup::remove_thread(p);
         // N-R6d-2a: resolve the thread's stored session `Sid` to a live pointer
         // (null if `NONE`/stale) before removing it from that session — same
         // "detach from current session if any" as the old raw-pointer read.
@@ -1522,12 +1518,12 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
 
         session_add_pg(SRef::as_ptr(&s), pg);
         if !tg.is_null() {
-            pgroup_add_tg(pg, tg);
+            Pgroup::add_tg(pg, tg);
         }
-        pgroup_add_thread(pg, p);
+        Pgroup::add_thread(pg, p);
         session_add_thread(SRef::as_ptr(&s), p);
         // N-R6d-2b: becomes foreground group — store `pg`'s generational key.
-        (*SRef::as_ptr(&s)).fg_pgrp = pgroup_key_of(pg);
+        (*SRef::as_ptr(&s)).fg_pgrp = Pgroup::key_of(pg);
 
         // Success: hand `s`'s baseline reference back out as a bare
         // pointer without dropping it. The baseline is now released
@@ -1538,7 +1534,7 @@ pub(crate) extern "C" fn session_setsid() -> pid_t {
         // pinned, exactly as before.
         let _ = SRef::into_raw(s);
 
-        pid_wunlock();
+        ProcTable::wunlock();
     }
     tgid
 }
@@ -1554,7 +1550,7 @@ pub(crate) extern "C" fn session_getsid(pid: pid_t) -> pid_t {
     }
 
     rcu_read_lock();
-    let target = get_pid_thread(pid);
+    let target = ProcTable::get_thread(pid);
     if is_err(target) {
         rcu_read_unlock();
         return -ESRCH;
@@ -1581,7 +1577,7 @@ pub(crate) extern "C" fn get_session(sid: pid_t) -> *mut session {
 }
 
 fn get_session_inner(sid: pid_t) -> KResult<*mut session> {
-    let t = get_pid_thread(sid);
+    let t = ProcTable::get_thread(sid);
     if is_err(t) {
         return Err(Errno::Srch);
     }

@@ -104,7 +104,7 @@ unsafe extern "C" {
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path (the `crate::proc` glob would work too, but the direct path is
 // unambiguous by construction).
-use super::exit::exit;
+use crate::proc::Proc;
 
 // P3-D3a: `either_copyin`/`vm_copyin`/`vm_growheap` (mm/vm.rs) are
 // ordinary (safe) Rust fns now that their `#[no_mangle]` exports are
@@ -126,7 +126,7 @@ fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_
 // and referenced as plain crate-path items instead of `extern "C"`
 // redeclarations -- each has exactly one caller anywhere in the tree, this
 // file.
-use crate::proc::{wait, waitpid, pgroup_setpgid, pgroup_getpgid};
+use crate::proc::Pgroup;
 // P3-1C mesh sweep: tty/session.rs is in scope for this wave; identical
 // `pid_t`/`c_int` signatures, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
@@ -168,7 +168,7 @@ fn thread_clone(args: *const CloneArgs) -> c_int {
     // through this pointer (never writes), so passing it through as `*mut`
     // is safe despite the `*const` source, matching the pre-existing
     // extern-declaration's own (looser) contract.
-    crate::proc::thread_clone(args as *mut CloneArgs as *mut crate::proc::CloneArgs)
+    crate::proc::CloneArgs::spawn(args as *mut CloneArgs as *mut crate::proc::CloneArgs)
 }
 
 #[inline(always)]
@@ -183,7 +183,7 @@ fn current() -> *mut bindings::thread { xv6_current_thread() }
 pub(crate) extern "C" fn sys_exit() -> u64 {
     let mut n: c_int = 0;
     argint(0, &mut n);
-    exit(n); // does not return
+    Proc::exit(n); // does not return
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -281,7 +281,7 @@ pub(crate) extern "C" fn sys_clone() -> u64 {
 pub(crate) extern "C" fn sys_wait() -> u64 {
     let mut p: u64 = 0;
     argaddr(0, &mut p);
-    wait(p) as u64
+    Proc::wait(p) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -293,7 +293,7 @@ pub(crate) extern "C" fn sys_waitpid() -> u64 {
     argint(0, &mut pid);
     argaddr(1, &mut status_addr);
     argint(2, &mut opts);
-    waitpid(pid, status_addr, opts) as u64
+    Proc::waitpid(pid, status_addr, opts) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -449,7 +449,7 @@ pub(crate) extern "C" fn sys_setpgid() -> u64 {
     let mut pgid: c_int = 0;
     argint(0, &mut pid);
     argint(1, &mut pgid);
-    pgroup_setpgid(pid, pgid) as u64
+    Pgroup::setpgid(pid, pgid) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -457,7 +457,7 @@ pub(crate) extern "C" fn sys_setpgid() -> u64 {
 pub(crate) extern "C" fn sys_getpgid() -> u64 {
     let mut pid: c_int = 0;
     argint(0, &mut pid);
-    pgroup_getpgid(pid) as u64
+    Pgroup::getpgid(pid) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s

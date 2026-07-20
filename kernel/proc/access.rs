@@ -1406,16 +1406,6 @@ impl<'a> SigActionAccess<'a> {
     }
 }
 
-#[inline]
-// RUSTIFY-PROC: in-`crate::proc` caller only (signal) -> pub(super).
-pub(super) fn make_ksiginfo(signo: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo {
-    let mut info: ksiginfo = zeroed_ksiginfo();
-    info.signo = signo;
-    info.sender = sender;
-    info.info.si_pid = si_pid;
-    info
-}
-
 // =========================================================================
 // KsigInfoAccess
 // =========================================================================
@@ -1453,6 +1443,18 @@ impl<'a> KsigInfoAccess<'a> {
     }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut crate::bindings::ksiginfo { self.raw.as_ptr() }
+
+    /// NO-STANDALONE-FN: former free fn `make_ksiginfo`. Builds a by-value
+    /// `ksiginfo` (zeroed except `signo`/`sender`/`si_pid`); associated fn (no
+    /// receiver — it constructs, rather than accessing an existing object).
+    #[inline]
+    pub(super) fn make(signo: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo {
+        let mut info: ksiginfo = zeroed_ksiginfo();
+        info.signo = signo;
+        info.sender = sender;
+        info.info.si_pid = si_pid;
+        info
+    }
 
     #[inline] pub fn signo(&self) -> c_int { shim_call!(self, ksi_signo) }
     #[inline] pub fn set_signo(&self, v: c_int) { shim_call!(self, ksi_set_signo, v) }

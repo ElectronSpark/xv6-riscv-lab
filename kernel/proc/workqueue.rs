@@ -233,7 +233,7 @@ fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path (the `crate::proc` glob would work too, but the direct path is
 // unambiguous by construction).
-use super::exit::exit;
+use crate::proc::Proc;
 
 // P3-D3b: `tcb_lock`/`tcb_unlock`/`kthread_create`
 // (kernel/proc/thread.rs) are plain safe Rust fns now that their
@@ -559,7 +559,7 @@ fn exit_worker_routine(exit_code: u64) -> ! {
         }
         cur_h.tcb_unlock();
     }
-    exit(exit_code as c_int)
+    Proc::exit(exit_code as c_int)
 }
 fn exit_manager_routine(exit_code: u64) -> ! {
     let cur_t = xv6_current_thread();
@@ -575,7 +575,7 @@ fn exit_manager_routine(exit_code: u64) -> ! {
         if wq.manager_ptr() == cur_t { wq.set_manager(ptr::null_mut()); }
         wq.lock_ref().unlock();
     }
-    exit(exit_code as c_int)
+    Proc::exit(exit_code as c_int)
 }
 
 // -------- worker / manager routines --------------------------------------
@@ -585,11 +585,11 @@ unsafe extern "C" fn worker_routine() {
     let cur_h = ThreadAccess::assume(cur_t);
     cur_h.tcb_lock();
     let wq_p = ta(cur_t).map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
-    if wq_p.is_null() { cur_h.tcb_unlock(); exit(-EINVAL); }
+    if wq_p.is_null() { cur_h.tcb_unlock(); Proc::exit(-EINVAL); }
     cur_h.tcb_unlock();
-    let Some(wq) = wqr(wq_p) else { exit(-EINVAL); };
+    let Some(wq) = wqr(wq_p) else { Proc::exit(-EINVAL); };
     wq.lock_ref().lock();
-    if wq.manager_ptr() == cur_t { wq.lock_ref().unlock(); exit(-EINVAL); }
+    if wq.manager_ptr() == cur_t { wq.lock_ref().unlock(); Proc::exit(-EINVAL); }
     wq.lock_ref().unlock();
     invoke_wq_t_cb(wq.cb_worker_ctor(), wq_p, cur_t);
     loop {
@@ -625,9 +625,9 @@ unsafe extern "C" fn manager_routine() {
     let cur_h = ThreadAccess::assume(cur_t);
     cur_h.tcb_lock();
     let wq_p = ta(cur_t).map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
-    if wq_p.is_null() { cur_h.tcb_unlock(); exit(-EINVAL); }
+    if wq_p.is_null() { cur_h.tcb_unlock(); Proc::exit(-EINVAL); }
     cur_h.tcb_unlock();
-    let Some(wq) = wqr(wq_p) else { exit(-EINVAL); };
+    let Some(wq) = wqr(wq_p) else { Proc::exit(-EINVAL); };
     wq.lock_ref().lock();
     wq.set_manager(cur_t);
     wq.lock_ref().unlock();

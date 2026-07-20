@@ -36,7 +36,7 @@ unsafe extern "C" {
 // P3-D2b: `pid_wlock`/`pid_wunlock` (proc/pid.rs) are plain crate-path
 // items now that their `#[no_mangle]` exports are gone (identical
 // signatures).
-use crate::proc::{pid_wlock, pid_wunlock};
+use crate::proc::ProcTable;
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration. P3-10c: `CdevOps` is the ops-table trait
@@ -105,7 +105,7 @@ fn ctrl_tty() -> *mut tty {
     if sid.is_none() {
         return core::ptr::null_mut();
     }
-    pid_wlock();
+    ProcTable::wlock();
     // Resolve the `Sid` to a live session under `pid_wlock` (required by
     // `session_lookup`); a stale key (session freed) resolves to null → no
     // controlling tty, the same answer the old null-pointer path gave.
@@ -116,7 +116,7 @@ fn ctrl_tty() -> *mut tty {
         // SAFETY: `session` is a live session pointer just resolved above.
         unsafe { session_get_ctrl_tty(session) }
     };
-    pid_wunlock();
+    ProcTable::wunlock();
     t
 }
 

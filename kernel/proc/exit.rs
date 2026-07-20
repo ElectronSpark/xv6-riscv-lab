@@ -70,6 +70,11 @@ const THREAD_RUNNING:        c_int = 8;
 const THREAD_INTERRUPTIBLE:  c_int = 2;
 const THREAD_ZOMBIE:         c_int = 11;
 
+/// Zero-sized marker owning the process-lifecycle entry points
+/// (`exit`/`wait`/`waitpid`/`vfork_done`) as associated functions
+/// (NO-STANDALONE-FN); never instantiated.
+pub(crate) struct Proc;
+
 // ---------------------------------------------------------------------------
 // Raw FFI declarations — the *only* place the rest of this file's
 // raw calls reach into.
@@ -118,10 +123,11 @@ mod raw {
     // exports are gone; re-exported here so every `raw::NAME` call site
     // stays unchanged (`Thread`/`ThreadGroup` are plain aliases of the
     // `crate::bindings` structs, so the signatures are identical).
-    pub(crate) use crate::proc::{
-        __proctab_get_initproc, get_pid_thread,
-        pgroup_remove_thread,
-    };
+    // NO-STANDALONE-FN: `__proctab_get_initproc`/`get_pid_thread` are now
+    // `ProcTable::get_initproc`/`get_thread`, and `pgroup_remove_thread` is
+    // `Pgroup::remove_thread` — associated fns; the `ffi::` wrappers below
+    // call them through their full `crate::proc::` type paths directly rather
+    // than re-exporting into this module.
     // NO-STANDALONE-FN: `signal_pending`/`kill_thread`/`sigpending_destroy`/
     // `sigpending_empty` (signal.rs) and the `sigacts_put` cast-adapter are no
     // longer free fns — the `ffi::` wrappers below construct a
@@ -173,10 +179,10 @@ mod raw {
     // `thread_clone`.
     // RUSTIFY-PROC: `pid::__free_pid` tightened to `pub(super)` (in-`crate::proc`
     // callers only), so this re-export narrows to `pub(super)` to match.
-    pub(super) use crate::proc::pid::__free_pid;
+    pub(super) use crate::proc::pid::Pid;
     #[inline(always)]
     pub fn proctab_proc_remove(t: *mut Thread) {
-        crate::proc::pid::proctab_proc_remove(t as *mut core::ffi::c_void as *mut crate::proc::pid::Thread);
+        crate::proc::pid::ProcTable::proc_remove(t as *mut core::ffi::c_void as *mut crate::proc::pid::Thread);
     }
 }
 
@@ -192,7 +198,7 @@ mod ffi {
 
     // pointer-returning entries -------------------------------------------------
     pub fn current() -> *mut Thread        { raw::xv6_current_thread() }
-    pub fn initproc() -> *mut Thread       { raw::__proctab_get_initproc() }
+    pub fn initproc() -> *mut Thread       { crate::proc::ProcTable::get_initproc() }
     pub fn parent(t: *mut Thread) -> *mut Thread        { raw::t_parent(t) }
     pub fn session(t: *mut Thread) -> *mut Session      { raw::t_session(t) }
     pub fn thread_group(t: *mut Thread) -> *mut ThreadGroup { raw::t_thread_group(t) }
@@ -204,7 +210,7 @@ mod ffi {
     pub fn sigacts(t: *mut Thread) -> *mut Sigacts      { raw::xv6_t_sigacts(t) }
 
     pub fn tg_leader(tg: *mut ThreadGroup) -> *mut Thread { raw::xv6_tg_group_leader(tg) }
-    pub fn pid_thread(pid: c_int) -> *mut Thread          { raw::get_pid_thread(pid) }
+    pub fn pid_thread(pid: c_int) -> *mut Thread          { crate::proc::ProcTable::get_thread(pid) }
 
     // scalar accessors ---------------------------------------------------------
     pub fn clone_flags(t: *mut Thread) -> u64           { raw::xv6_t_clone_flags(t) }
@@ -248,7 +254,7 @@ mod ffi {
     pub fn kill_thread(t: *mut Thread, signo: c_int) -> c_int  { ThreadAccess::from_ptr(t).map_or(-22, |ta| ta.kill_thread(signo)) }
 
     // pgroup / session / thread group plumbing --------------------------------
-    pub fn pgroup_remove_thread(p: *mut Thread)                { raw::pgroup_remove_thread(p) }
+    pub fn pgroup_remove_thread(p: *mut Thread)                { crate::proc::Pgroup::remove_thread(p) }
     pub fn session_remove_thread(s: *mut Session, t: *mut Thread) { raw::session_remove_thread(s, t) }
     pub fn thread_group_remove(p: *mut Thread) -> bool         { ThreadAccess::from_ptr(p).map_or(true, |ta| ta.group_remove()) }
     pub fn thread_group_put(tg: *mut ThreadGroup)              { if let Some(tga) = ThreadGroupAccess::from_ptr(tg) { tga.put(); } }
@@ -261,7 +267,7 @@ mod ffi {
     pub fn vfs_fdtable_put(fdt: *mut VfsFdtable)               { raw::vfs_fdtable_put(fdt) }
     pub fn vfs_struct_put(fs: *mut FsStruct)                   { raw::vfs_struct_put(fs) }
     pub fn proctab_proc_remove(t: *mut Thread)                 { raw::proctab_proc_remove(t) }
-    pub fn free_pid()                                          { raw::__free_pid() }
+    pub fn free_pid()                                          { crate::proc::pid::Pid::free() }
 
     // exit helpers in proc_rust_shims.c ---------------------------------------
     pub fn reparent_do(p: *mut Thread, initproc: *mut Thread) -> bool {
@@ -300,10 +306,11 @@ fn vfork_done_impl(p: *mut Thread) {
     }
 }
 
-// P3-1B: only caller is `exec.rs` (crate-path `use`, not an `extern`
-// redeclaration) -- demoted.
-pub(crate) extern "C" fn vfork_done(p: *mut Thread) {
-    vfork_done_impl(p)
+// NO-STANDALONE-FN: former free fn `vfork_done`; only caller is `exec.rs`.
+impl Proc {
+    pub(crate) fn vfork_done(p: *mut Thread) {
+        vfork_done_impl(p)
+    }
 }
 
 fn reparent_impl(p: *mut Thread) {
@@ -339,228 +346,152 @@ extern "C" fn reparent(p: *mut Thread) {
     reparent_impl(p)
 }
 
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every caller (irq/trap.rs
-// and the proc/* siblings) imports it by crate path now.
-pub(crate) fn exit(mut status: c_int) -> ! {
-    let p = ffi::current();
-    if ptr::eq(p, ffi::initproc()) {
-        ffi::panic_msg("init exiting");
-    }
-
-    let tg = ffi::thread_group(p);
-    if !tg.is_null() && ffi::tg_is_exiting(tg) && !ffi::tg_exit_task_is(tg, p) {
-        status = ffi::tg_exit_code(tg);
-    }
-
-    // Drop vfork relationship before tearing down anything else.
-    vfork_done_impl(p);
-
-    // Release file table / fs context early.
-    let fdt = ffi::fdtable(p);
-    if !fdt.is_null() {
-        ffi::vfs_fdtable_put(fdt);
-        ffi::set_fdtable(p, ptr::null_mut());
-    }
-    let fs = ffi::fs(p);
-    if !fs.is_null() {
-        ffi::vfs_struct_put(fs);
-        ffi::set_fs(p, ptr::null_mut());
-    }
-
-    let is_leader = ffi::is_group_leader(p);
-    let clone_flags = ffi::clone_flags(p);
-
-    // ---- CLONE_THREAD non-leader: self-reap path ----
-    if clone_flags & CLONE_THREAD != 0 && !is_leader {
-        reparent_impl(p);
-
-        ffi::pid_wlock();
-        ffi::pgroup_remove_thread(p);
-        let sess = ffi::session(p);
-        if !sess.is_null() {
-            ffi::session_remove_thread(sess, p);
+// NO-STANDALONE-FN: `exit`/`wait`/`waitpid` are associated fns on `Proc`
+// (former free fns). Every caller names `Proc::exit`/`Proc::wait`/
+// `Proc::waitpid`.
+impl Proc {
+    pub(crate) fn exit(mut status: c_int) -> ! {
+        let p = ffi::current();
+        if ptr::eq(p, ffi::initproc()) {
+            ffi::panic_msg("init exiting");
         }
-        let mut last_in_group = true;
-        if !tg.is_null() {
-            last_in_group = ffi::thread_group_remove(p);
-        }
-        ffi::proctab_proc_remove(p);
-        ffi::pid_wunlock();
-        ffi::free_pid();
 
-        if last_in_group && !tg.is_null() {
-            let leader = ffi::tg_leader(tg);
-            if !leader.is_null() {
-                ffi::set_xstate(leader, status);
-                ffi::pid_rlock();
-                let parent = ffi::parent(leader);
-                ffi::pid_runlock();
-                if !parent.is_null() {
-                    ffi::sched_wakeup_interruptible(parent);
-                    let esig = ffi::esignal(leader);
-                    if esig > 0 {
-                        ffi::kill_thread(parent, esig);
+        let tg = ffi::thread_group(p);
+        if !tg.is_null() && ffi::tg_is_exiting(tg) && !ffi::tg_exit_task_is(tg, p) {
+            status = ffi::tg_exit_code(tg);
+        }
+
+        // Drop vfork relationship before tearing down anything else.
+        vfork_done_impl(p);
+
+        // Release file table / fs context early.
+        let fdt = ffi::fdtable(p);
+        if !fdt.is_null() {
+            ffi::vfs_fdtable_put(fdt);
+            ffi::set_fdtable(p, ptr::null_mut());
+        }
+        let fs = ffi::fs(p);
+        if !fs.is_null() {
+            ffi::vfs_struct_put(fs);
+            ffi::set_fs(p, ptr::null_mut());
+        }
+
+        let is_leader = ffi::is_group_leader(p);
+        let clone_flags = ffi::clone_flags(p);
+
+        // ---- CLONE_THREAD non-leader: self-reap path ----
+        if clone_flags & CLONE_THREAD != 0 && !is_leader {
+            reparent_impl(p);
+
+            ffi::pid_wlock();
+            ffi::pgroup_remove_thread(p);
+            let sess = ffi::session(p);
+            if !sess.is_null() {
+                ffi::session_remove_thread(sess, p);
+            }
+            let mut last_in_group = true;
+            if !tg.is_null() {
+                last_in_group = ffi::thread_group_remove(p);
+            }
+            ffi::proctab_proc_remove(p);
+            ffi::pid_wunlock();
+            ffi::free_pid();
+
+            if last_in_group && !tg.is_null() {
+                let leader = ffi::tg_leader(tg);
+                if !leader.is_null() {
+                    ffi::set_xstate(leader, status);
+                    ffi::pid_rlock();
+                    let parent = ffi::parent(leader);
+                    ffi::pid_runlock();
+                    if !parent.is_null() {
+                        ffi::sched_wakeup_interruptible(parent);
+                        let esig = ffi::esignal(leader);
+                        if esig > 0 {
+                            ffi::kill_thread(parent, esig);
+                        }
                     }
                 }
             }
+
+            let sa = ffi::sigacts(p);
+            if !sa.is_null() {
+                ffi::sigacts_put(sa);
+                ffi::set_sigacts(p, ptr::null_mut());
+            }
+            let vm = ffi::vm(p);
+            if !vm.is_null() {
+                ffi::vm_put(vm);
+                ffi::set_vm(p, ptr::null_mut());
+            }
+            ffi::sigpending_empty(p, 0);
+            ffi::sigpending_destroy(p);
+
+            let pg_tg = ffi::thread_group(p);
+            if !pg_tg.is_null() {
+                ffi::thread_group_put(pg_tg);
+                ffi::set_thread_group(p, ptr::null_mut());
+            }
+
+            ffi::tcb_lock(p);
+            ffi::set_xstate(p, status);
+            ffi::set_self_reap(p);
+            ffi::set_state(p, THREAD_ZOMBIE);
+            ffi::tcb_unlock(p);
+            ffi::sched_yield();
+            ffi::panic_msg("exit: non-leader thread should not return");
         }
 
-        let sa = ffi::sigacts(p);
-        if !sa.is_null() {
-            ffi::sigacts_put(sa);
-            ffi::set_sigacts(p, ptr::null_mut());
+        // ---- Leader / single-threaded path ----
+        let mut last_in_group = true;
+        if !tg.is_null() {
+            ffi::pid_wlock();
+            ffi::pgroup_remove_thread(p);
+            let sess = ffi::session(p);
+            if !sess.is_null() {
+                ffi::session_remove_thread(sess, p);
+            }
+            last_in_group = ffi::thread_group_remove(p);
+            ffi::pid_wunlock();
         }
-        let vm = ffi::vm(p);
-        if !vm.is_null() {
-            ffi::vm_put(vm);
-            ffi::set_vm(p, ptr::null_mut());
-        }
-        ffi::sigpending_empty(p, 0);
-        ffi::sigpending_destroy(p);
 
-        let pg_tg = ffi::thread_group(p);
-        if !pg_tg.is_null() {
-            ffi::thread_group_put(pg_tg);
-            ffi::set_thread_group(p, ptr::null_mut());
-        }
+        reparent_impl(p);
 
         ffi::tcb_lock(p);
         ffi::set_xstate(p, status);
-        ffi::set_self_reap(p);
         ffi::set_state(p, THREAD_ZOMBIE);
         ffi::tcb_unlock(p);
-        ffi::sched_yield();
-        ffi::panic_msg("exit: non-leader thread should not return");
-    }
 
-    // ---- Leader / single-threaded path ----
-    let mut last_in_group = true;
-    if !tg.is_null() {
-        ffi::pid_wlock();
-        ffi::pgroup_remove_thread(p);
-        let sess = ffi::session(p);
-        if !sess.is_null() {
-            ffi::session_remove_thread(sess, p);
-        }
-        last_in_group = ffi::thread_group_remove(p);
-        ffi::pid_wunlock();
-    }
-
-    reparent_impl(p);
-
-    ffi::tcb_lock(p);
-    ffi::set_xstate(p, status);
-    ffi::set_state(p, THREAD_ZOMBIE);
-    ffi::tcb_unlock(p);
-
-    ffi::pid_rlock();
-    let parent = ffi::parent(p);
-    ffi::pid_runlock();
-
-    if (last_in_group || tg.is_null()) && !parent.is_null() {
-        ffi::sched_wakeup_interruptible(parent);
-        let esig = ffi::esignal(p);
-        if esig > 0 {
-            ffi::kill_thread(parent, esig);
-        }
-    }
-
-    ffi::sched_yield();
-    ffi::panic_msg("exit: __exit_yield should not return");
-}
-
-// P3-1B: only caller is `proc/sysproc.rs::sys_wait` (crate-path `use`, not
-// an `extern` redeclaration) -- demoted.
-// RUSTIFY-PROC: in-`crate::proc` caller only (sysproc.rs) -> pub(super).
-pub(super) extern "C" fn wait(addr: u64) -> c_int {
-    let p = ffi::current();
-    let mut pid: c_int;
-    let mut xstate: c_int = 0;
-
-    ffi::pid_rlock();
-    loop {
-        ffi::set_state(p, THREAD_INTERRUPTIBLE);
-        let child = ffi::find_zombie_child(p);
-        if !child.is_null() {
-            pid = ffi::reap_zombie(p, child, &mut xstate);
-            // reap_zombie returns with no lock held
-            if pid >= 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
-                return -EFAULT;
-            }
-            return pid;
-        }
-        if ffi::children_count(p) == 0 {
-            ffi::set_state(p, THREAD_RUNNING);
-            pid = -1;
-            break;
-        }
-        if ffi::signal_pending(p) {
-            ffi::set_state(p, THREAD_RUNNING);
-            pid = -EINTR;
-            break;
-        }
-        ffi::pid_runlock();
-        ffi::sched_yield();
         ffi::pid_rlock();
-    }
-    ffi::pid_runlock();
-    pid
-}
+        let parent = ffi::parent(p);
+        ffi::pid_runlock();
 
-// P3-1B: only caller is `proc/sysproc.rs::sys_waitpid` (crate-path `use`,
-// not an `extern` redeclaration) -- demoted.
-// RUSTIFY-PROC: in-`crate::proc` caller only (sysproc.rs) -> pub(super).
-pub(super) extern "C" fn waitpid(target_pid: c_int, addr: u64, options: c_int) -> c_int {
-    if options & !(WNOHANG | WUNTRACED) != 0 {
-        return -EINVAL;
-    }
-    let p = ffi::current();
-    let mut pid: c_int;
-    let mut xstate: c_int = 0;
-
-    ffi::pid_rlock();
-    loop {
-        ffi::set_state(p, THREAD_INTERRUPTIBLE);
-
-        if target_pid > 0 {
-            let child = ffi::pid_thread(target_pid);
-            if is_err_const(child as *const c_void)
-                || !ptr::eq(ffi::parent(child), p)
-            {
-                ffi::set_state(p, THREAD_RUNNING);
-                pid = -1;
-                break;
+        if (last_in_group || tg.is_null()) && !parent.is_null() {
+            ffi::sched_wakeup_interruptible(parent);
+            let esig = ffi::esignal(p);
+            if esig > 0 {
+                ffi::kill_thread(parent, esig);
             }
-            if options & WUNTRACED != 0 && ffi::is_stopped(child) {
-                ffi::set_state(p, THREAD_RUNNING);
-                pid = ffi::pid(child);
-                xstate = (ffi::stop_signal(child) << 8) | 0x7f;
-                break;
-            }
-            if ffi::is_zombie(child) {
+        }
+
+        ffi::sched_yield();
+        ffi::panic_msg("exit: __exit_yield should not return");
+    }
+
+    // Only caller is `proc/sysproc.rs::sys_wait`.
+    pub(super) fn wait(addr: u64) -> c_int {
+        let p = ffi::current();
+        let mut pid: c_int;
+        let mut xstate: c_int = 0;
+
+        ffi::pid_rlock();
+        loop {
+            ffi::set_state(p, THREAD_INTERRUPTIBLE);
+            let child = ffi::find_zombie_child(p);
+            if !child.is_null() {
                 pid = ffi::reap_zombie(p, child, &mut xstate);
-                if pid > 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
-                    return -EFAULT;
-                }
-                return pid;
-            }
-        } else {
-            // Scan all children.
-            let stopped = if options & WUNTRACED != 0 {
-                ffi::find_stopped_child(p)
-            } else {
-                ptr::null_mut()
-            };
-            if !stopped.is_null() {
-                ffi::set_state(p, THREAD_RUNNING);
-                pid = ffi::pid(stopped);
-                xstate = (ffi::stop_signal(stopped) << 8) | 0x7f;
-                break;
-            }
-            let zchild = ffi::find_zombie_child(p);
-            if !zchild.is_null() {
-                pid = ffi::reap_zombie(p, zchild, &mut xstate);
-                if pid > 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
+                // reap_zombie returns with no lock held
+                if pid >= 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
                     return -EFAULT;
                 }
                 return pid;
@@ -570,25 +501,100 @@ pub(super) extern "C" fn waitpid(target_pid: c_int, addr: u64, options: c_int) -
                 pid = -1;
                 break;
             }
-        }
-
-        if options & WNOHANG != 0 {
-            ffi::set_state(p, THREAD_RUNNING);
-            pid = 0;
-            break;
-        }
-        if ffi::signal_pending(p) {
-            ffi::set_state(p, THREAD_RUNNING);
-            pid = -EINTR;
-            break;
+            if ffi::signal_pending(p) {
+                ffi::set_state(p, THREAD_RUNNING);
+                pid = -EINTR;
+                break;
+            }
+            ffi::pid_runlock();
+            ffi::sched_yield();
+            ffi::pid_rlock();
         }
         ffi::pid_runlock();
-        ffi::sched_yield();
+        pid
+    }
+
+    // Only caller is `proc/sysproc.rs::sys_waitpid`.
+    pub(super) fn waitpid(target_pid: c_int, addr: u64, options: c_int) -> c_int {
+        if options & !(WNOHANG | WUNTRACED) != 0 {
+            return -EINVAL;
+        }
+        let p = ffi::current();
+        let mut pid: c_int;
+        let mut xstate: c_int = 0;
+
         ffi::pid_rlock();
+        loop {
+            ffi::set_state(p, THREAD_INTERRUPTIBLE);
+
+            if target_pid > 0 {
+                let child = ffi::pid_thread(target_pid);
+                if is_err_const(child as *const c_void)
+                    || !ptr::eq(ffi::parent(child), p)
+                {
+                    ffi::set_state(p, THREAD_RUNNING);
+                    pid = -1;
+                    break;
+                }
+                if options & WUNTRACED != 0 && ffi::is_stopped(child) {
+                    ffi::set_state(p, THREAD_RUNNING);
+                    pid = ffi::pid(child);
+                    xstate = (ffi::stop_signal(child) << 8) | 0x7f;
+                    break;
+                }
+                if ffi::is_zombie(child) {
+                    pid = ffi::reap_zombie(p, child, &mut xstate);
+                    if pid > 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
+                        return -EFAULT;
+                    }
+                    return pid;
+                }
+            } else {
+                // Scan all children.
+                let stopped = if options & WUNTRACED != 0 {
+                    ffi::find_stopped_child(p)
+                } else {
+                    ptr::null_mut()
+                };
+                if !stopped.is_null() {
+                    ffi::set_state(p, THREAD_RUNNING);
+                    pid = ffi::pid(stopped);
+                    xstate = (ffi::stop_signal(stopped) << 8) | 0x7f;
+                    break;
+                }
+                let zchild = ffi::find_zombie_child(p);
+                if !zchild.is_null() {
+                    pid = ffi::reap_zombie(p, zchild, &mut xstate);
+                    if pid > 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
+                        return -EFAULT;
+                    }
+                    return pid;
+                }
+                if ffi::children_count(p) == 0 {
+                    ffi::set_state(p, THREAD_RUNNING);
+                    pid = -1;
+                    break;
+                }
+            }
+
+            if options & WNOHANG != 0 {
+                ffi::set_state(p, THREAD_RUNNING);
+                pid = 0;
+                break;
+            }
+            if ffi::signal_pending(p) {
+                ffi::set_state(p, THREAD_RUNNING);
+                pid = -EINTR;
+                break;
+            }
+            ffi::pid_runlock();
+            ffi::sched_yield();
+            ffi::pid_rlock();
+        }
+        ffi::pid_runlock();
+        if pid > 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
+            return -EFAULT;
+        }
+        pid
     }
-    ffi::pid_runlock();
-    if pid > 0 && addr != 0 && !ffi::copyout_int(addr, xstate) {
-        return -EFAULT;
-    }
-    pid
-}
+} // impl Proc

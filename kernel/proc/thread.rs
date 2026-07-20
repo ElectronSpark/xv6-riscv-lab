@@ -33,11 +33,10 @@ use crate::proc::access::{
 use crate::proc::thread_group::ThreadGroup;
 use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
 use crate::tty::session::{session_key_of, session_lookup, Sid};
-use crate::proc::pgroup::{pgroup_key_of, pgroup_lookup, Pgid};
+use crate::proc::pgroup::{Pgid, Pgroup};
 use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
-use crate::proc::__proctab_init;
-use crate::proc::pid_assert_wholding;
+use crate::proc::{Pid, ProcTable};
 use crate::proc::Rq;
 use crate::proc::SchedAttr;
 use crate::proc::SchedEntity;
@@ -54,8 +53,6 @@ use crate::proc::Scheduler;
 // `pgroup_add_thread` used to be redeclared here with `*mut c_void`
 // pgroup handles; the call sites now use the real `*mut pgroup` type
 // (see `KERNEL_PG`).
-use crate::proc::{__proctab_get_initproc, pid_wlock, pid_wunlock,
-    pgroup_alloc, pgroup_add_tg, pgroup_add_thread};
 // P3-1B mesh sweep: all three cross top-level-module boundaries (proc's
 // submodules are private, so the fully-qualified submodule path is used
 // rather than risking an ambiguous glob re-export at `crate::<mod>::`
@@ -66,9 +63,8 @@ use crate::irq::trap::usertrapret;
 // P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path.
-use super::exit::exit;
+use crate::proc::Proc;
 use crate::start_kernel::start_kernel_post_init;
-use crate::proc::pid::{__alloc_pid, __free_pid};
 
 /// `pid::proctab_proc_add`/`pid::__proctab_set_initproc` take
 /// `pid::Thread`, a distinct (but layout-identical) opaque marker from
@@ -79,11 +75,11 @@ use crate::proc::pid::{__alloc_pid, __free_pid};
 impl Thread {
     #[inline(always)]
     fn proctab_add(p: *mut thread) {
-        crate::proc::pid::proctab_proc_add(p as *mut c_void as *mut crate::proc::pid::Thread);
+        crate::proc::pid::ProcTable::proc_add(p as *mut c_void as *mut crate::proc::pid::Thread);
     }
     #[inline(always)]
     fn set_initproc(p: *mut thread) {
-        crate::proc::pid::__proctab_set_initproc(p as *mut c_void as *mut crate::proc::pid::Thread);
+        crate::proc::pid::ProcTable::set_initproc(p as *mut c_void as *mut crate::proc::pid::Thread);
     }
 }
 
@@ -413,7 +409,7 @@ impl ThreadTableCell {
     /// if the table is full — impossible given [`NR_THREAD`]'s sizing. Called
     /// from `proctab_proc_add` under `pid_wlock`.
     pub(super) fn insert(&self, p: *mut thread) -> Option<Tid> {
-        pid_assert_wholding();
+        ProcTable::assert_wholding();
         let nn = NonNull::new(p)?;
         // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
         // registry is exclusive — no other hart holds a reference into the
@@ -427,7 +423,7 @@ impl ThreadTableCell {
     /// child's `parent` edge) goes stale → resolves to null. A no-op if `p` was
     /// never registered. Called from `proctab_proc_remove` under `pid_wlock`.
     pub(super) fn remove(&self, p: *mut thread) {
-        pid_assert_wholding();
+        ProcTable::assert_wholding();
         let Some(nn) = NonNull::new(p) else { return };
         // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
         let table = unsafe { &mut *self.0.get() };
@@ -531,13 +527,13 @@ impl<'a> ThreadAccess<'a> {
         // SAFETY: reading this live thread's own `pgroup` `Pgid` field is a
         // plain aligned word read.
         let pgid: Pgid = unsafe { (*self.as_ptr()).pgroup };
-        pgroup_lookup(pgid).unwrap_or(ptr::null_mut())
+        Pgroup::lookup(pgid).unwrap_or(ptr::null_mut())
     }
 
     /// Store `pg` as this thread's `pgroup` edge: `pg == null` → [`Pgid::NONE`],
     /// otherwise `pg`'s own cached [`Pgid`]. Caller holds `pid_wlock`.
     pub(super) fn pgroup_store(&self, pg: *mut pgroup) {
-        let pgid = pgroup_key_of(pg);
+        let pgid = Pgroup::key_of(pg);
         // SAFETY: writing this live thread's own `pgroup` field under the
         // caller's `pid_wlock` (exclusive) is race-free.
         unsafe {
@@ -768,7 +764,7 @@ impl Thread {
         // Every call in this function is a safe fn, an atomic load/store, or a
         // small `unsafe { }` block (each justified in-line) — no function-wide
         // unsafe context is needed.
-        pid_assert_wholding();
+        ProcTable::assert_wholding();
         if !KERNEL_TG.load(Ordering::Acquire).is_null() {
             return;
         }
@@ -777,7 +773,7 @@ impl Thread {
         let ret = ThreadGroup::alloc_kernel(&mut tg as *mut _, KERNEL_HIERARCHY_ID);
         kassert!(ret == 0 && !tg.is_null(), "kthread hierarchy: thread_group_alloc_kernel failed");
 
-        let pg = pgroup_alloc(KERNEL_HIERARCHY_ID, ptr::null_mut());
+        let pg = Pgroup::alloc(KERNEL_HIERARCHY_ID, ptr::null_mut());
         kassert!(!pg.is_null(), "kthread hierarchy: pgroup_alloc failed");
         // pgroup->is_kernel = 1 via PgroupAccess — no FFI needed.
         // SAFETY: `pg` is proven non-null by the diverging `kassert!` above.
@@ -794,7 +790,7 @@ impl Thread {
         // (proven by the `kassert!`s above) — matches the callee's contract.
         let ret = unsafe { crate::tty::session::session_add_pg(s as *mut session, pg) };
         kassert!(ret == 0, "kthread hierarchy: session_add_pg failed");
-        let ret = pgroup_add_tg(pg, tg);
+        let ret = Pgroup::add_tg(pg, tg);
         kassert!(ret == 0, "kthread hierarchy: pgroup_add_tg failed");
 
         KERNEL_TG.store(tg, Ordering::Release);
@@ -803,7 +799,7 @@ impl Thread {
     }
 
     fn kthread_join_hierarchy_locked(p: *mut thread) {
-        pid_assert_wholding();
+        ProcTable::assert_wholding();
         kassert!(!p.is_null(), "kthread hierarchy: thread is NULL");
         Thread::kthread_hierarchy_init_locked();
 
@@ -813,7 +809,7 @@ impl Thread {
             Some(tga) => tga.add_thread(p),
             None => xv6_panic(c"thread_group_add: NULL tg".as_ptr()),
         }
-        let ret = pgroup_add_thread(KERNEL_PG.load(Ordering::Acquire), p);
+        let ret = Pgroup::add_thread(KERNEL_PG.load(Ordering::Acquire), p);
         kassert!(ret == 0, "kthread hierarchy: pgroup_add_thread failed");
         // Inlined former `session_add_thread` facade (the sole call site).
         // SAFETY: the kernel hierarchy's session (initialized once) and the
@@ -888,7 +884,7 @@ impl<'a> ThreadAccess<'a> {
 // namespaced path. It is no longer `extern "C"` — nothing reaches it by
 // address (grep-verified: only a plain crate-path call remains).
 impl Thread {
-    pub(crate) fn proctab_init() { __proctab_init(); }
+    pub(crate) fn proctab_init() { ProcTable::init(); }
 }
 
 // The parent/child family-tree edits that used to be free fns
@@ -903,8 +899,8 @@ impl<'a> ThreadAccess<'a> {
             kassert!(!child.is_null(), "attach_child: child is NULL");
             let pta = ThreadAccess::assume(parent);
             let cta = ThreadAccess::assume(child);
-            kassert!(child != __proctab_get_initproc(), "attach_child: child is init process");
-            pid_assert_wholding();
+            kassert!(child != ProcTable::get_initproc(), "attach_child: child is init process");
+            ProcTable::assert_wholding();
             kassert!(cta.siblings_ref().is_detached(), "attach_child: child is attached to a parent");
             kassert!(cta.parent_ptr().is_null(), "attach_child: child has a parent");
 
@@ -921,7 +917,7 @@ impl<'a> ThreadAccess<'a> {
             kassert!(!child.is_null(), "detach_child: child is NULL");
             let pta = ThreadAccess::assume(parent);
             let cta = ThreadAccess::assume(child);
-            pid_assert_wholding();
+            ProcTable::assert_wholding();
             kassert!(pta.children_count() > 0, "detach_child: parent has no children");
             kassert!(!cta.siblings_ref().is_empty(), "detach_child: child is not a sibling of parent");
             kassert!(!cta.siblings_ref().is_detached(), "detach_child: child is already detached");
@@ -1005,7 +1001,7 @@ extern "C" fn kthread_entry(prev: *mut context) {
         let cur_ref = ThreadAccess::assume(cur);
         let entry_fn: extern "C" fn(u64, u64) -> c_int = core::mem::transmute(cur_ref.kentry() as *const ());
         let ret = entry_fn(cur_ref.arg(0), cur_ref.arg(1));
-        exit(ret);
+        Proc::exit(ret);
     }
 }
 
@@ -1018,16 +1014,16 @@ impl Thread {
                                              arg1: u64, arg2: u64, stack_order: c_int) -> KResult<*mut thread> {
         thread_raw_layout! {
             let _rcu = crate::lock::rcu::KRcuRead::new();
-            let initproc = __proctab_get_initproc();
+            let initproc = ProcTable::get_initproc();
             kassert!(!initproc.is_null(), "kthread_create: initproc is NULL");
 
-            if __alloc_pid() < 0 {
+            if Pid::alloc() < 0 {
                 return Err(Errno::Again);
             }
 
             let p = Thread::create(entry, arg1, arg2, stack_order);
             if is_err_or_null(p) {
-                __free_pid();
+                Pid::free();
                 return Err(if is_err(p) { Errno::Raw(ptr_err(p)) } else { Errno::NoMem });
             }
 
@@ -1035,7 +1031,7 @@ impl Thread {
             if !(*initproc).fs.is_null() {
                 fs_clone = vfs_struct_clone((*initproc).fs, 0);
                 if is_err_or_null(fs_clone) {
-                    __free_pid();
+                    Pid::free();
                     ThreadAccess::assume(p).destroy();
                     return Err(if is_err(fs_clone) { Errno::Raw(ptr_err(fs_clone)) } else { Errno::NoMem });
                 }
@@ -1051,11 +1047,11 @@ impl Thread {
             safestrcpy((*p).name.as_mut_ptr(), name_use, (*p).name.len());
             ThreadAccess::assume(p).state_set(THREAD_UNINTERRUPTIBLE);
 
-            pid_wlock();
+            ProcTable::wlock();
             ThreadAccess::assume(initproc).attach_child(p);
             Thread::proctab_add(p);
             Thread::kthread_join_hierarchy_locked(p);
-            pid_wunlock();
+            ProcTable::wunlock();
 
             Ok(p)
         }
@@ -1203,12 +1199,12 @@ impl Thread {
         // Body is entirely a `thread_raw_layout! { ... }` invocation, which
         // already supplies its own `unsafe` block.
         thread_raw_layout! {
-            kassert!(__alloc_pid() == 0, "userinit: __alloc_pid failed");
+            kassert!(Pid::alloc() == 0, "userinit: __alloc_pid failed");
 
             let p = Thread::create(init_entry as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
             kassert!(!is_err_or_null(p), "userinit: thread_create failed");
 
-            pid_wlock();
+            ProcTable::wlock();
             Thread::proctab_add(p);
             ThreadGroup::init(p);
             // SAFETY: `p` is a live `*mut thread` (just created by
@@ -1217,11 +1213,11 @@ impl Thread {
             // in for the exact same underlying object -- reinterpreting the
             // pointer is sound (same precedent as `sysproc.rs`'s `thread_clone`
             // wrapper, P3-1B mesh sweep).
-            crate::proc::pgroup_init(p as *mut c_void as *mut crate::proc::pgroup::Thread);
+            crate::proc::pgroup::Pgroup::init(p as *mut c_void as *mut crate::proc::pgroup::Thread);
             // Inlined former `session_init` facade (the sole call site); the
             // surrounding `thread_raw_layout!` already provides the unsafe context.
             crate::tty::session::session_init(p);
-            pid_wunlock();
+            ProcTable::wunlock();
 
             crate::kprintln!("Init process kernel stack size order: {}", (*p).kstack_order);
 

@@ -100,7 +100,7 @@ use crate::mm::{either_copyin, either_copyout};
 // P3-D2b: the proc-object entry points (proc/{signal,pid}.rs) are plain
 // crate-path items now that their `#[no_mangle]` exports are gone
 // (identical signatures).
-use crate::proc::{__proctab_get_initproc, pid_wlock, pid_wunlock, procdump};
+use crate::proc::ProcTable;
 
 /// `struct irq_desc`/`register_irq_handler`/`PLIC_IRQ_OFFSET` now live in
 /// `kernel/irq/irq_core.rs` (Phase 2 Wave 5 — irq/irq.c port). Previously
@@ -686,7 +686,7 @@ pub(crate) extern "C" fn consoleintr(c: c_int) {
     if !tty_ptr.is_null() {
         // ^P still handled here for kernel debugging.
         if c == ctrl(b'P') {
-            procdump();
+            ProcTable::dump();
             return;
         }
         let w = TTY_INBUF_W.load(Ordering::Relaxed);
@@ -716,7 +716,7 @@ pub(crate) extern "C" fn consoleintr(c: c_int) {
     match c {
         _ if c == ctrl(b'P') => {
             // Print process list.
-            procdump();
+            ProcTable::dump();
         }
         _ if c == ctrl(b'U') => {
             // Kill line.
@@ -980,7 +980,7 @@ pub(crate) extern "C" fn consoledevinit() {
 
         // Attach the console TTY to init's session as the controlling
         // terminal.
-        let initproc = __proctab_get_initproc();
+        let initproc = ProcTable::get_initproc();
         if !initproc.is_null() {
             // N-R6d-2a: `thread.session` is now a generational `Sid`; resolve
             // it to a live `*mut session` under `pid_wlock` (required by
@@ -988,12 +988,12 @@ pub(crate) extern "C" fn consoledevinit() {
             // attaches the console as its controlling terminal exactly as
             // before; a null (no/stale session) simply skips, as the old
             // null-pointer guard did.
-            pid_wlock();
+            ProcTable::wlock();
             let sess = session_lookup((*initproc).session).unwrap_or(core::ptr::null_mut());
             if !sess.is_null() {
                 session_set_ctrl_tty(sess, t);
             }
-            pid_wunlock();
+            ProcTable::wunlock();
         }
 
         // Start the input feeder thread (intr ring buf -> tty_input).

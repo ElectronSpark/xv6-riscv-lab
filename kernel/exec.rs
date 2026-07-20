@@ -110,7 +110,7 @@ use crate::bindings::{
 // (only caller anywhere in the tree is this file), referenced directly
 // instead of via their own `extern "C"` redeclarations.
 use crate::proc::proc_shims::xv6_current_thread;
-use crate::proc::vfork_done as raw_vfork_done;
+use crate::proc::Proc;
 // P3-1C mesh sweep: vfs/{inode,file,fdtable}.rs are in scope for this wave,
 // so their callees are referenced as plain crate-path items instead of
 // `extern "C"` redeclarations -- their definitions dropped `#[no_mangle]`
@@ -132,7 +132,7 @@ use crate::vfs::inode::{vfs_iput, vfs_namei};
 /// compiler infer it from `raw_vfork_done`'s own signature instead.
 #[inline(always)]
 fn vfork_done(p: *mut thread) {
-    raw_vfork_done(p as *mut c_void as *mut _);
+    Proc::vfork_done(p as *mut c_void as *mut _);
 }
 
 // ===========================================================================

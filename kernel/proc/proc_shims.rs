@@ -459,7 +459,7 @@ pub(super) fn pg_is_kernel(pg: *mut pgroup) -> c_int {
 // N-R6d-2a: `pgroup.session` is a generational `Sid` — resolve/store through
 // `SESSION_TABLE` (see `t_session`).
 pub(super) fn pg_session(pg: *mut pgroup) -> *mut session {
-    crate::proc::pgroup::pgroup_session_resolve(pg)
+    crate::proc::pgroup::Pgroup::session_resolve(pg)
 }
 
 pub(super) fn pg_set_pgid(pg: *mut pgroup, v: c_int) { field_set!(pg, pgid, v) }
@@ -467,7 +467,7 @@ pub(super) fn pg_set_leader(pg: *mut pgroup, tg: *mut thread_group) {
     field_set!(pg, leader, tg)
 }
 pub(super) fn pg_set_session(pg: *mut pgroup, s: *mut session) {
-    crate::proc::pgroup::pgroup_session_store(pg, s)
+    crate::proc::pgroup::Pgroup::session_store(pg, s)
 }
 pub(super) fn pg_set_exited(pg: *mut pgroup, v: c_int) {
     bit_set!(pg, flags, set_exited, if v != 0 { 1 } else { 0 })
@@ -502,7 +502,7 @@ pub(super) fn session_fg_pgrp(s: *mut session) -> *mut pgroup {
     // `field_get!` reads the `fg_pgrp` `Pgid` (its own `u!`/`// SAFETY:` covers
     // the pointer deref); resolve it to a live pgroup through the table.
     let pgid = field_get!(s, fg_pgrp);
-    crate::proc::pgroup::pgroup_lookup(pgid).unwrap_or(core::ptr::null_mut())
+    crate::proc::pgroup::Pgroup::lookup(pgid).unwrap_or(core::ptr::null_mut())
 }
 
 // silence unused warnings during incremental porting
@@ -1194,10 +1194,10 @@ use crate::proc::Scheduler;
 // layout-identical) opaque marker from `crate::bindings::thread` --
 // reinterpreted via a thin wrapper, same precedent as `sysproc.rs`'s
 // `thread_clone`.
-use crate::proc::pid::__free_pid;
+use crate::proc::pid::Pid;
 #[inline(always)]
 fn proctab_proc_remove(p: *mut thread) {
-    crate::proc::pid::proctab_proc_remove(p as *mut c_void as *mut crate::proc::pid::Thread);
+    crate::proc::pid::ProcTable::proc_remove(p as *mut c_void as *mut crate::proc::pid::Thread);
 }
 
 pub(super) fn xv6_exit_reparent_do(
@@ -1327,7 +1327,7 @@ pub(super) fn xv6_exit_reap_zombie(
         ThreadAccess::assume(parent).detach_child(child);
         proctab_proc_remove(child);
         xv6_pid_wunlock();
-        __free_pid();
+        Pid::free();
         ThreadAccess::assume(child).destroy();
         pid
     }
@@ -2396,7 +2396,7 @@ pub(super) fn xv6_dump_session(s: *mut Session) {
             // N-R6d-2b: compare the stored `Pgid` against this pgroup's own key
             // (both name the same live pgroup iff equal) — the `Pgid` analog of
             // `== pg`.
-            let fg = if (*s).fg_pgrp == crate::proc::pgroup::pgroup_key_of(pg) { " [fg]" } else { "" };
+            let fg = if (*s).fg_pgrp == crate::proc::pgroup::Pgroup::key_of(pg) { " [fg]" } else { "" };
             let exited = if (*pg).flags.exited() != 0 { ", exited" } else { "" };
             crate::kprintln!(
                 "  PGroup {}{}  (threads={}, tgroups={}{})",

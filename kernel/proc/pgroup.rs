@@ -243,26 +243,30 @@ impl Pgroup {
 /// freed → the "session gone" answer callers null-check). Caller holds
 /// `pid_lock` (reader or writer — [`session_lookup`](crate::tty::session::session_lookup)
 /// requires it; single non-looping generation-checked read, no `&Session`).
-pub(super) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
-    // SAFETY: `pg` is a live `*mut pgroup` (shim contract); forming the shared
-    // `&self` for this single non-looping read of its own `session` `Sid` field
-    // is race-free under the caller's `pid_lock` (writers need the exclusive
-    // `pid_wlock`).
-    let sid = unsafe { (*pg).session_sid() };
-    crate::tty::session::session_lookup(sid).unwrap_or(ptr::null_mut())
-}
-
-/// Store `s` as pgroup `pg`'s `session` edge: `s == null` → `Sid::NONE`,
-/// otherwise `s`'s own cached [`Sid`] (`session.self_sid`). Caller holds
-/// `pid_wlock` (every `set_session` site does).
-pub(super) fn pgroup_session_store(pg: *mut Pgroup, s: *mut Session) {
-    let sid = crate::tty::session::session_key_of(s);
-    // SAFETY: `pg` is a live `*mut pgroup`; the exclusive `&mut self` write of
-    // its own `session` field under the caller's `pid_wlock` is race-free.
-    unsafe {
-        (*pg).set_session_sid(sid);
+// NO-STANDALONE-FN: `pgroup_session_resolve`/`pgroup_session_store` are now
+// `Pgroup::session_resolve`/`session_store` associated fns.
+impl Pgroup {
+    pub(super) fn session_resolve(pg: *mut Pgroup) -> *mut Session {
+        // SAFETY: `pg` is a live `*mut pgroup` (shim contract); forming the shared
+        // `&self` for this single non-looping read of its own `session` `Sid` field
+        // is race-free under the caller's `pid_lock` (writers need the exclusive
+        // `pid_wlock`).
+        let sid = unsafe { (*pg).session_sid() };
+        crate::tty::session::session_lookup(sid).unwrap_or(ptr::null_mut())
     }
-}
+
+    /// Store `s` as pgroup `pg`'s `session` edge: `s == null` → `Sid::NONE`,
+    /// otherwise `s`'s own cached [`Sid`] (`session.self_sid`). Caller holds
+    /// `pid_wlock` (every `set_session` site does).
+    pub(super) fn session_store(pg: *mut Pgroup, s: *mut Session) {
+        let sid = crate::tty::session::session_key_of(s);
+        // SAFETY: `pg` is a live `*mut pgroup`; the exclusive `&mut self` write of
+        // its own `session` field under the caller's `pid_wlock` is race-free.
+        unsafe {
+            (*pg).set_session_sid(sid);
+        }
+    }
+} // impl Pgroup
 
 // ===========================================================================
 // Pgroup registry — a `GenTable` (N-R6d-2b).
@@ -315,70 +319,74 @@ static PGROUP_TABLE: PgroupTableCell =
 /// only if the table is full — impossible given [`NPGROUP`]'s sizing, handled
 /// defensively by [`pgroup_alloc`]. Caller must hold `pid_wlock` (every
 /// `pgroup_alloc` site does — boot hierarchy init and `setpgid`/`setsid`).
-fn pgroup_table_insert(pg: *mut Pgroup) -> Option<Pgid> {
-    pid_assert_wholding();
-    let nn = NonNull::new(pg)?;
-    // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
-    // registry is exclusive — no other hart holds a reference into the table
-    // (readers need `pid_lock`, excluded by our write lock).
-    let table = unsafe { &mut *PGROUP_TABLE.0.get() };
-    let pgid = table.insert(nn)?;
-    // Cache the freshly-issued key so the back-edge accessors can stamp it in
-    // O(1) (`pgroup_key_of`) instead of an O(N) `GenTable::key_of` scan.
-    // SAFETY: `pg` is live and exclusively ours here — just allocated,
-    // pre-publication, under `pid_wlock`; the `&mut self` `self_pgid` write is
-    // uncontended.
-    unsafe { (*pg).set_key(pgid) };
-    Some(pgid)
-}
-
-/// Deregister `pg` from [`PGROUP_TABLE`] (by its stable pointer — the cached
-/// `self_pgid` is only ever read while the pgroup is live), bumping the slot
-/// generation so any outstanding [`Pgid`] to it (a `thread.pgroup` or
-/// `session.fg_pgrp` edge) goes stale → resolves to null. A no-op if `pg` was
-/// never registered. Caller must hold `pid_wlock` (the `__pgroup_cleanup`
-/// teardown path does).
-fn pgroup_table_remove(pg: *mut Pgroup) {
-    pid_assert_wholding();
-    let Some(nn) = NonNull::new(pg) else { return };
-    // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
-    let table = unsafe { &mut *PGROUP_TABLE.0.get() };
-    table.remove_ptr(nn);
-}
-
-/// Generation-checked lookup: resolve a [`Pgid`] to a live `*mut pgroup`, or
-/// `None` if the pgroup it named has been freed (stale key) — the safe
-/// replacement for a raw `*mut pgroup` traversal of the converted edges.
-///
-/// Caller must hold `pid_lock` (reader or writer); the returned pointer is only
-/// stable under that same protection.
-pub(crate) fn pgroup_lookup(pgid: Pgid) -> Option<*mut Pgroup> {
-    // SAFETY: the caller holds `pid_lock` (read or write), which excludes every
-    // `&mut self` mutator (they hold the write lock) — so this shared reference
-    // into the registry is race-free for its (short, non-looping) lifetime. No
-    // `&Pgroup` is formed here; the raw pointer is handed straight back
-    // (freeze-hazard note in the section above).
-    let table = unsafe { &*PGROUP_TABLE.0.get() };
-    table.get(pgid).map(|nn| nn.as_ptr())
-}
-
-/// Encode a `*mut pgroup` as the generational [`Pgid`] to store in a back-edge
-/// (`thread.pgroup`/`session.fg_pgrp`): null → [`Pgid::NONE`] ("no pgroup"),
-/// otherwise the pgroup's own cached key `self_pgid` (stamped at
-/// [`pgroup_table_insert`]). O(1) — the write side of the converted edges,
-/// avoiding an O(N) [`GenTable::key_of`] reverse scan.
-///
-/// Caller holds `pid_wlock` (every store site does — the read of `self_pgid` on
-/// a live pgroup is race-free under it).
-pub(crate) fn pgroup_key_of(pg: *mut Pgroup) -> Pgid {
-    match NonNull::new(pg) {
-        None => Pgid::NONE,
-        // SAFETY: `pg` is a live `*mut pgroup` (caller passes an owned/looked-up
-        // pgroup under `pid_wlock`); the `&self` `self_pgid` read is single and
-        // non-looping.
-        Some(nn) => unsafe { (*nn.as_ptr()).key() },
+// NO-STANDALONE-FN: the registry ops + lookup/key_of are `Pgroup::` associated
+// fns (`table_insert`/`table_remove`/`lookup`/`key_of`).
+impl Pgroup {
+    fn table_insert(pg: *mut Pgroup) -> Option<Pgid> {
+        pid_assert_wholding();
+        let nn = NonNull::new(pg)?;
+        // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
+        // registry is exclusive — no other hart holds a reference into the table
+        // (readers need `pid_lock`, excluded by our write lock).
+        let table = unsafe { &mut *PGROUP_TABLE.0.get() };
+        let pgid = table.insert(nn)?;
+        // Cache the freshly-issued key so the back-edge accessors can stamp it in
+        // O(1) (`pgroup_key_of`) instead of an O(N) `GenTable::key_of` scan.
+        // SAFETY: `pg` is live and exclusively ours here — just allocated,
+        // pre-publication, under `pid_wlock`; the `&mut self` `self_pgid` write is
+        // uncontended.
+        unsafe { (*pg).set_key(pgid) };
+        Some(pgid)
     }
-}
+
+    /// Deregister `pg` from [`PGROUP_TABLE`] (by its stable pointer — the cached
+    /// `self_pgid` is only ever read while the pgroup is live), bumping the slot
+    /// generation so any outstanding [`Pgid`] to it (a `thread.pgroup` or
+    /// `session.fg_pgrp` edge) goes stale → resolves to null. A no-op if `pg` was
+    /// never registered. Caller must hold `pid_wlock` (the `__pgroup_cleanup`
+    /// teardown path does).
+    fn table_remove(pg: *mut Pgroup) {
+        pid_assert_wholding();
+        let Some(nn) = NonNull::new(pg) else { return };
+        // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
+        let table = unsafe { &mut *PGROUP_TABLE.0.get() };
+        table.remove_ptr(nn);
+    }
+
+    /// Generation-checked lookup: resolve a [`Pgid`] to a live `*mut pgroup`, or
+    /// `None` if the pgroup it named has been freed (stale key) — the safe
+    /// replacement for a raw `*mut pgroup` traversal of the converted edges.
+    ///
+    /// Caller must hold `pid_lock` (reader or writer); the returned pointer is only
+    /// stable under that same protection.
+    pub(crate) fn lookup(pgid: Pgid) -> Option<*mut Pgroup> {
+        // SAFETY: the caller holds `pid_lock` (read or write), which excludes every
+        // `&mut self` mutator (they hold the write lock) — so this shared reference
+        // into the registry is race-free for its (short, non-looping) lifetime. No
+        // `&Pgroup` is formed here; the raw pointer is handed straight back
+        // (freeze-hazard note in the section above).
+        let table = unsafe { &*PGROUP_TABLE.0.get() };
+        table.get(pgid).map(|nn| nn.as_ptr())
+    }
+
+    /// Encode a `*mut pgroup` as the generational [`Pgid`] to store in a back-edge
+    /// (`thread.pgroup`/`session.fg_pgrp`): null → [`Pgid::NONE`] ("no pgroup"),
+    /// otherwise the pgroup's own cached key `self_pgid` (stamped at
+    /// [`pgroup_table_insert`]). O(1) — the write side of the converted edges,
+    /// avoiding an O(N) [`GenTable::key_of`] reverse scan.
+    ///
+    /// Caller holds `pid_wlock` (every store site does — the read of `self_pgid` on
+    /// a live pgroup is race-free under it).
+    pub(crate) fn key_of(pg: *mut Pgroup) -> Pgid {
+        match NonNull::new(pg) {
+            None => Pgid::NONE,
+            // SAFETY: `pg` is a live `*mut pgroup` (caller passes an owned/looked-up
+            // pgroup under `pid_wlock`); the `&self` `self_pgid` read is single and
+            // non-looping.
+            Some(nn) => unsafe { (*nn.as_ptr()).key() },
+        }
+    }
+} // impl Pgroup
 
 // Errno constants used here (matches kernel/inc/errno.h).
 const EPERM:  i32 = 1;
@@ -418,7 +426,7 @@ use crate::proc::proc_shims::{
 // in the block above.
 // NO-STANDALONE-FN: `thread_tgid` is now the `ThreadAccess` method
 // `resolve_tgid`; the two call sites below construct the handle via `from_ptr`.
-use crate::proc::get_pid_thread;
+use crate::proc::ProcTable;
 use crate::proc::access::ThreadAccess;
 
 // P3-1C mesh sweep: tty/session.rs is in scope for this wave, same
@@ -506,381 +514,386 @@ macro_rules! tg_for_each_thread {
 /// Called each time a thread group is removed from a process group.
 /// If the process group is empty (no thread groups), remove it from
 /// its session and free it. Caller must hold pid_wlock.
-fn __pgroup_cleanup(pg: *mut Pgroup) {
-    if pg.is_null() {
-        return;
-    }
-    if pg_p_cnt(pg) > 0 {
-        return;
-    }
-    if pg_is_kernel(pg) != 0 {
-        return;
-    }
-    pg_set_exited(pg, 1);
-    let sess = pg_session(pg);
-    if !sess.is_null() {
-        session_remove_pg(sess, pg);
-    }
-    if pg_list_entry_is_detached(pg) == 0 {
-        pg_list_entry_detach(pg);
-    }
-    // N-R6d-2b: deregister from the generational table BEFORE freeing the slab,
-    // bumping the slot generation so every outstanding `Pgid` edge to this
-    // pgroup (`thread.pgroup`, `session.fg_pgrp`) goes stale → resolves to null.
-    pgroup_table_remove(pg);
-    xv6_pgroup_slab_free(pg);
-}
-
-// ---------------------------------------------------------------------------
-// Allocation
-// ---------------------------------------------------------------------------
-
-pub(crate) fn pgroup_alloc(
-    pgid: i32,
-    leader: *mut ThreadGroup,
-) -> *mut Pgroup {
-    let pg = xv6_pgroup_slab_alloc();
-    if pg.is_null() {
-        return ptr::null_mut();
-    }
-    // Zero whatever the slab returned (struct pgroup is small but we don't
-    // know the layout here; rely on the field setters to clobber what we
-    // care about, then explicitly zero the bitfield + counters).
-    pg_set_pgid(pg, pgid);
-    pg_set_leader(pg, leader);
-    pg_list_entry_init(pg);
-    pg_threads_init(pg);
-    pg_tgs_init(pg);
-    pg_set_t_cnt(pg, 0);
-    pg_set_p_cnt(pg, 0);
-    pg_set_exited(pg, 0);
-    pg_set_session(pg, ptr::null_mut());
-    // N-R6d-2b: register in the generational pgroup table (stamps `self_pgid`).
-    // On the impossible "table full" case (see `NPGROUP`'s sizing) fail the
-    // alloc cleanly — free the slab object and return null, exactly the contract
-    // `pgroup_alloc` already has for allocation failure — rather than hand back
-    // an unregistered pgroup whose `Pgid` edges would never resolve.
-    if pgroup_table_insert(pg).is_none() {
+// NO-STANDALONE-FN: the remaining pgroup operations are `Pgroup::` associated
+// fns (cleanup/alloc/init/add_thread/remove_thread/add_tg/remove_tg/live_dec/
+// migrate_tg/get/setpgid/getpgid/kill). Call sites name `Pgroup::<op>`.
+impl Pgroup {
+    fn cleanup(pg: *mut Pgroup) {
+        if pg.is_null() {
+            return;
+        }
+        if pg_p_cnt(pg) > 0 {
+            return;
+        }
+        if pg_is_kernel(pg) != 0 {
+            return;
+        }
+        pg_set_exited(pg, 1);
+        let sess = pg_session(pg);
+        if !sess.is_null() {
+            session_remove_pg(sess, pg);
+        }
+        if pg_list_entry_is_detached(pg) == 0 {
+            pg_list_entry_detach(pg);
+        }
+        // N-R6d-2b: deregister from the generational table BEFORE freeing the slab,
+        // bumping the slot generation so every outstanding `Pgid` edge to this
+        // pgroup (`thread.pgroup`, `session.fg_pgrp`) goes stale → resolves to null.
+        Self::table_remove(pg);
         xv6_pgroup_slab_free(pg);
-        return ptr::null_mut();
     }
-    pg
-}
 
-// P3-1B: only caller is `proc/thread.rs::init_entry` (via its own `extern`
-// declaration typed `*mut bindings::thread`, a different opaque marker
-// type than this file's local `Thread` -- converted to a typed thin
-// wrapper at the call site, same precedent as `sysproc.rs`'s
-// `thread_clone`) -- demoted.
-pub(super) extern "C" fn pgroup_init(initproc: *mut Thread) {
-    let ret = xv6_pgroup_slab_init();
-    if ret != 0 {
-        panic_pgroup("Failed to initialize pgroup slab cache");
-    }
-    let tg = t_thread_group(initproc);
-    if tg.is_null() {
-        panic_pgroup("pgroup_init: initproc has no thread_group");
-    }
-    let pg = pgroup_alloc(t_pid(initproc), tg);
-    if pg.is_null() {
-        panic_pgroup("pgroup_init: pgroup_alloc failed");
-    }
-    pgroup_add_tg(pg, tg);
-    pgroup_add_thread(pg, initproc);
-}
+    // ---------------------------------------------------------------------------
+    // Allocation
+    // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Thread membership
-// ---------------------------------------------------------------------------
-
-pub(crate) fn pgroup_add_thread(
-    pg: *mut Pgroup,
-    t: *mut Thread,
-) -> i32 {
-    pid_assert_wholding();
-    if pg.is_null() || t.is_null() {
-        return -EINVAL;
-    }
-    if pg_exited(pg) != 0 {
-        return -ESRCH;
-    }
-    if !t_pgroup(t).is_null() {
-        return -EEXIST;
-    }
-    t_set_pgroup(t, pg);
-    t_set_pgid(t, pg_pgid(pg));
-    t_pg_entry_init(t);
-    pg_threads_push_back(pg, t);
-    pg_inc_t_cnt(pg);
-    0
-}
-
-pub(crate) fn pgroup_remove_thread(t: *mut Thread) {
-    pid_assert_wholding();
-    if t.is_null() {
-        return;
-    }
-    let pg = t_pgroup(t);
-    if pg.is_null() {
-        return;
-    }
-    if pg_t_cnt(pg) <= 0 {
-        panic_pgroup("Process group thread count went negative");
-    }
-    if t_pg_entry_is_detached(t) != 0 {
-        panic_pgroup("Thread is not in the process group list");
-    }
-    pg_threads_detach(t);
-    pg_dec_t_cnt(pg);
-    t_set_pgroup(t, ptr::null_mut());
-    t_set_pgid(t, 0);
-}
-
-// ---------------------------------------------------------------------------
-// Thread group membership
-// ---------------------------------------------------------------------------
-
-pub(crate) fn pgroup_add_tg(
-    pg: *mut Pgroup,
-    tg: *mut ThreadGroup,
-) -> i32 {
-    pid_assert_wholding();
-    if pg.is_null() || tg.is_null() {
-        return -EINVAL;
-    }
-    if pg_exited(pg) != 0 {
-        return -ESRCH;
-    }
-    if !tg_pgroup(tg).is_null() {
-        return -EEXIST;
-    }
-    tg_list_entry_init(tg);
-    pg_tgs_push_back(pg, tg);
-    tg_set_pgroup(tg, pg);
-    pg_inc_p_cnt(pg);
-    0
-}
-
-pub(crate) fn pgroup_remove_tg(tg: *mut ThreadGroup) {
-    pid_assert_wholding();
-    if tg.is_null() {
-        return;
-    }
-    let pg = tg_pgroup(tg);
-    if pg.is_null() {
-        return;
-    }
-    if pg_p_cnt(pg) <= 0 {
-        panic_pgroup("Process group thread group count went negative");
-    }
-    if pg_tg_list_entry_is_detached(tg) == 0 {
-        pg_tgs_detach(tg);
-    }
-    pg_dec_p_cnt(pg);
-    tg_set_pgroup(tg, ptr::null_mut());
-    __pgroup_cleanup(pg);
-}
-
-// P3-1B: zero callers anywhere in the tree (grep-verified). Demoted from
-// `#[no_mangle]`; `#[allow(dead_code)]` documents the gap (matches this
-// wave's `goldfish_rtc_init`/`sched_timer_add` precedent). Note: the file
-// already carries a blanket `#![allow(dead_code)]` (line 12), so this
-// per-item attribute is documentation, not a functional requirement.
-extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
-    if pg.is_null() {
-        return;
-    }
-    if pg_atomic_dec_t_cnt(pg) <= 0 {
-        panic_pgroup("Process group live thread count went negative");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Migration
-// ---------------------------------------------------------------------------
-
-// P3-1B: only called internally within this file (`pgroup_setpgid`) --
-// demoted.
-extern "C" fn pgroup_migrate_tg(
-    tg: *mut ThreadGroup,
-    new_pg: *mut Pgroup,
-) {
-    pid_assert_wholding();
-    if tg.is_null() {
-        panic_pgroup("pgroup_migrate_tg: NULL tg");
-    }
-    if new_pg.is_null() {
-        panic_pgroup("pgroup_migrate_tg: NULL new_pg");
-    }
-    if !tg_pgroup(tg).is_null() {
-        pgroup_remove_tg(tg);
-    }
-    pgroup_add_tg(new_pg, tg);
-
-    tg_for_each_thread!(tg, t, {
-        if t_pgroup(t) != new_pg {
-            pgroup_remove_thread(t);
+    pub(crate) fn alloc(
+        pgid: i32,
+        leader: *mut ThreadGroup,
+    ) -> *mut Pgroup {
+        let pg = xv6_pgroup_slab_alloc();
+        if pg.is_null() {
+            return ptr::null_mut();
         }
-        if t_pgroup(t).is_null() {
-            pgroup_add_thread(new_pg, t);
+        // Zero whatever the slab returned (struct pgroup is small but we don't
+        // know the layout here; rely on the field setters to clobber what we
+        // care about, then explicitly zero the bitfield + counters).
+        pg_set_pgid(pg, pgid);
+        pg_set_leader(pg, leader);
+        pg_list_entry_init(pg);
+        pg_threads_init(pg);
+        pg_tgs_init(pg);
+        pg_set_t_cnt(pg, 0);
+        pg_set_p_cnt(pg, 0);
+        pg_set_exited(pg, 0);
+        pg_set_session(pg, ptr::null_mut());
+        // N-R6d-2b: register in the generational pgroup table (stamps `self_pgid`).
+        // On the impossible "table full" case (see `NPGROUP`'s sizing) fail the
+        // alloc cleanly — free the slab object and return null, exactly the contract
+        // `pgroup_alloc` already has for allocation failure — rather than hand back
+        // an unregistered pgroup whose `Pgid` edges would never resolve.
+        if Self::table_insert(pg).is_none() {
+            xv6_pgroup_slab_free(pg);
+            return ptr::null_mut();
         }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Lookup
-// ---------------------------------------------------------------------------
-
-pub(crate) fn get_pgroup(pgid: i32) -> *mut Pgroup {
-    let t = get_pid_thread(pgid);
-    if is_err_const(t as *const c_void) {
-        return err_ptr::<Pgroup>(-ESRCH);
-    }
-    let pg = t_pgroup(t);
-    if pg.is_null() {
-        return err_ptr::<Pgroup>(-ESRCH);
-    }
-    pg
-}
-
-// ---------------------------------------------------------------------------
-// setpgid / getpgid
-// ---------------------------------------------------------------------------
-
-// P3-1B: only caller is `proc/sysproc.rs::sys_setpgid` (crate-path `use`,
-// not an `extern` redeclaration) -- demoted.
-pub(super) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
-    let p = xv6_current_thread();
-    let mut pid = pid;
-    let mut pgid = pgid;
-    let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
-
-    if pid == 0 {
-        pid = tgid;
-    }
-    if pgid == 0 {
-        pgid = pid;
-    }
-    if pgid < 0 {
-        return -EINVAL;
+        pg
     }
 
-    xv6_pid_wlock();
+    // P3-1B: only caller is `proc/thread.rs::init_entry` (via its own `extern`
+    // declaration typed `*mut bindings::thread`, a different opaque marker
+    // type than this file's local `Thread` -- converted to a typed thin
+    // wrapper at the call site, same precedent as `sysproc.rs`'s
+    // `thread_clone`) -- demoted.
+    pub(super) fn init(initproc: *mut Thread) {
+        let ret = xv6_pgroup_slab_init();
+        if ret != 0 {
+            panic_pgroup("Failed to initialize pgroup slab cache");
+        }
+        let tg = t_thread_group(initproc);
+        if tg.is_null() {
+            panic_pgroup("pgroup_init: initproc has no thread_group");
+        }
+        let pg = Self::alloc(t_pid(initproc), tg);
+        if pg.is_null() {
+            panic_pgroup("pgroup_init: pgroup_alloc failed");
+        }
+        Self::add_tg(pg, tg);
+        Self::add_thread(pg, initproc);
+    }
 
-    // Find the target thread.
-    let target;
-    if pid == t_pid(p) || pid == tgid {
-        target = p;
-    } else {
-        target = get_pid_thread(pid);
-        if is_err_const(target as *const c_void) {
+    // ---------------------------------------------------------------------------
+    // Thread membership
+    // ---------------------------------------------------------------------------
+
+    pub(crate) fn add_thread(
+        pg: *mut Pgroup,
+        t: *mut Thread,
+    ) -> i32 {
+        pid_assert_wholding();
+        if pg.is_null() || t.is_null() {
+            return -EINVAL;
+        }
+        if pg_exited(pg) != 0 {
+            return -ESRCH;
+        }
+        if !t_pgroup(t).is_null() {
+            return -EEXIST;
+        }
+        t_set_pgroup(t, pg);
+        t_set_pgid(t, pg_pgid(pg));
+        t_pg_entry_init(t);
+        pg_threads_push_back(pg, t);
+        pg_inc_t_cnt(pg);
+        0
+    }
+
+    pub(crate) fn remove_thread(t: *mut Thread) {
+        pid_assert_wholding();
+        if t.is_null() {
+            return;
+        }
+        let pg = t_pgroup(t);
+        if pg.is_null() {
+            return;
+        }
+        if pg_t_cnt(pg) <= 0 {
+            panic_pgroup("Process group thread count went negative");
+        }
+        if t_pg_entry_is_detached(t) != 0 {
+            panic_pgroup("Thread is not in the process group list");
+        }
+        pg_threads_detach(t);
+        pg_dec_t_cnt(pg);
+        t_set_pgroup(t, ptr::null_mut());
+        t_set_pgid(t, 0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Thread group membership
+    // ---------------------------------------------------------------------------
+
+    pub(crate) fn add_tg(
+        pg: *mut Pgroup,
+        tg: *mut ThreadGroup,
+    ) -> i32 {
+        pid_assert_wholding();
+        if pg.is_null() || tg.is_null() {
+            return -EINVAL;
+        }
+        if pg_exited(pg) != 0 {
+            return -ESRCH;
+        }
+        if !tg_pgroup(tg).is_null() {
+            return -EEXIST;
+        }
+        tg_list_entry_init(tg);
+        pg_tgs_push_back(pg, tg);
+        tg_set_pgroup(tg, pg);
+        pg_inc_p_cnt(pg);
+        0
+    }
+
+    pub(crate) fn remove_tg(tg: *mut ThreadGroup) {
+        pid_assert_wholding();
+        if tg.is_null() {
+            return;
+        }
+        let pg = tg_pgroup(tg);
+        if pg.is_null() {
+            return;
+        }
+        if pg_p_cnt(pg) <= 0 {
+            panic_pgroup("Process group thread group count went negative");
+        }
+        if pg_tg_list_entry_is_detached(tg) == 0 {
+            pg_tgs_detach(tg);
+        }
+        pg_dec_p_cnt(pg);
+        tg_set_pgroup(tg, ptr::null_mut());
+        Self::cleanup(pg);
+    }
+
+    // P3-1B: zero callers anywhere in the tree (grep-verified). Demoted from
+    // `#[no_mangle]`; `#[allow(dead_code)]` documents the gap (matches this
+    // wave's `goldfish_rtc_init`/`sched_timer_add` precedent). Note: the file
+    // already carries a blanket `#![allow(dead_code)]` (line 12), so this
+    // per-item attribute is documentation, not a functional requirement.
+    fn live_dec(pg: *mut Pgroup) {
+        if pg.is_null() {
+            return;
+        }
+        if pg_atomic_dec_t_cnt(pg) <= 0 {
+            panic_pgroup("Process group live thread count went negative");
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Migration
+    // ---------------------------------------------------------------------------
+
+    // P3-1B: only called internally within this file (`pgroup_setpgid`) --
+    // demoted.
+    fn migrate_tg(
+        tg: *mut ThreadGroup,
+        new_pg: *mut Pgroup,
+    ) {
+        pid_assert_wholding();
+        if tg.is_null() {
+            panic_pgroup("pgroup_migrate_tg: NULL tg");
+        }
+        if new_pg.is_null() {
+            panic_pgroup("pgroup_migrate_tg: NULL new_pg");
+        }
+        if !tg_pgroup(tg).is_null() {
+            Self::remove_tg(tg);
+        }
+        Self::add_tg(new_pg, tg);
+
+        tg_for_each_thread!(tg, t, {
+            if t_pgroup(t) != new_pg {
+                Self::remove_thread(t);
+            }
+            if t_pgroup(t).is_null() {
+                Self::add_thread(new_pg, t);
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Lookup
+    // ---------------------------------------------------------------------------
+
+    pub(crate) fn get(pgid: i32) -> *mut Pgroup {
+        let t = ProcTable::get_thread(pgid);
+        if is_err_const(t as *const c_void) {
+            return err_ptr::<Pgroup>(-ESRCH);
+        }
+        let pg = t_pgroup(t);
+        if pg.is_null() {
+            return err_ptr::<Pgroup>(-ESRCH);
+        }
+        pg
+    }
+
+    // ---------------------------------------------------------------------------
+    // setpgid / getpgid
+    // ---------------------------------------------------------------------------
+
+    // P3-1B: only caller is `proc/sysproc.rs::sys_setpgid` (crate-path `use`,
+    // not an `extern` redeclaration) -- demoted.
+    pub(super) fn setpgid(pid: i32, pgid: i32) -> i32 {
+        let p = xv6_current_thread();
+        let mut pid = pid;
+        let mut pgid = pgid;
+        let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
+
+        if pid == 0 {
+            pid = tgid;
+        }
+        if pgid == 0 {
+            pgid = pid;
+        }
+        if pgid < 0 {
+            return -EINVAL;
+        }
+
+        xv6_pid_wlock();
+
+        // Find the target thread.
+        let target;
+        if pid == t_pid(p) || pid == tgid {
+            target = p;
+        } else {
+            target = ProcTable::get_thread(pid);
+            if is_err_const(target as *const c_void) {
+                xv6_pid_wunlock();
+                return -ESRCH;
+            }
+        }
+
+        // Must be self or a child of self.
+        if target != p && t_parent(target) != p {
             xv6_pid_wunlock();
             return -ESRCH;
         }
-    }
 
-    // Must be self or a child of self.
-    if target != p && t_parent(target) != p {
-        xv6_pid_wunlock();
-        return -ESRCH;
-    }
-
-    let target_tgid = ThreadAccess::from_ptr(target).map_or(-1, |ta| ta.resolve_tgid());
-    // Cannot change session leader's pgid.
-    if t_sid(target) == target_tgid {
-        xv6_pid_wunlock();
-        return -EPERM;
-    }
-    // Must be in the same session.
-    if t_sid(target) != t_sid(p) {
-        xv6_pid_wunlock();
-        return -EPERM;
-    }
-    // Already in the right group?
-    if t_pgid(target) == pgid {
-        xv6_pid_wunlock();
-        return 0;
-    }
-
-    let tg = t_thread_group(target);
-    let new_pg: *mut Pgroup;
-
-    if pgid == target_tgid {
-        // Creating a new process group with target as leader.
-        new_pg = pgroup_alloc(pgid, tg);
-        if new_pg.is_null() {
-            xv6_pid_wunlock();
-            return -ENOMEM;
-        }
-        let sess = t_session(target);
-        if !sess.is_null() {
-            session_add_pg(sess, new_pg);
-        }
-    } else {
-        // Joining an existing process group.
-        new_pg = get_pgroup(pgid);
-        if is_err_const(new_pg as *const c_void) {
+        let target_tgid = ThreadAccess::from_ptr(target).map_or(-1, |ta| ta.resolve_tgid());
+        // Cannot change session leader's pgid.
+        if t_sid(target) == target_tgid {
             xv6_pid_wunlock();
             return -EPERM;
         }
-        if pg_exited(new_pg) != 0 {
+        // Must be in the same session.
+        if t_sid(target) != t_sid(p) {
             xv6_pid_wunlock();
             return -EPERM;
         }
-        if pg_session(new_pg) != t_session(target) {
+        // Already in the right group?
+        if t_pgid(target) == pgid {
             xv6_pid_wunlock();
-            return -EPERM;
+            return 0;
         }
+
+        let tg = t_thread_group(target);
+        let new_pg: *mut Pgroup;
+
+        if pgid == target_tgid {
+            // Creating a new process group with target as leader.
+            new_pg = Self::alloc(pgid, tg);
+            if new_pg.is_null() {
+                xv6_pid_wunlock();
+                return -ENOMEM;
+            }
+            let sess = t_session(target);
+            if !sess.is_null() {
+                session_add_pg(sess, new_pg);
+            }
+        } else {
+            // Joining an existing process group.
+            new_pg = Self::get(pgid);
+            if is_err_const(new_pg as *const c_void) {
+                xv6_pid_wunlock();
+                return -EPERM;
+            }
+            if pg_exited(new_pg) != 0 {
+                xv6_pid_wunlock();
+                return -EPERM;
+            }
+            if pg_session(new_pg) != t_session(target) {
+                xv6_pid_wunlock();
+                return -EPERM;
+            }
+        }
+
+        Self::migrate_tg(tg, new_pg);
+        xv6_pid_wunlock();
+        0
     }
 
-    pgroup_migrate_tg(tg, new_pg);
-    xv6_pid_wunlock();
-    0
-}
+    // P3-1B: only caller is `proc/sysproc.rs::sys_getpgid` (crate-path `use`,
+    // not an `extern` redeclaration) -- demoted.
+    pub(super) fn getpgid(pid: i32) -> i32 {
+        if pid == 0 {
+            return t_pgid(xv6_current_thread());
+        }
+        if pid < 0 {
+            return -EINVAL;
+        }
 
-// P3-1B: only caller is `proc/sysproc.rs::sys_getpgid` (crate-path `use`,
-// not an `extern` redeclaration) -- demoted.
-pub(super) extern "C" fn pgroup_getpgid(pid: i32) -> i32 {
-    if pid == 0 {
-        return t_pgid(xv6_current_thread());
-    }
-    if pid < 0 {
-        return -EINVAL;
-    }
-
-    rcu_lock();
-    let target = get_pid_thread(pid);
-    if is_err_const(target as *const c_void) {
+        rcu_lock();
+        let target = ProcTable::get_thread(pid);
+        if is_err_const(target as *const c_void) {
+            rcu_unlock();
+            return -ESRCH;
+        }
+        let pgid = t_pgid(target);
         rcu_unlock();
-        return -ESRCH;
+        pgid
     }
-    let pgid = t_pgid(target);
-    rcu_unlock();
-    pgid
-}
 
-// ---------------------------------------------------------------------------
-// Process-group-wide signal delivery
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // Process-group-wide signal delivery
+    // ---------------------------------------------------------------------------
 
-pub(crate) fn pgroup_kill(pgid: i32, signum: i32) -> i32 {
-    xv6_pid_rlock();
-    let pg = get_pgroup(pgid);
-    if is_err_const(pg as *const c_void) || pg_exited(pg) != 0 {
+    pub(crate) fn kill(pgid: i32, signum: i32) -> i32 {
+        xv6_pid_rlock();
+        let pg = Self::get(pgid);
+        if is_err_const(pg as *const c_void) || pg_exited(pg) != 0 {
+            xv6_pid_runlock();
+            return -ESRCH;
+        }
+        if pg_is_kernel(pg) != 0 {
+            xv6_pid_runlock();
+            return -EPERM;
+        }
+
+        let mut count = 0;
+        pg_for_each_tg!(pg, tg, {
+            xv6_tg_send_signo(tg, signum);
+            count += 1;
+        });
         xv6_pid_runlock();
-        return -ESRCH;
-    }
-    if pg_is_kernel(pg) != 0 {
-        xv6_pid_runlock();
-        return -EPERM;
-    }
 
-    let mut count = 0;
-    pg_for_each_tg!(pg, tg, {
-        xv6_tg_send_signo(tg, signum);
-        count += 1;
-    });
-    xv6_pid_runlock();
-
-    if count > 0 { 0 } else { -ESRCH }
-}
+        if count > 0 { 0 } else { -ESRCH }
+    }
+} // impl Pgroup
