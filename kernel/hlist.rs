@@ -325,6 +325,56 @@ fn node_from_entry(e: *mut HlistEntry) -> *mut HlistBucket {
 }
 
 // ---------------------------------------------------------------------------
+// `BucketIter` — additive lazy iterator over the entries chained in a single
+// hlist bucket (goal #2). Same anti-churn, raw-yield contract as
+// `bintree.rs`'s `RbTreeIter` (git 856d205): a bucket is a `list_node_t`
+// sentinel head, and this walks `head.next` around the ring until it returns
+// to the head, yielding each linked node reinterpreted as a `*mut HlistEntry`
+// (offset-0 cast). It yields **raw pointers, never `&HlistEntry`**, so it
+// creates no `&Freeze`-into-a-loop borrow of the intrusive nodes — the exact
+// hazard the memory `freeze-noalias-hazard` note warns against.
+//
+// NON-RCU ONLY: `next()` reads `(*cur).next` with a plain field load, so it
+// is valid only on the writer-serialized (externally locked) lookup path.
+// The RCU read-side walk (`find_entry_in_bucket_rcu`) keeps its hand-rolled
+// `llist::next_rcu` acquire-load form — an RCU-consume boundary, not a plain
+// chain, left raw per the crate's "RCU edges stay raw" convention.
+struct BucketIter {
+    head: *mut HlistBucket,
+    cur: *mut HlistBucket,
+}
+
+impl BucketIter {
+    /// Seed a walk at `bucket`'s first linked node.
+    ///
+    /// # Safety
+    /// `bucket` must be a live bucket sentinel head; the caller serializes
+    /// against writers for the whole walk (the non-RCU contract).
+    #[inline(always)]
+    unsafe fn new(bucket: *mut HlistBucket) -> Self {
+        // SAFETY: caller contract — `bucket` is a live sentinel head.
+        BucketIter { head: bucket, cur: unsafe { (*bucket).next } }
+    }
+}
+
+impl Iterator for BucketIter {
+    type Item = *mut HlistEntry;
+
+    #[inline]
+    fn next(&mut self) -> Option<*mut HlistEntry> {
+        if self.cur == self.head {
+            return None;
+        }
+        let entry = entry_from_node(self.cur);
+        // SAFETY: `cur != head`, so it is a live entry node currently linked
+        // into the bucket ring; advancing to its `.next` under the caller's
+        // writer-serialization contract (see `BucketIter::new`).
+        self.cur = unsafe { (*self.cur).next };
+        Some(entry)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // hlist_entry_{add,del,replace}_rcu — `static inline` in `kernel/inc/hlist.h`
 // (no external linkage); reimplemented on top of `llist` for `hlist_c`'s
 // own RCU write paths (`hlist_put_rcu`/`hlist_pop_rcu`).
@@ -489,19 +539,20 @@ unsafe fn calc_hash_bucket(hlist: *mut Hlist, hash: HtHash) -> *mut HlistBucket 
 /// `hlist` must be validated; `bucket` must be a live bucket head of
 /// `*hlist`; `node` is passed through to `func.cmp_node`/`func.get_node`.
 unsafe fn find_entry_in_bucket(hlist: *mut Hlist, bucket: *mut HlistBucket, node: *mut c_void) -> *mut HlistEntry {
-    unsafe {
-        let mut cur = (*bucket).next;
-        while cur != bucket {
-            let next = (*cur).next; // captured up front: "_safe" iteration
-            let entry = entry_from_node(cur);
-            let node1 = call_get_node(hlist, entry);
-            if call_cmp_node(hlist, node1, node) == 0 {
-                return entry;
-            }
-            cur = next;
-        }
-        ptr::null_mut()
-    }
+    // SAFETY: caller contract — `bucket` is a live bucket head of `*hlist`,
+    // walked under the writer-serialization the non-RCU path assumes. The
+    // find is read-only (no node is unlinked mid-walk), so the C original's
+    // "_safe" capture-next is behaviourally redundant here and the plain
+    // forward `BucketIter` reproduces it exactly.
+    unsafe { BucketIter::new(bucket) }
+        .find(|&entry| {
+            // SAFETY: `entry` is a live linked entry from `bucket`'s chain;
+            // `func.get_node`/`func.cmp_node` are the hlist's validated
+            // callbacks (checked by `validate` before this is reached).
+            let node1 = unsafe { call_get_node(hlist, entry) };
+            unsafe { call_cmp_node(hlist, node1, node) == 0 }
+        })
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Mirrors `__hlist_find_entry_in_bucket_rcu`.
