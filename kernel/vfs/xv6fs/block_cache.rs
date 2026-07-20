@@ -384,154 +384,161 @@ fn bcache_free_extent(ext: *mut free_extent) {
 // ===========================================================================
 // Internal tree operations (caller must hold lock)
 //
-// Simple manual traversal for O(log n) searches.
+// N-METH sweep (goal #1): the five `bc: *mut BlockCacheInner` free fns
+// became inherent methods on [`BlockCacheInner`]. The receiver is now a
+// safe `&self`/`&mut self` reference -- reached directly through the held
+// `SpinLock<BlockCacheInner>` guard (which `DerefMut`s to the inner), so the
+// `&raw mut *cache` dance is gone at every public call site. `BlockCacheInner`
+// is non-Freeze-relevant here because the guard grants exclusive access for
+// the method's duration (no other hart can touch it without the lock) and no
+// method sleeps, so no reference ever spans a yield. The intrusive rb-tree
+// list-node ops (`rb_insert_color`/`rb_delete_node_color`/next + the
+// left/right BST descents) stay RAW -- the separate list keystone, out of
+// scope. `find_extent_*` became plain safe fns (the tree-well-formed type
+// invariant discharges the node-walk unsafety); `insert_extent`/
+// `alloc_from_extent` stay `unsafe fn` (raw `extent_cache`/`ext` preconditions).
 // ===========================================================================
 
-/// Mirrors `bcache_find_extent_le()`. Find the extent with `start <=
-/// blockno` (floor search). Returns null if no such extent exists.
-///
-/// # Safety
-/// `bc` must point to a live `BlockCacheInner`.
-unsafe fn bcache_find_extent_le(bc: *mut BlockCacheInner, blockno: u32) -> *mut free_extent {
-    // SAFETY: `bc` is live.
-    unsafe {
-        let mut node = (*bc).extent_tree.node;
-        let mut best: *mut free_extent = ptr::null_mut();
-        while !node.is_null() {
-            let ext = node as *mut free_extent;
-            if (*ext).start <= blockno {
-                best = ext;
-                node = (*node).right;
-            } else {
-                node = (*node).left;
-            }
-        }
-        best
-    }
-}
-
-/// Mirrors `bcache_find_extent_ge()`. Find the extent with `start >=
-/// blockno` (ceiling search). Returns null if no such extent exists.
-///
-/// # Safety
-/// `bc` must point to a live `BlockCacheInner`.
-unsafe fn bcache_find_extent_ge(bc: *mut BlockCacheInner, blockno: u32) -> *mut free_extent {
-    // SAFETY: `bc` is live.
-    unsafe {
-        let mut node = (*bc).extent_tree.node;
-        let mut best: *mut free_extent = ptr::null_mut();
-        while !node.is_null() {
-            let ext = node as *mut free_extent;
-            if (*ext).start >= blockno {
-                best = ext;
-                node = (*node).left;
-            } else {
-                node = (*node).right;
-            }
-        }
-        best
-    }
-}
-
-/// Mirrors `bcache_find_extent_containing()`.
-///
-/// # Safety
-/// `bc` must point to a live `BlockCacheInner`.
-unsafe fn bcache_find_extent_containing(bc: *mut BlockCacheInner, blockno: u32) -> *mut free_extent {
-    // SAFETY: `bc` is live.
-    let ext = unsafe { bcache_find_extent_le(bc, blockno) };
-    // SAFETY: `ext` is either null or a live extent returned above.
-    if !ext.is_null() && blockno < unsafe { (*ext).start + (*ext).length } {
-        return ext;
-    }
-    ptr::null_mut()
-}
-
-/// Mirrors `bcache_insert_extent()`. Insert a new extent into the tree,
-/// attempting to merge with adjacent extents.
-///
-/// # Safety
-/// `bc` must point to a live `BlockCacheInner` with the cache lock held;
-/// `extent_cache` must be the live sibling extent slab.
-unsafe fn bcache_insert_extent(bc: *mut BlockCacheInner, extent_cache: *mut slab_cache_t, start: u32, length: u32) {
-    unsafe {
-        let end = start + length;
-
-        // Check for merge with previous extent.
-        let prev = bcache_find_extent_le(bc, start);
-        if !prev.is_null() && (*prev).start + (*prev).length == start {
-            // Merge with previous: extend it.
-            (*prev).length += length;
-            (*bc).free_count += length;
-
-            // Check if we can also merge with next.
-            let next_node = rb_next_node(ptr::addr_of_mut!((*prev).rb_node));
-            if !next_node.is_null() {
-                let next = next_node as *mut free_extent;
-                if (*prev).start + (*prev).length == (*next).start {
-                    // Merge all three into prev.
-                    (*prev).length += (*next).length;
-                    rb_delete_node_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*next).rb_node));
-                    bcache_free_extent(next);
-                    (*bc).extent_count -= 1;
+impl BlockCacheInner {
+    /// Mirrors `bcache_find_extent_le()`. Find the extent with `start <=
+    /// blockno` (floor search). Returns null if no such extent exists.
+    fn find_extent_le(&self, blockno: u32) -> *mut free_extent {
+        // SAFETY: `extent_tree`'s nodes are live `free_extent`s of a
+        // well-formed tree (the type invariant, upheld by insert/alloc/
+        // destroy) -- exactly the descent contract.
+        unsafe {
+            let mut node = self.extent_tree.node;
+            let mut best: *mut free_extent = ptr::null_mut();
+            while !node.is_null() {
+                let ext = node as *mut free_extent;
+                if (*ext).start <= blockno {
+                    best = ext;
+                    node = (*node).right;
+                } else {
+                    node = (*node).left;
                 }
             }
-            return;
+            best
         }
-
-        // Check for merge with next extent.
-        let next = bcache_find_extent_ge(bc, start);
-        if !next.is_null() && end == (*next).start {
-            // Merge with next: move its start back. Need to remove and
-            // re-insert since the key changes.
-            rb_delete_node_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*next).rb_node));
-            (*next).start = start;
-            (*next).length += length;
-            rb_insert_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*next).rb_node));
-            (*bc).free_count += length;
-            return;
-        }
-
-        // No merge possible, create new extent.
-        let ext = bcache_alloc_extent(extent_cache);
-        if ext.is_null() {
-            // Out of memory -- silently fail (cache is optimization only).
-            return;
-        }
-
-        (*ext).start = start;
-        (*ext).length = length;
-        rb_insert_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*ext).rb_node));
-        (*bc).extent_count += 1;
-        (*bc).free_count += length;
     }
-}
 
-/// Mirrors `bcache_alloc_from_extent()`. Allocate one block from an
-/// extent, preferring the END for efficiency: allocating from the end
-/// only requires decrementing length (O(1)), whereas allocating from the
-/// start requires re-keying the tree (O(log n)).
-///
-/// # Safety
-/// `bc`/`ext` must point to a live `BlockCacheInner`/`free_extent`
-/// (the latter currently linked into `bc`'s tree), with `bc`'s lock held.
-unsafe fn bcache_alloc_from_extent(bc: *mut BlockCacheInner, ext: *mut free_extent) -> u32 {
-    unsafe {
-        // Allocate from the end of the extent.
-        let blockno = (*ext).start + (*ext).length - 1;
-
-        if (*ext).length == 1 {
-            // Remove entire extent.
-            rb_delete_node_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*ext).rb_node));
-            bcache_free_extent(ext);
-            (*bc).extent_count -= 1;
-        } else {
-            // Simply shrink from the end -- no key change, O(1).
-            (*ext).length -= 1;
+    /// Mirrors `bcache_find_extent_ge()`. Find the extent with `start >=
+    /// blockno` (ceiling search). Returns null if no such extent exists.
+    fn find_extent_ge(&self, blockno: u32) -> *mut free_extent {
+        // SAFETY: see `find_extent_le` (same tree-well-formed invariant).
+        unsafe {
+            let mut node = self.extent_tree.node;
+            let mut best: *mut free_extent = ptr::null_mut();
+            while !node.is_null() {
+                let ext = node as *mut free_extent;
+                if (*ext).start >= blockno {
+                    best = ext;
+                    node = (*node).left;
+                } else {
+                    node = (*node).right;
+                }
+            }
+            best
         }
+    }
 
-        (*bc).free_count -= 1;
-        blockno
+    /// Mirrors `bcache_find_extent_containing()`.
+    fn find_extent_containing(&self, blockno: u32) -> *mut free_extent {
+        let ext = self.find_extent_le(blockno);
+        // SAFETY: `ext` is null or a live extent returned above.
+        if !ext.is_null() && blockno < unsafe { (*ext).start + (*ext).length } {
+            return ext;
+        }
+        ptr::null_mut()
+    }
+
+    /// Mirrors `bcache_insert_extent()`. Insert a new extent into the tree,
+    /// attempting to merge with adjacent extents.
+    ///
+    /// # Safety
+    /// The cache lock must be held (guaranteed by `&mut self` from the
+    /// guard, or the single-threaded mount build); `extent_cache` must be
+    /// the live sibling extent slab.
+    unsafe fn insert_extent(&mut self, extent_cache: *mut slab_cache_t, start: u32, length: u32) {
+        unsafe {
+            let end = start + length;
+
+            // Check for merge with previous extent.
+            let prev = self.find_extent_le(start);
+            if !prev.is_null() && (*prev).start + (*prev).length == start {
+                // Merge with previous: extend it.
+                (*prev).length += length;
+                self.free_count += length;
+
+                // Check if we can also merge with next.
+                let next_node = rb_next_node(ptr::addr_of_mut!((*prev).rb_node));
+                if !next_node.is_null() {
+                    let next = next_node as *mut free_extent;
+                    if (*prev).start + (*prev).length == (*next).start {
+                        // Merge all three into prev.
+                        (*prev).length += (*next).length;
+                        rb_delete_node_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*next).rb_node));
+                        bcache_free_extent(next);
+                        self.extent_count -= 1;
+                    }
+                }
+                return;
+            }
+
+            // Check for merge with next extent.
+            let next = self.find_extent_ge(start);
+            if !next.is_null() && end == (*next).start {
+                // Merge with next: move its start back. Need to remove and
+                // re-insert since the key changes.
+                rb_delete_node_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*next).rb_node));
+                (*next).start = start;
+                (*next).length += length;
+                rb_insert_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*next).rb_node));
+                self.free_count += length;
+                return;
+            }
+
+            // No merge possible, create new extent.
+            let ext = bcache_alloc_extent(extent_cache);
+            if ext.is_null() {
+                // Out of memory -- silently fail (cache is optimization only).
+                return;
+            }
+
+            (*ext).start = start;
+            (*ext).length = length;
+            rb_insert_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*ext).rb_node));
+            self.extent_count += 1;
+            self.free_count += length;
+        }
+    }
+
+    /// Mirrors `bcache_alloc_from_extent()`. Allocate one block from an
+    /// extent, preferring the END for efficiency: allocating from the end
+    /// only requires decrementing length (O(1)), whereas allocating from the
+    /// start requires re-keying the tree (O(log n)).
+    ///
+    /// # Safety
+    /// The cache lock must be held; `ext` must point to a live `free_extent`
+    /// currently linked into this cache's tree.
+    unsafe fn alloc_from_extent(&mut self, ext: *mut free_extent) -> u32 {
+        unsafe {
+            // Allocate from the end of the extent.
+            let blockno = (*ext).start + (*ext).length - 1;
+
+            if (*ext).length == 1 {
+                // Remove entire extent.
+                rb_delete_node_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*ext).rb_node));
+                bcache_free_extent(ext);
+                self.extent_count -= 1;
+            } else {
+                // Simply shrink from the end -- no key change, O(1).
+                (*ext).length -= 1;
+            }
+
+            self.free_count -= 1;
+            blockno
+        }
     }
 }
 
@@ -557,11 +564,9 @@ pub(crate) extern "C" fn xv6fs_bcache_mark_free(xv6_sb: *mut xv6fs_superblock, b
         if blockno < cache.data_start {
             return; // guard drops -> release
         }
-        // The tree insert is the intrusive-rbtree list keystone, left raw:
-        // hand it a `*mut BlockCacheInner` derived from the held guard, plus
-        // the sibling extent slab.
-        let bc = &raw mut *cache;
-        bcache_insert_extent(bc, extent_cache, blockno, 1);
+        // Insert through the guard (`DerefMut` -> `&mut BlockCacheInner`); the
+        // sibling extent slab (computed before locking) rides in as a param.
+        cache.insert_extent(extent_cache, blockno, 1);
     } // guard drops -> release
 }
 
@@ -583,24 +588,22 @@ pub(crate) extern "C" fn xv6fs_bcache_find_free_block(xv6_sb: *mut xv6fs_superbl
             return neg(ENOSPC); // guard drops -> release
         }
 
-        // Tree search/alloc are the raw list keystone; drive them through a
-        // `*mut BlockCacheInner` derived from the held guard.
-        let bc = &raw mut *cache;
-
-        // Find extent at or after cursor for wear leveling.
-        let mut ext = bcache_find_extent_ge(bc, (*bc).alloc_cursor);
+        // Find extent at or after cursor for wear leveling (methods run
+        // through the guard; rb_first_node stays the raw list keystone).
+        let cursor = cache.alloc_cursor;
+        let mut ext = cache.find_extent_ge(cursor);
 
         // Wrap around if no extent found after cursor.
         if ext.is_null() {
-            ext = rb_first_node(ptr::addr_of_mut!((*bc).extent_tree)) as *mut free_extent;
+            ext = rb_first_node(ptr::addr_of_mut!(cache.extent_tree)) as *mut free_extent;
         }
         // `ext` is guaranteed non-null since we checked the tree is not
         // empty above.
 
-        *blockno_out = bcache_alloc_from_extent(bc, ext);
-        (*bc).alloc_cursor = *blockno_out + 1;
-        if (*bc).alloc_cursor >= (*bc).data_start + (*bc).nblocks {
-            (*bc).alloc_cursor = (*bc).data_start;
+        *blockno_out = cache.alloc_from_extent(ext);
+        cache.alloc_cursor = *blockno_out + 1;
+        if cache.alloc_cursor >= cache.data_start + cache.nblocks {
+            cache.alloc_cursor = cache.data_start;
         }
 
         0
@@ -625,37 +628,36 @@ pub(crate) extern "C" fn xv6fs_bcache_find_free_block_near(xv6_sb: *mut xv6fs_su
             return neg(ENOSPC); // guard drops -> release
         }
 
-        // Tree search/alloc are the raw list keystone; drive them through a
-        // `*mut BlockCacheInner` derived from the held guard. Every early
-        // `return` below drops the guard (== the old `spin_unlock`).
-        let bc = &raw mut *cache;
+        // Tree search/alloc run through the guard (methods); rb_last_node
+        // stays the raw list keystone. Every early `return` below drops the
+        // guard (== the old `spin_unlock`).
 
         // Clamp hint to valid range.
         let mut hint = hint;
-        if hint < (*bc).data_start {
-            hint = (*bc).data_start;
-        } else if hint >= (*bc).data_start + (*bc).nblocks {
-            hint = (*bc).data_start + (*bc).nblocks - 1;
+        if hint < cache.data_start {
+            hint = cache.data_start;
+        } else if hint >= cache.data_start + cache.nblocks {
+            hint = cache.data_start + cache.nblocks - 1;
         }
 
         // Try to find extent containing the hint -- O(log n).
-        let ext = bcache_find_extent_containing(bc, hint);
+        let ext = cache.find_extent_containing(hint);
         if !ext.is_null() {
-            *blockno_out = bcache_alloc_from_extent(bc, ext);
+            *blockno_out = cache.alloc_from_extent(ext);
             return 0;
         }
 
         // Find extent at or after hint -- O(log n).
-        let ext = bcache_find_extent_ge(bc, hint);
+        let ext = cache.find_extent_ge(hint);
         if !ext.is_null() {
-            *blockno_out = bcache_alloc_from_extent(bc, ext);
+            *blockno_out = cache.alloc_from_extent(ext);
             return 0;
         }
 
         // No extent at/after hint means all extents are before hint. The
         // last (largest key) extent is closest to hint -- O(log n).
-        let ext = rb_last_node(ptr::addr_of_mut!((*bc).extent_tree)) as *mut free_extent;
-        *blockno_out = bcache_alloc_from_extent(bc, ext);
+        let ext = rb_last_node(ptr::addr_of_mut!(cache.extent_tree)) as *mut free_extent;
+        *blockno_out = cache.alloc_from_extent(ext);
         0
     } // guard drops -> release
 }
@@ -745,8 +747,13 @@ pub(crate) extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_i
         let mut run_length: u32 = 0;
         let mut in_run = false;
 
-        let mut b: u32 = 0;
-        while b < nblocks {
+        // `nblocks` is fixed (computed once above) -> range walk. Loop
+        // STRUCTURE only: the bitmap streaming across sleeping bread/brelse
+        // and every bit-test byte are unchanged. `insert_extent` is called
+        // via a transient `&mut *bc` (from the single-threaded mount
+        // `data_ptr()`; it does not sleep, so the reference never spans a
+        // yield).
+        for b in 0..nblocks {
             let blockno = data_start + b;
             let bitmap_block = bblock_ptr(blockno, (*disk_sb).bmapstart);
 
@@ -759,10 +766,9 @@ pub(crate) extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_i
                     last_bitmap_block = u32::MAX;
                     // Treat read errors as used blocks.
                     if in_run {
-                        bcache_insert_extent(bc, extent_cache, run_start, run_length);
+                        (*bc).insert_extent(extent_cache, run_start, run_length);
                         in_run = false;
                     }
-                    b += 1;
                     continue;
                 }
                 last_bitmap_block = bitmap_block;
@@ -783,16 +789,14 @@ pub(crate) extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_i
                 }
             } else if in_run {
                 // Block is used.
-                bcache_insert_extent(bc, extent_cache, run_start, run_length);
+                (*bc).insert_extent(extent_cache, run_start, run_length);
                 in_run = false;
             }
-
-            b += 1;
         }
 
         // Flush any remaining run.
         if in_run {
-            bcache_insert_extent(bc, extent_cache, run_start, run_length);
+            (*bc).insert_extent(extent_cache, run_start, run_length);
         }
 
         if !bp.is_null() {

@@ -591,35 +591,46 @@ pub(crate) extern "C" fn xv6fs_shrink_caches() {
 // Superblock read/write helpers
 // ===========================================================================
 
-fn __xv6fs_read_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> KResult<()> {
-    let bp = bread(dev, 1);
-    if bp.is_null() {
-        return Err(Errno::Io);
-    }
-    // SAFETY: `bp` is a live, just-read buffer; `disk_sb` is a valid
-    // exclusively-owned out-param.
-    unsafe {
-        memmove(disk_sb as *mut c_void, (*bp).data as *const c_void, core::mem::size_of::<OndiskSuperblock>());
-        brelse(bp);
-        if (*disk_sb).magic != FSMAGIC {
+impl OndiskSuperblock {
+    /// Mirrors `__xv6fs_read_superblock()`. Read block 1 of `dev` into this
+    /// on-disk superblock record and validate its magic. N-METH sweep
+    /// (goal #1): the `disk_sb: *mut OndiskSuperblock` out-param became the
+    /// `&mut self` receiver -- purely receiver plumbing, the memmove disk
+    /// bytes are byte-identical (P3-4 on-disk-format scrutiny class).
+    fn read_from_disk(&mut self, dev: u32) -> KResult<()> {
+        let bp = bread(dev, 1);
+        if bp.is_null() {
+            return Err(Errno::Io);
+        }
+        // SAFETY: `bp` is a live, just-read buffer; `self` is exclusively
+        // borrowed (`&mut`), so the memmove target is uniquely owned.
+        unsafe {
+            memmove(self as *mut OndiskSuperblock as *mut c_void, (*bp).data as *const c_void, core::mem::size_of::<OndiskSuperblock>());
+            brelse(bp);
+        }
+        if self.magic != FSMAGIC {
             return Err(Errno::Inval);
         }
+        Ok(())
     }
-    Ok(())
-}
 
-fn __xv6fs_write_superblock(dev: u32, disk_sb: *mut OndiskSuperblock) -> KResult<()> {
-    let bp = bread(dev, 1);
-    if bp.is_null() {
-        return Err(Errno::Io);
+    /// Mirrors `__xv6fs_write_superblock()`. Write this on-disk superblock
+    /// record back to block 1 of `dev`. N-METH sweep (goal #1): `disk_sb`
+    /// param -> `&self` receiver; disk bytes byte-identical.
+    fn write_to_disk(&self, dev: u32) -> KResult<()> {
+        let bp = bread(dev, 1);
+        if bp.is_null() {
+            return Err(Errno::Io);
+        }
+        // SAFETY: `bp` is a live, just-read buffer; `self` is borrowed for
+        // the memmove source only.
+        unsafe {
+            memmove((*bp).data as *mut c_void, self as *const OndiskSuperblock as *const c_void, core::mem::size_of::<OndiskSuperblock>());
+            bwrite(bp);
+            brelse(bp);
+        }
+        Ok(())
     }
-    // SAFETY: `bp` is a live, just-read buffer; `disk_sb` is live.
-    unsafe {
-        memmove((*bp).data as *mut c_void, disk_sb as *const c_void, core::mem::size_of::<OndiskSuperblock>());
-        bwrite(bp);
-        brelse(bp);
-    }
-    Ok(())
 }
 
 // ===========================================================================
@@ -655,9 +666,13 @@ fn xv6fs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
         let disk_sb = ptr::addr_of_mut!((*xv6_sb).disk_sb);
         let dev = xv6fs_sb_dev(xv6_sb);
 
-        let mut inum: u64 = 1;
-        while inum < (*disk_sb).ninodes as u64 {
-            let bp = bread(dev, xv6fs_iblock(inum, (*disk_sb).inodestart));
+        // `ninodes`/`inodestart` are fixed for the mount (loop-invariant under
+        // the superblock write lock); capture once and scan the inode-number
+        // range. Loop STRUCTURE only -- bread/brelse/log_write byte-identical.
+        let ninodes = (*disk_sb).ninodes as u64;
+        let inodestart = (*disk_sb).inodestart;
+        for inum in 1..ninodes {
+            let bp = bread(dev, xv6fs_iblock(inum, inodestart));
             if bp.is_null() {
                 return Err(Errno::Io);
             }
@@ -682,7 +697,6 @@ fn xv6fs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
                 return Ok(ptr::addr_of_mut!((*xi).vfs_inode));
             }
             brelse(bp);
-            inum += 1;
         }
     }
 
@@ -768,7 +782,8 @@ fn xv6fs_sync_fs_impl(sb: *mut vfs_superblock, _wait: c_int) -> KResult<()> {
     // SAFETY: `xv6_sb`/`sb` are live (caller's contract).
     unsafe {
         if (*xv6_sb).dirty != 0 {
-            __xv6fs_write_superblock(xv6fs_sb_dev(xv6_sb), ptr::addr_of_mut!((*xv6_sb).disk_sb))?;
+            let dev = xv6fs_sb_dev(xv6_sb);
+            (*xv6_sb).disk_sb.write_to_disk(dev)?;
             (*xv6_sb).dirty = 0;
         }
         (*sb).flags.set_dirty(0);
@@ -826,7 +841,8 @@ impl FsTypeOps for Xv6fsFsTypeOps {
         ptr::write_bytes(xv6_sb as *mut u8, 0, core::mem::size_of::<xv6fs_superblock>());
         (*xv6_sb).blkdev = blkdev;
 
-        if let Err(e) = __xv6fs_read_superblock(xv6fs_sb_dev(xv6_sb), ptr::addr_of_mut!((*xv6_sb).disk_sb)) {
+        let dev = xv6fs_sb_dev(xv6_sb);
+        if let Err(e) = (*xv6_sb).disk_sb.read_from_disk(dev) {
             blkdev_put(blkdev);
             slab_free(xv6_sb as *mut c_void);
             return Err(e);

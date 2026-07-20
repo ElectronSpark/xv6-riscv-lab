@@ -261,8 +261,12 @@ const THREAD_UNINTERRUPTIBLE: c_int = 6;
 /// `log` must point to a live `LogInner`.
 unsafe fn __xv6fs_install_trans(log: *mut LogInner, recovering: bool) {
     unsafe {
-        let mut tail: i32 = 0;
-        while tail < (*log).lh.n {
+        // `lh.n` is loop-invariant here: the committing-flag protocol makes
+        // this committer/recoverer the SOLE accessor of `log`, so capture it
+        // once and walk the tail range. Loop STRUCTURE only -- every
+        // bread/memmove/bwrite disk op stays byte-identical (e3cb8a0 precedent).
+        let n = (*log).lh.n;
+        for tail in 0..n {
             let lbuf = bread((*log).dev as u32, ((*log).start + tail + 1) as u32); // read log block
             let dbuf = bread((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // read dst
             memmove((*dbuf).data as *mut c_void, (*lbuf).data as *const c_void, super::BSIZE as usize); // copy block to dst
@@ -276,11 +280,10 @@ unsafe fn __xv6fs_install_trans(log: *mut LogInner, recovering: bool) {
             }
             brelse(lbuf);
             brelse(dbuf);
-            tail += 1;
         }
 
         // Flush all async writes to disk.
-        if !recovering && (*log).lh.n > 0 {
+        if !recovering && n > 0 {
             bsync();
         }
     }
@@ -296,10 +299,9 @@ unsafe fn __xv6fs_read_head(log: *mut LogInner) {
         let b = bread((*log).dev as u32, (*log).start as u32);
         let lh = (*b).data as *const xv6fs_logheader;
         (*log).lh.n = (*lh).n;
-        let mut i = 0usize;
-        while (i as i32) < (*log).lh.n {
+        // `lh.n` just set from disk and invariant for this copy -> range walk.
+        for i in 0..(*log).lh.n as usize {
             (*log).lh.block[i] = (*lh).block[i];
-            i += 1;
         }
         brelse(b);
     }
@@ -315,10 +317,9 @@ unsafe fn __xv6fs_write_head(log: *mut LogInner) {
         let b = bread((*log).dev as u32, (*log).start as u32);
         let hb = (*b).data as *mut xv6fs_logheader;
         (*hb).n = (*log).lh.n;
-        let mut i = 0usize;
-        while (i as i32) < (*log).lh.n {
+        // `lh.n` invariant for this copy -> range walk (structure only).
+        for i in 0..(*log).lh.n as usize {
             (*hb).block[i] = (*log).lh.block[i];
-            i += 1;
         }
         bwrite(b);
         brelse(b);
@@ -347,19 +348,20 @@ unsafe fn __xv6fs_recover_from_log(log: *mut LogInner) {
 /// `log` must point to a live `LogInner`.
 unsafe fn __xv6fs_write_log(log: *mut LogInner) {
     unsafe {
-        let mut tail: i32 = 0;
-        while tail < (*log).lh.n {
+        // `lh.n` loop-invariant under the committing-flag protocol (sole
+        // accessor) -> capture once, walk the tail range. Structure only.
+        let n = (*log).lh.n;
+        for tail in 0..n {
             let to = bread((*log).dev as u32, ((*log).start + tail + 1) as u32); // log block
             let from = bread((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // cache block
             memmove((*to).data as *mut c_void, (*from).data as *const c_void, super::BSIZE as usize);
             bwrite_async(to); // mark dirty, will flush at end
             brelse(from);
             brelse(to);
-            tail += 1;
         }
 
         // Flush all log writes before writing header.
-        if (*log).lh.n > 0 {
+        if n > 0 {
             bsync();
         }
     }
@@ -593,16 +595,14 @@ pub(crate) extern "C" fn xv6fs_log_write(xv6_sb: *mut xv6fs_superblock, b: *mut 
             xv6_panic(c"xv6fs: log_write outside of trans".as_ptr());
         }
 
-        let mut i: usize = 0;
-        while (i as i32) < log.lh.n {
-            if log.lh.block[i] == (*b).blockno as i32 {
-                // Log absorption.
-                break;
-            }
-            i += 1;
-        }
-        log.lh.block[i] = (*b).blockno as i32;
-        if i as i32 == log.lh.n {
+        // Log-absorption scan: find an existing slot for this block, else the
+        // append index `n`. `n` is loop-invariant under the held guard (no
+        // sleep on this path) -> `.position()` over the live slice.
+        let n = log.lh.n as usize;
+        let blockno = (*b).blockno as i32;
+        let i = log.lh.block[..n].iter().position(|&bn| bn == blockno).unwrap_or(n);
+        log.lh.block[i] = blockno;
+        if i == n {
             // Add new block to log?
             bpin(b);
             log.lh.n += 1;
