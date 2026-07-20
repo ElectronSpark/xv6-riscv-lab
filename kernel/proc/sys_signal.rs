@@ -4,6 +4,24 @@
 //! syscall dispatch table. The actual signal mechanics (sigprocmask,
 //! sigaction, sigsuspend, kill, etc.) remain implemented in C; this
 //! module only handles user-argument extraction and copyin/copyout.
+//!
+//! P3-N-METH floor record (whole file):
+//! * Methods: none. Every `sys_*` is a nullary `extern "C"` dispatch-table
+//!   entry (the C syscall ABI) with no struct receiver — the exact C-ABI
+//!   boundary class. Argument state lives in the trapframe (reached via the
+//!   `arg*` helpers / `current()`), not in a Rust value we could take `self`
+//!   on. All backends (`sigprocmask`/`sigaction`/... in `proc/signal.rs`)
+//!   are plain delegated calls.
+//! * Iterators: none. The two loops are both floor — `sys_pause`'s
+//!   `signal_pending`/`scheduler_yield` retry loop is the freeze-in-loop
+//!   (noalias-hoist) hazard class, and `sys_sigreturn`'s `wfi()` loop is a
+//!   divergent halt; neither is a read-only fixed-count scan. There are no
+//!   manual sigset copy loops here — the copies go through the single
+//!   `either_copyin`/`either_copyout` calls.
+//! * Visibility: all 10 `sys_*` stay `pub(crate)` — reached out-of-proc as
+//!   fn-pointer values in `crate::irq::syscall`'s dispatch table (a real,
+//!   verified out-of-`proc` caller). The file-private helpers `either_copyout`
+//!   and `current` are already minimal (`fn`).
 
 #![allow(non_snake_case)]
 

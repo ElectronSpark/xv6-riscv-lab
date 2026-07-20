@@ -32,7 +32,14 @@ static IDLE_RQS: SyncCell<*mut IdleRq> = SyncCell::new(null_mut());
 // ---------------------------------------------------------------------------
 // sched_class callbacks
 // ---------------------------------------------------------------------------
-pub(crate) unsafe fn idle_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
+// P3-N-METH: dispatched only from `SchedClass`'s methods in `sched.rs`
+// (a `proc` sibling) via the explicit `super::sched_idle::` path — never
+// via the `pub use sched_idle::*` glob — so `pub(crate)` -> `pub(super)`
+// (smallest scope: `crate::proc`). Left raw (the SchedClass trait/policy
+// layer, per 46320f2): raw `*mut Rq`/`*mut SchedEntity` from the dispatch
+// site, freeze-hazard on Rq/SchedEntity fields — the same floor as the
+// fifo callbacks.
+pub(super) unsafe fn idle_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     // `rq` is the first field of `IdleRq` → container_of is a no-op cast.
     let idle = rq as *mut IdleRq;
     let thread = (*idle).idle_thread;
@@ -46,7 +53,7 @@ pub(crate) unsafe fn idle_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     thread_sched_entity(thread)
 }
 
-pub(crate) unsafe fn idle_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(super) unsafe fn idle_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
     let idle = rq as *mut IdleRq;
     if !(*idle).idle_thread.is_null() {
         cffi::panic_proc(b"idle_enqueue_task: idle rq already has a thread\0");
@@ -58,7 +65,7 @@ pub(crate) unsafe fn idle_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
         | PRIORITY_SUBLEVEL_MASK as i32;
 }
 
-pub(crate) unsafe fn idle_dequeue_task(_rq: *mut Rq, _se: *mut SchedEntity) {
+pub(super) unsafe fn idle_dequeue_task(_rq: *mut Rq, _se: *mut SchedEntity) {
     cffi::panic_proc(b"idle_dequeue_task: trying to dequeue task from idle rq\0");
 }
 
@@ -98,7 +105,10 @@ unsafe fn alloc_idle_rqs() {
 
 // P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
-pub(crate) unsafe extern "C" fn init_idle_rq() {
+// P3-N-METH: sole caller `proc/rq.rs` is a `proc` descendant reaching this
+// via `super::sched_idle::init_idle_rq` (call site updated off the
+// `pub use sched_idle::*` glob) -> `pub(crate)` -> `pub(super)`.
+pub(super) unsafe extern "C" fn init_idle_rq() {
     cffi::sched_class_register(IDLE_MAJOR_PRIORITY, SchedClass::Idle);
     alloc_idle_rqs();
 }

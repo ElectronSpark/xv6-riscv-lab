@@ -27,7 +27,9 @@ use crate::proc::access::{
 use crate::kstd::{result_to_errptr, Errno, KResult};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 use crate::proc::init_fifo_rq;
-use crate::proc::init_idle_rq;
+// P3-N-METH: `init_idle_rq` tightened to `pub(super)` (dropped from the
+// `pub use sched_idle::*` glob) — reach it by explicit module path.
+use crate::proc::sched_idle::init_idle_rq;
 
 const NCPU: usize = 8;
 const PRIORITY_MAINLEVELS: usize = 64;

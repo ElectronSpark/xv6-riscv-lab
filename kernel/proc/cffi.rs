@@ -15,29 +15,33 @@ use crate::mm::cffi::ListNode;
 // ===========================================================================
 // Priority encoding (mirror of inc/proc/rq.h)
 // ===========================================================================
-pub const PRIORITY_SUBLEVEL_MASK:     u8 = 0x03;
-pub const PRIORITY_MAINLEVEL_MASK:    u8 = 0xFC;
-pub const PRIORITY_MAINLEVEL_SHIFT:   u8 = 2;
+// P3-N-METH: `mod cffi` is private (see `proc/mod.rs`) and every consumer
+// is a `proc` submodule; the whole surface is tightened `pub` -> `pub(super)`
+// (= `crate::proc`), the smallest scope reaching sched_idle/sched_fifo/
+// proc_shims/signal. No out-of-proc caller exists.
+pub(super) const PRIORITY_SUBLEVEL_MASK:     u8 = 0x03;
+pub(super) const PRIORITY_MAINLEVEL_MASK:    u8 = 0xFC;
+pub(super) const PRIORITY_MAINLEVEL_SHIFT:   u8 = 2;
 
-pub const IDLE_MAJOR_PRIORITY:        i32 = 63;
-pub const FIFO_MAJOR_PRIORITY:        i32 = 17;
-pub const DEFAULT_MAJOR_PRIORITY:     i32 = 17;
+pub(super) const IDLE_MAJOR_PRIORITY:        i32 = 63;
+pub(super) const FIFO_MAJOR_PRIORITY:        i32 = 17;
+pub(super) const DEFAULT_MAJOR_PRIORITY:     i32 = 17;
 
-pub const PRIORITY_MAINLEVELS:        usize = 64;
-pub const FIFO_RQ_SUBLEVELS:          usize = 4;
+pub(super) const PRIORITY_MAINLEVELS:        usize = 64;
+pub(super) const FIFO_RQ_SUBLEVELS:          usize = 4;
 
-pub const NCPU:                       usize = 8;
+pub(super) const NCPU:                       usize = 8;
 
 // errno values (subset)
-pub const EINVAL: c_int = 22;
-pub const ENOENT: c_int = 2;
+pub(super) const EINVAL: c_int = 22;
+pub(super) const ENOENT: c_int = 2;
 
 #[inline]
-pub const fn major_priority(prio: i32) -> i32 {
+pub(super) const fn major_priority(prio: i32) -> i32 {
     ((prio as u32 & PRIORITY_MAINLEVEL_MASK as u32) >> PRIORITY_MAINLEVEL_SHIFT) as i32
 }
 #[inline]
-pub const fn minor_priority(prio: i32) -> i32 {
+pub(super) const fn minor_priority(prio: i32) -> i32 {
     (prio as u32 & PRIORITY_SUBLEVEL_MASK as u32) as i32
 }
 
@@ -63,39 +67,39 @@ pub const fn minor_priority(prio: i32) -> i32 {
 // opaque `Context` stand-in is dropped outright — the native
 // `SchedEntity.context` is the real `crate::bindings::context`.)
 // ===========================================================================
-pub type Thread = crate::bindings::thread;
+pub(super) type Thread = crate::bindings::thread;
 
-pub type cpumask_t = u64;
+pub(super) type cpumask_t = u64;
 
-pub use crate::proc::rq::{Rq, SchedEntity};
-pub use crate::proc::sched::SchedClass;
+pub(super) use crate::proc::rq::{Rq, SchedEntity};
+pub(super) use crate::proc::sched::SchedClass;
 
 // ===========================================================================
 // idle_rq / fifo_rq mirrors
 // ===========================================================================
 #[repr(C, align(64))]
-pub struct IdleRq {
-    pub rq:           Rq,
-    pub idle_thread:  *mut Thread,
+pub(super) struct IdleRq {
+    pub(super) rq:           Rq,
+    pub(super) idle_thread:  *mut Thread,
 }
 
 #[repr(C)]
-pub struct FifoSubqueue {
-    pub head:  ListNode,
-    pub count: c_int,
+pub(super) struct FifoSubqueue {
+    pub(super) head:  ListNode,
+    pub(super) count: c_int,
 }
 
 #[repr(C, align(64))]
-pub struct FifoRq {
-    pub rq:          Rq,
-    pub subqueues:   [FifoSubqueue; FIFO_RQ_SUBLEVELS],
-    pub ready_mask:  u8,
+pub(super) struct FifoRq {
+    pub(super) rq:          Rq,
+    pub(super) subqueues:   [FifoSubqueue; FIFO_RQ_SUBLEVELS],
+    pub(super) ready_mask:  u8,
 }
 
 // ===========================================================================
 // Raw extern declarations (kept in a private module).
 // ===========================================================================
-pub mod raw {
+pub(super) mod raw {
     use super::*;
 
     // P3-D2a: the run-queue glue entry points are ordinary Rust fns in
@@ -108,10 +112,10 @@ pub mod raw {
     // bottom of this file), so the pointer casts are ABI-identity.
     // (P3-10e: `sched_class` is no longer a pointer — `SchedClass` is a
     // closed-set enum passed by value, no cast needed.)
-    pub(crate) use crate::proc::{rq_clear_ready, rq_set_ready};
+    pub(in crate::proc) use crate::proc::{rq_clear_ready, rq_set_ready};
 
     #[inline]
-    pub fn rq_init(rq: *mut Rq) {
+    pub(in crate::proc) fn rq_init(rq: *mut Rq) {
         // SAFETY: `rq_init`'s precondition (valid, writable, non-null
         // `rq`) is enforced by its callers exactly as before, when this
         // was a `safe fn` extern redeclaration of the same symbol; the
@@ -120,7 +124,7 @@ pub mod raw {
     }
 
     #[inline]
-    pub fn rq_register(rq: *mut Rq, cls_id: c_int, cpu_id: c_int) {
+    pub(in crate::proc) fn rq_register(rq: *mut Rq, cls_id: c_int, cpu_id: c_int) {
         crate::proc::rq_register(rq as *mut crate::bindings::rq, cls_id, cpu_id)
     }
 
@@ -128,12 +132,12 @@ pub mod raw {
     // `SchedClass::Fifo`), so registration passes the variant by value —
     // no pointer, no cast.
     #[inline]
-    pub fn sched_class_register(id: c_int, cls: SchedClass) {
+    pub(in crate::proc) fn sched_class_register(id: c_int, cls: SchedClass) {
         crate::proc::sched_class_register(id, cls)
     }
 }
 
-pub use raw::*;
+pub(super) use raw::*;
 
 // ===========================================================================
 // Adapter helpers shared by the scheduler classes.
@@ -141,7 +145,7 @@ pub use raw::*;
 use crate::mm::cffi::raw as mm_raw;
 
 #[inline]
-pub fn kmm_alloc_zeroed(size: usize) -> *mut c_void {
+pub(super) fn kmm_alloc_zeroed(size: usize) -> *mut c_void {
     let p = mm_raw::kmm_alloc(size);
     if !p.is_null() {
         mm_raw::memset(p, 0, size);
@@ -150,32 +154,32 @@ pub fn kmm_alloc_zeroed(size: usize) -> *mut c_void {
 }
 
 #[inline]
-pub fn list_init(entry: *mut ListNode) {
+pub(super) fn list_init(entry: *mut ListNode) {
     mm_raw::xv6_list_init(entry);
 }
 
 #[inline]
-pub fn list_detach(entry: *mut ListNode) {
+pub(super) fn list_detach(entry: *mut ListNode) {
     mm_raw::xv6_list_detach(entry);
 }
 
 #[inline]
-pub fn list_first(head: *const ListNode) -> *mut ListNode {
+pub(super) fn list_first(head: *const ListNode) -> *mut ListNode {
     mm_raw::xv6_list_first(head)
 }
 
 // P3-D3c: `mm/cffi.rs`'s `xv6_list_push_back` is a plain (safe) crate-path
 // re-export now that its `#[no_mangle]` export is gone.
-pub(crate) use crate::mm::cffi::xv6_list_push_back;
+use crate::mm::cffi::xv6_list_push_back;
 
 #[inline]
-pub fn list_push_back(head: *mut ListNode, entry: *mut ListNode) {
+pub(super) fn list_push_back(head: *mut ListNode, entry: *mut ListNode) {
     xv6_list_push_back(head, entry);
 }
 
 /// `panic("...")`-equivalent: prints to console then halts.
 #[inline(never)]
-pub fn panic_proc(msg: &[u8]) -> ! {
+pub(super) fn panic_proc(msg: &[u8]) -> ! {
     debug_assert!(msg.last() == Some(&0), "panic msg must be NUL-terminated");
     mm_raw::__panic_start();
     crate::kprintln!("PANIC proc: {}", crate::printf::Cs(msg.as_ptr() as *const c_char));
