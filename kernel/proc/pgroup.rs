@@ -23,9 +23,13 @@ use crate::proc::access::{err_ptr, is_err_const};
 // (P3-D1a: formerly opaque `[u8; 0]` markers; now the real `crate::bindings`
 // types so the direct Rust calls into `proc_shims` type-check unchanged.)
 // ---------------------------------------------------------------------------
-pub type Thread      = crate::bindings::thread;
-pub type ThreadGroup = crate::bindings::thread_group;
-pub type Session     = crate::bindings::session;
+// `Thread`/`ThreadGroup` appear in `pub(crate)` fn signatures (e.g.
+// `pgroup_alloc`, `pgroup_add_thread`) so they must be `pub(crate)`; `Session`
+// only appears in `pub(super)` helpers (`pgroup_session_resolve/_store`), so it
+// tightens to `pub(super)`.
+pub(crate) type Thread      = crate::bindings::thread;
+pub(crate) type ThreadGroup = crate::bindings::thread_group;
+pub(super) type Session     = crate::bindings::session;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-N3.
@@ -50,26 +54,29 @@ pub type Session     = crate::bindings::session;
 /// bindgen's `get(0,1)`/`get(1,1)` accessors reproduced below.
 #[repr(C, align(8))]
 #[derive(Copy, Clone)]
-pub struct PgroupFlagBits {
+pub(crate) struct PgroupFlagBits {
     bits: u8,
     _pad: [u8; 7],
 }
 
 impl PgroupFlagBits {
+    // Read out-of-proc (`tty/session.rs` reads `(*pg).flags.exited()`), so this
+    // one stays `pub(crate)`; the other three are only reached in-proc
+    // (`proc_shims` bit macros / `access.rs`) → `pub(super)`.
     #[inline]
     pub(crate) fn exited(&self) -> u64 {
         (self.bits & 0b01) as u64
     }
     #[inline]
-    pub(crate) fn set_exited(&mut self, val: u64) {
+    pub(super) fn set_exited(&mut self, val: u64) {
         self.bits = (self.bits & !0b01) | ((val as u8) & 0b01);
     }
     #[inline]
-    pub(crate) fn is_kernel(&self) -> u64 {
+    pub(super) fn is_kernel(&self) -> u64 {
         ((self.bits >> 1) & 0b01) as u64
     }
     #[inline]
-    pub(crate) fn set_is_kernel(&mut self, val: u64) {
+    pub(super) fn set_is_kernel(&mut self, val: u64) {
         self.bits = (self.bits & !0b10) | (((val as u8) << 1) & 0b10);
     }
 }
@@ -95,7 +102,7 @@ const _: () = {
 
 /// Family tag for process-group keys — an ASCII marker, only its distinctness
 /// matters (it makes [`Pgid`] a different type from `Tid`/`Sid`).
-pub(crate) const PGID_TAG: u64 = u64::from_le_bytes(*b"PGROUP\0\0");
+const PGID_TAG: u64 = u64::from_le_bytes(*b"PGROUP\0\0");
 
 /// Typed generational handle to a live pgroup in [`PGROUP_TABLE`], distinct
 /// from the userspace numeric process-group id (the `Pgroup::pgid` field, still
@@ -103,17 +110,24 @@ pub(crate) const PGID_TAG: u64 = u64::from_le_bytes(*b"PGROUP\0\0");
 /// resolves to `None` through [`pgroup_lookup`].
 pub(crate) type Pgid = GenKey<PGID_TAG>;
 
+// `Pgroup` is `pub use`-re-exported crate-wide as `crate::bindings::pgroup`
+// (`bindings.rs`), so the struct itself must stay `pub` (a `pub use` of a
+// `pub(crate)` item is E0365). Per-field visibility is still minimized:
+// `list_entry`/`pgid`/`flags`/`threads`/`session` are touched out-of-proc
+// (`tty/session.rs`) → `pub(crate)`; `leader`/`t_cnt`/`p_cnt`/`thread_groups`
+// only in-proc (`proc_shims` field macros) → `pub(super)`; `self_pgid` only
+// in-file (the `key`/`set_key` methods) → private.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct Pgroup {
     pub(crate) list_entry: crate::list::ListNode,
     pub(crate) pgid: crate::bindings::pid_t,
-    pub(crate) leader: *mut crate::bindings::thread_group,
+    pub(super) leader: *mut crate::bindings::thread_group,
     pub(crate) flags: PgroupFlagBits,
-    pub(crate) t_cnt: core::ffi::c_int,
+    pub(super) t_cnt: core::ffi::c_int,
     pub(crate) threads: crate::list::ListNode,
-    pub(crate) p_cnt: core::ffi::c_int,
-    pub(crate) thread_groups: crate::list::ListNode,
+    pub(super) p_cnt: core::ffi::c_int,
+    pub(super) thread_groups: crate::list::ListNode,
     // N-R6d-2a: the session back-edge converted off `*mut session` to the
     // session family's generational key [`Sid`] (`GenKey<SID_TAG>`, 8
     // bytes/align 4 — the exact span the `*mut session` occupied, so this
@@ -136,7 +150,7 @@ pub struct Pgroup {
     // so growing the struct 96 → 104 is self-contained. `Pgid`'s internal layout
     // is unobserved externally; only its 8-byte tail placement matters (the
     // offset assert below pins it).
-    pub(crate) self_pgid: Pgid,
+    self_pgid: Pgid,
 }
 
 // P3-N3 hardcoded layout proof — values captured from the
@@ -229,7 +243,7 @@ impl Pgroup {
 /// freed → the "session gone" answer callers null-check). Caller holds
 /// `pid_lock` (reader or writer — [`session_lookup`](crate::tty::session::session_lookup)
 /// requires it; single non-looping generation-checked read, no `&Session`).
-pub(crate) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
+pub(super) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
     // SAFETY: `pg` is a live `*mut pgroup` (shim contract); forming the shared
     // `&self` for this single non-looping read of its own `session` `Sid` field
     // is race-free under the caller's `pid_lock` (writers need the exclusive
@@ -241,7 +255,7 @@ pub(crate) fn pgroup_session_resolve(pg: *mut Pgroup) -> *mut Session {
 /// Store `s` as pgroup `pg`'s `session` edge: `s == null` → `Sid::NONE`,
 /// otherwise `s`'s own cached [`Sid`] (`session.self_sid`). Caller holds
 /// `pid_wlock` (every `set_session` site does).
-pub(crate) fn pgroup_session_store(pg: *mut Pgroup, s: *mut Session) {
+pub(super) fn pgroup_session_store(pg: *mut Pgroup, s: *mut Session) {
     let sid = crate::tty::session::session_key_of(s);
     // SAFETY: `pg` is a live `*mut pgroup`; the exclusive `&mut self` write of
     // its own `session` field under the caller's `pid_wlock` is race-free.
@@ -556,7 +570,7 @@ pub(crate) fn pgroup_alloc(
 // type than this file's local `Thread` -- converted to a typed thin
 // wrapper at the call site, same precedent as `sysproc.rs`'s
 // `thread_clone`) -- demoted.
-pub(crate) extern "C" fn pgroup_init(initproc: *mut Thread) {
+pub(super) extern "C" fn pgroup_init(initproc: *mut Thread) {
     let ret = xv6_pgroup_slab_init();
     if ret != 0 {
         panic_pgroup("Failed to initialize pgroup slab cache");
@@ -670,7 +684,7 @@ pub(crate) fn pgroup_remove_tg(tg: *mut ThreadGroup) {
 // wave's `goldfish_rtc_init`/`sched_timer_add` precedent). Note: the file
 // already carries a blanket `#![allow(dead_code)]` (line 12), so this
 // per-item attribute is documentation, not a functional requirement.
-pub(crate) extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
+extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
     if pg.is_null() {
         return;
     }
@@ -685,7 +699,7 @@ pub(crate) extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
 
 // P3-1B: only called internally within this file (`pgroup_setpgid`) --
 // demoted.
-pub(crate) extern "C" fn pgroup_migrate_tg(
+extern "C" fn pgroup_migrate_tg(
     tg: *mut ThreadGroup,
     new_pg: *mut Pgroup,
 ) {
@@ -733,7 +747,7 @@ pub(crate) fn get_pgroup(pgid: i32) -> *mut Pgroup {
 
 // P3-1B: only caller is `proc/sysproc.rs::sys_setpgid` (crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
+pub(super) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
     let p = xv6_current_thread();
     let mut pid = pid;
     let mut pgid = pgid;
@@ -824,7 +838,7 @@ pub(crate) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
 
 // P3-1B: only caller is `proc/sysproc.rs::sys_getpgid` (crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn pgroup_getpgid(pid: i32) -> i32 {
+pub(super) extern "C" fn pgroup_getpgid(pid: i32) -> i32 {
     if pid == 0 {
         return t_pgid(xv6_current_thread());
     }

@@ -65,7 +65,7 @@ fn subqueue(fifo_rq: *mut FifoRq, minor_prio: c_int) -> *mut FifoSubqueue {
 // ---------------------------------------------------------------------------
 // sched_class callbacks
 // ---------------------------------------------------------------------------
-pub(crate) unsafe fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
+pub(super) unsafe fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     let fifo_rq = rq as *mut FifoRq;
     let mask = (*fifo_rq).ready_mask;
     if mask == 0 {
@@ -80,7 +80,7 @@ pub(crate) unsafe fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     cffi::list_first(&raw const (*sq).head) as *mut SchedEntity
 }
 
-pub(crate) unsafe fn fifo_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(super) unsafe fn fifo_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
@@ -89,7 +89,7 @@ pub(crate) unsafe fn fifo_enqueue_task(rq: *mut Rq, se: *mut SchedEntity) {
     (*fifo_rq).ready_mask |= 1u8 << idx;
 }
 
-pub(crate) unsafe fn fifo_dequeue_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(super) unsafe fn fifo_dequeue_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
@@ -100,7 +100,7 @@ pub(crate) unsafe fn fifo_dequeue_task(rq: *mut Rq, se: *mut SchedEntity) {
     }
 }
 
-pub(crate) unsafe fn fifo_put_prev_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(super) unsafe fn fifo_put_prev_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
@@ -109,7 +109,7 @@ pub(crate) unsafe fn fifo_put_prev_task(rq: *mut Rq, se: *mut SchedEntity) {
     cffi::rq_set_ready((*rq).class_id, (*rq).cpu_id);
 }
 
-pub(crate) unsafe fn fifo_set_next_task(rq: *mut Rq, se: *mut SchedEntity) {
+pub(super) unsafe fn fifo_set_next_task(rq: *mut Rq, se: *mut SchedEntity) {
     let fifo_rq = rq as *mut FifoRq;
     let idx = fifo_minor_prio(se);
     let sq = subqueue(fifo_rq, idx);
@@ -122,7 +122,7 @@ pub(crate) unsafe fn fifo_set_next_task(rq: *mut Rq, se: *mut SchedEntity) {
     }
 }
 
-pub(crate) unsafe fn fifo_select_task_rq(
+pub(super) unsafe fn fifo_select_task_rq(
     _prev_rq: *mut Rq,
     se: *mut SchedEntity,
     mut cpumask: cpumask_t,
@@ -229,7 +229,7 @@ fn alloc_fifo_rqs_for_cls(cls_id: c_int) {
 }
 
 // P3-1B: only caller is `init_fifo_rq` (same file) -- demoted.
-pub(crate) extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
+extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
     for cls in start_cls_id..end_cls_id {
         cffi::sched_class_register(cls, SchedClass::Fifo);
         alloc_fifo_rqs_for_cls(cls);
@@ -238,6 +238,6 @@ pub(crate) extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_i
 
 // P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn init_fifo_rq() {
+pub(super) extern "C" fn init_fifo_rq() {
     init_fifo_rq_range(1, IDLE_MAJOR_PRIORITY);
 }

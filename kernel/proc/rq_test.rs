@@ -441,7 +441,7 @@ fn test_affinity_change() {
 // --- main entry point -----------------------------------------------------
 // P3-D3c: `#[no_mangle] extern "C"` dropped (0-ref-verified, see module
 // doc); kept compiled under the module's `allow(dead_code)`.
-pub(crate) fn rq_test_run() {
+fn rq_test_run() {
     rq_test_raw! {
         crate::kprintln!("\n========================================");
         crate::kprintln!("Run Queue Priority Integration Tests");
