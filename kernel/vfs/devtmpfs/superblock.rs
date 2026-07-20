@@ -329,6 +329,29 @@ unsafe fn list_detach(node: *mut list_node_t) {
     }
 }
 
+/// Read-only forward iterator over the registry ring — `successors` over
+/// `list_first`/`list_next`, the `mm::slab::cache_registry_iter`/`vm_vma_iter`
+/// idiom (a72a0d7). Yields every live `*mut list_node_t` (== `*mut
+/// DevtmpfsNode`, offset 0) from first to last.
+///
+/// For **read-only** walks under a held `__DEVTMPFS_NODES` guard only. The
+/// lock-drop mutation walk in [`devtmpfs_post_mount_populate`] deliberately
+/// keeps its explicit hand-written loop (it captures `next` before dropping
+/// the lock and running a sleeping `mknod`, which this lazy iterator can't
+/// express — `successors` would re-read `list_next` on a node that may have
+/// been freed while the lock was dropped).
+///
+/// # Safety
+/// `head` must point to a live, initialized `list_node_t` ring head that
+/// stays locked (unmutated) for the lifetime of the returned iterator.
+unsafe fn devtmpfs_node_iter(head: *mut list_node_t) -> impl Iterator<Item = *mut list_node_t> {
+    let first = unsafe { list_first(head) };
+    core::iter::successors((!first.is_null()).then_some(first), move |&cur| {
+        let n = unsafe { list_next(head, cur) };
+        (!n.is_null()).then_some(n)
+    })
+}
+
 // ------------------------------------------------------------------ */
 //  Mount-point-agnostic helpers (use root inode, not "/dev/")
 // ------------------------------------------------------------------ */
@@ -381,19 +404,17 @@ unsafe fn __devtmpfs_walk_parent(
 
     if last_slash > 0 {
         let last_slash = last_slash as usize;
-        let mut start = 0usize;
-        while start < last_slash {
-            let mut end = start;
-            while end < last_slash && name_bytes[end] != b'/' {
-                end += 1;
-            }
-            if end == start {
-                start += 1;
+        // Path-component tokenizer -> `split('/')` iterator. Empty tokens
+        // (leading/consecutive slashes) are skipped exactly like the C's
+        // `end == start` continue; each token subslices `name_bytes`, so
+        // `token.as_ptr()`/`len()` reproduce the old `name.add(start)`/
+        // `end - start` byte-for-byte.
+        for token in name_bytes[..last_slash].split(|&b| b == b'/') {
+            if token.is_empty() {
                 continue;
             }
-
-            let comp = unsafe { name.add(start) };
-            let comp_len = end - start;
+            let comp = token.as_ptr() as *const c_char;
+            let comp_len = token.len();
 
             let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
             let ret = vfs_ilookup(dir, &mut dentry, comp, comp_len);
@@ -430,7 +451,6 @@ unsafe fn __devtmpfs_walk_parent(
                 };
                 dir = sub;
             }
-            start = end + 1;
         }
     }
 
@@ -757,17 +777,18 @@ pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
     // lock throughout.
     {
         let mut guard = __DEVTMPFS_NODES.lock();
-        unsafe {
-            let mut cur = list_first(&raw mut *guard);
-            while !cur.is_null() {
+        let head = &raw mut *guard;
+        // SAFETY: `guard` proves the lock is held; the ring is unmutated
+        // during the read-only `.find()`. `find` stops at the match, so the
+        // subsequent `list_detach` is NOT a mutation-during-walk.
+        if let Some(cur) = unsafe {
+            devtmpfs_node_iter(head).find(|&cur| {
                 let node = cur as *mut DevtmpfsNode;
-                if (*node).name_len == name_len && strncmp((*node).name, name, name_len) == 0 {
-                    list_detach(cur);
-                    found_node = node;
-                    break;
-                }
-                cur = list_next(&raw mut *guard, cur);
-            }
+                unsafe { (*node).name_len == name_len && strncmp((*node).name, name, name_len) == 0 }
+            })
+        } {
+            unsafe { list_detach(cur) };
+            found_node = cur as *mut DevtmpfsNode;
         }
     }
 
@@ -813,23 +834,20 @@ extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_vo
     // device_register already called devtmpfs_create_node after the
     // registry list was initialised). Avoid duplicates.
     let name_len = strlen(devname);
-    let mut found = false;
     // SAFETY: registry access guarded by `__DEVTMPFS_NODES`'s lock
-    // throughout.
-    {
+    // throughout; read-only `.any()` walk.
+    let found = {
         let mut guard = __DEVTMPFS_NODES.lock();
+        let head = &raw mut *guard;
         unsafe {
-            let mut cur = list_first(&raw mut *guard);
-            while !cur.is_null() {
+            devtmpfs_node_iter(head).any(|cur| {
                 let node = cur as *mut DevtmpfsNode;
-                if (*node).name_len == name_len && strncmp((*node).name, devname, name_len) == 0 {
-                    found = true;
-                    break;
+                unsafe {
+                    (*node).name_len == name_len && strncmp((*node).name, devname, name_len) == 0
                 }
-                cur = list_next(&raw mut *guard, cur);
-            }
+            })
         }
-    }
+    };
 
     if !found {
         // SAFETY: `dev` live per this function's own contract above.
@@ -852,19 +870,13 @@ pub(crate) extern "C" fn devtmpfs_populate_devices() {
     dev_for_each_device(__devtmpfs_register_one_device, ptr::null_mut());
 
     // Count how many nodes are now in the registry.
-    let mut count: c_int = 0;
     // SAFETY: registry access guarded by `__DEVTMPFS_NODES`'s lock
-    // throughout.
-    {
+    // throughout; read-only `.count()` walk.
+    let count = {
         let mut guard = __DEVTMPFS_NODES.lock();
-        unsafe {
-            let mut cur = list_first(&raw mut *guard);
-            while !cur.is_null() {
-                count += 1;
-                cur = list_next(&raw mut *guard, cur);
-            }
-        }
-    }
+        let head = &raw mut *guard;
+        unsafe { devtmpfs_node_iter(head).count() as c_int }
+    };
 
     crate::kprintln!("devtmpfs: populated {} device nodes from device table", count);
 }

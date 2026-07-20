@@ -70,6 +70,19 @@ pub struct TmpfsSbPrivate {
     pub next_ino: crate::bindings::uint64,
 }
 
+impl TmpfsSbPrivate {
+    /// Mirrors `tmpfs_ino_alloc()`: return the next inode number and
+    /// post-increment. Goal #1 method on the native tmpfs superblock-private
+    /// struct (`&mut self` exclusive receiver — no shared-`&` freeze/noalias
+    /// hazard; the C original's plain `next_ino++` under the alloc path).
+    #[inline]
+    fn ino_alloc(&mut self) -> u64 {
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        ino
+    }
+}
+
 /// Native `struct tmpfs_superblock` (`kernel/vfs/tmpfs/tmpfs_private.h`).
 #[repr(C, align(64))]
 pub struct TmpfsSuperblock {
@@ -218,16 +231,6 @@ pub(crate) extern "C" fn tmpfs_shrink_caches() {
     slab_cache_shrink(tmpfs_sb_cache(), 0x7fffffff);
 }
 
-fn __tmpfs_ino_alloc(private_data: *mut tmpfs_sb_private) -> u64 {
-    // SAFETY: caller (`tmpfs_alloc_inode`) holds a live superblock whose
-    // `fs_data` was set to `&sb->private_data` by `tmpfs_alloc_superblock`.
-    unsafe {
-        let ino = (*private_data).next_ino;
-        (*private_data).next_ino += 1;
-        ino
-    }
-}
-
 fn __tmpfs_alloc_inode_structure() -> *mut tmpfs_inode {
     let ti = slab_alloc(tmpfs_inode_cache()) as *mut tmpfs_inode;
     if ti.is_null() {
@@ -258,7 +261,9 @@ pub(crate) fn tmpfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut v
     if ti.is_null() {
         return Err(Errno::NoMem);
     }
-    let ino = __tmpfs_ino_alloc(private_data);
+    // SAFETY: caller (`tmpfs_alloc_inode`) holds a live superblock whose
+    // `fs_data` was set to `&sb->private_data` by `tmpfs_alloc_superblock`.
+    let ino = unsafe { (*private_data).ino_alloc() };
     // SAFETY: `ti` was just allocated above and is exclusively owned here.
     unsafe {
         (*ti).vfs_inode.ino = ino;
@@ -459,13 +464,12 @@ unsafe fn hlist_first_entry(hlist: *mut hlist_t) -> *mut hlist_entry_t {
         if hlist.is_null() {
             return ptr::null_mut();
         }
-        for i in 0..(*hlist).bucket_cnt {
-            let e = bucket_first_entry(hlist_bucket_at(hlist, i));
-            if !e.is_null() {
-                return e;
-            }
-        }
-        ptr::null_mut()
+        // First non-empty bucket's first entry (`bucket_cnt` is a
+        // loop-invariant field read once) -> range `.find()`.
+        (0..(*hlist).bucket_cnt)
+            .map(|i| unsafe { bucket_first_entry(hlist_bucket_at(hlist, i)) })
+            .find(|e| !e.is_null())
+            .unwrap_or(ptr::null_mut())
     }
 }
 

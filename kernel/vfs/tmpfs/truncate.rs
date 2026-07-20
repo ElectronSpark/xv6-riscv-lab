@@ -97,11 +97,13 @@ fn __tmpfs_truncate_shrink(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
     let old_size = unsafe { (*inode).size };
     let old_block_cnt = tmpfs_iblock(old_size + page_size - 1);
 
-    let mut blk = first_discard;
-    while blk < old_block_cnt {
+    // Fixed-stride block-index walk (both bounds captured once above under
+    // the inode mutex; `pcache_discard_blk` discards by block number and
+    // never mutates the iteration variable) -> range, matching xv6fs
+    // `xv6fs_itrunc`'s `for j in 0..N` block-walk style (e3cb8a0).
+    for blk in first_discard..old_block_cnt {
         let blkno_512 = (blk as u64) * PCACHE_BLKS_PER_PAGE;
         pcache_discard_blk(pc, blkno_512);
-        blk += 1;
     }
     0
 }
