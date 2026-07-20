@@ -411,6 +411,33 @@ impl VfsInode {
         // under it. `as_ref` yields `None` for a null pointer.
         unsafe { self.sb.as_ref() }
     }
+
+    /// Whether this inode is the local root of its own filesystem
+    /// (mirrors `fs.h`'s `static inline vfs_inode_is_local_root()`).
+    ///
+    /// N-METH: the shared `&self` method that unifies the two former
+    /// free-fn twins — `inode.rs`'s raw `vfs_inode_is_local_root(*mut
+    /// vfs_inode)` (now a thin null-tolerant delegate) and `fs.rs`'s
+    /// borrowed `inode_is_local_root(&vfs_inode)` (deleted, callers
+    /// repointed here). Only the **set-once** `sb`/`root_inode`/`parent`
+    /// fields are touched — no Freeze field, no loop — so the shared
+    /// borrow carries no freeze-noalias hazard, and routing the
+    /// superblock deref through [`VfsInode::superblock`] leaves the
+    /// method unsafe-free (the raw `(*sb).root_inode` block the `fs.rs`
+    /// free fn still carried collapses).
+    pub(crate) fn is_local_root(&self) -> bool {
+        let Some(sb) = self.superblock() else {
+            return false;
+        };
+        if ptr::eq(self, sb.root_inode) {
+            kassert!(
+                ptr::eq(self.parent, self),
+                "vfs_inode_is_local_root: root inode's parent is not itself"
+            );
+            return true;
+        }
+        false
+    }
 }
 
 /// The per-filesystem inode-operations vtable — wave P3-10b's
@@ -1034,26 +1061,17 @@ fn current_proc_rooti() -> *mut vfs_inode {
     unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) }
 }
 
-/// Mirrors `fs.h`'s `static inline vfs_inode_is_local_root()`.
+/// Mirrors `fs.h`'s `static inline vfs_inode_is_local_root()`. N-METH:
+/// a thin null-tolerant delegate to the shared [`VfsInode::is_local_root`]
+/// method (single source of truth for the set-once `sb`/`root_inode`/
+/// `parent` logic); the two raw callers here keep passing `*mut`.
 fn vfs_inode_is_local_root(inode: *mut vfs_inode) -> bool {
-    if inode.is_null() {
-        return false;
+    // SAFETY: null-tolerant — `as_ref` yields `None` for a null pointer;
+    // the method reads only set-once fields through the shared borrow.
+    match unsafe { inode.as_ref() } {
+        Some(i) => i.is_local_root(),
+        None => false,
     }
-    // SAFETY: non-null `inode`; only reads `sb`/`root_inode`/`parent`.
-    unsafe {
-        let sb = (*inode).sb;
-        if sb.is_null() {
-            return false;
-        }
-        if core::ptr::eq(inode, (*sb).root_inode) {
-            kassert!(
-                core::ptr::eq((*inode).parent, inode),
-                "vfs_inode_is_local_root: root inode's parent is not itself"
-            );
-            return true;
-        }
-    }
-    false
 }
 
 /// Mirrors `vfs_private.h`'s `static inline __vfs_inode_valid()`.

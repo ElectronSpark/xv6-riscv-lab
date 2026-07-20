@@ -829,7 +829,7 @@ use crate::vfs::fdtable::{__vfs_fdtable_global_init, vfs_fdtable_init};
 use crate::vfs::file::{__vfs_file_init, __vfs_file_shrink_cache};
 use crate::vfs::inode::{
     __vfs_inode_init, inode_ops, vfs_chroot, vfs_idup, vfs_idup_not_zero, vfs_ilock, vfs_iunlock,
-    vfs_iput, vfs_mkdir, vfs_namei,
+    vfs_iput, vfs_mkdir, vfs_namei, VfsInode,
 };
 use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
 use crate::vfs::vfs_syscall::vfs_mount_path;
@@ -1073,6 +1073,36 @@ unsafe fn sb_inodes_next(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut
     }
 }
 
+/// Iterator over `sb`'s inode-hash entries — the safe-shim form of the
+/// [`sb_inodes_first`]/[`sb_inodes_next`] cursor pair (N-METH goal #2).
+/// Replaces the manual `while !pos.is_null() { ...; pos =
+/// sb_inodes_next(sb, pos) }` cursor walks. Yields raw `*mut vfs_inode`
+/// (the item deref stays the caller's floor, exactly as
+/// [`vfs_dump_inodes`]'s `list_for_each!` keeps its item `unsafe`).
+///
+/// The lazy `successors` advance runs AFTER each loop body, so this is
+/// sound only for walks that neither unlink `pos` from the hash nor
+/// depend on capturing the successor *before* the body — hence
+/// [`evict_unused_inodes`] (unlinks `pos` via `vfs_remove_inode`) and
+/// `vfs_unmount_lazy`'s orphan pass (mutates inode state during the
+/// walk) keep their raw capture-next-first form; only the read-only
+/// [`dump_sb_inodes`] uses this iterator.
+///
+/// # Safety
+/// `sb` must point to a live, initialized `vfs_superblock` whose inode
+/// hash is not restructured for the lifetime of the returned iterator.
+unsafe fn sb_inodes_iter(sb: *mut vfs_superblock) -> impl Iterator<Item = *mut vfs_inode> {
+    // SAFETY: caller guarantees `sb` live (see the fn `# Safety`);
+    // `sb_inodes_first` is the audited cursor primitive.
+    let first = unsafe { sb_inodes_first(sb) };
+    core::iter::successors((!first.is_null()).then_some(first), move |&pos| {
+        // SAFETY: `pos` was yielded by this same walk, so it is currently
+        // linked into `sb->inodes`; the caller keeps the hash stable.
+        let next = unsafe { sb_inodes_next(sb, pos) };
+        (!next.is_null()).then_some(next)
+    })
+}
+
 // ===========================================================================
 // Module statics (all file-private in the C original — no `#[no_mangle]`).
 // ===========================================================================
@@ -1241,106 +1271,70 @@ unsafe fn superblock_mountcount(sb: *mut vfs_superblock) -> c_int {
     unsafe { sb_mountcount_atomic(sb).load(Ordering::SeqCst) }
 }
 
-/// Mirrors `fs.h`'s `static inline vfs_inode_is_local_root()`.
-///
-/// N-R5 (VFS-Arc diagnostic pilot): takes a borrowed `&vfs_inode` instead
-/// of a raw `*mut vfs_inode`. The sole caller (`turn_mountpoint`) holds a
-/// live, mutex-locked, non-null inode, so the borrow is sound and the
-/// null branch the raw form carried collapses (a reference is never null).
-/// Only the **set-once** `sb`/`parent` fields are touched here — no Freeze
-/// field (`flags`/`ref_count`/…), no loop — so this reference is free of
-/// the freeze-noalias hazard that gates the flags-reading paths.
-fn inode_is_local_root(inode: &vfs_inode) -> bool {
-    if inode.sb.is_null() {
-        return false;
-    }
-    // SAFETY: `sb` is a live superblock (just null-checked); `root_inode`
-    // is a set-once pointer field. Only a raw-pointer identity compare
-    // against the borrowed inode's address follows — no aliasing/mutation.
-    let root = unsafe { (*inode.sb).root_inode };
-    if ptr::eq(inode, root) {
-        kassert!(
-            ptr::eq(inode.parent, inode),
-            "vfs_inode_is_local_root: root inode's parent is not itself"
-        );
-        return true;
-    }
-    false
-}
-
 // ---------------------------------------------------------------------------
 // `vfs_private.h`'s `static inline` validity checks (no external linkage
 // in the C original).
+//
+// N-METH: the former borrowed free fns `inode_valid`/
+// `dir_inode_valid_holding` (N-R5b/N-R5c) became `&self` METHODS on
+// `VfsInode` (below); `inode_is_local_root` was unified into the shared
+// [`VfsInode::is_local_root`] method (defined in `inode.rs` next to
+// [`VfsInode::superblock`], since both twins now route through it). The
+// method bodies are byte-identical ports of the reference forms; each is
+// unsafe-free (every read is either a relaxed atomic `flags.valid()`, an
+// atomic mutex-holder load, or a set-once field reached through
+// `superblock()`), no loop, ephemeral borrow — freeze-noalias-free.
 // ---------------------------------------------------------------------------
 
-/// Mirrors `vfs_private.h`'s `static inline __vfs_inode_valid()`.
-///
-/// N-R5b (VFS-Arc reference conversion): takes a borrowed `&vfs_inode`
-/// instead of a raw `*mut vfs_inode`. Every caller (`vfs_unmount`,
-/// `vfs_unmount_lazy`) null-checks its inode and holds the inode mutex
-/// before calling, so the borrow is sound and the raw form's null branch
-/// collapses (a reference is never null). The fields read here are all
-/// now safe through a shared borrow: the `mutex` is reached only via an
-/// atomic holder load (`holding_mutex`), `flags.valid()` is a relaxed
-/// atomic load (a3a400b), and `sb` is a set-once pointer. The borrow is
-/// ephemeral (dropped at return), so it never races a later mutation of
-/// the same inode. No non-atomic inode field is read in a loop — free of
-/// the freeze-noalias hazard.
-///
-/// N-R5c (superblock reference conversion): the residual `unsafe`-wrapped
-/// `(*sb).flags.valid()` superblock deref — the raw-ptr floor N-R5b left
-/// standing — is now the safe [`VfsInode::superblock`] accessor
-/// (encapsulated set-once `*mut -> &`), and `flags.valid()` is a relaxed
-/// atomic load (N-R5c Step A). The function is now unsafe-free.
-fn inode_valid(inode: &vfs_inode) -> c_int {
-    // `holding_mutex` reads the mutex holder via a SeqCst atomic load; a
-    // raw pointer derived from the shared borrow of the interior-
-    // synchronized `mutex` field is sound to hand it.
-    if holding_mutex(&raw const inode.mutex as *mut _) == 0 {
-        return neg(EPERM);
-    }
-    if inode.flags.valid() == 0 {
-        return neg(EINVAL);
-    }
-    if !ptr::eq(inode, &raw const vfs_root_inode) {
-        // Superblock validity through the borrowed accessor: `None`
-        // (null `sb`) or `flags.valid() == 0` is the same EINVAL as the
-        // old `sb.is_null() || (*sb).flags.valid() == 0`.
-        if !matches!(inode.superblock(), Some(sb) if sb.flags.valid() != 0) {
-            crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
+impl VfsInode {
+    /// Validity check for a mutex-held inode (mirrors `vfs_private.h`'s
+    /// `static inline __vfs_inode_valid()`). N-METH method form of the
+    /// former `inode_valid(&vfs_inode)` free fn; callers (`vfs_unmount`,
+    /// `vfs_unmount_lazy`) hold the inode mutex first.
+    pub(crate) fn check_valid(&self) -> c_int {
+        // `holding_mutex` reads the mutex holder via a SeqCst atomic
+        // load; a raw pointer derived from the shared borrow of the
+        // interior-synchronized `mutex` field is sound to hand it.
+        if holding_mutex(&raw const self.mutex as *mut _) == 0 {
+            return neg(EPERM);
+        }
+        if self.flags.valid() == 0 {
             return neg(EINVAL);
         }
+        if !ptr::eq(self, &raw const vfs_root_inode) {
+            // Superblock validity through the borrowed accessor: `None`
+            // (null `sb`) or `flags.valid() == 0` is the same EINVAL as
+            // the old `sb.is_null() || (*sb).flags.valid() == 0`.
+            if !matches!(self.superblock(), Some(sb) if sb.flags.valid() != 0) {
+                crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
+                return neg(EINVAL);
+            }
+        }
+        0
     }
-    0
-}
 
-/// Mirrors `vfs_private.h`'s `static inline __vfs_dir_inode_valid_holding()`.
-///
-/// N-R5b (VFS-Arc reference conversion): borrowed `&vfs_inode` form — the
-/// directory-typed sibling of [`inode_valid`]. Both callers (`vfs_mount`,
-/// `vfs_get_mnt_rooti`) null-check and hold the inode mutex first, so the
-/// ephemeral borrow is sound. Reads only the now-safe set: the `mutex`
-/// (via atomic holder load), `flags.valid()` (relaxed atomic), the
-/// set-once `mode`/`sb`. No loop, no mutation — freeze-noalias-free.
-///
-/// N-R5c: the residual superblock deref is now the safe
-/// [`VfsInode::superblock`] accessor — the function is unsafe-free.
-fn dir_inode_valid_holding(inode: &vfs_inode) -> c_int {
-    if holding_mutex(&raw const inode.mutex as *mut _) == 0 {
-        return neg(EPERM);
-    }
-    if inode.flags.valid() == 0 {
-        return neg(EINVAL);
-    }
-    if !is_dir(inode.mode) {
-        return neg(EINVAL);
-    }
-    if !ptr::eq(inode, &raw const vfs_root_inode) {
-        if !matches!(inode.superblock(), Some(sb) if sb.flags.valid() != 0) {
+    /// Validity check for a mutex-held **directory** inode (mirrors
+    /// `vfs_private.h`'s `static inline __vfs_dir_inode_valid_holding()`).
+    /// N-METH method form of the former `dir_inode_valid_holding(&vfs_inode)`
+    /// free fn; callers (`vfs_mount`, `vfs_get_mnt_rooti`) hold the inode
+    /// mutex first.
+    pub(crate) fn dir_check_valid_holding(&self) -> c_int {
+        if holding_mutex(&raw const self.mutex as *mut _) == 0 {
+            return neg(EPERM);
+        }
+        if self.flags.valid() == 0 {
             return neg(EINVAL);
         }
+        if !is_dir(self.mode) {
+            return neg(EINVAL);
+        }
+        if !ptr::eq(self, &raw const vfs_root_inode) {
+            if !matches!(self.superblock(), Some(sb) if sb.flags.valid() != 0) {
+                return neg(EINVAL);
+            }
+        }
+        0
     }
-    0
 }
 
 /******************************************************************************
@@ -1590,7 +1584,7 @@ unsafe fn turn_mountpoint(mountpoint: *mut vfs_inode) -> c_int {
         if !is_dir((*mountpoint).mode) {
             return neg(ENOTDIR);
         }
-        if inode_is_local_root(&*mountpoint) {
+        if (*mountpoint).is_local_root() {
             return neg(EBUSY);
         }
         if (*mountpoint).flags.mount() != 0 {
@@ -1966,7 +1960,7 @@ pub(crate) extern "C" fn vfs_mount(
             return neg(EPERM);
         }
 
-        ret_val = dir_inode_valid_holding(&*mountpoint);
+        ret_val = (*mountpoint).dir_check_valid_holding();
         if ret_val != 0 {
             crate::kprintln!("vfs_mount: mountpoint inode not valid, errno={}", ret_val);
             return ret_val;
@@ -2181,7 +2175,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         if holding_mutex(&raw mut (*mountpoint).mutex) == 0 {
             return neg(EPERM);
         }
-        let mut ret_val = inode_valid(&*mountpoint);
+        let mut ret_val = (*mountpoint).check_valid();
         if ret_val != 0 {
             return ret_val;
         }
@@ -2208,7 +2202,7 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         if holding_mutex(&raw mut (*mounted_inode).mutex) == 0 {
             return neg(EPERM);
         }
-        ret_val = inode_valid(&*mounted_inode);
+        ret_val = (*mounted_inode).check_valid();
         if ret_val != 0 {
             return ret_val;
         }
@@ -2400,7 +2394,7 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
             return neg(EPERM);
         }
 
-        let ret = inode_valid(&*mountpoint);
+        let ret = (*mountpoint).check_valid();
         if ret != 0 {
             return ret;
         }
@@ -2512,7 +2506,7 @@ pub(crate) extern "C" fn vfs_get_mnt_rooti(
         }
         let ret_val;
         vfs_ilock(mountpoint);
-        ret_val = dir_inode_valid_holding(&*mountpoint);
+        ret_val = (*mountpoint).dir_check_valid_holding();
         if ret_val != 0 {
             vfs_iunlock(mountpoint);
             return ret_val;
@@ -3304,13 +3298,13 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
         let mut inode_count = 0;
         let mut active_count = 0;
 
-        let mut pos = sb_inodes_first(sb);
-        while !pos.is_null() {
+        // N-METH goal #2: read-only inode-hash count walk via the
+        // `sb_inodes_iter` shim (was a manual `sb_inodes_next` cursor).
+        for pos in sb_inodes_iter(sb) {
             inode_count += 1;
             if (*pos).ref_count > 0 {
                 active_count += 1;
             }
-            pos = sb_inodes_next(sb, pos);
         }
 
         crate::kprintln!(
@@ -3323,10 +3317,9 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
             active_count,
         );
 
-        pos = sb_inodes_first(sb);
-        while !pos.is_null() {
-            let inode = pos;
-            pos = sb_inodes_next(sb, pos);
+        // N-METH goal #2: read-only inode-hash detail walk via the
+        // `sb_inodes_iter` shim (was a manual `sb_inodes_next` cursor).
+        for inode in sb_inodes_iter(sb) {
             if (*inode).ref_count > 0 || (*inode).n_links > 0 {
                 crate::kprint!(
                     "    ino={} type={} ref={} n_links={} valid={} dirty={} destroying={} orphan={}",
