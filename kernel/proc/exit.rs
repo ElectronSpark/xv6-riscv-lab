@@ -105,15 +105,17 @@ mod raw {
     // stays unchanged (`Thread`/`ThreadGroup` are plain aliases of the
     // `crate::bindings` structs, so the signatures are identical).
     pub(crate) use crate::proc::{
-        __proctab_get_initproc, get_pid_thread, kill_thread,
-        pgroup_remove_thread, sigpending_destroy, sigpending_empty,
+        __proctab_get_initproc, get_pid_thread,
+        pgroup_remove_thread,
         signal_pending,
     };
     // RUSTIFY-PROC: `thread_group_{put,remove}` + `thread_is_group_leader`
-    // tightened to `pub(super)` in thread_group.rs (in-proc callers only);
-    // re-export them at the matching narrower visibility so this file's
-    // `raw::NAME` -> `ffi::NAME` shim keeps resolving.
+    // (thread_group.rs) and `kill_thread`/`sigpending_destroy`/
+    // `sigpending_empty` (signal.rs) tightened to `pub(super)` (in-proc
+    // callers only); re-export them at the matching narrower visibility so
+    // this file's `raw::NAME` -> `ffi::NAME` shim keeps resolving.
     pub(super) use crate::proc::{
+        kill_thread, sigpending_destroy, sigpending_empty,
         thread_group_put, thread_group_remove, thread_is_group_leader,
     };
 
