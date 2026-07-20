@@ -9,6 +9,20 @@
 //! `xv6_tqport_*` alias layer that used to front these was collapsed in
 //! the P3-1B2 sweep, and the `#[no_mangle] extern "C"` export surface
 //! itself was dismantled in P3-D2a (dead exports deleted).
+//!
+//! N-METH (RUSTIFY-PROC): the per-object algorithms that used to be
+//! free `*_impl(q: *mut …)` fns are now inherent METHODS on the
+//! `TqRef`/`TtreeRef`/`TnodeRef` *handles* (defined in
+//! [`crate::proc::access`]). The handles read/write the underlying C
+//! struct through a `NonNull` raw pointer -- crucially, no `&Tq`/`&Ttree`/
+//! `&Tnode` reference is ever formed, so the Freeze-`noalias` read-hoist
+//! hazard that would fire on a `&self` method of the (`Copy`, `UnsafeCell`-
+//! free => `Freeze`) native structs is structurally avoided: every field
+//! touch is a raw load/store the optimizer may not reorder across the
+//! `scheduler_yield()` park point. The crate-wide `pub(crate)` entry
+//! points below stay thin free fns (their callers hold raw `*mut tq_t`
+//! into by-value-embedded queues all over the kernel); each just null-
+//! checks via `tq_of`/`tt_of`/`tn_of` and delegates to the method.
 
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
@@ -28,7 +42,7 @@ use crate::machine::{intr_off_save, intr_restore};
 use crate::proc::access::{
     err_ptr_errno as err_ptr, is_err, is_err_or_null, ptr_err_errno as ptr_err,
     tnode_from_list_entry, tnode_from_tree_entry, write_out, ListNodeRef, TnodeRef, TqRef,
-    TtreeRef, zero_tnode_ptr, zeroed_tnode,
+    TtreeRef, zeroed_tnode, zero_tnode_ptr,
 };
 use crate::list::ListNode;
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
@@ -341,196 +355,452 @@ fn name_or_null(name: *const c_char) -> *const c_char {
     if name.is_null() { NULL_NAME.as_ptr() as *const c_char } else { name }
 }
 
-fn tq_init_impl(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t) {
-    let Some(qr) = tq_of(q) else { return };
-    qr.head_ref().init();
-    qr.set_counter(0);
-    qr.set_name(name_or_null(name));
-    qr.set_lock_ptr(lock);
+// A forward walk over a doubly-linked `ListNode` ring whose structure is
+// stable for the walk's duration (payload fields may be mutated per node,
+// but no node is inserted/detached mid-walk). `head` is the sentinel: the
+// walk yields `head.next`, `head.next.next`, ... and stops before revisiting
+// `head`. Each hop reads `.next` through a `ListNodeRef` handle (a raw
+// pointer load) -- no `&ListNode` is formed, so there is no Freeze-noalias
+// read-hoist. Used only by [`TqRef::bulk_move_from`]'s re-parent pass.
+#[inline]
+fn list_ring_walk(
+    first: *mut crate::bindings::list_node_t,
+    head: *mut crate::bindings::list_node_t,
+) -> impl Iterator<Item = *mut crate::bindings::list_node_t> {
+    core::iter::successors(
+        (first != head).then_some(first),
+        move |&cur| {
+            let next = ln_of(cur)?.next_ptr();
+            (next != head).then_some(next)
+        },
+    )
 }
 
-pub(crate) fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t) {
-    tq_init_impl(q, name, lock);
-}
-
-fn ttree_init_impl(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t) {
-    let Some(qr) = tt_of(q) else { return };
-    qr.set_root_node(null_mut());
-    qr.set_root_opts(q_root_opts());
-    qr.set_counter(0);
-    qr.set_name(name_or_null(name));
-    qr.set_lock_ptr(lock);
-}
-
-pub(crate) fn ttree_init(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t) {
-    ttree_init_impl(q, name, lock);
-}
-
-fn tnode_init_impl(node: *mut tnode_t) {
-    zero_tnode_ptr(node);
-    let Some(nr) = tn_of(node) else { return };
-    nr.to_none();
-    nr.set_error_no(0);
-    nr.set_thread_ptr(xv6_current_thread());
-}
-
-fn tq_size_impl(q: *mut tq_t) -> c_int {
-    match tq_of(q) {
-        Some(qr) => qr.counter(),
-        None => -EINVAL,
+// ===========================================================================
+// Node (`tnode_t`) operations -- inherent methods on the `TnodeRef` handle.
+//
+// N-METH: `tnode_init_impl`/`tnode_get_queue_impl`/`tnode_in_tree`/
+// `do_wakeup` were free fns taking a raw `*mut tnode_t`; each first did a
+// `tn_of(node)` null-guard, so the natural receiver is exactly that guarded
+// handle. `TnodeRef` wraps a `NonNull<Tnode>` and touches fields through the
+// raw pointer, so `&self` here carries no `&Tnode` and no Freeze hazard --
+// the waiter's `queue`/`error_no` fields are read fresh after the park even
+// though another hart cleared them under the queue lock.
+// ===========================================================================
+impl<'a> TnodeRef<'a> {
+    /// Zero the node, mark it detached, and stamp the current thread as
+    /// its owner -- the pre-park setup for a stack-local waiter.
+    /// (Former free fn `tnode_init_impl`.)
+    #[inline]
+    fn init_waiter(&self) {
+        zero_tnode_ptr(self.as_ptr());
+        self.to_none();
+        self.set_error_no(0);
+        self.set_thread_ptr(xv6_current_thread());
     }
+
+    /// The list queue this node is enqueued on, or null if it is not a
+    /// list node. (Former free fn `tnode_get_queue_impl`.)
+    #[inline]
+    fn list_queue(&self) -> *mut tq_t {
+        if self.type_get() != TYPE_LIST { return null_mut(); }
+        self.list_queue_ptr()
+    }
+
+    /// Whether this node is currently enqueued on tree `q`.
+    /// (Former free fn `tnode_in_tree`.)
+    #[inline]
+    fn in_tree(&self, q: *mut ttree_t) -> bool {
+        if q.is_null() { return false; }
+        if self.type_get() != TYPE_TREE { return false; }
+        self.tree_queue_ptr() == q
+    }
+
+    /// Record the wake result on this (already-dequeued) waiter and hand
+    /// its thread to the scheduler. (Former free fn `do_wakeup`.)
+    fn do_wakeup(&self, error_no: c_int, rdata: u64) -> *mut thread {
+        if self.thread_ptr().is_null() {
+            crate::kprintln!("woken thread is NULL");
+            return err_ptr::<thread>(EINVAL);
+        }
+        self.set_error_no(error_no);
+        self.set_data(rdata);
+        let p = self.thread_ptr();
+        scheduler_wakeup(p);
+        p
+    }
+}
+
+// ===========================================================================
+// List queue (`tq_t`) operations -- inherent methods on the `TqRef` handle.
+//
+// N-METH: the `tq_*_impl` free fns are now `&self` methods on `TqRef`.
+// Same freeze-safety argument as `TnodeRef`: `TqRef` is a `NonNull<Tq>`
+// handle, every `counter`/`head` touch is a raw load/store, so no `&Tq`
+// ever exists and LLVM applies no `noalias`/`readonly` to the queue --
+// mandatory here because `counter` is mutated by other harts (under the
+// queue's own spinlock, held by the caller) between our reads.
+// ===========================================================================
+impl<'a> TqRef<'a> {
+    /// (Former free fn `tq_init_impl`.)
+    fn init(&self, name: *const c_char, lock: *mut spinlock_t) {
+        self.head_ref().init();
+        self.set_counter(0);
+        self.set_name(name_or_null(name));
+        self.set_lock_ptr(lock);
+    }
+
+    /// Number of waiters. (Former free fn `tq_size_impl`, valid-queue path.)
+    #[inline]
+    fn size(&self) -> c_int {
+        self.counter()
+    }
+
+    /// (Former free fn `tq_push_impl`.)
+    fn push(&self, node: *mut tnode_t) -> c_int {
+        let Some(nr) = tn_of(node) else { return -EINVAL };
+        if nr.thread_ptr().is_null() { return -EINVAL; }
+        if nr.is_enqueued() { return -EINVAL; }
+        nr.to_list();
+        nr.list_entry_ref().push_back(self.head_ptr());
+        nr.set_list_queue(self.as_ptr());
+        self.inc_counter();
+        fence(Ordering::SeqCst);
+        0
+    }
+
+    /// (Former free fn `tq_first_impl`.)
+    fn first(&self) -> *mut tnode_t {
+        let c = self.counter();
+        if c == 0 { return null_mut(); }
+        if c < 0 { return err_ptr::<tnode_t>(EINVAL); }
+        let head = self.head_ptr();
+        let first = self.head_ref().next_ptr();
+        if first == head {
+            xv6_panic(c"tq_first: queue is not empty but failed to get the first node".as_ptr());
+        }
+        tnode_from_list_entry(first)
+    }
+
+    /// (Former free fn `tq_remove_impl`.)
+    fn remove(&self, node: *mut tnode_t) -> c_int {
+        let Some(nr) = tn_of(node) else { return -EINVAL };
+        if nr.thread_ptr().is_null() { return -EINVAL; }
+        if nr.list_queue() != self.as_ptr() { return -EINVAL; }
+        if self.counter() <= 0 {
+            xv6_panic(c"tq_remove: queue is empty".as_ptr());
+        }
+        nr.list_entry_ref().detach();
+        nr.to_none();
+        self.dec_counter();
+        fence(Ordering::SeqCst);
+        0
+    }
+
+    /// (Former free fn `tq_pop_impl`, valid-queue path.)
+    fn pop(&self) -> *mut tnode_t {
+        let dequeued = self.first();
+        if is_err_or_null(dequeued) { return dequeued; }
+        let q_of = tn_of(dequeued).map_or(null_mut(), |r| r.list_queue());
+        if q_of != self.as_ptr() {
+            xv6_panic(c"tq_pop: dequeued node is not in the expected queue".as_ptr());
+        }
+        let ret = self.remove(dequeued);
+        if ret == 0 { dequeued } else { err_ptr::<tnode_t>(-ret) }
+    }
+
+    /// Splice every waiter of `from` onto the tail of `self` (which must be
+    /// empty) and re-parent each moved node's `queue` back-pointer.
+    /// (Former free fn `tq_bulk_move_impl`.)
+    fn bulk_move_from(&self, from: TqRef<'_>) -> c_int {
+        if self.as_ptr() == from.as_ptr() { return -EINVAL; }
+        if self.counter() > 0 { return -ENOTEMPTY; }
+        let from_count = from.counter();
+        if from_count == 0 { return 0; }
+        if from_count < 0 { return -EINVAL; }
+        self.add_counter(from_count);
+        from.set_counter(0);
+
+        let to_head = self.head_ptr();
+        let from_head = from.head_ptr();
+        let to_tail = self.head_ref().prev_ptr();
+        if let Some(tail) = ln_of(to_tail) {
+            tail.insert_bulk_from_head(from_head);
+        }
+
+        // Re-parent pass: walk the now-spliced ring and point every node's
+        // list back-pointer at `self`. Structure is stable across this walk
+        // (no detach), so it is a read-only structural traversal expressed
+        // as an iterator; only each node's `queue` payload is written.
+        for cur in list_ring_walk(self.head_ref().next_ptr(), to_head) {
+            let proc = tnode_from_list_entry(cur);
+            if let Some(pr) = tn_of(proc) { pr.set_list_queue(self.as_ptr()); }
+        }
+        0
+    }
+
+    /// Park the calling thread on this queue until woken/interrupted.
+    /// (Former free fn `tq_wait_cb_impl`, valid-queue path.)
+    fn wait_cb(
+        &self,
+        sleep_callback: sleep_callback_t,
+        wakeup_callback: wakeup_callback_t,
+        callback_data: *mut c_void,
+        rdata: *mut u64,
+    ) -> c_int {
+        let intr = intr_off_save();
+        let mut waiter: tnode_t = zeroed_tnode();
+        let waiter_ptr = &raw mut waiter;
+        let wr = tn_of(waiter_ptr).unwrap();
+        wr.init_waiter();
+        wr.set_error_no(-EINTR);
+        if self.push(waiter_ptr) != 0 {
+            xv6_panic(c"Failed to push thread to sleep queue".as_ptr());
+        }
+
+        let mut cb_status: c_int = 0;
+        if let Some(cb) = sleep_callback {
+            cb_status = invoke_sleep_cb(cb, callback_data);
+        }
+        scheduler_yield();
+        if let Some(cb) = wakeup_callback {
+            invoke_wakeup_cb(cb, callback_data, cb_status);
+        }
+
+        if wr.is_enqueued() {
+            if self.remove(waiter_ptr) != 0 {
+                xv6_panic(c"Failed to remove interrupted waiter from queue".as_ptr());
+            }
+        }
+        intr_restore(intr);
+
+        if !rdata.is_null() {
+            write_out(rdata, wr.data());
+        }
+        wr.error_no()
+    }
+
+    /// Spinlock-backed park (releases/reacquires `lock` around the block).
+    /// (Former free fn `tq_wait_impl`, valid-queue path.)
+    #[inline]
+    fn wait(&self, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
+        self.wait_cb(Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
+    }
+
+    /// Pop and wake a single waiter. (Former free fn `tq_wakeup_one`,
+    /// valid-queue path.)
+    fn wakeup_one(&self, error_no: c_int, rdata: u64) -> *mut thread {
+        let woken = self.pop();
+        if is_err_or_null(woken) { return err_cast::<tnode_t, thread>(woken); }
+        // `woken` is non-null and valid here (the `is_err_or_null` guard).
+        tn_of(woken).map_or(err_ptr::<thread>(EINVAL), |r| r.do_wakeup(error_no, rdata))
+    }
+
+    /// Drain the queue, waking every waiter. (Former free fn body of
+    /// `tq_wakeup_all`.) This is a wake+dequeue drain -- each `wakeup_one`
+    /// structurally pops a node -- so it stays a raw `loop`, not an iterator.
+    fn wakeup_all(&self, error_no: c_int, rdata: u64) -> c_int {
+        let mut counter: c_int = 0;
+        loop {
+            let p = self.wakeup_one(error_no, rdata);
+            if p.is_null() {
+                if self.counter() != 0 {
+                    xv6_panic(c"Queue counter is not zero when queue is empty".as_ptr());
+                }
+                break;
+            }
+            if is_err(p) { return ptr_err(p); }
+            counter += 1;
+        }
+        counter
+    }
+}
+
+// ===========================================================================
+// Tree queue (`ttree_t`) operations -- inherent methods on `TtreeRef`.
+//
+// N-METH: same handle-receiver / freeze-safety story as `TqRef`.
+// ===========================================================================
+impl<'a> TtreeRef<'a> {
+    /// (Former free fn `ttree_init_impl`.)
+    fn init(&self, name: *const c_char, lock: *mut spinlock_t) {
+        self.set_root_node(null_mut());
+        self.set_root_opts(q_root_opts());
+        self.set_counter(0);
+        self.set_name(name_or_null(name));
+        self.set_lock_ptr(lock);
+    }
+
+    /// The smallest-key node with `key`, or null. (Former free fn
+    /// `ttree_find_key_min`.)
+    fn find_key_min(&self, key: uint64) -> *mut tnode_t {
+        let mut dummy_root: rb_root = self.root_copy();
+        dummy_root.opts = q_root_rdown_opts();
+
+        let mut dummy: tnode_t = zeroed_tnode();
+        tn_of(&raw mut dummy).unwrap().set_tree_key(key);
+
+        let node = rb_find_key_rup(&raw mut dummy_root, &raw const dummy as uint64);
+        if node.is_null() { return null_mut(); }
+        let target = tnode_from_tree_entry(node);
+        match tn_of(target) {
+            Some(r) if r.tree_key() == key => target,
+            _ => null_mut(),
+        }
+    }
+
+    /// (Former free fn `ttree_add_impl`.)
+    fn add(&self, node: *mut tnode_t) -> c_int {
+        let Some(nr) = tn_of(node) else { return -EINVAL };
+        if nr.thread_ptr().is_null() { return -EINVAL; }
+        if nr.is_enqueued() { return -EINVAL; }
+        nr.to_tree();
+        nr.set_tree_queue(self.as_ptr());
+        let entry = nr.tree_entry_ptr();
+        let inserted = rb_insert_color(self.root_ptr(), entry);
+        if inserted != entry {
+            xv6_panic(c"Failed to insert node into tree".as_ptr());
+        }
+        self.inc_counter();
+        fence(Ordering::SeqCst);
+        0
+    }
+
+    /// Unchecked removal (caller has already confirmed membership).
+    /// (Former free fn `ttree_do_remove`.)
+    fn do_remove(&self, node: *mut tnode_t) -> c_int {
+        let Some(nr) = tn_of(node) else { return -EINVAL };
+        let removed = rb_delete_node_color(self.root_ptr(), nr.tree_entry_ptr());
+        if removed.is_null() { return -ENOENT; }
+        nr.to_none();
+        self.dec_counter();
+        fence(Ordering::SeqCst);
+        0
+    }
+
+    /// Membership-checked removal. (Former free fn `ttree_remove_impl`,
+    /// valid-queue path.)
+    fn remove(&self, node: *mut tnode_t) -> c_int {
+        if node.is_null() { return -EINVAL; }
+        if !tn_of(node).map_or(false, |r| r.in_tree(self.as_ptr())) { return -EINVAL; }
+        self.do_remove(node)
+    }
+
+    /// Park the calling thread on this tree keyed by `key`.
+    /// (Former free fn `ttree_wait_cb_impl`, valid-queue path.)
+    fn wait_cb(
+        &self,
+        key: uint64,
+        sleep_callback: sleep_callback_t,
+        wakeup_callback: wakeup_callback_t,
+        callback_data: *mut c_void,
+        rdata: *mut u64,
+    ) -> c_int {
+        let intr = intr_off_save();
+        let mut waiter: tnode_t = zeroed_tnode();
+        let waiter_ptr = &raw mut waiter;
+        let wr = tn_of(waiter_ptr).unwrap();
+        wr.init_waiter();
+        wr.set_error_no(-EINTR);
+        wr.set_tree_key(key);
+
+        if self.add(waiter_ptr) != 0 {
+            xv6_panic(c"Failed to push thread to sleep tree".as_ptr());
+        }
+
+        let mut cb_status: c_int = 0;
+        if let Some(cb) = sleep_callback {
+            cb_status = invoke_sleep_cb(cb, callback_data);
+        }
+        scheduler_yield();
+        if let Some(cb) = wakeup_callback {
+            invoke_wakeup_cb(cb, callback_data, cb_status);
+        }
+
+        if wr.is_enqueued() {
+            if self.remove(waiter_ptr) != 0 {
+                xv6_panic(c"Failed to remove interrupted waiter from tree".as_ptr());
+            }
+        }
+        intr_restore(intr);
+
+        if !rdata.is_null() {
+            write_out(rdata, wr.data());
+        }
+        wr.error_no()
+    }
+
+    /// Spinlock-backed keyed park. (Former free fn `ttree_wait_impl`,
+    /// valid-queue path.)
+    #[inline]
+    fn wait(&self, key: uint64, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
+        self.wait_cb(key, Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
+    }
+
+    /// Wake the smallest-key waiter matching `key`. (Former free fn
+    /// `ttree_wakeup_one_impl`, valid-queue path.)
+    fn wakeup_one(&self, key: uint64, error_no: c_int, rdata: u64) -> *mut thread {
+        let target = self.find_key_min(key);
+        if target.is_null() { return err_ptr::<thread>(ENOENT); }
+        let ret = self.do_remove(target);
+        if ret != 0 { return err_ptr::<thread>(-ret); }
+        tn_of(target).map_or(err_ptr::<thread>(EINVAL), |r| r.do_wakeup(error_no, rdata))
+    }
+
+    /// Wake every waiter matching `key`. (Former free fn
+    /// `ttree_wakeup_key_impl`, valid-queue path.) Wake+dequeue drain ->
+    /// stays a raw `loop`.
+    fn wakeup_key(&self, key: uint64, error_no: c_int, rdata: u64) -> c_int {
+        let mut count = 0;
+        loop {
+            let p = self.wakeup_one(key, error_no, rdata);
+            if is_err_or_null(p) { break; }
+            count += 1;
+        }
+        if count == 0 { -ENOENT } else { 0 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Crate-facing entry points.
+//
+// These stay thin free fns: their callers hold raw `*mut tq_t`/`*mut ttree_t`
+// into queues embedded by value all over the kernel (`workqueue.idle_queue`,
+// `rwsem.read_queue`, pipe/tty/log/completion/... wait queues), so a raw-ptr
+// signature is the honest ABI. Each null-checks via `tq_of`/`tt_of`/`tn_of`
+// and delegates to the method above, reproducing the exact null->error
+// behaviour the former `*_impl` layer encoded.
+//
+// Visibility (N-METH goal C): tightened from the blanket `pub(crate)` that
+// the de-C-ification left behind to the smallest scope that compiles. The
+// four `ttree_*`/`tnode_get_thread` entry points are called ONLY from
+// `crate::proc::sched` (grep-verified), so they are `pub(super)` (visible in
+// the `proc` module, reached as `crate::proc::X` via `mod.rs`'s
+// `pub use thread_queue::*`). The `tq_*` entry points keep `pub(crate)`:
+// each has real callers outside `kernel/proc/` (lock/, vfs/, mm/, virtio,
+// tty, and -- for `tq_wait` -- `crate::sync`'s `SpinLockGuard::wait_on`).
+// ---------------------------------------------------------------------------
+pub(crate) fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t) {
+    if let Some(r) = tq_of(q) { r.init(name, lock); }
+}
+
+pub(super) fn ttree_init(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t) {
+    if let Some(r) = tt_of(q) { r.init(name, lock); }
 }
 
 pub(crate) fn tq_size(q: *mut tq_t) -> c_int {
-    tq_size_impl(q)
+    match tq_of(q) { Some(r) => r.size(), None => -EINVAL }
 }
 
-fn tnode_get_queue_impl(node: *mut tnode_t) -> *mut tq_t {
-    let Some(nr) = tn_of(node) else { return null_mut() };
-    if nr.type_get() != TYPE_LIST { return null_mut(); }
-    nr.list_queue_ptr()
-}
-
-fn tnode_get_thread_impl(node: *mut tnode_t) -> *mut thread {
-    match tn_of(node) {
-        Some(nr) => nr.thread_ptr(),
-        None => null_mut(),
-    }
-}
-
-pub(crate) fn tnode_get_thread(node: *mut tnode_t) -> *mut thread {
-    tnode_get_thread_impl(node)
-}
-
-// ---------------------------------------------------------------------------
-// List queue operations
-// ---------------------------------------------------------------------------
-fn tq_push_impl(q: *mut tq_t, node: *mut tnode_t) -> c_int {
-    let Some(qr) = tq_of(q) else { return -EINVAL };
-    let Some(nr) = tn_of(node) else { return -EINVAL };
-    if nr.thread_ptr().is_null() { return -EINVAL; }
-    if nr.is_enqueued() { return -EINVAL; }
-    nr.to_list();
-    nr.list_entry_ref().push_back(qr.head_ptr());
-    nr.set_list_queue(q);
-    qr.inc_counter();
-    fence(Ordering::SeqCst);
-    0
-}
-
-fn tq_first_impl(q: *mut tq_t) -> *mut tnode_t {
-    let Some(qr) = tq_of(q) else { return err_ptr::<tnode_t>(EINVAL) };
-    let c = qr.counter();
-    if c == 0 { return null_mut(); }
-    if c < 0 { return err_ptr::<tnode_t>(EINVAL); }
-    let head = qr.head_ptr();
-    let first = qr.head_ref().next_ptr();
-    if first == head {
-        xv6_panic(c"tq_first: queue is not empty but failed to get the first node".as_ptr());
-    }
-    tnode_from_list_entry(first)
-}
-
-fn tq_remove_impl(q: *mut tq_t, node: *mut tnode_t) -> c_int {
-    let Some(qr) = tq_of(q) else { return -EINVAL };
-    let Some(nr) = tn_of(node) else { return -EINVAL };
-    if nr.thread_ptr().is_null() { return -EINVAL; }
-    if tnode_get_queue_impl(node) != q { return -EINVAL; }
-    if qr.counter() <= 0 {
-        xv6_panic(c"tq_remove: queue is empty".as_ptr());
-    }
-    nr.list_entry_ref().detach();
-    nr.to_none();
-    qr.dec_counter();
-    fence(Ordering::SeqCst);
-    0
-}
-
-fn tq_pop_impl(q: *mut tq_t) -> *mut tnode_t {
-    if q.is_null() { return err_ptr::<tnode_t>(EINVAL); }
-    let dequeued = tq_first_impl(q);
-    if is_err_or_null(dequeued) { return dequeued; }
-    if tnode_get_queue_impl(dequeued) != q {
-        xv6_panic(c"tq_pop: dequeued node is not in the expected queue".as_ptr());
-    }
-    let ret = tq_remove_impl(q, dequeued);
-    if ret == 0 { dequeued } else { err_ptr::<tnode_t>(-ret) }
-}
-
-fn tq_bulk_move_impl(to: *mut tq_t, from: *mut tq_t) -> c_int {
-    let Some(to_r) = tq_of(to) else { return -EINVAL };
-    let Some(from_r) = tq_of(from) else { return -EINVAL };
-    if to == from { return -EINVAL; }
-    if to_r.counter() > 0 { return -ENOTEMPTY; }
-    let from_count = from_r.counter();
-    if from_count == 0 { return 0; }
-    if from_count < 0 { return -EINVAL; }
-    to_r.add_counter(from_count);
-    from_r.set_counter(0);
-
-    let to_head = to_r.head_ptr();
-    let from_head = from_r.head_ptr();
-    let to_tail = to_r.head_ref().prev_ptr();
-    if let Some(tail) = ln_of(to_tail) {
-        tail.insert_bulk_from_head(from_head);
-    }
-
-    let mut cur = to_r.head_ref().next_ptr();
-    while cur != to_head {
-        let lr = match ln_of(cur) { Some(r) => r, None => break };
-        let next = lr.next_ptr();
-        let proc = tnode_from_list_entry(cur);
-        if let Some(pr) = tn_of(proc) { pr.set_list_queue(to); }
-        cur = next;
-    }
-    0
+pub(super) fn tnode_get_thread(node: *mut tnode_t) -> *mut thread {
+    match tn_of(node) { Some(r) => r.thread_ptr(), None => null_mut() }
 }
 
 pub(crate) fn tq_bulk_move(to: *mut tq_t, from: *mut tq_t) -> c_int {
-    tq_bulk_move_impl(to, from)
-}
-
-// ---------------------------------------------------------------------------
-// Wait primitives
-// ---------------------------------------------------------------------------
-fn tq_wait_cb_impl(
-    q: *mut tq_t,
-    sleep_callback: sleep_callback_t,
-    wakeup_callback: wakeup_callback_t,
-    callback_data: *mut c_void,
-    rdata: *mut u64,
-) -> c_int {
-    if q.is_null() { return -EINVAL; }
-    let intr = intr_off_save();
-    let mut waiter: tnode_t = zeroed_tnode();
-    let waiter_ptr = &raw mut waiter;
-    tnode_init_impl(waiter_ptr);
-    let wr = tn_of(waiter_ptr).unwrap();
-    wr.set_error_no(-EINTR);
-    if tq_push_impl(q, waiter_ptr) != 0 {
-        xv6_panic(c"Failed to push thread to sleep queue".as_ptr());
+    match (tq_of(to), tq_of(from)) {
+        (Some(t), Some(f)) => t.bulk_move_from(f),
+        _ => -EINVAL,
     }
-
-    let mut cb_status: c_int = 0;
-    if let Some(cb) = sleep_callback {
-        cb_status = invoke_sleep_cb(cb, callback_data);
-    }
-    scheduler_yield();
-    if let Some(cb) = wakeup_callback {
-        invoke_wakeup_cb(cb, callback_data, cb_status);
-    }
-
-    if wr.is_enqueued() {
-        if tq_remove_impl(q, waiter_ptr) != 0 {
-            xv6_panic(c"Failed to remove interrupted waiter from queue".as_ptr());
-        }
-    }
-    intr_restore(intr);
-
-    if !rdata.is_null() {
-        write_out(rdata, wr.data());
-    }
-    wr.error_no()
 }
 
 pub(crate) fn tq_wait_cb(
@@ -540,232 +810,48 @@ pub(crate) fn tq_wait_cb(
     callback_data: *mut c_void,
     rdata: *mut u64,
 ) -> c_int {
-    tq_wait_cb_impl(q, sleep_callback, wakeup_callback, callback_data, rdata)
-}
-
-fn tq_wait_impl(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
-    tq_wait_cb_impl(q, Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
+    match tq_of(q) {
+        Some(r) => r.wait_cb(sleep_callback, wakeup_callback, callback_data, rdata),
+        None => -EINVAL,
+    }
 }
 
 pub(crate) fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
-    tq_wait_impl(q, lock, rdata)
-}
-
-// ---------------------------------------------------------------------------
-// Wakeup helpers
-// ---------------------------------------------------------------------------
-fn do_wakeup(woken: *mut tnode_t, error_no: c_int, rdata: u64) -> *mut thread {
-    let Some(wr) = tn_of(woken) else { return err_ptr::<thread>(EINVAL) };
-    if wr.thread_ptr().is_null() {
-        crate::kprintln!("woken thread is NULL");
-        return err_ptr::<thread>(EINVAL);
-    }
-    wr.set_error_no(error_no);
-    wr.set_data(rdata);
-    let p = wr.thread_ptr();
-    scheduler_wakeup(p);
-    p
-}
-
-fn tq_wakeup_one(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread {
-    if q.is_null() { return err_ptr::<thread>(EINVAL); }
-    let woken = tq_pop_impl(q);
-    if is_err_or_null(woken) { return err_cast::<tnode_t, thread>(woken); }
-    do_wakeup(woken, error_no, rdata)
+    match tq_of(q) { Some(r) => r.wait(lock, rdata), None => -EINVAL }
 }
 
 pub(crate) fn tq_wakeup(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread {
-    tq_wakeup_one(q, error_no, rdata)
+    match tq_of(q) { Some(r) => r.wakeup_one(error_no, rdata), None => err_ptr::<thread>(EINVAL) }
 }
 
 pub(crate) fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int {
-    let Some(qr) = tq_of(q) else { return -EINVAL };
-    let mut counter: c_int = 0;
-    loop {
-        let p = tq_wakeup_one(q, error_no, rdata);
-        if p.is_null() {
-            if qr.counter() != 0 {
-                xv6_panic(c"Queue counter is not zero when queue is empty".as_ptr());
-            }
-            break;
-        }
-        if is_err(p) { return ptr_err(p); }
-        counter += 1;
-    }
-    counter
+    match tq_of(q) { Some(r) => r.wakeup_all(error_no, rdata), None => -EINVAL }
 }
 
-// ---------------------------------------------------------------------------
-// Tree queue operations
-// ---------------------------------------------------------------------------
-fn tnode_in_tree(q: *mut ttree_t, node: *mut tnode_t) -> bool {
-    let Some(nr) = tn_of(node) else { return false };
-    if q.is_null() { return false; }
-    if nr.type_get() != TYPE_TREE { return false; }
-    nr.tree_queue_ptr() == q
-}
-
-fn ttree_find_key_min(q: *mut ttree_t, key: uint64) -> *mut tnode_t {
-    let Some(qr) = tt_of(q) else { return null_mut() };
-    let mut dummy_root: rb_root = qr.root_copy();
-    dummy_root.opts = q_root_rdown_opts();
-
-    let mut dummy: tnode_t = zeroed_tnode();
-    let dr = tn_of(&raw mut dummy).unwrap();
-    dr.set_tree_key(key);
-
-    let node = rb_find_key_rup(&raw mut dummy_root, &raw const dummy as uint64);
-    if node.is_null() { return null_mut(); }
-    let target = tnode_from_tree_entry(node);
-    let tr = match tn_of(target) { Some(r) => r, None => return null_mut() };
-    if tr.tree_key() != key { return null_mut(); }
-    target
-}
-
-fn ttree_add_impl(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
-    let Some(qr) = tt_of(q) else { return -EINVAL };
-    let Some(nr) = tn_of(node) else { return -EINVAL };
-    if nr.thread_ptr().is_null() { return -EINVAL; }
-    if nr.is_enqueued() { return -EINVAL; }
-    nr.to_tree();
-    nr.set_tree_queue(q);
-    let entry = nr.tree_entry_ptr();
-    let inserted = rb_insert_color(qr.root_ptr(), entry);
-    if inserted != entry {
-        xv6_panic(c"Failed to insert node into tree".as_ptr());
-    }
-    qr.inc_counter();
-    fence(Ordering::SeqCst);
-    0
-}
-
-fn ttree_do_remove(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
-    let Some(qr) = tt_of(q) else { return -EINVAL };
-    let Some(nr) = tn_of(node) else { return -EINVAL };
-    let removed = rb_delete_node_color(qr.root_ptr(), nr.tree_entry_ptr());
-    if removed.is_null() { return -ENOENT; }
-    nr.to_none();
-    qr.dec_counter();
-    fence(Ordering::SeqCst);
-    0
-}
-
-fn ttree_remove_impl(q: *mut ttree_t, node: *mut tnode_t) -> c_int {
-    if q.is_null() || node.is_null() { return -EINVAL; }
-    if !tnode_in_tree(q, node) { return -EINVAL; }
-    ttree_do_remove(q, node)
-}
-
-fn ttree_wait_cb_impl(
-    q: *mut ttree_t,
-    key: uint64,
-    sleep_callback: sleep_callback_t,
-    wakeup_callback: wakeup_callback_t,
-    callback_data: *mut c_void,
-    rdata: *mut u64,
-) -> c_int {
-    if q.is_null() { return -EINVAL; }
-    let intr = intr_off_save();
-    let mut waiter: tnode_t = zeroed_tnode();
-    let waiter_ptr = &raw mut waiter;
-    tnode_init_impl(waiter_ptr);
-    let wr = tn_of(waiter_ptr).unwrap();
-    wr.set_error_no(-EINTR);
-    wr.set_tree_key(key);
-
-    if ttree_add_impl(q, waiter_ptr) != 0 {
-        xv6_panic(c"Failed to push thread to sleep tree".as_ptr());
-    }
-
-    let mut cb_status: c_int = 0;
-    if let Some(cb) = sleep_callback {
-        cb_status = invoke_sleep_cb(cb, callback_data);
-    }
-    scheduler_yield();
-    if let Some(cb) = wakeup_callback {
-        invoke_wakeup_cb(cb, callback_data, cb_status);
-    }
-
-    if wr.is_enqueued() {
-        if ttree_remove_impl(q, waiter_ptr) != 0 {
-            xv6_panic(c"Failed to remove interrupted waiter from tree".as_ptr());
-        }
-    }
-    intr_restore(intr);
-
-    if !rdata.is_null() {
-        write_out(rdata, wr.data());
-    }
-    wr.error_no()
-}
-
-fn ttree_wait_impl(
+pub(super) fn ttree_wait(
     q: *mut ttree_t,
     key: uint64,
     lock: *mut spinlock_t,
     rdata: *mut u64,
 ) -> c_int {
-    ttree_wait_cb_impl(q, key, Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
+    match tt_of(q) { Some(r) => r.wait(key, lock, rdata), None => -EINVAL }
 }
 
-pub(crate) fn ttree_wait(
-    q: *mut ttree_t,
-    key: uint64,
-    lock: *mut spinlock_t,
-    rdata: *mut u64,
-) -> c_int {
-    ttree_wait_impl(q, key, lock, rdata)
-}
-
-fn ttree_wakeup_one_impl(
-    q: *mut ttree_t,
-    key: uint64,
-    error_no: c_int,
-    rdata: u64,
-) -> *mut thread {
-    if q.is_null() { return err_ptr::<thread>(EINVAL); }
-    let target = ttree_find_key_min(q, key);
-    if target.is_null() { return err_ptr::<thread>(ENOENT); }
-    let ret = ttree_do_remove(q, target);
-    if ret != 0 { return err_ptr::<thread>(-ret); }
-    do_wakeup(target, error_no, rdata)
-}
-
-fn ttree_wakeup_key_impl(
+pub(super) fn ttree_wakeup_key(
     q: *mut ttree_t,
     key: uint64,
     error_no: c_int,
     rdata: u64,
 ) -> c_int {
-    if q.is_null() { return -EINVAL; }
-    let mut count = 0;
-    loop {
-        let p = ttree_wakeup_one_impl(q, key, error_no, rdata);
-        if is_err_or_null(p) { break; }
-        count += 1;
-    }
-    if count == 0 { return -ENOENT; }
-    0
-}
-
-pub(crate) fn ttree_wakeup_key(
-    q: *mut ttree_t,
-    key: uint64,
-    error_no: c_int,
-    rdata: u64,
-) -> c_int {
-    ttree_wakeup_key_impl(q, key, error_no, rdata)
+    match tt_of(q) { Some(r) => r.wakeup_key(key, error_no, rdata), None => -EINVAL }
 }
 
 // The backwards-compat `xv6_tqport_*` C-ABI alias layer that used to
 // front these entry points was collapsed in the P3-1B2 sweep; P3-D2a
-// then dismantled the `#[no_mangle] extern "C"` export surface itself:
-// the live entry points above are plain `pub(crate)` fns, and the dead
-// exports (tq_set_lock/ttree_set_lock/tnode_init/ttree_size/
-// tnode_get_queue/tnode_get_tree/tnode_get_errno/tq_push/tq_first/
-// tq_remove/tq_pop/ttree_add/ttree_first/ttree_key_min/ttree_remove/
-// ttree_wait_cb/ttree_wakeup_one/ttree_wakeup_all -- 0-ref verified
-// crate-wide) were deleted outright, along with the `_impl` bodies only
-// they referenced. The internal `_impl` helpers that live callers still
-// share (tq_push_impl, tq_remove_impl, ttree_add_impl, ttree_remove_impl,
-// ttree_wait_cb_impl, ttree_wakeup_one_impl, ...) are unchanged.
+// then dismantled the `#[no_mangle] extern "C"` export surface itself.
+// N-METH folded the former internal `_impl` helpers (tq_push_impl,
+// tq_remove_impl, ttree_add_impl, ttree_remove_impl, ttree_wait_cb_impl,
+// ttree_wakeup_one_impl, tnode_init_impl, tnode_get_queue_impl, do_wakeup,
+// tnode_in_tree, ...) into inherent methods on the
+// `TqRef`/`TtreeRef`/`TnodeRef` handles above; the thin `pub` entry points
+// are the only free-fn surface that remains.
