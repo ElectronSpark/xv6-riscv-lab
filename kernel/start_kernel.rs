@@ -99,7 +99,7 @@ use crate::ipi::{cpus_init, ipi_init, mycpu_init};
 use crate::irq::irq_core::irq_desc_init;
 use crate::irq::plic::{plicinit, plicinithart};
 use crate::irq::trap::{trapinit, trapinithart};
-use crate::proc::{Scheduler, workqueue_init, workqueue_runtime_smoke_test, workqueue_test_launch_tests};
+use crate::proc::{Scheduler, Workqueue, workqueue_test_launch_tests};
 // NO-STANDALONE-FN: the thread bring-up entry points are now associated fns on
 // `Thread` (`proctab_init`/`userinit`/`install_user_root`/`idle_init`).
 use crate::proc::thread::Thread;
@@ -287,7 +287,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Thread::proctab_init(); // process table
         tty_init(); // Initialize TTY subsystem
         Scheduler::init(); // initialize the scheduler
-        workqueue_init(); // workqueue subsystem initialization
+        Workqueue::init(); // workqueue subsystem initialization
         irq_desc_init(); // IRQ descriptor initialization
         trapinit(); // trap vectors
         trapinithart(); // install kernel trap vector
@@ -487,7 +487,7 @@ pub(crate) fn start_kernel_post_init() {
     #[cfg(feature = "workqueue_smoke_test")]
     // SAFETY: single call, thread context.
     unsafe {
-        workqueue_runtime_smoke_test();
+        Workqueue::runtime_smoke_test();
     }
 
     // Phase 4 (docs/rustify/test_port_plan.md) in-kernel suite:

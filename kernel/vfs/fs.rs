@@ -780,7 +780,7 @@ fn kobject_put(obj: *mut kobject) {
 // P3-D3b: proc/workqueue.rs's entry points (the deferred-iput workqueue)
 // are plain safe Rust fns now that their `#[no_mangle]` exports are
 // gone; reached via the `crate::proc` glob re-export.
-use crate::proc::{create_work_struct, free_work_struct, queue_work, workqueue_create};
+use crate::proc::{WorkStruct, Workqueue};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -1721,7 +1721,7 @@ pub(crate) extern "C" fn vfs_init() {
         // vfs_superblock_wlock). Must happen before any file operation
         // that might use RCU.
         __VFS_DEFERRED_IPUT_WQ =
-            workqueue_create(c"vfs_iput_wq".as_ptr(), 1);
+            Workqueue::create(c"vfs_iput_wq".as_ptr(), 1);
         kassert!(!__VFS_DEFERRED_IPUT_WQ.is_null(), "Failed to create vfs_iput workqueue");
 
         let thread = xv6_current_thread();
@@ -1803,7 +1803,7 @@ unsafe extern "C" fn iput_work_func(work: *mut work_struct) {
     unsafe {
         let inode = (*work).data as *mut vfs_inode;
         vfs_iput(inode);
-        free_work_struct(work);
+        WorkStruct::free(work);
     }
 }
 
@@ -1815,7 +1815,7 @@ unsafe fn queue_deferred_iput(inode: *mut vfs_inode) {
             vfs_iput(inode);
             return;
         }
-        let work = create_work_struct(Some(iput_work_func), inode as u64);
+        let work = WorkStruct::create(Some(iput_work_func), inode as u64);
         if work.is_null() {
             crate::kprintln!(
                 "__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput"
@@ -1823,7 +1823,7 @@ unsafe fn queue_deferred_iput(inode: *mut vfs_inode) {
             vfs_iput(inode);
             return;
         }
-        queue_work(wq, work);
+        Workqueue::queue(wq, work);
     }
 }
 

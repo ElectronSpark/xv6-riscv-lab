@@ -335,7 +335,6 @@ pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
 // entry points are plain safe Rust fns now that their `#[no_mangle]`
 // exports are gone; re-exported here so the module-wide `use ffi::*`
 // keeps resolving them (the extern redeclarations above are deleted).
-pub(crate) use crate::proc::{init_work_struct, queue_work, workqueue_create};
 // P3-D2a: proc/sched.rs wake/sleep entry points and proc/thread_queue.rs
 // primitives, reached as plain crate-path items instead of the `extern
 // "C"` redeclarations that used to sit in the block above.
@@ -1136,7 +1135,7 @@ impl PcacheHandle {
     // -- flush work / workqueue -----------------------------------------
     fn init_flush_work(self, func: unsafe extern "C" fn(*mut WorkStruct)) {
         let w = unsafe { addr_of_mut!((*self.raw()).flush_work) };
-        init_work_struct(w, Some(func), self.raw() as u64);
+        WorkStruct::init(w, Some(func), self.raw() as u64);
     }
     fn queue_flush_work(self) -> bool {
         let wq = unsafe { *PCACHE_GLOBAL_FLUSH_WQ.get() };
@@ -1144,7 +1143,7 @@ impl PcacheHandle {
             return false;
         }
         let w = unsafe { addr_of_mut!((*self.raw()).flush_work) };
-        queue_work(wq, w)
+        Workqueue::queue(wq, w)
     }
 
     // -- zero-init check (pcache_init precondition) ----------------------
@@ -2593,7 +2592,7 @@ pub(crate) fn pcache_global_init() {
     xv6_pcache_globals_init();
     let ret = xv6_pcache_node_slab_init();
     assert_msg(ret == 0, b"Failed to initialize pcache node slab\0");
-    let wq = (workqueue_create(PCACHE_FLUSH_WQ_NAME.as_ptr() as *const c_char, WORKQUEUE_DEFAULT_MAX_ACTIVE));
+    let wq = (Workqueue::create(PCACHE_FLUSH_WQ_NAME.as_ptr() as *const c_char, WORKQUEUE_DEFAULT_MAX_ACTIVE));
     assert_msg(!wq.is_null(), b"Failed to create global pcache flush workqueue\0");
     xv6_pcache_set_flush_wq(wq);
     crate::kprintln!("Page cache subsystem initialized");

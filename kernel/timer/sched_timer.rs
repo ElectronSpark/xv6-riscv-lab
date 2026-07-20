@@ -85,7 +85,7 @@ use crate::proc::Scheduler;
 // P3-D3b: proc/workqueue.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached via the
 // `crate::proc` glob re-export like `scheduler_yield`/`wakeup` above.
-use crate::proc::{init_work_struct, queue_work, workqueue_create};
+use crate::proc::{WorkStruct, Workqueue};
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
@@ -276,7 +276,7 @@ unsafe extern "C" fn timer_callback(tn: *mut timer_node) {
     let wq = SCHED_TIMER_WQ.load(Ordering::Relaxed);
     // SAFETY: `stw` is live and non-null; `&raw mut (*stw).work` is the
     // embedded work item `alloc_sched_timer_work` initialized.
-    let ok = unsafe { queue_work(wq, &raw mut (*stw).work) };
+    let ok = unsafe { Workqueue::queue(wq, &raw mut (*stw).work) };
     if !ok {
         crate::kprintln!("warning: __sched_timer_add_timer_callback: Failed to queue work");
         // SAFETY: `stw` is live and non-null; queueing failed so it will
@@ -311,7 +311,7 @@ unsafe fn alloc_sched_timer_work(
         // for 1:1 fidelity -- the node is actually removed after its first
         // firing regardless of the value passed).
         timer_node_init(&raw mut (*stw).tn, deadline, Some(timer_callback), stw as *mut c_void, 1);
-        init_work_struct(&raw mut (*stw).work, Some(work_callback), stw as u64);
+        WorkStruct::init(&raw mut (*stw).work, Some(work_callback), stw as u64);
     }
     stw
 }
@@ -505,7 +505,7 @@ pub(crate) fn sched_timer_init() {
     unsafe { timer_init(sched_timer_ptr()) };
     SCHED_TICK_CLEAR.store(false, Ordering::Relaxed);
 
-    let wq = workqueue_create(c"sched_timer_wq".as_ptr(), WORKQUEUE_DEFAULT_MAX_ACTIVE);
+    let wq = Workqueue::create(c"sched_timer_wq".as_ptr(), WORKQUEUE_DEFAULT_MAX_ACTIVE);
     SCHED_TIMER_WQ.store(wq, Ordering::Relaxed);
     sched_timer_assert(!wq.is_null(), line!(), c"sched_timer_init", c"Failed to create scheduler timer workqueue");
 

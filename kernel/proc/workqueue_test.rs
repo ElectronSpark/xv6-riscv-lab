@@ -83,10 +83,7 @@ use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{work_struct, workqueue, workqueue_callbacks};
-use crate::proc::{
-    create_work_struct, create_work_struct_ex, free_work_struct, queue_work, workqueue_create,
-    workqueue_create_with_callbacks, workqueue_kill,
-};
+use crate::proc::{WorkStruct, Workqueue};
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
@@ -187,14 +184,14 @@ fn t1_ctor_invoked_on_create() {
         worker_ctor: None,
         worker_dtor: None,
     };
-    let wq = workqueue_create_with_callbacks(c"wqtest_t1".as_ptr(), 1, &callbacks);
+    let wq = Workqueue::create_with_callbacks(c"wqtest_t1".as_ptr(), 1, &callbacks);
     if wq.is_null() {
         case_fail();
         return;
     }
     check_eq!(CTOR_CALLS.load(Ordering::SeqCst), 1);
     check_eq!(DTOR_CALLS.load(Ordering::SeqCst), 0);
-    workqueue_kill(wq);
+    Workqueue::kill(wq);
 }
 
 // ===========================================================================
@@ -211,14 +208,14 @@ fn t2_dtor_invoked_once_on_kill() {
         worker_ctor: None,
         worker_dtor: None,
     };
-    let wq = workqueue_create_with_callbacks(c"wqtest_t2".as_ptr(), 1, &callbacks);
+    let wq = Workqueue::create_with_callbacks(c"wqtest_t2".as_ptr(), 1, &callbacks);
     if wq.is_null() {
         case_fail();
         return;
     }
-    check_eq!(workqueue_kill(wq), 0);
+    check_eq!(Workqueue::kill(wq), 0);
     check_eq!(DTOR_CALLS.load(Ordering::SeqCst), 1);
-    check_eq!(workqueue_kill(wq), 0);
+    check_eq!(Workqueue::kill(wq), 0);
     check_eq!(DTOR_CALLS.load(Ordering::SeqCst), 1);
 }
 
@@ -226,7 +223,7 @@ fn t2_dtor_invoked_once_on_kill() {
 // T3: work_struct field integrity + invalid-flags rejection.
 // ===========================================================================
 fn t3_work_struct_field_integrity() {
-    let work = create_work_struct_ex(Some(cb_noop), None, 0x5678, WORK_STRUCT_FLAG_RUN_ON_DRAIN);
+    let work = WorkStruct::create_ex(Some(cb_noop), None, 0x5678, WORK_STRUCT_FLAG_RUN_ON_DRAIN);
     if work.is_null() {
         case_fail();
         return;
@@ -238,13 +235,13 @@ fn t3_work_struct_field_integrity() {
         check_eq!((*work).data, 0x5678u64);
         check_eq!((*work).flags, WORK_STRUCT_FLAG_RUN_ON_DRAIN);
     }
-    free_work_struct(work);
+    WorkStruct::free(work);
 
     // Invalid flags mask: `create_work_struct_ex` checks validity before
     // allocating and fails closed (returns NULL), unlike
     // `init_work_struct_ex` which panics on the same input — this suite
     // only ever exercises the fail-closed `create_*` entry points.
-    let bad = create_work_struct_ex(Some(cb_noop), None, 0, WORK_STRUCT_FLAG_INVALID);
+    let bad = WorkStruct::create_ex(Some(cb_noop), None, 0, WORK_STRUCT_FLAG_INVALID);
     check!(bad.is_null());
 }
 
@@ -253,23 +250,23 @@ fn t3_work_struct_field_integrity() {
 // ===========================================================================
 fn t4_queue_work_runs_async() {
     RUN_COUNT.store(0, Ordering::SeqCst);
-    let wq = workqueue_create(c"wqtest_t4".as_ptr(), 2);
+    let wq = Workqueue::create(c"wqtest_t4".as_ptr(), 2);
     if wq.is_null() {
         case_fail();
         return;
     }
-    let work = create_work_struct(Some(cb_run_counter), 0);
+    let work = WorkStruct::create(Some(cb_run_counter), 0);
     if work.is_null() {
         case_fail();
-        workqueue_kill(wq);
+        Workqueue::kill(wq);
         return;
     }
-    check!(queue_work(wq, work));
+    check!(Workqueue::queue(wq, work));
     if !wait_for(&RUN_COUNT, 1, 2000) {
         case_fail();
     }
-    free_work_struct(work);
-    workqueue_kill(wq);
+    WorkStruct::free(work);
+    Workqueue::kill(wq);
 }
 
 // ===========================================================================
@@ -277,20 +274,20 @@ fn t4_queue_work_runs_async() {
 // ===========================================================================
 fn t5_queue_work_fails_when_killed() {
     RUN_COUNT.store(0, Ordering::SeqCst);
-    let wq = workqueue_create(c"wqtest_t5".as_ptr(), 1);
+    let wq = Workqueue::create(c"wqtest_t5".as_ptr(), 1);
     if wq.is_null() {
         case_fail();
         return;
     }
-    check_eq!(workqueue_kill(wq), 0);
-    let work = create_work_struct(Some(cb_run_counter), 0);
+    check_eq!(Workqueue::kill(wq), 0);
+    let work = WorkStruct::create(Some(cb_run_counter), 0);
     if work.is_null() {
         case_fail();
         return;
     }
-    check!(!queue_work(wq, work));
+    check!(!Workqueue::queue(wq, work));
     check_eq!(RUN_COUNT.load(Ordering::SeqCst), 0);
-    free_work_struct(work);
+    WorkStruct::free(work);
 }
 
 // ===========================================================================
@@ -299,19 +296,19 @@ fn t5_queue_work_fails_when_killed() {
 const T6_ITEMS: usize = 24;
 fn t6_multi_worker_concurrency() {
     RUN_COUNT.store(0, Ordering::SeqCst);
-    let wq = workqueue_create(c"wqtest_t6".as_ptr(), 6);
+    let wq = Workqueue::create(c"wqtest_t6".as_ptr(), 6);
     if wq.is_null() {
         case_fail();
         return;
     }
     let mut items: [*mut work_struct; T6_ITEMS] = [core::ptr::null_mut(); T6_ITEMS];
     for slot in items.iter_mut() {
-        let w = create_work_struct(Some(cb_run_counter), 0);
+        let w = WorkStruct::create(Some(cb_run_counter), 0);
         if w.is_null() {
             case_fail();
             continue;
         }
-        if !queue_work(wq, w) {
+        if !Workqueue::queue(wq, w) {
             case_fail();
         }
         *slot = w;
@@ -322,10 +319,10 @@ fn t6_multi_worker_concurrency() {
     }
     for &w in items.iter() {
         if !w.is_null() {
-            free_work_struct(w);
+            WorkStruct::free(w);
         }
     }
-    workqueue_kill(wq);
+    Workqueue::kill(wq);
 }
 
 // ===========================================================================
@@ -334,13 +331,13 @@ fn t6_multi_worker_concurrency() {
 const T7_ITEMS: usize = 32;
 fn t7_free_after_run_stress() {
     RUN_COUNT.store(0, Ordering::SeqCst);
-    let wq = workqueue_create(c"wqtest_t7".as_ptr(), 4);
+    let wq = Workqueue::create(c"wqtest_t7".as_ptr(), 4);
     if wq.is_null() {
         case_fail();
         return;
     }
     for _ in 0..T7_ITEMS {
-        let w = create_work_struct_ex(
+        let w = WorkStruct::create_ex(
             Some(cb_run_counter),
             None,
             0,
@@ -350,7 +347,7 @@ fn t7_free_after_run_stress() {
             case_fail();
             continue;
         }
-        if !queue_work(wq, w) {
+        if !Workqueue::queue(wq, w) {
             case_fail();
         }
     }
@@ -361,7 +358,7 @@ fn t7_free_after_run_stress() {
     // means the workqueue already freed each item right after running it
     // (see `execute_work` in `workqueue.rs`). Reaching this point without a
     // crash across `T7_ITEMS` runs is itself the assertion.
-    workqueue_kill(wq);
+    Workqueue::kill(wq);
 }
 
 // ===========================================================================

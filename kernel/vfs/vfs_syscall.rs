@@ -115,7 +115,7 @@ use crate::timer::sched_timer::sleep_ms;
 // RCU grace period) are plain safe Rust fns now that their
 // `#[no_mangle]` exports are gone; reached via the `crate::proc` glob
 // re-export.
-use crate::proc::{create_work_struct, free_work_struct, queue_work};
+use crate::proc::{WorkStruct, Workqueue};
 
 unsafe extern "C" {
 
@@ -393,7 +393,7 @@ unsafe extern "C" fn vfs_fput_work_func(work: *mut work_struct) {
     // whose `.data` is the `vfs_file*` to release.
     let file = unsafe { (*work).data } as *mut vfs_file;
     vfs_fput(file);
-    free_work_struct(work);
+    WorkStruct::free(work);
 }
 
 unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
@@ -407,14 +407,14 @@ unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
         return;
     }
 
-    let work = create_work_struct(Some(vfs_fput_work_func), file as u64);
+    let work = WorkStruct::create(Some(vfs_fput_work_func), file as u64);
     if work.is_null() {
         crate::kprintln!("__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput");
         vfs_fput(file);
         return;
     }
 
-    queue_work(wq, work);
+    Workqueue::queue(wq, work);
 }
 
 /// Defer `vfs_fput()` until the current RCU grace period completes, so
