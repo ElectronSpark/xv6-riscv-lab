@@ -100,9 +100,12 @@ use crate::irq::irq_core::irq_desc_init;
 use crate::irq::plic::{plicinit, plicinithart};
 use crate::irq::trap::{trapinit, trapinithart};
 use crate::proc::{
-    install_user_root, scheduler_init, scheduler_yield, signal_init, thread_init, userinit,
+    scheduler_init, scheduler_yield, signal_init,
     workqueue_init, workqueue_runtime_smoke_test, workqueue_test_launch_tests,
 };
+// NO-STANDALONE-FN: the thread bring-up entry points are now associated fns on
+// `Thread` (`proctab_init`/`userinit`/`install_user_root`/`idle_init`).
+use crate::proc::thread::Thread;
 use crate::timer::sched_timer::sched_timer_init;
 // P3-1C mesh sweep: printf.rs/vfs/tty/console.rs are in scope for this
 // wave, so these become plain crate-path imports instead of `extern "C"`
@@ -210,11 +213,8 @@ use crate::mm::{kinit, pcache_global_init};
 // fn`s now that their `#[no_mangle]` exports are gone; reached by crate
 // path (call sites below already sit in `unsafe` blocks).
 use crate::lock::rcu::{rcu_cpu_init, rcu_init, rcu_kthread_start_cpu};
-// P3-D3b: `idle_thread_init` (proc/thread.rs) is a plain safe Rust fn now
-// that its `#[no_mangle]` export is gone. (The old note claiming an
-// out-of-scope caller in `vfs/fs.rs` was stale: fs.rs only mentions the
-// name inside a kassert message string — this file has the only calls.)
-use crate::proc::idle_thread_init;
+// NO-STANDALONE-FN: `idle_thread_init` is now the associated fn
+// `Thread::idle_init` (this file has the only calls).
 // P3-1D mesh sweep: dev/{fdt,dev,netdev,x1_emac,x1_sdhci,nullrand}.rs,
 // sbi.rs, backtrace.rs, pci.rs, virtio_disk.rs, ramdisk.rs, sysnet.rs are
 // all in scope for this wave; these become plain crate-path imports
@@ -287,7 +287,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         crate::kprintln!("mycpu initialized");
         rcu_init(); // RCU subsystem initialization
         dev_table_init(); // Initialize the device table
-        thread_init(); // process table
+        Thread::proctab_init(); // process table
         tty_init(); // Initialize TTY subsystem
         scheduler_init(); // initialize the scheduler
         workqueue_init(); // workqueue subsystem initialization
@@ -303,12 +303,12 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         signal_init(); // signal handling initialization
         binit(); // buffer cache
         // Legacy iinit() and fileinit() removed - VFS handles these
-        userinit(); // first user thread
+        Thread::userinit(); // first user thread
         // idle_thread_init must be called before sched_timer_init (or any
         // workqueue_create) because idle_thread_init calls rq_cpu_activate() to
         // mark this CPU as active. Without an active CPU, rq_select_task_rq()
         // returns NULL and new threads cannot be enqueued to any run queue.
-        idle_thread_init();
+        Thread::idle_init();
         sched_timer_init();
         // Post-init device drivers: spawned as kthreads so they run with
         // the scheduler active and can use sleep_ms() / scheduler_yield().
@@ -342,7 +342,7 @@ fn __start_kernel_secondary_hart(hartid: c_int) {
         kvminithart(); // turn on paging
         // Now switch TP to trampoline virtual address (paging is now on)
         mycpu_init(hartid as u64, true);
-        idle_thread_init();
+        Thread::idle_init();
         trapinithart(); // install kernel trap vector
         plicinithart(); // ask PLIC for device interrupts
         rcu_cpu_init(machine::cpuid()); // Initialize RCU for this CPU
@@ -431,7 +431,7 @@ pub(crate) fn start_kernel_post_init() {
         vfs_init();
 
         // Set up root directory for init process (must be after vfs_init)
-        install_user_root();
+        Thread::install_user_root();
     }
 
     // #ifdef RWAD_WRITE_TEST in the C original -- see the module doc's

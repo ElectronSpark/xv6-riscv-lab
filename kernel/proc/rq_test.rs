@@ -31,7 +31,7 @@ use crate::proc::sched_setattr;
 // P3-1B2: these used to be bridged via the `xv6_schport_*`/`xv6_thport_*`/
 // `xv6_tqport_*` C-ABI alias layers (`extern "C"` redeclarations below);
 // now direct crate-path calls to the real, already-Rust definitions.
-use crate::proc::{scheduler_yield, wakeup, kthread_create, tq_init, tq_wait, tq_wakeup_all};
+use crate::proc::{scheduler_yield, wakeup, tq_init, tq_wait, tq_wakeup_all};
 
 // --- priority macros (mirror inc/proc/rq.h) -------------------------------
 const PRIORITY_SUBLEVEL_MASK: c_int = 0x03;
@@ -341,7 +341,7 @@ fn test_priority_ordered_activation() {
         let cpu_mask: cpumask_t = 1u64 << test_cpu;
 
         for i in 0..PRIORITY_TEST_COUNT {
-            test_procs[i] = kthread_create(
+            test_procs[i] = crate::proc::thread::Thread::kthread_create(
                 c"prio_test".as_ptr(),
                 priority_test_proc_entry as *mut c_void,
                 i as u64, 0, 0,

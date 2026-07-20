@@ -246,7 +246,10 @@ use super::exit::exit;
 // call sites below pass a literal `0` for the 4th argument and
 // `KERNEL_STACK_ORDER` for the 5th, so the generated calls are
 // value-identical — the divergent decl was latent, not live.
-use crate::proc::thread::{kthread_create, tcb_lock, tcb_unlock};
+// NO-STANDALONE-FN: `kthread_create` is now the associated fn
+// `thread::kthread_create` (called through the `bindings::thread` type, which
+// *is* `crate::proc::thread::Thread`); `tcb_lock`/`tcb_unlock` are handle
+// methods on `ThreadAccess`, so the call sites construct/reuse a handle.
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -465,7 +468,7 @@ impl<'a> WorkqueueRef<'a> {
     }
     /// Spawn a worker thread bound to this queue (was `create_worker`).
     fn create_worker(&self) -> c_int {
-        let worker = kthread_create(
+        let worker = thread::kthread_create(
             c"worker_thread".as_ptr(),
             worker_routine as *mut c_void,
             self.as_ptr() as u64,
@@ -474,17 +477,17 @@ impl<'a> WorkqueueRef<'a> {
         );
         if is_err_or_null(worker) { return ptr_err_or(worker, -ENOMEM); }
         let Some(wa) = ta(worker) else { return -ENOMEM; };
-        tcb_lock(worker);
+        wa.tcb_lock();
         wa.set_wq_ptr(self.as_ptr());
         self.inc_nr_workers();
         wa.wq_entry_ref().push_back(self.worker_list_ptr());
-        tcb_unlock(worker);
+        wa.tcb_unlock();
         wakeup(worker);
         0
     }
     /// Spawn the manager thread bound to this queue (was `create_manager`).
     fn create_manager(&self) -> c_int {
-        let manager = kthread_create(
+        let manager = thread::kthread_create(
             c"manager_thread".as_ptr(),
             manager_routine as *mut c_void,
             self.as_ptr() as u64,
@@ -493,9 +496,9 @@ impl<'a> WorkqueueRef<'a> {
         );
         if is_err_or_null(manager) { return ptr_err_or(manager, -ENOMEM); }
         let Some(ma) = ta(manager) else { return -ENOMEM; };
-        tcb_lock(manager);
+        ma.tcb_lock();
         ma.set_wq_ptr(self.as_ptr());
-        tcb_unlock(manager);
+        ma.tcb_unlock();
         self.set_manager(manager);
         0
     }
@@ -540,9 +543,12 @@ impl<'a> WorkqueueRef<'a> {
 fn exit_worker_routine(exit_code: u64) -> ! {
     let cur_t = xv6_current_thread();
     let cur_a = ta(cur_t);
-    tcb_lock(cur_t);
+    // SAFETY: `cur_t` is the running thread (`xv6_current_thread()`), always a
+    // live `*mut thread`; the handle only takes/releases its own tcb lock.
+    let cur_h = unsafe { ThreadAccess::assume(cur_t) };
+    cur_h.tcb_lock();
     let wq_p = cur_a.map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
-    tcb_unlock(cur_t);
+    cur_h.tcb_unlock();
     if !wq_p.is_null() {
         if let Some(wq) = wqr(wq_p) {
             invoke_wq_t_cb(wq.cb_worker_dtor(), wq_p, cur_t);
@@ -550,11 +556,11 @@ fn exit_worker_routine(exit_code: u64) -> ! {
             if wq.manager_ptr() == cur_t {
                 xv6_panic(c"Manager thread try to exit using worker exit routine".as_ptr());
             }
-            tcb_lock(cur_t);
+            cur_h.tcb_lock();
             if let Some(a) = cur_a {
                 if !a.wq_entry_ref().is_detached() { a.wq_entry_ref().detach(); }
             }
-            tcb_unlock(cur_t);
+            cur_h.tcb_unlock();
             wq.dec_nr_workers();
             if wq.nr_workers() < 0 {
                 xv6_panic(c"Worker thread count is invalid\n".as_ptr());
@@ -562,20 +568,22 @@ fn exit_worker_routine(exit_code: u64) -> ! {
             wq.lock_ref().unlock();
         }
     } else if let Some(a) = cur_a {
-        tcb_lock(cur_t);
+        cur_h.tcb_lock();
         if !a.wq_entry_ref().is_detached() {
             xv6_panic(c"Worker thread not belong to a workqueue but attached\n".as_ptr());
         }
-        tcb_unlock(cur_t);
+        cur_h.tcb_unlock();
     }
     exit(exit_code as c_int)
 }
 fn exit_manager_routine(exit_code: u64) -> ! {
     let cur_t = xv6_current_thread();
     let cur_a = ta(cur_t);
-    tcb_lock(cur_t);
+    // SAFETY: `cur_t` is the running thread; see `exit_worker_routine`.
+    let cur_h = unsafe { ThreadAccess::assume(cur_t) };
+    cur_h.tcb_lock();
     let wq_p = cur_a.map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
-    tcb_unlock(cur_t);
+    cur_h.tcb_unlock();
     if let Some(wq) = wqr(wq_p) {
         invoke_wq_t_cb(wq.cb_manager_dtor(), wq_p, cur_t);
         wq.lock_ref().lock();
@@ -588,10 +596,12 @@ fn exit_manager_routine(exit_code: u64) -> ! {
 // -------- worker / manager routines --------------------------------------
 unsafe extern "C" fn worker_routine() {
     let cur_t = xv6_current_thread();
-    tcb_lock(cur_t);
+    // SAFETY: `cur_t` is the running thread; unsafe-fn body is an unsafe context.
+    let cur_h = ThreadAccess::assume(cur_t);
+    cur_h.tcb_lock();
     let wq_p = ta(cur_t).map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
-    if wq_p.is_null() { tcb_unlock(cur_t); exit(-EINVAL); }
-    tcb_unlock(cur_t);
+    if wq_p.is_null() { cur_h.tcb_unlock(); exit(-EINVAL); }
+    cur_h.tcb_unlock();
     let Some(wq) = wqr(wq_p) else { exit(-EINVAL); };
     wq.lock_ref().lock();
     if wq.manager_ptr() == cur_t { wq.lock_ref().unlock(); exit(-EINVAL); }
@@ -627,10 +637,12 @@ unsafe extern "C" fn worker_routine() {
 
 unsafe extern "C" fn manager_routine() {
     let cur_t = xv6_current_thread();
-    tcb_lock(cur_t);
+    // SAFETY: `cur_t` is the running thread; unsafe-fn body is an unsafe context.
+    let cur_h = ThreadAccess::assume(cur_t);
+    cur_h.tcb_lock();
     let wq_p = ta(cur_t).map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
-    if wq_p.is_null() { tcb_unlock(cur_t); exit(-EINVAL); }
-    tcb_unlock(cur_t);
+    if wq_p.is_null() { cur_h.tcb_unlock(); exit(-EINVAL); }
+    cur_h.tcb_unlock();
     let Some(wq) = wqr(wq_p) else { exit(-EINVAL); };
     wq.lock_ref().lock();
     wq.set_manager(cur_t);

@@ -405,7 +405,6 @@ use crate::proc::wakeup;
 // that its `#[no_mangle]` export is gone; the file-private extern
 // redeclaration is replaced by a direct crate-path import of the real
 // definition (no E0659 risk: the name now has exactly one provider).
-use crate::proc::thread::kthread_create;
 
 // `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
 // centralization).
@@ -417,7 +416,7 @@ use crate::kstd::is_err_or_null;
 /// "workqueue_test")]`.
 pub(crate) extern "C" fn workqueue_test_launch_tests() {
     const KERNEL_STACK_ORDER: c_int = 2;
-    let np = kthread_create(
+    let np = crate::proc::thread::Thread::kthread_create(
         c"workqueue_test_master".as_ptr(),
         workqueue_test_master as *mut c_void,
         0,

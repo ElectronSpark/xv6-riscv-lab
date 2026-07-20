@@ -128,7 +128,7 @@ use crate::net::{mbufalloc, mbuffree, net_rx};
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export like its neighbors here.
-use crate::proc::{kthread_create, scheduler_yield, wakeup};
+use crate::proc::{scheduler_yield, wakeup};
 use super::netdev::{netdev_register, netdev_set_link};
 
 // ===========================================================================
@@ -1426,7 +1426,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
     // Spawn one init kthread per instance so they probe in parallel.
     for i in 0..n {
         let name: [u8; 6] = [b'e', b'm', b'a', b'c', b'0' + i as u8, 0];
-        let t = kthread_create(
+        let t = crate::proc::thread::Thread::kthread_create(
             name.as_ptr() as *const c_char,
             x1_emac_init_kthread as *mut c_void,
             i as u64,
@@ -1522,7 +1522,7 @@ pub(crate) extern "C" fn x1_emac_init() {
         return;
     }
 
-    let t = kthread_create(c"x1_emac".as_ptr(), x1_emac_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
+    let t = crate::proc::thread::Thread::kthread_create(c"x1_emac".as_ptr(), x1_emac_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
     if is_err_or_null(t) {
         crate::kprintln!("x1_emac: failed to create init kthread");
         return;

@@ -31,7 +31,6 @@ use crate::proc::{scheduler_yield, tq_size, wakeup};
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export.
-use crate::proc::kthread_create;
 
 
 const KERNEL_STACK_ORDER: c_int = 2;
@@ -56,7 +55,7 @@ impl<T> StaticCell<T> {
 }
 
 fn spawn(name: &'static CStr, entry: extern "C" fn(u64, u64)) -> bool {
-    let np = kthread_create(name.as_ptr(), entry as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
+    let np = crate::proc::thread::Thread::kthread_create(name.as_ptr(), entry as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
     if is_err_or_null(np) {
         false
     } else {

@@ -398,7 +398,6 @@ use crate::machine::{cpuid, CpuLocal};
 use crate::proc::proc_shims::{
     xv6_current_thread, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
 };
-use crate::proc::proc_assert_holding;
 // P3-D2a: the other scheduler wake/yield entry points join
 // `scheduler_wakeup_stopped` as plain crate-path imports (their former
 // `extern "C"` redeclarations in the block below are gone).
@@ -517,7 +516,9 @@ use super::exit::exit;
 // P3-D3b: `tcb_lock`/`tcb_unlock` (kernel/proc/thread.rs) are plain safe
 // Rust fns now that their `#[no_mangle]` exports are gone; reached by
 // crate path.
-use crate::proc::thread::{tcb_lock, tcb_unlock};
+// NO-STANDALONE-FN: `tcb_lock`/`tcb_unlock`/`proc_assert_holding` are handle
+// methods on `ThreadAccess`; this file routes them through its `ta_of(p)`
+// choke point (which constructs the handle) instead of the deleted free fns.
 
 // P3-D2b: the pid lookups (proc/pid.rs), `thread_tgid`
 // (proc/thread_group.rs) and `pgroup_kill` (proc/pgroup.rs) are plain
@@ -1184,13 +1185,13 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
         sigacts_unlock(sa);
 
         if is_stop {
-            tcb_lock(p);
+            ta_of(p).tcb_lock();
             let pst = thread_state_get(p);
             if THREAD_IS_INTERRUPTIBLE(pst) {
-                tcb_unlock(p);
+                ta_of(p).tcb_unlock();
                 scheduler_wakeup(p);
             } else if pst == THREAD_RUNNING {
-                tcb_unlock(p);
+                ta_of(p).tcb_unlock();
                 let se = ta.sched_entity_ptr();
                 if !se.is_null() {
                     let target = SchedEntityRef::assume(se).cpu_id_load_acquire();
@@ -1201,7 +1202,7 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
                     }
                 }
             } else {
-                tcb_unlock(p);
+                ta_of(p).tcb_unlock();
             }
         }
         if is_cont {
@@ -1218,9 +1219,9 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
         let pmp = &raw const (*p).signal.sig_pending_mask as *const AtomicU64;
         let pending_unmasked = (*pmp).load(Ordering::Acquire) & !sigmask;
         if pending_unmasked != 0 {
-            tcb_lock(p);
+            ta_of(p).tcb_lock();
             signal_notify(p);
-            tcb_unlock(p);
+            ta_of(p).tcb_unlock();
         }
         0
     }
@@ -1270,13 +1271,13 @@ pub(crate) fn signal_pending(p: *mut thread) -> bool {
 fn signal_notify(p: *mut thread)-> c_int  {
     if p.is_null() { return -EINVAL; }
     raw_sig_abi! {
-        proc_assert_holding(p);
+        ta_of(p).assert_lock_held();
         if THREAD_AWOKEN(p) { return 0; }
         if !THREAD_SLEEPING(p) { return -EAGAIN; }
         if thread_state_get(p) == THREAD_INTERRUPTIBLE {
-            tcb_unlock(p);
+            ta_of(p).tcb_unlock();
             scheduler_wakeup_interruptible(p);
-            tcb_lock(p);
+            ta_of(p).tcb_lock();
             return 0;
         }
         -EAGAIN
@@ -1432,9 +1433,9 @@ pub(super) fn sigprocmask(how: c_int, set: *const sigset_t,
         }
         sigacts_unlock(sa);
         if pending_unmasked != 0 {
-            tcb_lock(p);
+            ta_of(p).tcb_lock();
             signal_notify(p);
-            tcb_unlock(p);
+            ta_of(p).tcb_unlock();
         }
         0
     }
@@ -1546,10 +1547,10 @@ fn deliver_signal(p: *mut thread, signo: c_int, info: *mut ksiginfo_t,
         if h_addr < PAGE_SIZE {
             crate::kprintln!("deliver_signal: invalid handler addr {} signo {}",
                    crate::printf::Ptr(h_addr as u64), signo);
-            tcb_lock(p);
+            ta_of(p).tcb_lock();
             THREAD_SET_KILLED(p);
             set_term_signal_first(p, signo);
-            tcb_unlock(p);
+            ta_of(p).tcb_unlock();
             return 0;
         }
         let mut ret = 0;
@@ -1677,9 +1678,9 @@ pub(crate) fn handle_signal() {
                 (*p).signal.stop_signal = bits_ffs_g(pending_stop);
                 recalc_sigpending_tsk(p);
                 sigacts_unlock(sa);
-                tcb_lock(p);
+                ta_of(p).tcb_lock();
                 thread_state_set(p, THREAD_STOPPED);
-                tcb_unlock(p);
+                ta_of(p).tcb_unlock();
                 notify_parent_child_stopped(p);
                 scheduler_yield();
                 continue;

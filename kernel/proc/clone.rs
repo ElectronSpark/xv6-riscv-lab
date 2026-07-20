@@ -106,7 +106,12 @@ use crate::proc::proc_shims::{
 // at `crate::proc`) are replaced by direct crate-path imports of the
 // real definitions. This file's `Thread` alias *is*
 // `crate::bindings::thread`, so the signatures are identical.
-use crate::proc::thread::{attach_child, thread_create, thread_destroy};
+// NO-STANDALONE-FN: `thread_create` is now the associated fn `Thread::create`
+// (reached through this file's `type Thread = crate::bindings::thread` alias,
+// which *is* `crate::proc::thread::Thread`); `thread_destroy`/`attach_child`
+// are handle methods on `ThreadAccess` (the thread being destroyed / the
+// parent). Call sites construct the namespaced path / the handle.
+use crate::proc::access::ThreadAccess;
 
 // P3-D3b: lock/rcu.rs's `rcu_check_callbacks` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached by crate path.
@@ -300,7 +305,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
 
     // Allocate child thread
     let kstack_order = xv6_t_kstack_order(p);
-    let child = match check_ptr(thread_create(forkret_entry as *mut c_void, 0, 0, kstack_order)) {
+    let child = match check_ptr(Thread::create(forkret_entry as *mut c_void, 0, 0, kstack_order)) {
         Ok(c) => c,
         Err(e) => {
             __free_pid();
@@ -317,7 +322,9 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
         match check_ptr(vm_copy(xv6_t_vm(p))) {
             Ok(v) => v,
             Err(e) => {
-                thread_destroy(child);
+                // SAFETY: `child` is the live thread just created by `Thread::create`
+                // above; the handle only tears it down.
+                unsafe { ThreadAccess::assume(child) }.destroy();
                 __free_pid();
                 return e;
             }
@@ -329,7 +336,8 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     let fs_clone = match check_ptr(vfs_struct_clone(xv6_t_fs(p), args.flags)) {
         Ok(f) => f,
         Err(e) => {
-            thread_destroy(child);
+            // SAFETY: `child` is the live thread just created above.
+            unsafe { ThreadAccess::assume(child) }.destroy();
             __free_pid();
             return e;
         }
@@ -340,7 +348,8 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     let new_fdt = match check_ptr(vfs_fdtable_clone(xv6_t_fdtable(p), args.flags as c_int)) {
         Ok(f) => f,
         Err(e) => {
-            thread_destroy(child);
+            // SAFETY: `child` is the live thread just created above.
+            unsafe { ThreadAccess::assume(child) }.destroy();
             __free_pid();
             return e;
         }
@@ -352,7 +361,8 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     if !p_sigacts.is_null() {
         let dup = sigacts_dup(p_sigacts as *mut crate::bindings::sigacts, args.flags);
         if dup.is_null() {
-            thread_destroy(child);
+            // SAFETY: `child` is the live thread just created above.
+            unsafe { ThreadAccess::assume(child) }.destroy();
             __free_pid();
             return -ENOMEM;
         }
@@ -403,7 +413,8 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     if args.flags & CLONE_THREAD != 0 {
         xv6_t_set_parent(child, real_parent);
     } else {
-        attach_child(real_parent, child);
+        // SAFETY: `real_parent`/`child` are live threads (handle contract).
+        unsafe { ThreadAccess::assume(real_parent) }.attach_child(child);
     }
     proctab_proc_add(child);
 

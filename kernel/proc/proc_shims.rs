@@ -198,7 +198,11 @@ macro_rules! atomic_fetch_sub_i32_field {
 // `xv6_thport_*` C-ABI alias layers (`extern "C"` redeclarations); now
 // direct crate-path calls to the real, already-Rust definitions in
 // `thread_group.rs`/`thread.rs`.
-use crate::proc::{tg_signal_send, tcb_lock, tcb_unlock};
+use crate::proc::tg_signal_send;
+// NO-STANDALONE-FN: `tcb_lock`/`tcb_unlock` are now handle methods on
+// `ThreadAccess`; the `xv6_tcb_lock`/`xv6_tcb_unlock` shims construct the
+// handle below instead of calling a free fn.
+use crate::proc::access::ThreadAccess;
 
 // ===========================================================================
 // xv6_panic — PORTED from proc_rust_bridge.c. The C bridge wrapped the
@@ -313,11 +317,14 @@ pub(super) fn xv6_rcu_read_unlock() {
 }
 
 pub(super) fn xv6_tcb_lock(p: *mut crate::bindings::thread) {
-    tcb_lock(p)
+    // SAFETY: `p` is a live `*mut thread` (shim contract, documented on the
+    // section header); the handle only takes/releases its own control-block lock.
+    unsafe { ThreadAccess::assume(p) }.tcb_lock()
 }
 
 pub(super) fn xv6_tcb_unlock(p: *mut crate::bindings::thread) {
-    tcb_unlock(p)
+    // SAFETY: as above.
+    unsafe { ThreadAccess::assume(p) }.tcb_unlock()
 }
 
 // SECTION 1 leftover: xv6_current_thread — replaces the `current` macro,
@@ -390,7 +397,9 @@ pub(super) fn t_parent(p: *mut thread) -> *mut thread {
 // (pgroup freed) resolves to null — the "pgroup gone" semantics callers already
 // null-check. Signatures unchanged, so every caller is untouched.
 pub(super) fn t_pgroup(p: *mut thread) -> *mut pgroup {
-    crate::proc::thread::thread_pgroup_resolve(p)
+    // SAFETY: `p` is a live `*mut thread` (shim contract); the handle only
+    // reads its own `pgroup` key field and resolves it (no `&Thread` formed).
+    unsafe { crate::proc::access::ThreadAccess::assume(p) }.pgroup_resolve()
 }
 // N-R6d-2a: `thread.session` is now a generational `Sid`, not a `*mut session`.
 // The get/set shims resolve/store it through the pilot's `SESSION_TABLE`; a
@@ -398,13 +407,17 @@ pub(super) fn t_pgroup(p: *mut thread) -> *mut pgroup {
 // callers already null-check. Signatures unchanged, so every caller (access.rs
 // `session_ptr`/`set_session`, exit.rs, clone.rs, pid.rs, pgroup.rs) is untouched.
 pub(super) fn t_session(p: *mut thread) -> *mut session {
-    crate::proc::thread::thread_session_resolve(p)
+    // SAFETY: `p` is a live `*mut thread` (shim contract); the handle only
+    // reads its own `session` key field and resolves it (no `&Thread` formed).
+    unsafe { crate::proc::access::ThreadAccess::assume(p) }.session_resolve()
 }
 pub(super) fn t_thread_group(p: *mut thread) -> *mut thread_group {
     field_get!(p, thread_group)
 }
 pub(super) fn t_set_pgroup(p: *mut thread, pg: *mut pgroup) {
-    crate::proc::thread::thread_pgroup_store(p, pg)
+    // SAFETY: `p` is a live `*mut thread` (shim contract); the handle only
+    // writes its own `pgroup` key field.
+    unsafe { crate::proc::access::ThreadAccess::assume(p) }.pgroup_store(pg)
 }
 
 pub(super) fn t_vm(p: *mut thread) -> *mut crate::bindings::vm_t { field_get!(p, vm) }
@@ -420,7 +433,9 @@ pub(super) fn t_set_parent(p: *mut thread, par: *mut thread) {
 }
 pub(super) fn t_set_thread_group(p: *mut thread, tg: *mut thread_group) { field_set!(p, thread_group, tg) }
 pub(super) fn t_set_session(p: *mut thread, s: *mut session) {
-    crate::proc::thread::thread_session_store(p, s)
+    // SAFETY: `p` is a live `*mut thread` (shim contract); the handle only
+    // writes its own `session` key field.
+    unsafe { crate::proc::access::ThreadAccess::assume(p) }.session_store(s)
 }
 pub(super) fn t_set_tgid(p: *mut thread, v: c_int) { field_set!(p, tgid, v) }
 pub(super) fn t_set_sid(p: *mut thread, v: c_int) { field_set!(p, sid, v) }
@@ -1165,7 +1180,10 @@ const SIGCHLD: u64 = 17;
 // `xv6_schport_*` C-ABI alias layers (`extern "C"` redeclarations); now
 // direct crate-path calls to the real, already-Rust definitions in
 // `thread.rs`/`sched.rs`.
-use crate::proc::{detach_child, attach_child, thread_destroy, scheduler_yield};
+// NO-STANDALONE-FN: `detach_child`/`attach_child` are now handle methods on the
+// *parent* `ThreadAccess`, and `thread_destroy` a handle method on the thread
+// being destroyed; the call sites below construct the handle.
+use crate::proc::scheduler_yield;
 
 // P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
 // referenced via a crate path instead of `extern "C"` redeclarations.
@@ -1203,8 +1221,8 @@ pub(super) fn xv6_exit_reparent_do(
             if thread_state_load(child) == THREAD_STATE_ZOMBIE {
                 zombie_found = 1;
             }
-            detach_child(p, child);
-            attach_child(initproc, child);
+            ThreadAccess::assume(p).detach_child(child);
+            ThreadAccess::assume(initproc).attach_child(child);
         });
         xv6_pid_wunlock();
     }
@@ -1304,11 +1322,11 @@ pub(super) fn xv6_exit_reap_zombie(
             xv6_pid_runlock();
             xv6_pid_wlock();
         }
-        detach_child(parent, child);
+        ThreadAccess::assume(parent).detach_child(child);
         proctab_proc_remove(child);
         xv6_pid_wunlock();
         __free_pid();
-        thread_destroy(child);
+        ThreadAccess::assume(child).destroy();
         pid
     }
 }
@@ -2135,7 +2153,7 @@ pub(super) fn xv6_procdump_one(p: *mut thread) -> c_int {
         let mut name = [0u8; 16];
         let mut pname = [0u8; 16];
 
-        tcb_lock(p);
+        ThreadAccess::assume(p).tcb_lock();
         let pstate = t_state_load(p);
         let tid = (*p).pid;
         let tgid = (*p).tgid;
@@ -2150,7 +2168,7 @@ pub(super) fn xv6_procdump_one(p: *mut thread) -> c_int {
         } else {
             pname[..4].copy_from_slice(b"N/A\0");
         }
-        tcb_unlock(p);
+        ThreadAccess::assume(p).tcb_unlock();
 
         // THREAD_UNUSED = 0
         if pstate == 0 { return 0; }
@@ -2226,7 +2244,7 @@ pub(super) fn xv6_procdump_bt_one(p: *mut thread) {
     // `kstack_order`, matching the C call site's arguments.
     u! {
         let mut name = [0u8; 16];
-        tcb_lock(p);
+        ThreadAccess::assume(p).tcb_lock();
         let pstate = t_state_load(p);
         let pid = (*p).pid;
         let tgid = (*p).tgid;
@@ -2251,7 +2269,7 @@ pub(super) fn xv6_procdump_bt_one(p: *mut thread) {
                 print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
             }
         }
-        tcb_unlock(p);
+        ThreadAccess::assume(p).tcb_unlock();
     }
 }
 
@@ -2270,7 +2288,7 @@ pub(super) fn xv6_procdump_bt_pid(pid: c_int) {
             crate::kprintln!("Process {} not found", pid);
             return;
         }
-        tcb_lock(p);
+        ThreadAccess::assume(p).tcb_lock();
         let pstate = t_state_load(p);
         let mut name = [0u8; 16];
         safestr(&mut name, t_name_ptr(p));
@@ -2293,7 +2311,7 @@ pub(super) fn xv6_procdump_bt_pid(pid: c_int) {
             let pse = (*p).sched_entity;
             print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
         }
-        tcb_unlock(p);
+        ThreadAccess::assume(p).tcb_unlock();
     }
 }
 

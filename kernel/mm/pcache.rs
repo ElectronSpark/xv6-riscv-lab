@@ -335,7 +335,7 @@ pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
 // entry points are plain safe Rust fns now that their `#[no_mangle]`
 // exports are gone; re-exported here so the module-wide `use ffi::*`
 // keeps resolving them (the extern redeclarations above are deleted).
-pub(crate) use crate::proc::{init_work_struct, kthread_create, queue_work, workqueue_create};
+pub(crate) use crate::proc::{init_work_struct, queue_work, workqueue_create};
 // P3-D2a: proc/sched.rs wake/sleep entry points and proc/thread_queue.rs
 // primitives, reached as plain crate-path items instead of the `extern
 // "C"` redeclarations that used to sit in the block above.
@@ -1638,7 +1638,7 @@ fn xv6_pcache_kthread_create(
     a2: u64,
     stack_order: c_int,
 ) -> *mut Thread {
-    let np = kthread_create(name, entry as *mut c_void, a1, a2, stack_order);
+    let np = crate::proc::thread::Thread::kthread_create(name, entry as *mut c_void, a1, a2, stack_order);
     // IS_ERR_OR_NULL: pointer in error range (high bits set) or null -> NULL
     if np.is_null() {
         return ptr::null_mut();

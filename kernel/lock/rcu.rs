@@ -80,7 +80,6 @@ use crate::timer::sched_timer::sleep_ms;
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export like its neighbors above.
-use crate::proc::kthread_create;
 /// `crate::mm::slab::slab_free` is genuinely `unsafe fn`; this file's
 /// original extern declaration asserted `pub safe fn` (usual FFI facade).
 #[inline]
@@ -1038,7 +1037,7 @@ fn kthread_start_cpu_impl(cpu: c_int) {
 
     let name = RCU_NAMES[cpu as usize].as_ptr() as *const c_char;
     let entry: extern "C" fn(u64, u64) -> c_int = rcu_cb_kthread;
-    let p = kthread_create(
+    let p = crate::proc::thread::Thread::kthread_create(
         name,
         entry as *mut c_void,
         cpu as u64,

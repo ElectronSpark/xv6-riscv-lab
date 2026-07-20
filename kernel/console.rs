@@ -87,7 +87,6 @@ use crate::printf::{__panic_end, __panic_start};
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export.
-use crate::proc::kthread_create;
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
 use crate::timer::sched_timer::sleep_ms;
@@ -998,7 +997,7 @@ pub(crate) extern "C" fn consoledevinit() {
         }
 
         // Start the input feeder thread (intr ring buf -> tty_input).
-        let feeder = kthread_create(
+        let feeder = crate::proc::thread::Thread::kthread_create(
             c"tty_input".as_ptr(),
             console_tty_input_thread as *mut c_void,
             0,
@@ -1010,7 +1009,7 @@ pub(crate) extern "C" fn consoledevinit() {
         }
 
         // Start the output drain thread (echo -> UART).
-        let drain = kthread_create(
+        let drain = crate::proc::thread::Thread::kthread_create(
             c"tty_drain".as_ptr(),
             console_tty_drain_thread as *mut c_void,
             0,
@@ -1023,7 +1022,7 @@ pub(crate) extern "C" fn consoledevinit() {
 
         // Start SBI polling thread if UART hardware not available.
         if !UART_INITIALIZED.load(Ordering::Relaxed) {
-            let p = kthread_create(
+            let p = crate::proc::thread::Thread::kthread_create(
                 c"sbi_console".as_ptr(),
                 sbi_console_poll_thread as *mut c_void,
                 0,

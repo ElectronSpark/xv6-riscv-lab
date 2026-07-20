@@ -99,7 +99,7 @@ use crate::sync::KMutex;
 // instead of `extern "C"` redeclarations.
 // P3-D3b: `kthread_create` (proc/thread.rs) is reached via the
 // `crate::proc` glob re-export like its neighbors here.
-use crate::proc::{kthread_create, scheduler_yield, wakeup};
+use crate::proc::{scheduler_yield, wakeup};
 // P3-D3b: lock/mutex.rs's `mutex_init` and lock/completion.rs's entry
 // points are plain safe Rust fns now that their `#[no_mangle]` exports
 // are gone; reached by crate path.
@@ -2110,7 +2110,7 @@ extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
 
     for i in 0..n {
         let name: [u8; 5] = [b's', b'd', b'h', b'0' + i as u8, 0];
-        let t = kthread_create(
+        let t = crate::proc::thread::Thread::kthread_create(
             name.as_ptr() as *const c_char,
             x1_sdhci_init_one_kthread as *mut c_void,
             i as u64,
@@ -2141,7 +2141,7 @@ pub(crate) extern "C" fn x1_sdhci_init() {
         return;
     }
 
-    let t = kthread_create(c"x1_sdhci".as_ptr(), x1_sdhci_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
+    let t = crate::proc::thread::Thread::kthread_create(c"x1_sdhci".as_ptr(), x1_sdhci_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
     if is_err_or_null(t) {
         crate::kprintln!("x1_sdhci: failed to create init kthread");
         return;
