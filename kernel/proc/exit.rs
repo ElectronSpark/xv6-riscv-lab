@@ -107,8 +107,14 @@ mod raw {
     pub(crate) use crate::proc::{
         __proctab_get_initproc, get_pid_thread, kill_thread,
         pgroup_remove_thread, sigpending_destroy, sigpending_empty,
-        signal_pending, thread_group_put, thread_group_remove,
-        thread_is_group_leader,
+        signal_pending,
+    };
+    // RUSTIFY-PROC: `thread_group_{put,remove}` + `thread_is_group_leader`
+    // tightened to `pub(super)` in thread_group.rs (in-proc callers only);
+    // re-export them at the matching narrower visibility so this file's
+    // `raw::NAME` -> `ffi::NAME` shim keeps resolving.
+    pub(super) use crate::proc::{
+        thread_group_put, thread_group_remove, thread_is_group_leader,
     };
 
     // This file's `Sigacts` is an opaque `c_void` stand-in; the real
