@@ -120,28 +120,13 @@ mod raw {
     pub(crate) use crate::proc::{
         __proctab_get_initproc, get_pid_thread,
         pgroup_remove_thread,
-        signal_pending,
     };
-    // RUSTIFY-PROC: `kill_thread`/`sigpending_destroy`/`sigpending_empty`
-    // (signal.rs) tightened to `pub(super)` (in-proc callers only); re-export
-    // them at the matching narrower visibility so this file's `raw::NAME` ->
-    // `ffi::NAME` shim keeps resolving.
-    // NO-STANDALONE-FN: `thread_group_put`/`thread_group_remove`/
-    // `thread_is_group_leader` are no longer free fns — the `ffi::` wrappers
-    // below construct a `ThreadGroupAccess`/`ThreadAccess` handle and invoke the
-    // corresponding method, so nothing is re-exported for them here.
-    pub(super) use crate::proc::{
-        kill_thread, sigpending_destroy, sigpending_empty,
-    };
-
-    // This file's `Sigacts` is an opaque `c_void` stand-in; the real
-    // `sigacts_put` takes `*mut crate::bindings::sigacts` (layout-identical
-    // pointer, same cast-adapter precedent as `session_remove_thread`
-    // below).
-    #[inline]
-    pub fn sigacts_put(sa: *mut Sigacts) {
-        crate::proc::sigacts_put(sa as *mut crate::bindings::sigacts)
-    }
+    // NO-STANDALONE-FN: `signal_pending`/`kill_thread`/`sigpending_destroy`/
+    // `sigpending_empty` (signal.rs) and the `sigacts_put` cast-adapter are no
+    // longer free fns — the `ffi::` wrappers below construct a
+    // `ThreadAccess`/`SigactsAccess` handle and invoke the corresponding
+    // method, so nothing is re-exported for them here (same pattern as
+    // `thread_group_put`/`thread_group_remove`/`thread_is_group_leader`).
 
     // P3-D3a: `vm_put` (mm/vm.rs) is an ordinary (safe) Rust fn now that
     // its `#[no_mangle]` export is gone; this module's `Vm` is an opaque
@@ -228,7 +213,7 @@ mod ffi {
     pub fn is_zombie(t: *mut Thread) -> bool            { (raw::xv6_thread_is_zombie(t)) != 0 }
     pub fn is_stopped(t: *mut Thread) -> bool           { (raw::xv6_thread_is_stopped(t)) != 0 }
     pub fn is_group_leader(t: *mut Thread) -> bool      { ThreadAccess::from_ptr(t).map_or(true, |ta| ta.is_group_leader()) }
-    pub fn signal_pending(t: *mut Thread) -> bool       { raw::signal_pending(t) }
+    pub fn signal_pending(t: *mut Thread) -> bool       { ThreadAccess::from_ptr(t).is_some_and(|ta| ta.signal_pending()) }
 
     pub fn tg_is_exiting(tg: *mut ThreadGroup) -> bool         { (raw::xv6_tg_is_exiting(tg)) != 0 }
     pub fn tg_exit_task_is(tg: *mut ThreadGroup, t: *mut Thread) -> bool {
@@ -259,7 +244,7 @@ mod ffi {
     pub fn sched_yield()                                       { raw::scheduler_yield() }
     pub fn sched_wakeup(t: *mut Thread)                        { raw::scheduler_wakeup(t) }
     pub fn sched_wakeup_interruptible(t: *mut Thread)          { raw::scheduler_wakeup_interruptible(t) }
-    pub fn kill_thread(t: *mut Thread, signo: c_int) -> c_int  { raw::kill_thread(t, signo) }
+    pub fn kill_thread(t: *mut Thread, signo: c_int) -> c_int  { ThreadAccess::from_ptr(t).map_or(-22, |ta| ta.kill_thread(signo)) }
 
     // pgroup / session / thread group plumbing --------------------------------
     pub fn pgroup_remove_thread(p: *mut Thread)                { raw::pgroup_remove_thread(p) }
@@ -268,9 +253,9 @@ mod ffi {
     pub fn thread_group_put(tg: *mut ThreadGroup)              { if let Some(tga) = ThreadGroupAccess::from_ptr(tg) { tga.put(); } }
 
     // resource release --------------------------------------------------------
-    pub fn sigacts_put(sa: *mut Sigacts)                       { raw::sigacts_put(sa) }
-    pub fn sigpending_empty(p: *mut Thread, signo: c_int)      { let _ = raw::sigpending_empty(p, signo); }
-    pub fn sigpending_destroy(p: *mut Thread)                  { raw::sigpending_destroy(p) }
+    pub fn sigacts_put(sa: *mut Sigacts)                       { if let Some(s) = crate::proc::access::SigactsAccess::from_ptr(sa as *mut crate::bindings::sigacts) { s.put(); } }
+    pub fn sigpending_empty(p: *mut Thread, signo: c_int)      { if let Some(ta) = ThreadAccess::from_ptr(p) { let _ = ta.sigpending_empty(signo); } }
+    pub fn sigpending_destroy(p: *mut Thread)                  { if let Some(ta) = ThreadAccess::from_ptr(p) { ta.sigpending_destroy(); } }
     pub fn vm_put(vm: *mut Vm)                                 { raw::vm_put(vm) }
     pub fn vfs_fdtable_put(fdt: *mut VfsFdtable)               { raw::vfs_fdtable_put(fdt) }
     pub fn vfs_struct_put(fs: *mut FsStruct)                   { raw::vfs_struct_put(fs) }

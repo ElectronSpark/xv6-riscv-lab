@@ -35,7 +35,6 @@ use crate::proc::access::TqRef;
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
 // old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 // P3-D3c: `sched_timer_set`/`sched_timer_done` are genuinely `unsafe fn`
 // in `crate::timer::sched_timer` now that their `#[no_mangle]` exports are
@@ -337,7 +336,7 @@ pub(crate) fn sem_wait_interruptible(s: *mut sem_t) -> c_int {
         let ret = sem_trywait(s);
         if ret == 0 { return 0; }
         if ret != -(EAGAIN as c_int) { return ret; }
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         sleep_ms(1);
     }
 }
@@ -387,7 +386,7 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int {
                     crate::printf::Cs(name_of(s)));
             }
         }
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         if (machine::read_time().wrapping_sub(start)) >= timeout_ticks {
             return -(ETIMEDOUT as c_int);
         }

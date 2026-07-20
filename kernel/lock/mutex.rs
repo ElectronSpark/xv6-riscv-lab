@@ -28,7 +28,6 @@ use crate::proc::access::TqRef;
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
 // old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 // P3-D3c: `sched_timer_set`/`sched_timer_done` are genuinely `unsafe fn`
 // in `crate::timer::sched_timer` now that their `#[no_mangle]` exports are
@@ -326,10 +325,10 @@ pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int {
     if try_set_holder(m, pid) { return 0; }
 
     while get_holder(m) != pid {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(m), null_mut()));
-        if ret != 0 && signal_pending(cur) && get_holder(m) != pid {
+        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && get_holder(m) != pid {
             return -(EINTR as c_int);
         }
     }
@@ -374,7 +373,7 @@ pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         ));
-        if ret != 0 && signal_pending(cur) && get_holder(m) != pid {
+        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && get_holder(m) != pid {
             return -(EINTR as c_int);
         }
     }

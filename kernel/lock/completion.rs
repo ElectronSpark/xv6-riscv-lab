@@ -46,7 +46,6 @@ use crate::proc::access::TqRef;
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
 // old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 // P3-D3c: `sched_timer_set`/`sched_timer_done` are genuinely `unsafe fn`
 // in `crate::timer::sched_timer` now that their `#[no_mangle]` exports are
@@ -311,11 +310,11 @@ pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int {
 
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     while !try_wait_for_completion_locked(c) {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(c), null_mut()));
         if ret != 0
-            && signal_pending(cur)
+            && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
             && !try_wait_for_completion_locked(c)
         {
             return -(EINTR as c_int);
@@ -352,7 +351,7 @@ pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
     let start = machine::read_time();
 
     while !try_wait_for_completion_locked(c) {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         let now = machine::read_time();
         let elapsed = now.wrapping_sub(start);
         if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
@@ -378,7 +377,7 @@ pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
             null_mut(),
         ));
         if ret != 0
-            && signal_pending(cur)
+            && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
             && !try_wait_for_completion_locked(c)
         {
             return -(EINTR as c_int);

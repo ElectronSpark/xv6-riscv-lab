@@ -207,7 +207,6 @@ const _: () = {
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> bool_` (c_uint); the real fn returns `bool` (same 0/1 in `a0`
 // under the old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 unsafe extern "C" {
     // string.rs.
@@ -459,24 +458,24 @@ unsafe fn __xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock, state: c_int) -> c_int
         let mut log = log_lock.lock();
         loop {
             if log.committing != 0 {
-                if interruptible && signal_pending(current) {
+                if interruptible && crate::proc::access::ThreadAccess::from_ptr(current).is_some_and(|ta| ta.signal_pending()) {
                     return neg(crate::bindings::EINTR);
                 }
                 xv6_thread_state_set(current, state);
                 let wq = &raw mut log.wait_queue;
                 let ret = log.wait_on(wq, ptr::null_mut());
-                if interruptible && ret != 0 && signal_pending(current) {
+                if interruptible && ret != 0 && crate::proc::access::ThreadAccess::from_ptr(current).is_some_and(|ta| ta.signal_pending()) {
                     return neg(crate::bindings::EINTR);
                 }
             } else if log.lh.n + (log.outstanding + 1) * super::MAXOPBLOCKS > super::XV6FS_LOGSIZE {
                 // This op might exhaust log space; wait for commit.
-                if interruptible && signal_pending(current) {
+                if interruptible && crate::proc::access::ThreadAccess::from_ptr(current).is_some_and(|ta| ta.signal_pending()) {
                     return neg(crate::bindings::EINTR);
                 }
                 xv6_thread_state_set(current, state);
                 let wq = &raw mut log.wait_queue;
                 let ret = log.wait_on(wq, ptr::null_mut());
-                if interruptible && ret != 0 && signal_pending(current) {
+                if interruptible && ret != 0 && crate::proc::access::ThreadAccess::from_ptr(current).is_some_and(|ta| ta.signal_pending()) {
                     return neg(crate::bindings::EINTR);
                 }
             } else {

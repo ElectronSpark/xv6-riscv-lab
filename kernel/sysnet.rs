@@ -60,7 +60,6 @@ use crate::proc::proc_shims::xv6_current_thread;
 // no longer imported here -- only the wake side (`wakeup_on_chan`) is.
 use crate::proc::wakeup_on_chan;
 // P3-D2b: `killed` (proc/signal.rs) likewise (identical signature).
-use crate::proc::killed;
 use crate::net::mbufq;
 use crate::sync::SpinLock;
 
@@ -247,12 +246,12 @@ pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> 
         let chan = &raw mut s.rxq as *mut c_void;
         // SAFETY: `s.rxq` is the guarded rxq; the raw mbufq list op stays
         // raw (intrusive-list class, out of scope). Lock held via `s`.
-        while unsafe { mbufq_empty(&raw mut s.rxq) } != 0 && killed(pr) == 0 {
+        while unsafe { mbufq_empty(&raw mut s.rxq) } != 0 && crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) == 0 {
             if s.sleep_on_interruptible(chan) != 0 {
                 return neg(EINTR); // `s` drops here -> unlock
             }
         }
-        if killed(pr) != 0 {
+        if crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) != 0 {
             return neg(EINTR); // `s` drops here -> unlock
         }
         // SAFETY: lock held via `s`, rxq non-empty (loop invariant above).

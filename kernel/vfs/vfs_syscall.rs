@@ -96,7 +96,6 @@ use crate::sync::KSpinlock;
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> c_int`; the real fn returns `bool` (same 0/1 in `a0` under
 // the old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 unsafe extern "C" {
     // printf.rs — C-variadic.
@@ -2738,7 +2737,7 @@ fn poll_inner(fds_addr: u64, nfds: c_int, timeout_ms: c_int) -> KResult<c_int> {
                 break;
             }
             sleep_ms(1);
-            if signal_pending(current()) {
+            if crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) {
                 return Err(Errno::Intr);
             }
         }
@@ -2775,7 +2774,7 @@ fn poll_inner(fds_addr: u64, nfds: c_int, timeout_ms: c_int) -> KResult<c_int> {
             break;
         }
         sleep_ms(1);
-        if signal_pending(current()) {
+        if crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) {
             ready = neg(EINTR);
             break;
         }

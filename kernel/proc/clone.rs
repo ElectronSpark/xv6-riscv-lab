@@ -150,7 +150,7 @@ fn vm_copy(vm: *mut Vm) -> *mut Vm {
 //    real fns return `c_int`, which the call sites discard exactly as
 //    the old ABI did.
 use crate::proc::{
-    pgroup_add_thread, pgroup_add_tg, sigacts_dup, sigpending_clone,
+    pgroup_add_thread, pgroup_add_tg,
 };
 use crate::proc::access::ThreadGroupAccess;
 use crate::proc::thread_group::ThreadGroup;
@@ -360,7 +360,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     // sigacts
     let p_sigacts = xv6_t_sigacts(p);
     if !p_sigacts.is_null() {
-        let dup = sigacts_dup(p_sigacts as *mut crate::bindings::sigacts, args.flags);
+        let dup = crate::proc::signal::SigActs::dup(p_sigacts as *mut crate::bindings::sigacts, args.flags);
         if dup.is_null() {
             // SAFETY: `child` is the live thread just created above.
             unsafe { ThreadAccess::assume(child) }.destroy();
@@ -371,7 +371,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     }
 
     // Per-thread signal mask
-    sigpending_clone(
+    crate::proc::signal::ThreadSignal::sigpending_clone(
         xv6_t_signal_ptr(child) as *mut crate::bindings::thread_signal_t,
         xv6_t_signal_ptr(p) as *mut crate::bindings::thread_signal_t,
         args.flags,

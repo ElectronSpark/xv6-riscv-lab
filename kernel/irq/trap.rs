@@ -100,7 +100,7 @@ use crate::backtrace::print_backtrace;
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::scheduler_yield;
 // P3-D2b: `kill`/`killed`/`handle_signal` (proc/signal.rs) likewise.
-use crate::proc::{handle_signal, kill, killed};
+
 
 // ===========================================================================
 // Native layout — Wave P3-5 (the asm-offset-locked trio, part 1/3).
@@ -896,7 +896,7 @@ pub extern "C" fn usertrap() {
         match scause {
             RISCV_ENV_CALL_FROM_U_MODE => {
                 // system call
-                if killed(p) != 0 {
+                if crate::proc::access::ThreadAccess::from_ptr(p).map_or(0, |ta| ta.killed()) != 0 {
                     exit(-1);
                 }
                 // sepc points to the ecall instruction, but we want to
@@ -921,7 +921,7 @@ pub extern "C" fn usertrap() {
                 } else {
                     vm_runlock((*p).vm);
                     kassert!((*p).pid != 1, c"usertrap", c"init exiting");
-                    kill((*p).pid, SIGSEGV);
+                    crate::proc::Signal::kill((*p).pid, SIGSEGV);
                 }
             }
             RISCV_LOAD_PAGE_FAULT => {
@@ -942,7 +942,7 @@ pub extern "C" fn usertrap() {
                 } else {
                     vm_runlock((*p).vm);
                     kassert!((*p).pid != 1, c"usertrap", c"init exiting");
-                    kill((*p).pid, SIGSEGV);
+                    crate::proc::Signal::kill((*p).pid, SIGSEGV);
                 }
             }
             RISCV_STORE_PAGE_FAULT => {
@@ -959,13 +959,13 @@ pub extern "C" fn usertrap() {
                 } else {
                     vm_runlock((*p).vm);
                     kassert!((*p).pid != 1, c"usertrap", c"init exiting");
-                    kill((*p).pid, SIGSEGV);
+                    crate::proc::Signal::kill((*p).pid, SIGSEGV);
                 }
             }
             _ => {
                 kassert!((scause >> 63) == 0, c"usertrap", c"unexpected interrupt");
                 kassert!((*p).pid != 1, c"usertrap", c"init exiting");
-                kill((*p).pid, SIGSEGV);
+                crate::proc::Signal::kill((*p).pid, SIGSEGV);
             }
         }
     }
@@ -1281,12 +1281,12 @@ pub(crate) extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext)
 pub(crate) extern "C" fn usertrapret() {
     let p = machine::current_thread_ptr();
 
-    if killed(p) != 0 {
+    if crate::proc::access::ThreadAccess::from_ptr(p).map_or(0, |ta| ta.killed()) != 0 {
         // If the thread is terminated, exit it.
         exit(-1);
     }
 
-    handle_signal();
+    crate::proc::Signal::handle_signal();
 
     if needs_resched() {
         scheduler_yield();

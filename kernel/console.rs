@@ -100,7 +100,7 @@ use crate::mm::{either_copyin, either_copyout};
 // P3-D2b: the proc-object entry points (proc/{signal,pid}.rs) are plain
 // crate-path items now that their `#[no_mangle]` exports are gone
 // (identical signatures).
-use crate::proc::{__proctab_get_initproc, killed, pid_wlock, pid_wunlock, procdump};
+use crate::proc::{__proctab_get_initproc, pid_wlock, pid_wunlock, procdump};
 
 /// `struct irq_desc`/`register_irq_handler`/`PLIC_IRQ_OFFSET` now live in
 /// `kernel/irq/irq_core.rs` (Phase 2 Wave 5 — irq/irq.c port). Previously
@@ -459,7 +459,7 @@ unsafe fn consoleread(
             // Wait until the interrupt handler has put some input into
             // cons.buf.
             while cons.r == cons.w {
-                if killed(crate::machine::current_thread_ptr()) != 0 {
+                if crate::proc::access::ThreadAccess::from_ptr(crate::machine::current_thread_ptr()).map_or(0, |ta| ta.killed()) != 0 {
                     drop(cons);
                     // Copy any pending data before returning.
                     if batch_count > 0 {

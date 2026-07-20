@@ -64,7 +64,6 @@ use super::truncate::xv6fs_bmap;
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> bool_` (c_uint); the real fn returns `bool` (same 0/1 in `a0`
 // under the old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 unsafe extern "C" {
     // string.rs.
@@ -185,7 +184,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
             if bytes_read > 0 {
                 return Ok(bytes_read as isize);
             }
-            return Err(if signal_pending(current()) { Errno::Intr } else { Errno::Io });
+            return Err(if crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) { Errno::Intr } else { Errno::Io });
         }
         let ret = pcache_read_page(pc, page);
         if ret != 0 {
@@ -332,7 +331,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
                 if bytes_written > 0 {
                     return Ok(bytes_written as isize);
                 }
-                return Err(if signal_pending(current()) { Errno::Intr } else { Errno::Io });
+                return Err(if crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) { Errno::Intr } else { Errno::Io });
             }
             let ret = pcache_read_page(pc, page);
             if ret != 0 {

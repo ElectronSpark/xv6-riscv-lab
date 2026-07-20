@@ -110,7 +110,6 @@ use crate::bindings::{
 // (only caller anywhere in the tree is this file), referenced directly
 // instead of via their own `extern "C"` redeclarations.
 use crate::proc::proc_shims::xv6_current_thread;
-use crate::proc::sigacts_exec;
 use crate::proc::vfork_done as raw_vfork_done;
 // P3-1C mesh sweep: vfs/{inode,file,fdtable}.rs are in scope for this wave,
 // so their callees are referenced as plain crate-path items instead of
@@ -800,7 +799,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // addresses are meaningless in the new address space).
     // SAFETY: `p` is the live current thread.
     unsafe {
-        sigacts_exec((*p).sigacts);
+        if let Some(s) = crate::proc::access::SigactsAccess::from_ptr((*p).sigacts) { s.exec(); }
     }
 
     // Close descriptors marked close-on-exec now that exec is committed.

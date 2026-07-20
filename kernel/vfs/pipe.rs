@@ -198,7 +198,7 @@ const _: () = {
 // items now that their `#[no_mangle]` exports are gone. `signal_pending`
 // used to be redeclared `-> c_int`; the real fn returns `bool` (same 0/1
 // in `a0` under the old C ABI), so its call sites drop their `!= 0`.
-use crate::proc::{killed, signal_pending};
+
 
 // P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
 // `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
@@ -488,7 +488,7 @@ pub(crate) extern "C" fn pipe_get_flags(pi: *mut pipe) -> c_int {
 fn pipe_wait_writer(pi: *mut pipe) -> c_int {
     let cur = xv6_current_thread();
     let g = writer_lock(pi).lock();
-    if !pipe_writable(pi) || killed(cur) != 0 {
+    if !pipe_writable(pi) || crate::proc::access::ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.killed()) != 0 {
         drop(g);
         // Return 0 to let the caller re-check and detect EOF properly.
         return 0;
@@ -518,7 +518,7 @@ fn pipe_wait_writer(pi: *mut pipe) -> c_int {
     };
     let _ = TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk, ptr::null_mut()));
     drop(g);
-    if signal_pending(cur) {
+    if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) {
         return neg(EINTR);
     }
     // Return 0 to re-check conditions (the wakeup may be from close or
@@ -531,7 +531,7 @@ fn pipe_wait_writer(pi: *mut pipe) -> c_int {
 fn pipe_wait_reader(pi: *mut pipe) -> c_int {
     let cur = xv6_current_thread();
     let g = reader_lock(pi).lock();
-    if !pipe_readable(pi) || killed(cur) != 0 {
+    if !pipe_readable(pi) || crate::proc::access::ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.killed()) != 0 {
         drop(g);
         return 0;
     }
@@ -552,7 +552,7 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
     };
     let _ = TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk, ptr::null_mut()));
     drop(g);
-    if signal_pending(cur) {
+    if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) {
         return neg(EINTR);
     }
     0
@@ -592,7 +592,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
                         g = None;
                         break 'out;
                     }
-                    if killed(pr) != 0 {
+                    if crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) != 0 {
                         g = None;
                         return -1;
                     }
@@ -760,7 +760,7 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
             while tmp_len > tmp_pos {
                 // SAFETY: non-null `pi`.
                 let nread = load_acquire_u32(unsafe { ptr::addr_of!((*pi).nread) });
-                if !pipe_readable(pi) || killed(pr) != 0 {
+                if !pipe_readable(pi) || crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) != 0 {
                     g = None;
                     return -1;
                 }

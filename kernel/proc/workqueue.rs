@@ -290,7 +290,6 @@ use crate::proc::{
     wakeup,
 };
 // P3-D2b: `kill_thread` (proc/signal.rs) likewise.
-use crate::proc::kill_thread;
 
 // =========================================================================
 // Wrapper-construction helpers. Each pointer constructor is null-safe.
@@ -523,7 +522,7 @@ impl<'a> WorkqueueRef<'a> {
         self.lock_ref().unlock();
         if should { invoke_wq_cb(self.cb_workqueue_dtor(), self.as_ptr()); }
         if !manager.is_null() {
-            let r = kill_thread(manager, SIGKILL);
+            let r = crate::proc::access::ThreadAccess::from_ptr(manager).map_or(-22, |ta| ta.kill_thread(SIGKILL));
             if r < 0 { thread_set_killed(manager); }
             scheduler_wakeup(manager);
         }

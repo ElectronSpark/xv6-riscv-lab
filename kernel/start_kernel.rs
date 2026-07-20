@@ -100,7 +100,7 @@ use crate::irq::irq_core::irq_desc_init;
 use crate::irq::plic::{plicinit, plicinithart};
 use crate::irq::trap::{trapinit, trapinithart};
 use crate::proc::{
-    scheduler_init, scheduler_yield, signal_init,
+    scheduler_init, scheduler_yield,
     workqueue_init, workqueue_runtime_smoke_test, workqueue_test_launch_tests,
 };
 // NO-STANDALONE-FN: the thread bring-up entry points are now associated fns on
@@ -300,7 +300,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         consoleinit();
         netdev_init();
         pci_init();
-        signal_init(); // signal handling initialization
+        crate::proc::Signal::init(); // signal handling initialization
         binit(); // buffer cache
         // Legacy iinit() and fileinit() removed - VFS handles these
         Thread::userinit(); // first user thread

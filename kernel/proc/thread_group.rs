@@ -44,10 +44,6 @@ use crate::proc::access::{
     list_node_next_raw, list_node_push_back_raw,
 };
 use crate::proc::proc_shims::{xv6_panic, xv6_pid_rlock, xv6_pid_runlock, xv6_pid_wholding};
-use crate::proc::ksiginfo_alloc;
-use crate::proc::ksiginfo_free;
-use crate::proc::sigacts_lock;
-use crate::proc::sigacts_unlock;
 // P3-1B2: previously bridged via the `xv6_schport_*` C-ABI alias layer
 // (`extern "C"` redeclarations above); now direct crate-path calls to the
 // real, already-Rust definitions in `sched.rs`.
@@ -600,7 +596,7 @@ impl<'a> ThreadGroupAccess<'a> {
                 // caches each node's successor before yielding it, so
                 // detach+free of the current node here is sound.
                 unsafe { KsigInfoAccess::assume(ksi) }.list_entry_ref().detach();
-                ksiginfo_free(ksi);
+                crate::proc::signal::KsigInfo::free(ksi);
             }
         }
         sp.set_sig_pending_mask(0);
@@ -700,7 +696,7 @@ impl<'a> ThreadGroupAccess<'a> {
         // indexing. `leader` and `sigacts` are each null-checked immediately
         // before the first deref that uses them (`self.group_leader_ptr()` /
         // `lta.sigacts_ptr()`), and `sigacts` stays live for the duration of
-        // this block because we hold `sigacts_lock(sigacts)` across all
+        // this block because we hold `crate::proc::access::SigactsAccess::from_ptr(sigacts).unwrap().lock()` across all
         // subsequent field accesses through it, released just before each
         // early return. Thread `sig_mask`/pending fields are reached through
         // the `ThreadSignalAccess` handle (raw loads, no `&thread`).
@@ -731,13 +727,13 @@ impl<'a> ThreadGroupAccess<'a> {
                 return -ESRCH;
             }
             let sigacts = lta.sigacts_ptr();
-            sigacts_lock(sigacts);
+            crate::proc::access::SigactsAccess::from_ptr(sigacts).unwrap().lock();
 
             let stop_mask = (*sigacts).sa_sigstop;
             let cont_mask = (*sigacts).sa_sigcont;
 
             if sigismember((*sigacts).sa_sigignore, signo) {
-                sigacts_unlock(sigacts);
+                crate::proc::access::SigactsAccess::from_ptr(sigacts).unwrap().unlock();
                 xv6_pid_runlock();
                 return 0;
             }
@@ -771,11 +767,11 @@ impl<'a> ThreadGroupAccess<'a> {
                         let old = container_of::<ksiginfo_t>(first, KSI_LIST_ENTRY_OFF);
                         if !old.is_null() {
                             KsigInfoAccess::assume(old).list_entry_ref().detach();
-                            ksiginfo_free(old);
+                            crate::proc::signal::KsigInfo::free(old);
                         }
                     }
                 }
-                let ksi = ksiginfo_alloc();
+                let ksi = crate::proc::signal::KsigInfo::alloc();
                 if !ksi.is_null() {
                     let ka = KsigInfoAccess::assume(ksi);
                     ka.copy_from(info);
@@ -784,7 +780,7 @@ impl<'a> ThreadGroupAccess<'a> {
                 }
             } else {
                 if sigismember(shared.sig_pending_mask(), signo) && !is_cont {
-                    sigacts_unlock(sigacts);
+                    crate::proc::access::SigactsAccess::from_ptr(sigacts).unwrap().unlock();
                     xv6_pid_runlock();
                     return 0;
                 }
@@ -800,7 +796,7 @@ impl<'a> ThreadGroupAccess<'a> {
                 }
             }
 
-            sigacts_unlock(sigacts);
+            crate::proc::access::SigactsAccess::from_ptr(sigacts).unwrap().unlock();
 
             if is_cont {
                 for t in self.threads() {
@@ -874,7 +870,7 @@ impl<'a> ThreadGroupAccess<'a> {
             // with real `ksiginfo` entries; `SigPendingRef::entries` caches each
             // node's successor before yielding it, so detach+free is sound.
             unsafe { KsigInfoAccess::assume(ksi) }.list_entry_ref().detach();
-            ksiginfo_free(ksi);
+            crate::proc::signal::KsigInfo::free(ksi);
         }
         shared.and_sig_pending_mask(!(1u64 << (signo - 1)));
     }

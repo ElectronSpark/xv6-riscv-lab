@@ -38,21 +38,16 @@ use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
 use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
-use crate::proc::sigacts_init;
-use crate::proc::sigstack_init;
 use crate::proc::rq_lock_current;
 use crate::proc::rq_unlock_current;
 use crate::proc::sched_attr_init;
 use crate::proc::sched_entity_init;
 use crate::proc::sched_setattr;
-use crate::proc::sigacts_put;
-use crate::proc::sigpending_destroy;
-use crate::proc::sigpending_init;
 // P3-1B2: these cross into sibling proc submodules and were previously
 // bridged via `xv6_sigport_*`/`xv6_schport_*`/`xv6_rqport_*` `extern "C"`
 // redeclarations (some inline above, some in the block below); now direct
 // crate-path items, same precedent as the `use` imports above.
-use crate::proc::{sigpending_empty, context_switch_finish, scheduler_wakeup,
+use crate::proc::{context_switch_finish, scheduler_wakeup,
     rq_cpu_activate, get_rq_for_cpu};
 // P3-D2b: the pid/thread-group/pgroup entry points (proc/{pid,
 // thread_group,pgroup}.rs) are ordinary Rust fns now that their
@@ -875,9 +870,9 @@ impl<'a> ThreadAccess<'a> {
         let p = self.as_ptr();
         thread_raw_layout! {
             self.state_set(THREAD_UNUSED);
-            sigpending_init(p);
+            self.sigpending_init();
             // Direct call through the typed signal-substruct field pointer.
-            sigstack_init(ThreadSignalAccess::assume_thread(p).sig_stack_ptr());
+            crate::proc::signal::SigStack::init(ThreadSignalAccess::assume_thread(p).sig_stack_ptr());
             self.init_embedded_lists_and_lock(c"thread".as_ptr() as *mut c_char);
             self.set_thread_group(ptr::null_mut());
             self.set_fs(ptr::null_mut());
@@ -1148,7 +1143,7 @@ impl<'a> ThreadAccess<'a> {
                      "thread_destroy: invalid kstack_order");
 
             if !self.sigacts_ptr().is_null() {
-                sigacts_put(self.sigacts_ptr());
+                if let Some(s) = crate::proc::access::SigactsAccess::from_ptr(self.sigacts_ptr()) { s.put(); }
                 self.set_sigacts(ptr::null_mut());
             }
             if !self.vm_ptr().is_null() {
@@ -1164,8 +1159,8 @@ impl<'a> ThreadAccess<'a> {
                 (*p).fs = ptr::null_mut();
             }
 
-            sigpending_empty(p, 0);
-            sigpending_destroy(p);
+            self.sigpending_empty(0);
+            self.sigpending_destroy();
 
             if let Some(tga) = ThreadGroupAccess::from_ptr(self.thread_group_ptr()) {
                 tga.put();
@@ -1240,7 +1235,7 @@ impl Thread {
 
             Thread::set_initproc(p);
 
-            ta_u.set_sigacts(sigacts_init());
+            ta_u.set_sigacts(crate::proc::signal::SigActs::init());
             kassert!(!ta_u.sigacts_ptr().is_null(), "userinit: sigacts_init failed");
 
             safestrcpy((*p).name.as_mut_ptr(), c"initcode".as_ptr(), (*p).name.len());

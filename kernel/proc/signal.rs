@@ -412,6 +412,22 @@ use crate::proc::access::{
     list_node_push_back_raw, write_out,
 };
 use crate::kstd::{Errno, KResult};
+// NO-STANDALONE-FN: `make_ksiginfo`'s real definition lives in `access.rs`
+// (out of this wave's scope). The file-local delegator that used to front
+// it was deleted; callers reach the access-module builder directly through
+// this import.
+use crate::proc::access::make_ksiginfo;
+
+/// Zero-sized marker carrying the pid/current-keyed signal ABI entry points
+/// as associated functions.
+///
+/// NO-STANDALONE-FN: these entries have no single `thread`/`sigacts`
+/// receiver to hang a method on — each resolves `current()` or looks up a
+/// pid at run time — so, per the wave rule, they become associated
+/// functions on this marker rather than remaining free functions. The
+/// thread-keyed entries (`killed`/`signal_pending`/`kill_proc`/… ) instead
+/// became [`ThreadAccess`] methods.
+pub(crate) struct Signal;
 
 // ---------- constants ----------
 const SLAB_FLAG_STATIC: u64 = 1 << 1;
@@ -838,84 +854,95 @@ fn recalc_sigpending() {
 // ============================================================================
 // sigpending_init / sigpending_destroy / sigpending_clone / sigstack_init
 // ============================================================================
-pub(super) fn sigpending_init(p: *mut thread) {
-    if p.is_null() { return; }
-    // SAFETY: `p` is checked non-null at the top of `sigpending_init` above.
-    let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
-    for i in 0..(NSIG as usize) {
-        ts.sig_pending_ref_index(i).queue_ref().init();
-    }
-}
-
-pub(super) fn sigpending_destroy(p: *mut thread) {
-    if p.is_null() { return; }
-    // SAFETY: `p` is checked non-null at the top of `sigpending_destroy` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let sa = ta.sigacts_ptr();
-    if !sa.is_null() {
-        // SAFETY: `sa` is checked non-null immediately above (`if !sa.is_null()`).
-        debug_assert!(unsafe { SigactsAccess::assume(sa) }.lock_ref().holding());
-    }
-    // SAFETY: `p` is checked non-null at the top of `sigpending_destroy` above.
-    let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
-    for i in 0..(NSIG as usize) {
-        if !ts.sig_pending_ref_index(i).queue_ref().is_empty() {
-            xv6_panic(c"sigpending_destroy: pending signals not empty".as_ptr());
+impl<'a> ThreadAccess<'a> {
+    pub(crate) fn sigpending_init(&self) {
+        let p = self.as_ptr();
+        // SAFETY: `p` is `self`'s non-null pointer.
+        let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
+        for i in 0..(NSIG as usize) {
+            ts.sig_pending_ref_index(i).queue_ref().init();
         }
     }
-    if ts.sig_pending_mask() != 0 {
-        xv6_panic(c"sigpending_destroy: pending mask not zero".as_ptr());
+
+    pub(crate) fn sigpending_destroy(&self) {
+        let p = self.as_ptr();
+        let sa = self.sigacts_ptr();
+        if !sa.is_null() {
+            // SAFETY: `sa` is checked non-null immediately above (`if !sa.is_null()`).
+            debug_assert!(unsafe { SigactsAccess::assume(sa) }.lock_ref().holding());
+        }
+        // SAFETY: `p` is `self`'s non-null pointer.
+        let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
+        for i in 0..(NSIG as usize) {
+            if !ts.sig_pending_ref_index(i).queue_ref().is_empty() {
+                xv6_panic(c"sigpending_destroy: pending signals not empty".as_ptr());
+            }
+        }
+        if ts.sig_pending_mask() != 0 {
+            xv6_panic(c"sigpending_destroy: pending mask not zero".as_ptr());
+        }
     }
 }
 
-pub(super) fn sigpending_clone(dst: *mut thread_signal_t,
-                                          src: *mut thread_signal_t,
-                                          clone_flags: u64,
-                                          esignal: c_int) {
-    // SAFETY: `dst` is an `extern "C"` parameter documented (by this function's C-era
-    // contract, mirrored in all Rust callers) to be the address of a live
-    // `thread_signal_t` sub-struct; never null in practice.
-    let dst = unsafe { ThreadSignalPtrRef::assume(dst) };
-    // SAFETY: `src` is an `extern "C"` parameter documented (by this function's C-era
-    // contract, mirrored in all Rust callers) to be the address of a live
-    // `thread_signal_t` sub-struct; never null in practice.
-    let src = unsafe { ThreadSignalPtrRef::assume(src) };
-    dst.set_sig_mask(src.sig_mask());
-    dst.set_sig_saved_mask(src.sig_saved_mask());
-    if (clone_flags & CLONE_THREAD) != 0 {
-        dst.set_esignal(0);
-    } else {
-        dst.set_esignal(esignal as u64);
+// NO-STANDALONE-FN: the per-thread signal-state clone became an associated
+// fn on the native [`ThreadSignal`] type; the sigaltstack reset became an
+// associated fn on the native [`SigStack`] type.
+impl ThreadSignal {
+    pub(crate) fn sigpending_clone(dst: *mut thread_signal_t,
+                                   src: *mut thread_signal_t,
+                                   clone_flags: u64,
+                                   esignal: c_int) {
+        // SAFETY: `dst` is documented (by this function's C-era contract,
+        // mirrored in all Rust callers) to be the address of a live
+        // `thread_signal_t` sub-struct; never null in practice.
+        let dst = unsafe { ThreadSignalPtrRef::assume(dst) };
+        // SAFETY: same contract as `dst` above for `src`.
+        let src = unsafe { ThreadSignalPtrRef::assume(src) };
+        dst.set_sig_mask(src.sig_mask());
+        dst.set_sig_saved_mask(src.sig_saved_mask());
+        if (clone_flags & CLONE_THREAD) != 0 {
+            dst.set_esignal(0);
+        } else {
+            dst.set_esignal(esignal as u64);
+        }
     }
 }
 
-pub(super) fn sigstack_init(stack: *mut stack_t) {
-    if stack.is_null() { return; }
-    raw_sig_abi! {
-        (*stack).ss_sp = ptr::null_mut();
-        (*stack).ss_flags = SS_DISABLE;
-        (*stack).ss_size = 0;
+impl SigStack {
+    pub(crate) fn init(stack: *mut stack_t) {
+        if stack.is_null() { return; }
+        raw_sig_abi! {
+            (*stack).ss_sp = ptr::null_mut();
+            (*stack).ss_flags = SS_DISABLE;
+            (*stack).ss_size = 0;
+        }
     }
 }
 
 // ============================================================================
 // ksiginfo_alloc / ksiginfo_free
 // ============================================================================
-pub(super) fn ksiginfo_alloc()-> *mut ksiginfo_t  {
-    raw_sig_abi! {
-        let ksi = slab_alloc(ksiginfo_pool()) as *mut ksiginfo_t;
-        if ksi.is_null() { return ptr::null_mut(); }
-        memset(ksi as *mut c_void, 0, core::mem::size_of::<ksiginfo_t>());
-        let ka = KsigInfoAccess::assume(ksi);
-        ka.list_entry_ref().init();
-        ka.set_sender(ptr::null_mut());
-        ksi
+// NO-STANDALONE-FN: the ksiginfo slab constructor/destructor became
+// associated fns on the native [`KsigInfo`] type (`alloc`/`free`); `make`
+// forwards to `access.rs`'s builder (real definition; out of this wave's
+// scope). Every cross-module caller (thread_group.rs) uses `KsigInfo::`.
+impl KsigInfo {
+    pub(crate) fn alloc() -> *mut ksiginfo_t {
+        raw_sig_abi! {
+            let ksi = slab_alloc(ksiginfo_pool()) as *mut ksiginfo_t;
+            if ksi.is_null() { return ptr::null_mut(); }
+            memset(ksi as *mut c_void, 0, core::mem::size_of::<ksiginfo_t>());
+            let ka = KsigInfoAccess::assume(ksi);
+            ka.list_entry_ref().init();
+            ka.set_sender(ptr::null_mut());
+            ksi
+        }
     }
-}
 
-pub(super) fn ksiginfo_free(ksi: *mut ksiginfo_t) {
-    if !ksi.is_null() {
-        raw_sig_abi! { slab_free(ksi as *mut c_void); }
+    pub(crate) fn free(ksi: *mut ksiginfo_t) {
+        if !ksi.is_null() {
+            raw_sig_abi! { slab_free(ksi as *mut c_void); }
+        }
     }
 }
 
@@ -935,14 +962,13 @@ fn sigacts_unlock_impl(sa: *mut sigacts_t) {
 // anywhere in the tree (kernel/inc/signal.h's legacy prototype does not
 // count, 9d35f95 precedent).
 
-pub(super) fn sigacts_lock(sa: *mut sigacts_t) { sigacts_lock_impl(sa) }
-pub(super) fn sigacts_unlock(sa: *mut sigacts_t) { sigacts_unlock_impl(sa) }
 
 // ============================================================================
 // sigpending_empty
 // ============================================================================
-pub(super) fn sigpending_empty(p: *mut thread, signo: c_int)-> c_int  {
-    if p.is_null() { return -EINVAL; }
+impl<'a> ThreadAccess<'a> {
+    pub(crate) fn sigpending_empty(&self, signo: c_int) -> c_int {
+    let p = self.as_ptr();
     raw_sig_abi! {
         let ta = ThreadAccess::assume(p);
         let sa = ta.sigacts_ptr();
@@ -956,7 +982,7 @@ pub(super) fn sigpending_empty(p: *mut thread, signo: c_int)-> c_int  {
                 let head = ts.sig_pending_ref_index((i - 1) as usize).queue_ptr();
                 for ksi in siginfo_queue(head) {
                     KsigInfoAccess::assume(ksi).list_entry_ref().detach();
-                    ksiginfo_free(ksi);
+                    KsigInfo::free(ksi);
                 }
             }
             ts.set_sig_pending_mask(0);
@@ -970,11 +996,12 @@ pub(super) fn sigpending_empty(p: *mut thread, signo: c_int)-> c_int  {
         let head = ts.sig_pending_ref_index((signo - 1) as usize).queue_ptr();
         for ksi in siginfo_queue(head) {
             KsigInfoAccess::assume(ksi).list_entry_ref().detach();
-            ksiginfo_free(ksi);
+            KsigInfo::free(ksi);
         }
         ts.and_sig_pending_mask(!sig_mask_bit(signo));
         recalc_sigpending_tsk(p);
         0
+    }
     }
 }
 
@@ -1028,85 +1055,101 @@ impl<'a> SigactsAccess<'a> {
 // ============================================================================
 // sigacts_init / sigacts_exec / sigacts_dup / sigacts_put / signal_init
 // ============================================================================
-pub(super) fn sigacts_init()-> *mut sigacts_t  {
-    raw_sig_abi! {
-        let sa = slab_alloc(sigacts_pool()) as *mut sigacts_t;
-        if sa.is_null() { return ptr::null_mut(); }
-        memset(sa as *mut c_void, 0, core::mem::size_of::<sigacts_t>());
-        (*sa).sa_sigterm = 0;
-        (*sa).sa_sigstop = 0;
-        (*sa).sa_sigcont = 0;
-        (*sa).sa_sigignore = 0;
-        spin_init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
-        (*sa).refcount = 1;
-        for i in 1..=NSIG {
-            if SigactsAccess::assume(sa).setdefault(i) != 0 {
-                xv6_panic(c"sigacts_init: failed to set default action".as_ptr());
-            }
-        }
-        sa
-    }
-}
-
-pub(crate) fn sigacts_exec(sa: *mut sigacts_t) {
-    if sa.is_null() { return; }
-    raw_sig_abi! {
-        sigacts_lock(sa);
-        for i in 1..=NSIG {
-            let sacc = SigactsAccess::assume(sa);
-            let act = sacc.action_ref(i);
-            let is_dfl = act.is_default();
-            let is_ign = act.is_ignore();
-            if !is_dfl && !is_ign {
-                sacc.setdefault(i);
-            }
-            act.set_flags(0);
-            act.set_mask(0);
-        }
-        sigacts_unlock(sa);
-    }
-}
-
-pub(super) fn sigacts_dup(psa: *mut sigacts_t, clone_flags: u64)-> *mut sigacts_t  {
-    if psa.is_null() { return ptr::null_mut(); }
-    raw_sig_abi! {
-        if (clone_flags & CLONE_SIGHAND) != 0 {
-            atomic_inc_i32(&raw mut (*psa).refcount);
-            return psa;
-        }
-        let sa = slab_alloc(sigacts_pool()) as *mut sigacts_t;
-        if !sa.is_null() {
-            sigacts_lock(psa);
-            memmove(sa as *mut c_void, psa as *const c_void, core::mem::size_of::<sigacts_t>());
-            sigacts_unlock(psa);
+// NO-STANDALONE-FN: the sigacts slab constructor/duplicator became
+// associated fns on the native [`SigActs`] type; the operations on an
+// existing sigacts (`exec`/`put`/`lock`/`unlock`) became [`SigactsAccess`]
+// methods (the pub `sigacts_lock`/`sigacts_unlock` free delegators were
+// deleted — thread_group.rs now calls the handle's `lock`/`unlock`; this
+// file keeps the private `sigacts_lock_impl`/`sigacts_unlock_impl`
+// null->panic choke points for its own pervasive internal use, the
+// `ta_of`/`sigacts_lock_ref` floor).
+impl SigActs {
+    pub(crate) fn init() -> *mut sigacts_t {
+        raw_sig_abi! {
+            let sa = slab_alloc(sigacts_pool()) as *mut sigacts_t;
+            if sa.is_null() { return ptr::null_mut(); }
+            memset(sa as *mut c_void, 0, core::mem::size_of::<sigacts_t>());
+            (*sa).sa_sigterm = 0;
+            (*sa).sa_sigstop = 0;
+            (*sa).sa_sigcont = 0;
+            (*sa).sa_sigignore = 0;
             spin_init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
             (*sa).refcount = 1;
+            for i in 1..=NSIG {
+                if SigactsAccess::assume(sa).setdefault(i) != 0 {
+                    xv6_panic(c"sigacts_init: failed to set default action".as_ptr());
+                }
+            }
+            sa
         }
-        sa
+    }
+
+    pub(crate) fn dup(psa: *mut sigacts_t, clone_flags: u64) -> *mut sigacts_t {
+        if psa.is_null() { return ptr::null_mut(); }
+        raw_sig_abi! {
+            if (clone_flags & CLONE_SIGHAND) != 0 {
+                atomic_inc_i32(&raw mut (*psa).refcount);
+                return psa;
+            }
+            let sa = slab_alloc(sigacts_pool()) as *mut sigacts_t;
+            if !sa.is_null() {
+                sigacts_lock_impl(psa);
+                memmove(sa as *mut c_void, psa as *const c_void, core::mem::size_of::<sigacts_t>());
+                sigacts_unlock_impl(psa);
+                spin_init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
+                (*sa).refcount = 1;
+            }
+            sa
+        }
     }
 }
 
-pub(super) fn sigacts_put(sa: *mut sigacts_t) {
-    if sa.is_null() { return; }
-    raw_sig_abi! {
-        if !atomic_dec_unless_i32(&raw mut (*sa).refcount, 1) {
-            slab_free(sa as *mut c_void);
+impl<'a> SigactsAccess<'a> {
+    #[inline] pub(crate) fn lock(&self) { self.lock_ref().lock(); }
+    #[inline] pub(crate) fn unlock(&self) { self.lock_ref().unlock(); }
+
+    pub(crate) fn exec(&self) {
+        let sa = self.as_ptr();
+        raw_sig_abi! {
+            sigacts_lock_impl(sa);
+            for i in 1..=NSIG {
+                let sacc = SigactsAccess::assume(sa);
+                let act = sacc.action_ref(i);
+                let is_dfl = act.is_default();
+                let is_ign = act.is_ignore();
+                if !is_dfl && !is_ign {
+                    sacc.setdefault(i);
+                }
+                act.set_flags(0);
+                act.set_mask(0);
+            }
+            sigacts_unlock_impl(sa);
+        }
+    }
+
+    pub(crate) fn put(&self) {
+        let sa = self.as_ptr();
+        raw_sig_abi! {
+            if !atomic_dec_unless_i32(&raw mut (*sa).refcount, 1) {
+                slab_free(sa as *mut c_void);
+            }
         }
     }
 }
 
-// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
-// `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn signal_init() {
-    raw_sig_abi! {
-        slab_cache_init(sigacts_pool(),
-            c"sigacts".as_ptr() as *mut c_char,
-            core::mem::size_of::<sigacts_t>(),
-            SLAB_FLAG_STATIC);
-        slab_cache_init(ksiginfo_pool(),
-            c"ksiginfo".as_ptr() as *mut c_char,
-            core::mem::size_of::<ksiginfo_t>(),
-            SLAB_FLAG_STATIC);
+impl Signal {
+    // P3-1B: only caller is `start_kernel.rs` (crate-path `use`).
+    pub(crate) fn init() {
+        raw_sig_abi! {
+            slab_cache_init(sigacts_pool(),
+                c"sigacts".as_ptr() as *mut c_char,
+                core::mem::size_of::<sigacts_t>(),
+                SLAB_FLAG_STATIC);
+            slab_cache_init(ksiginfo_pool(),
+                c"ksiginfo".as_ptr() as *mut c_char,
+                core::mem::size_of::<ksiginfo_t>(),
+                SLAB_FLAG_STATIC);
+        }
     }
 }
 
@@ -1135,10 +1178,10 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
         let sa = ta.sigacts_ptr();
         if sa.is_null() { return -EINVAL; }
 
-        sigacts_lock(sa);
+        sigacts_lock_impl(sa);
 
         if sigismember((*sa).sa_sigignore, signo) > 0 {
-            sigacts_unlock(sa);
+            sigacts_unlock_impl(sa);
             return 0;
         }
 
@@ -1153,10 +1196,10 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
                 if !list_node_is_empty_raw(head) {
                     let old = container_of::<ksiginfo_t>(list_node_next_raw(head), ksi_list_entry_offset());
                     KsigInfoAccess::assume(old).list_entry_ref().detach();
-                    ksiginfo_free(old);
+                    KsigInfo::free(old);
                 }
             }
-            let ksi = ksiginfo_alloc();
+            let ksi = KsigInfo::alloc();
             if !ksi.is_null() {
                 let ka = KsigInfoAccess::assume(ksi);
                 ka.copy_from(info);
@@ -1179,7 +1222,7 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
         let is_term = sigismember((*sa).sa_sigterm, signo) > 0;
         let sigmask = (*p).signal.sig_mask;
 
-        sigacts_unlock(sa);
+        sigacts_unlock_impl(sa);
 
         if is_stop {
             ta_of(p).tcb_lock();
@@ -1224,42 +1267,56 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
     }
 }
 
-pub(super) fn signal_send(pid: c_int, info: *mut ksiginfo_t)-> c_int  {
-    if pid < 0 || info.is_null() { return -EINVAL; }
-    // SAFETY: `info` is checked non-null immediately above.
-    if sigbad(unsafe { KsigInfoAccess::assume(info) }.signo()) { return -EINVAL; }
-    let _rcu = crate::lock::rcu::KRcuRead::new();
-    let p = get_pid_thread(pid);
-    if is_err(p) || p.is_null() {
-        return -ESRCH;
-    }
-    // SAFETY: `p` is checked non-null (`is_err(p) || p.is_null()`) immediately above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let tg = ta.thread_group_ptr();
-    // SAFETY: `tg` is proven non-null by the short-circuiting `&&` (`!tg.is_null() &&
-    // ...`).
-    if !tg.is_null() && unsafe { ThreadGroupAccess::assume(tg) }.is_kernel() != 0 {
-        __signal_send(p, info)
-    } else if matches!(ThreadGroupAccess::from_ptr(tg), Some(tga) if tga.tgid() == pid) {
-        ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(info))
-    } else {
-        __signal_send(p, info)
+impl Signal {
+    pub(crate) fn signal_send(pid: c_int, info: *mut ksiginfo_t) -> c_int {
+        if pid < 0 || info.is_null() { return -EINVAL; }
+        // SAFETY: `info` is checked non-null immediately above.
+        if sigbad(unsafe { KsigInfoAccess::assume(info) }.signo()) { return -EINVAL; }
+        let _rcu = crate::lock::rcu::KRcuRead::new();
+        let p = get_pid_thread(pid);
+        if is_err(p) || p.is_null() {
+            return -ESRCH;
+        }
+        // SAFETY: `p` is checked non-null (`is_err(p) || p.is_null()`) immediately above.
+        let ta = unsafe { ThreadAccess::assume(p) };
+        let tg = ta.thread_group_ptr();
+        // SAFETY: `tg` is proven non-null by the short-circuiting `&&` (`!tg.is_null() &&
+        // ...`).
+        if !tg.is_null() && unsafe { ThreadGroupAccess::assume(tg) }.is_kernel() != 0 {
+            __signal_send(p, info)
+        } else if matches!(ThreadGroupAccess::from_ptr(tg), Some(tga) if tga.tgid() == pid) {
+            ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(info))
+        } else {
+            __signal_send(p, info)
+        }
     }
 }
 
-pub(crate) fn signal_pending(p: *mut thread) -> bool {
-    if p.is_null() { return false; }
-    if !THREAD_SIGPENDING(p) { return false; }
-    let cur = xv6_current_thread();
-    // SAFETY: `p` is checked non-null at the top of `signal_pending` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    if p != cur || ta.sigacts_ptr().is_null() { return true; }
-    let sa = ta.sigacts_ptr();
-    sigacts_lock_impl(sa);
-    let has_pending = recalc_sigpending_tsk(p);
-    if !has_pending { THREAD_CLEAR_SIGPENDING(p); }
-    sigacts_unlock_impl(sa);
-    has_pending
+// NO-STANDALONE-FN: `signal_pending`/`killed`/`kill_proc`/`kill_thread`/
+// `sigpending`(query)/`sigpending_init`/`sigpending_destroy`/
+// `sigpending_empty` used to be free fns keyed on a `*mut thread`; they are
+// now `ThreadAccess` methods (inherent impl for a same-crate type may live
+// in any module, d086865 precedent). Every former top-of-body `p.is_null()`
+// guard's null->default mapping is reproduced at the call site by
+// constructing the handle via `ThreadAccess::from_ptr(p)` and folding
+// `None` to that default (the wave's accepted handle-construction burden).
+impl<'a> ThreadAccess<'a> {
+    pub(crate) fn signal_pending(&self) -> bool {
+        let p = self.as_ptr();
+        if !THREAD_SIGPENDING(p) { return false; }
+        let cur = xv6_current_thread();
+        if p != cur || self.sigacts_ptr().is_null() { return true; }
+        let sa = self.sigacts_ptr();
+        sigacts_lock_impl(sa);
+        let has_pending = recalc_sigpending_tsk(p);
+        if !has_pending { THREAD_CLEAR_SIGPENDING(p); }
+        sigacts_unlock_impl(sa);
+        has_pending
+    }
+
+    pub(crate) fn killed(&self) -> c_int {
+        if THREAD_KILLED(self.as_ptr()) { 1 } else { 0 }
+    }
 }
 
 // P3-D2b: `signal_pending_locked` deleted -- zero callers anywhere in
@@ -1300,7 +1357,7 @@ fn signal_restore(p: *mut thread, context: *mut c_void)-> c_int  {
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sa = ta.sigacts_ptr();
         if sa.is_null() { return -EINVAL; }
-        sigacts_lock(sa);
+        sigacts_lock_impl(sa);
         (*p).signal.sig_stack = (*ctx).uc_stack;
         (*p).signal.sig_ucontext = (*ctx).uc_link as u64;
         if (*p).signal.sig_ucontext == 0 {
@@ -1314,7 +1371,7 @@ fn signal_restore(p: *mut thread, context: *mut c_void)-> c_int  {
         sigdelset(&mut (*sa).sa_sigignore, SIGKILL);
         sigdelset(&mut (*sa).sa_sigignore, SIGSTOP);
         recalc_sigpending_tsk(p);
-        sigacts_unlock(sa);
+        sigacts_unlock_impl(sa);
         0
     }
 }
@@ -1322,7 +1379,8 @@ fn signal_restore(p: *mut thread, context: *mut c_void)-> c_int  {
 // ============================================================================
 // sigaction
 // ============================================================================
-pub(super) fn sigaction(signum: c_int, act: *mut sigaction_t,
+impl Signal {
+pub(crate) fn sigaction(signum: c_int, act: *mut sigaction_t,
                                    oldact: *mut sigaction_t)-> c_int  {
     if signum < 1 || signum > NSIG { return -EINVAL; }
     if signum == SIGKILL || signum == SIGSTOP { return -EINVAL; }
@@ -1332,7 +1390,7 @@ pub(super) fn sigaction(signum: c_int, act: *mut sigaction_t,
         if !THREAD_USER_SPACE(p) { return -EPERM; }
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sa = ta.sigacts_ptr();
-        sigacts_lock(sa);
+        sigacts_lock_impl(sa);
         if !oldact.is_null() {
             SigactsAccess::assume(sa).copy_action_to(signum, oldact);
         }
@@ -1349,7 +1407,7 @@ pub(super) fn sigaction(signum: c_int, act: *mut sigaction_t,
                 clear_pending = true;
             } else if is_dfl {
                 if SigactsAccess::assume(sa).setdefault(signum) != 0 {
-                    sigacts_unlock(sa);
+                    sigacts_unlock_impl(sa);
                     return -EINVAL;
                 }
                 if sigismember((*sa).sa_sigignore, signum) > 0 {
@@ -1368,8 +1426,8 @@ pub(super) fn sigaction(signum: c_int, act: *mut sigaction_t,
                 stored_act.and_mask(!sig_mask_bit(SIGSTOP));
             }
             if clear_pending {
-                if sigpending_empty(p, signum) != 0 {
-                    sigacts_unlock(sa);
+                if ta.sigpending_empty(signum) != 0 {
+                    sigacts_unlock_impl(sa);
                     return -EINVAL;
                 }
                 let tg_ptr = ta.thread_group_ptr();
@@ -1378,15 +1436,17 @@ pub(super) fn sigaction(signum: c_int, act: *mut sigaction_t,
                 }
             }
         }
-        sigacts_unlock(sa);
+        sigacts_unlock_impl(sa);
         0
     }
+}
 }
 
 // ============================================================================
 // sigprocmask
 // ============================================================================
-pub(super) fn sigprocmask(how: c_int, set: *const sigset_t,
+impl Signal {
+pub(crate) fn sigprocmask(how: c_int, set: *const sigset_t,
                                      oldset: *mut sigset_t)-> c_int  {
     if !set.is_null() && how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK {
         return -EINVAL;
@@ -1397,7 +1457,7 @@ pub(super) fn sigprocmask(how: c_int, set: *const sigset_t,
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sa = ta.sigacts_ptr();
         if sa.is_null() { xv6_panic(c"sigprocmask: sigacts NULL".as_ptr()); }
-        sigacts_lock(sa);
+        sigacts_lock_impl(sa);
         if !oldset.is_null() { *oldset = (*p).signal.sig_mask; }
         if !set.is_null() {
             let s = *set;
@@ -1428,7 +1488,7 @@ pub(super) fn sigprocmask(how: c_int, set: *const sigset_t,
             THREAD_SET_KILLED(p);
             set_term_signal_first(p, bits_ffs_g(pending_term));
         }
-        sigacts_unlock(sa);
+        sigacts_unlock_impl(sa);
         if pending_unmasked != 0 {
             ta_of(p).tcb_lock();
             signal_notify(p);
@@ -1437,47 +1497,48 @@ pub(super) fn sigprocmask(how: c_int, set: *const sigset_t,
         0
     }
 }
+}
 
 // ============================================================================
 // sigpending (query)
 // ============================================================================
-pub(super) fn sigpending(p: *mut thread, set: *mut sigset_t) -> c_int {
+impl<'a> ThreadAccess<'a> {
+    pub(crate) fn sigpending_query(&self, set: *mut sigset_t) -> c_int {
     if set.is_null() { return -EINVAL; }
-    if p.is_null() { xv6_panic(c"sigpending: thread NULL".as_ptr()); }
-    // SAFETY: `p` is proven non-null by the `xv6_panic` (diverging) null check
-    // immediately above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let sa = ta.sigacts_ptr();
+    let p = self.as_ptr();
+    let sa = self.sigacts_ptr();
     if sa.is_null() { xv6_panic(c"sigpending: sigacts NULL".as_ptr()); }
     sigacts_lock_impl(sa);
-    // SAFETY: `p` is proven non-null by the `xv6_panic` (diverging) null check above.
+    // SAFETY: `p` is `self`'s non-null pointer.
     let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
     let mask = ts.sig_mask();
     let mut pending = ts.sig_pending_mask();
-    let tg = ta.thread_group_ptr();
+    let tg = self.thread_group_ptr();
     // SAFETY: `tg` is proven non-null by the enclosing `if !tg.is_null() { ... }`.
     if !tg.is_null() { pending |= unsafe { ThreadGroupAccess::assume(tg) }.shared_pending_ref().sig_pending_mask(); }
     write_out(set, mask & pending);
     sigacts_unlock_impl(sa);
     0
+    }
 }
 
 // ============================================================================
 // sigreturn
 // ============================================================================
-pub(super) fn sigreturn()-> c_int  {
+impl Signal {
+pub(crate) fn sigreturn()-> c_int  {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() { xv6_panic(c"sigreturn: current NULL".as_ptr()); }
         if !THREAD_USER_SPACE(p) { return -EPERM; }
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sa = ta.sigacts_ptr();
-        sigacts_lock(sa);
+        sigacts_lock_impl(sa);
         if (*p).signal.sig_ucontext == 0 {
-            sigacts_unlock(sa);
+            sigacts_unlock_impl(sa);
             return -EINVAL;
         }
-        sigacts_unlock(sa);
+        sigacts_unlock_impl(sa);
         let mut uc: UContext = core::mem::zeroed();
         if restore_sigframe(p, &raw mut uc) != 0 {
             // Corrupted/invalid saved signal context: not reachable via the
@@ -1498,6 +1559,7 @@ pub(super) fn sigreturn()-> c_int  {
         }
         0
     }
+}
 }
 
 // ============================================================================
@@ -1557,7 +1619,7 @@ fn deliver_signal(p: *mut thread, signo: c_int, info: *mut ksiginfo_t,
         }
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sigacts = ta.sigacts_ptr();
-        sigacts_lock(sigacts);
+        sigacts_lock_impl(sigacts);
         if (action.flags() & SA_NODEFER) == 0 {
             sigaddset(&mut (*p).signal.sig_mask, signo);
         }
@@ -1570,7 +1632,7 @@ fn deliver_signal(p: *mut thread, signo: c_int, info: *mut ksiginfo_t,
                 xv6_panic(c"deliver_signal: sig_setdefault failed".as_ptr());
             }
         }
-        sigacts_unlock(sigacts);
+        sigacts_unlock_impl(sigacts);
         ret
     }
 }
@@ -1584,23 +1646,24 @@ fn notify_parent_child_stopped(p: *mut thread) {
             let pta = ThreadAccess::from_raw(parent).unwrap_unchecked();
             let psa = pta.sigacts_ptr();
             if !psa.is_null() {
-                sigacts_lock(psa);
+                sigacts_lock_impl(psa);
                 if ((*psa).sa[SIGCHLD as usize].sa_flags & SA_NOCLDSTOP) != 0 {
                     notify_sigchld = false;
                 }
-                sigacts_unlock(psa);
+                sigacts_unlock_impl(psa);
             }
         }
         xv6_pid_runlock();
         if !parent.is_null() {
             scheduler_wakeup_interruptible(parent);
             if notify_sigchld {
-                kill_proc(parent, SIGCHLD);
+                ta_of(parent).kill_proc(SIGCHLD);
             }
         }
     }
 }
 
+impl Signal {
 pub(crate) fn handle_signal() {
     raw_sig_abi! {
         let p = xv6_current_thread();
@@ -1610,7 +1673,7 @@ pub(crate) fn handle_signal() {
         let sa = ta.sigacts_ptr();
         let tg = ta.thread_group_ptr();
         loop {
-            sigacts_lock(sa);
+            sigacts_lock_impl(sa);
             let sigmask = (*p).signal.sig_mask;
             let sigterm = (*sa).sa_sigterm;
             let sigstop = (*sa).sa_sigstop;
@@ -1630,12 +1693,12 @@ pub(crate) fn handle_signal() {
                         (*tg).shared_pending.sig_pending_mask &= !sigterm;
                     }
                     recalc_sigpending_tsk(p);
-                    sigacts_unlock(sa);
+                    sigacts_unlock_impl(sa);
                     continue;
                 }
                 THREAD_SET_KILLED(p);
                 set_term_signal_first(p, bits_ffs_g(masked & sigterm));
-                sigacts_unlock(sa);
+                sigacts_unlock_impl(sa);
                 break;
             }
 
@@ -1663,7 +1726,7 @@ pub(crate) fn handle_signal() {
                         (*tg).shared_pending.sig_pending_mask &= !pending_cont;
                     }
                     recalc_sigpending_tsk(p);
-                    sigacts_unlock(sa);
+                    sigacts_unlock_impl(sa);
                     continue;
                 }
                 // fall through to delivery
@@ -1674,7 +1737,7 @@ pub(crate) fn handle_signal() {
                 }
                 (*p).signal.stop_signal = bits_ffs_g(pending_stop);
                 recalc_sigpending_tsk(p);
-                sigacts_unlock(sa);
+                sigacts_unlock_impl(sa);
                 ta_of(p).tcb_lock();
                 thread_state_set(p, THREAD_STOPPED);
                 ta_of(p).tcb_unlock();
@@ -1685,11 +1748,11 @@ pub(crate) fn handle_signal() {
 
             let signo = if masked != 0 { bits_ffs_g(masked) } else { 0 };
             if signo == 0 || signo > NSIG {
-                sigacts_unlock(sa);
+                sigacts_unlock_impl(sa);
                 break;
             }
             if sigismember(sigstop, signo) > 0 {
-                sigacts_unlock(sa);
+                sigacts_unlock_impl(sa);
                 continue;
             }
 
@@ -1700,7 +1763,7 @@ pub(crate) fn handle_signal() {
             } else if !tg.is_null() && sigismember((*tg).shared_pending.sig_pending_mask, signo) > 0 {
                 from_shared = true;
             } else {
-                sigacts_unlock(sa);
+                sigacts_unlock_impl(sa);
                 continue;
             }
 
@@ -1716,7 +1779,7 @@ pub(crate) fn handle_signal() {
                 };
             }
             recalc_sigpending_tsk(p);
-            sigacts_unlock(sa);
+            sigacts_unlock_impl(sa);
 
             if deliver_signal(p, signo, info,
                 &raw const sa_copy as *mut sigaction_t,
@@ -1724,16 +1787,16 @@ pub(crate) fn handle_signal() {
                 xv6_panic(c"handle_signal: deliver failed".as_ptr());
             }
             if (sa_copy.sa_flags & SA_SIGINFO) != 0 {
-                sigacts_lock(sa);
+                sigacts_lock_impl(sa);
                 let unmasked = sigismember((*p).signal.sig_mask, signo) == 0;
                 let mut still_pending = sigismember((*p).signal.sig_pending_mask, signo) > 0;
                 if !still_pending && !tg.is_null() {
                     still_pending = sigismember((*tg).shared_pending.sig_pending_mask, signo) > 0;
                 }
-                sigacts_unlock(sa);
+                sigacts_unlock_impl(sa);
                 if unmasked && still_pending { repeat = true; }
             }
-            if !info.is_null() { ksiginfo_free(info); }
+            if !info.is_null() { KsigInfo::free(info); }
             if !repeat { break; }
         }
 
@@ -1742,60 +1805,75 @@ pub(crate) fn handle_signal() {
         if THREAD_KILLED(p) { exit(-1); }
     }
 }
+}
 
 // ============================================================================
 // kill / kill_thread / tgkill / tkill / killed / kill_from_kernel / kill_proc
 // ============================================================================
-fn make_ksiginfo(signum: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo_t {
-    crate::proc::access::make_ksiginfo(signum, sender, si_pid)
-}
-
-pub(crate) fn kill(pid: c_int, signum: c_int) -> c_int {
-    if pid < -1 { return pgroup_kill(-pid, signum); }
-    if pid == -1 { return -EINVAL; }
-    let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
-    signal_send(pid, &mut info)
-}
-
-pub(super) fn kill_thread(p: *mut thread, signum: c_int)-> c_int  {
-    let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
-    let _rcu = crate::lock::rcu::KRcuRead::new();
-    __signal_send(p, &mut info)
-}
-
-pub(super) fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
-    if tgid < 0 || tid < 0 || sigbad(signum) { return -EINVAL; }
-    let _rcu = crate::lock::rcu::KRcuRead::new();
-    let p = get_pid_thread(tid);
-    if is_err(p) { return -ESRCH; }
-    // SAFETY: `p` is non-null: `get_pid_thread` only ever returns an err-encoded
-    // pointer (caught by `is_err(p)` above) or a live, non-null thread
-    // pointer.
-    let tg_ptr = unsafe { ThreadAccess::assume(p) }.thread_group_ptr();
-    match ThreadGroupAccess::from_ptr(tg_ptr) {
-        Some(tga) if tga.tgid() == tgid => {}
-        _ => return -ESRCH,
+// NO-STANDALONE-FN: the thread-keyed `kill_thread`/`kill_proc` became
+// `ThreadAccess` methods; the pid-keyed `kill`/`tgkill`/`tkill` (no single
+// receiver — they resolve a pid at run time) became `Signal` associated
+// functions.
+impl<'a> ThreadAccess<'a> {
+    pub(crate) fn kill_thread(&self, signum: c_int) -> c_int {
+        let p = self.as_ptr();
+        let cur = xv6_current_thread();
+        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        let _rcu = crate::lock::rcu::KRcuRead::new();
+        __signal_send(p, &mut info)
     }
-    let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
-    __signal_send(p, &mut info)
+
+    pub(crate) fn kill_proc(&self, signum: c_int) -> c_int {
+        let p = self.as_ptr();
+        if sigbad(signum) { return -EINVAL; }
+        let cur = xv6_current_thread();
+        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.resolve_tgid()));
+        let _rcu = crate::lock::rcu::KRcuRead::new();
+        // SAFETY: `p` is `self`'s non-null pointer.
+        let tg = unsafe { ThreadAccess::assume(p) }.thread_group_ptr();
+        if !tg.is_null() {
+            return ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&mut info));
+        }
+        __signal_send(p, &mut info)
+    }
 }
 
-pub(super) fn tkill(tid: c_int, signum: c_int) -> c_int {
-    if tid < 0 || sigbad(signum) { return -EINVAL; }
-    let _rcu = crate::lock::rcu::KRcuRead::new();
-    let p = get_pid_thread(tid);
-    if is_err(p) { return -ESRCH; }
-    let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
-    __signal_send(p, &mut info)
-}
+impl Signal {
+    pub(crate) fn kill(pid: c_int, signum: c_int) -> c_int {
+        if pid < -1 { return pgroup_kill(-pid, signum); }
+        if pid == -1 { return -EINVAL; }
+        let cur = xv6_current_thread();
+        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        Self::signal_send(pid, &mut info)
+    }
 
-pub(crate) fn killed(p: *mut thread) -> c_int {
-    if p.is_null() { return 0; }
-    if THREAD_KILLED(p) { 1 } else { 0 }
+    pub(crate) fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
+        if tgid < 0 || tid < 0 || sigbad(signum) { return -EINVAL; }
+        let _rcu = crate::lock::rcu::KRcuRead::new();
+        let p = get_pid_thread(tid);
+        if is_err(p) { return -ESRCH; }
+        // SAFETY: `p` is non-null: `get_pid_thread` only ever returns an err-encoded
+        // pointer (caught by `is_err(p)` above) or a live, non-null thread
+        // pointer.
+        let tg_ptr = unsafe { ThreadAccess::assume(p) }.thread_group_ptr();
+        match ThreadGroupAccess::from_ptr(tg_ptr) {
+            Some(tga) if tga.tgid() == tgid => {}
+            _ => return -ESRCH,
+        }
+        let cur = xv6_current_thread();
+        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        __signal_send(p, &mut info)
+    }
+
+    pub(crate) fn tkill(tid: c_int, signum: c_int) -> c_int {
+        if tid < 0 || sigbad(signum) { return -EINVAL; }
+        let _rcu = crate::lock::rcu::KRcuRead::new();
+        let p = get_pid_thread(tid);
+        if is_err(p) { return -ESRCH; }
+        let cur = xv6_current_thread();
+        let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(-1, |ta| ta.resolve_tgid()));
+        __signal_send(p, &mut info)
+    }
 }
 
 fn signal_send_to_tgroup(tgid: c_int, info: *mut ksiginfo_t)-> c_int  {
@@ -1820,30 +1898,18 @@ fn signal_send_to_tgroup(tgid: c_int, info: *mut ksiginfo_t)-> c_int  {
 // P3-D2b: `kill_from_kernel` deleted -- zero callers anywhere in the
 // tree (kernel/inc/signal.h's legacy prototype does not count).
 
-pub(crate) fn kill_proc(p: *mut thread, signum: c_int)-> c_int  {
-    if p.is_null() || sigbad(signum) { return -EINVAL; }
-    let cur = xv6_current_thread();
-    let mut info = make_ksiginfo(signum, cur, ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.resolve_tgid()));
-    let _rcu = crate::lock::rcu::KRcuRead::new();
-    // SAFETY: `p` is checked non-null at the top of `kill_proc` above.
-    let tg = unsafe { ThreadAccess::assume(p) }.thread_group_ptr();
-    if !tg.is_null() {
-        return ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&mut info));
-    }
-    __signal_send(p, &mut info)
-}
-
 // ============================================================================
 // sigsuspend / sigwait
 // ============================================================================
-pub(super) fn sigsuspend(mask: *const sigset_t)-> c_int  {
+impl Signal {
+pub(crate) fn sigsuspend(mask: *const sigset_t)-> c_int  {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() || mask.is_null() { return -EINVAL; }
         let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
         let sa = ta.sigacts_ptr();
         if sa.is_null() { xv6_panic(c"sigsuspend: sigacts NULL".as_ptr()); }
-        sigacts_lock(sa);
+        sigacts_lock_impl(sa);
         let saved = (*p).signal.sig_mask;
         (*p).signal.sig_saved_mask = (*p).signal.sig_mask;
         (*p).signal.sig_mask = *mask;
@@ -1858,18 +1924,20 @@ pub(super) fn sigsuspend(mask: *const sigset_t)-> c_int  {
             (*p).signal.sig_mask = saved;
             (*p).signal.sig_saved_mask = saved;
             recalc_sigpending_tsk(p);
-            sigacts_unlock(sa);
+            sigacts_unlock_impl(sa);
             return -EINTR;
         }
         recalc_sigpending_tsk(p);
-        sigacts_unlock(sa);
+        sigacts_unlock_impl(sa);
         thread_state_set(p, THREAD_INTERRUPTIBLE);
         scheduler_yield();
         -EINTR
     }
 }
+}
 
-pub(super) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
+impl Signal {
+pub(crate) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() || set.is_null() || sig.is_null() { return -EINVAL; }
@@ -1877,7 +1945,7 @@ pub(super) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
         let sa = ta.sigacts_ptr();
         if sa.is_null() { xv6_panic(c"sigwait: sigacts NULL".as_ptr()); }
         loop {
-            sigacts_lock(sa);
+            sigacts_lock_impl(sa);
             let wait_set = *set;
             let mut pending_wanted = (*p).signal.sig_pending_mask & wait_set;
             let tg = ta.thread_group_ptr();
@@ -1893,18 +1961,18 @@ pub(super) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
                         if !list_node_is_empty_raw(head) {
                             let ksi = container_of::<ksiginfo_t>((*head).next, ksi_list_entry_offset());
                             list_node_detach_raw(&raw mut (*ksi).list_entry);
-                            ksiginfo_free(ksi);
+                            KsigInfo::free(ksi);
                         }
                         if list_node_is_empty_raw(head) {
                             sigdelset(&mut (*p).signal.sig_pending_mask, signo);
                         }
                     } else if !tg.is_null() && sigismember((*tg).shared_pending.sig_pending_mask, signo) > 0 {
                         let ksi = ThreadGroupAccess::from_ptr(tg).map_or(ptr::null_mut(), |tga| tga.dequeue_signal(signo));
-                        if !ksi.is_null() { ksiginfo_free(ksi); }
+                        if !ksi.is_null() { KsigInfo::free(ksi); }
                     }
                     *sig = signo;
                     recalc_sigpending_tsk(p);
-                    sigacts_unlock(sa);
+                    sigacts_unlock_impl(sa);
                     return 0;
                 }
             }
@@ -1913,17 +1981,18 @@ pub(super) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
             sigdelset(&mut (*p).signal.sig_mask, SIGKILL);
             sigdelset(&mut (*p).signal.sig_mask, SIGSTOP);
             recalc_sigpending_tsk(p);
-            sigacts_unlock(sa);
+            sigacts_unlock_impl(sa);
 
             thread_state_set(p, THREAD_INTERRUPTIBLE);
             scheduler_yield();
 
-            sigacts_lock(sa);
+            sigacts_lock_impl(sa);
             (*p).signal.sig_mask = saved_mask;
             recalc_sigpending_tsk(p);
-            sigacts_unlock(sa);
+            sigacts_unlock_impl(sa);
 
-            if killed(p) != 0 { return -EINTR; }
+            if ta_of(p).killed() != 0 { return -EINTR; }
         }
     }
+}
 }

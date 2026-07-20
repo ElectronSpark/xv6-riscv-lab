@@ -150,7 +150,6 @@ use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
 // now moot) -- pulled in alongside for the same reason.
 // NO-STANDALONE-FN: `thread_group_exit`/`thread_tgid` are now the `ThreadAccess`
 // methods `group_exit` / `resolve_tgid` (reached via the full access path below).
-use crate::proc::signal_pending;
 use crate::proc::access::ThreadAccess;
 
 /// `thread_clone`'s real definition (`proc/clone.rs`) takes
@@ -324,7 +323,7 @@ pub(crate) extern "C" fn sys_sleep() -> u64 {
     argint(0, &mut n);
     let n = if n < 0 { 0u64 } else { n as u64 };
     let remaining = sleep_ms_interruptible(n);
-    if remaining > 0 && signal_pending(current()) {
+    if remaining > 0 && crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) {
         return (-EINTR) as u64;
     }
     0
@@ -387,7 +386,7 @@ pub(crate) extern "C" fn sys_nanosleep() -> u64 {
 
     let remaining_ms = sleep_ms_interruptible(ms);
 
-    if remaining_ms > 0 && signal_pending(current()) {
+    if remaining_ms > 0 && crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) {
         if rem_addr != 0 {
             let rem_ns = remaining_ms.wrapping_mul(1_000_000);
             let rem = Timespec {

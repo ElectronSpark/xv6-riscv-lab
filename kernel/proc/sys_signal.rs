@@ -74,10 +74,6 @@ fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_
 // (ABI-identical pointer casts). `signal_pending` used to be redeclared
 // `-> c_int`; the real fn returns `bool` (same 0/1 in `a0` under the old
 // C ABI), so its single call site drops the `!= 0`.
-use crate::proc::{
-    kill, sigaction, sigpending, sigprocmask, sigreturn, sigsuspend, sigwait,
-    signal_pending, tgkill, tkill,
-};
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
@@ -107,7 +103,7 @@ pub(crate) extern "C" fn sys_sigprocmask() -> u64 {
         }
     }
     let set_ptr: *const sigset_t = if set_addr != 0 { &set } else { core::ptr::null() };
-    let ret = sigprocmask(how, set_ptr, &mut oldset);
+    let ret = crate::proc::Signal::sigprocmask(how, set_ptr, &mut oldset);
     if ret < 0 {
         return ret as u64;
     }
@@ -154,7 +150,7 @@ pub(crate) extern "C" fn sys_sigaction() -> u64 {
     // (the old extern redeclaration took `*const c_void`/`*mut c_void`;
     // the buffers are `SIZEOF_SIGACTION`-byte copies of the user struct,
     // pinned by the drift guard above).
-    let ret = sigaction(
+    let ret = crate::proc::Signal::sigaction(
         signum,
         p_act as *mut bindings::sigaction,
         p_oldact as *mut bindings::sigaction,
@@ -179,7 +175,7 @@ pub(crate) extern "C" fn sys_sigpending() -> u64 {
     let mut set_addr: u64 = 0;
     argaddr(0, &mut set_addr);
     let mut set: sigset_t = 0;
-    let ret = sigpending(current(), &mut set);
+    let ret = crate::proc::access::ThreadAccess::from_ptr(current()).map_or(-22, |ta| ta.sigpending_query(&mut set));
     if ret < 0 { return ret as u64; }
     if set_addr != 0 {
         if either_copyout(1, set_addr, &set as *const _ as *const c_void,
@@ -193,7 +189,7 @@ pub(crate) extern "C" fn sys_sigpending() -> u64 {
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_sigreturn() -> u64 {
-    let ret = sigreturn();
+    let ret = crate::proc::Signal::sigreturn();
     if ret < 0 { return ret as u64; }
 
     let p = current();
@@ -214,7 +210,7 @@ pub(crate) extern "C" fn sys_pause() -> u64 {
     let p = current();
     loop {
         xv6_thread_state_set(p, THREAD_INTERRUPTIBLE);
-        if signal_pending(p) {
+        if crate::proc::access::ThreadAccess::from_ptr(p).is_some_and(|ta| ta.signal_pending()) {
             xv6_thread_state_set(p, THREAD_RUNNING);
             return (-EINTR) as u64;
         }
@@ -229,7 +225,7 @@ pub(crate) extern "C" fn sys_kill() -> u64 {
     let mut sig: c_int = 0;
     argint(0, &mut pid);
     argint(1, &mut sig);
-    kill(pid, sig) as u64
+    crate::proc::Signal::kill(pid, sig) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -241,7 +237,7 @@ pub(crate) extern "C" fn sys_tgkill() -> u64 {
     argint(0, &mut tgid);
     argint(1, &mut tid);
     argint(2, &mut sig);
-    tgkill(tgid, tid, sig) as u64
+    crate::proc::Signal::tgkill(tgid, tid, sig) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -251,7 +247,7 @@ pub(crate) extern "C" fn sys_tkill() -> u64 {
     let mut sig: c_int = 0;
     argint(0, &mut tid);
     argint(1, &mut sig);
-    tkill(tid, sig) as u64
+    crate::proc::Signal::tkill(tid, sig) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -266,7 +262,7 @@ pub(crate) extern "C" fn sys_sigsuspend() -> u64 {
                      core::mem::size_of::<sigset_t>() as u64) < 0 {
         return (-EFAULT) as u64;
     }
-    sigsuspend(&mask) as u64
+    crate::proc::Signal::sigsuspend(&mask) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -286,7 +282,7 @@ pub(crate) extern "C" fn sys_sigwait() -> u64 {
         return (-EFAULT) as u64;
     }
     let mut sig: c_int = 0;
-    let ret = sigwait(&set, &mut sig);
+    let ret = crate::proc::Signal::sigwait(&set, &mut sig);
     if ret < 0 { return ret as u64; }
     if either_copyout(1, sig_addr, &sig as *const _ as *const c_void,
                       core::mem::size_of::<c_int>() as u64) < 0 {

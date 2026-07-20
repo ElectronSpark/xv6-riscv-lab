@@ -68,7 +68,7 @@ use crate::proc::access::TqRef;
 // P3-D2b: `signal_pending`/`kill_proc` (proc/signal.rs) and `pgroup_kill`
 // (proc/pgroup.rs) are plain crate-path items now that their
 // `#[no_mangle]` exports are gone (identical signatures).
-use crate::proc::{kill_proc, pgroup_kill, signal_pending};
+use crate::proc::pgroup_kill;
 
 use super::session::{
     session_get_fg_pgid, session_lookup, session_set_ctrl_tty, session_set_fg_pgid,
@@ -926,7 +926,7 @@ impl Tty {
         }
         // Fallback: no session or no fg group -- signal current process.
         let cur = crate::machine::current_thread_ptr();
-        kill_proc(cur, signum);
+        if let Some(ta) = crate::proc::access::ThreadAccess::from_ptr(cur) { ta.kill_proc(signum); }
     }
 }
 
@@ -1151,7 +1151,7 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
             // formed first (ends the borrow before the `&mut self` call).
             let q = &raw mut guard.raw_wait;
             guard.wait_on(q, core::ptr::null_mut());
-            if signal_pending(cur) {
+            if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) {
                 drop(guard);
                 return if total > 0 { total } else { -(EINTR as i64) };
             }

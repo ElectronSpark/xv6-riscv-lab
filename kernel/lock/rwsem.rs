@@ -28,7 +28,6 @@ use crate::proc::access::TqRef;
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
 // said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
 // old C ABI), so the call sites drop their `!= 0`.
-use crate::proc::signal_pending;
 
 // P3-D3c: `sched_timer_set`/`sched_timer_done` are genuinely `unsafe fn`
 // in `crate::timer::sched_timer` now that their `#[no_mangle]` exports are
@@ -337,10 +336,10 @@ pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t) -> c_int {
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(l), null_mut()));
-        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
+        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
     }
     set_readers(l, get_readers(l) + 1);
     0
@@ -358,7 +357,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_in
     let tm = machine::tick_ms();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         let elapsed = machine::read_time().wrapping_sub(start);
         if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
         let remaining_ticks = timeout_ticks - elapsed;
@@ -378,7 +377,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_in
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         ));
-        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
+        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
     }
     set_readers(l, get_readers(l) + 1);
     0
@@ -422,10 +421,10 @@ pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t) -> c_int {
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if get_holder(l) == pid { return -(EDEADLK as c_int); }
     while writer_should_wait(l, pid) {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(l), null_mut()));
-        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
+        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
     }
     set_holder(l, pid);
     0
@@ -445,7 +444,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_i
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if get_holder(l) == pid { return -(EDEADLK as c_int); }
     while writer_should_wait(l, pid) {
-        if signal_pending(cur) { return -(EINTR as c_int); }
+        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         let elapsed = machine::read_time().wrapping_sub(start);
         if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
         let remaining_ticks = timeout_ticks - elapsed;
@@ -465,7 +464,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_i
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         ));
-        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
+        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
     }
     set_holder(l, pid);
     0
