@@ -1,7 +1,13 @@
 //! Rust port of `kernel/proc/sched_idle.c`.
 //!
-//! Exports the C ABI symbol [`init_idle_rq`]. The corresponding C file
-//! has been removed from `kernel/proc/CMakeLists.txt`.
+//! Boot-time construction of the per-CPU idle run queues is reached through
+//! the associated fns [`IdleRq::init_all`] / [`IdleRq::alloc_all`]
+//! (NO-STANDALONE-FN: the former free `init_idle_rq`/`alloc_idle_rqs`
+//! constructors). The three `idle_*_task` policy callbacks stay free — they
+//! ARE the `SchedClass` trait/vtable layer (dispatched from `SchedClass`'s
+//! methods in `sched.rs`), the same floor as the fifo callbacks.
+//! The corresponding C file has been removed from
+//! `kernel/proc/CMakeLists.txt`.
 
 #![allow(non_upper_case_globals)]
 
@@ -85,32 +91,39 @@ pub(super) unsafe fn idle_dequeue_task(_rq: *mut Rq, _se: *mut SchedEntity) {
 use crate::proc::proc_shims::thread_sched_entity;
 
 // ---------------------------------------------------------------------------
-// Boot path
+// Boot path (NO-STANDALONE-FN: associated fns on `IdleRq`)
 // ---------------------------------------------------------------------------
-unsafe fn alloc_idle_rqs() {
-    let size = core::mem::size_of::<IdleRq>() * NCPU;
-    let p = cffi::kmm_alloc_zeroed(size) as *mut IdleRq;
-    if p.is_null() {
-        cffi::panic_proc(b"alloc_idle_rqs: failed to allocate idle_rqs\0");
-    }
-    *IDLE_RQS.get() = p;
+impl IdleRq {
+    /// Allocate + register the per-CPU idle run queues (was the free
+    /// `alloc_idle_rqs`).
+    ///
+    /// # Safety
+    /// Boot-time only; must run once, before any scheduler dispatch.
+    unsafe fn alloc_all() {
+        let size = core::mem::size_of::<IdleRq>() * NCPU;
+        let p = cffi::kmm_alloc_zeroed(size) as *mut IdleRq;
+        if p.is_null() {
+            cffi::panic_proc(b"alloc_idle_rqs: failed to allocate idle_rqs\0");
+        }
+        *IDLE_RQS.get() = p;
 
-    for i in 0..NCPU {
-        let rq_ptr = &raw mut (*p.add(i)).rq;
-        cffi::rq_init(rq_ptr);
-        cffi::rq_register(rq_ptr, IDLE_MAJOR_PRIORITY, i as c_int);
-        cffi::rq_set_ready(IDLE_MAJOR_PRIORITY, i as c_int);
+        for i in 0..NCPU {
+            let rq_ptr = &raw mut (*p.add(i)).rq;
+            cffi::rq_init(rq_ptr);
+            cffi::rq_register(rq_ptr, IDLE_MAJOR_PRIORITY, i as c_int);
+            cffi::rq_set_ready(IDLE_MAJOR_PRIORITY, i as c_int);
+        }
     }
-}
 
-// P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
-// not an `extern` redeclaration) -- demoted.
-// P3-N-METH: sole caller `proc/rq.rs` is a `proc` descendant reaching this
-// via `super::sched_idle::init_idle_rq` (call site updated off the
-// `pub use sched_idle::*` glob) -> `pub(crate)` -> `pub(super)`.
-pub(super) unsafe extern "C" fn init_idle_rq() {
-    cffi::sched_class_register(IDLE_MAJOR_PRIORITY, SchedClass::Idle);
-    alloc_idle_rqs();
+    /// Boot entry: register the idle class + build its run queues (was the
+    /// free `init_idle_rq`). Sole caller is `proc/rq.rs`'s `global_init`.
+    ///
+    /// # Safety
+    /// Boot-time only; must run once, before any scheduler dispatch.
+    pub(super) unsafe fn init_all() {
+        cffi::sched_class_register(IDLE_MAJOR_PRIORITY, SchedClass::Idle);
+        unsafe { IdleRq::alloc_all() };
+    }
 }
 
 // Keep import live in case of future changes.

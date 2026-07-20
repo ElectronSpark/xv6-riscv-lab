@@ -1,6 +1,14 @@
 //! Rust port of `kernel/proc/sched_fifo.c`.
 //!
-//! Exports the C ABI symbols [`init_fifo_rq`] and [`init_fifo_rq_range`].
+//! Boot-time construction of the per-cls, per-CPU FIFO run-queue banks is
+//! reached through the associated fns [`FifoRq::init_all`] /
+//! [`FifoRq::init_range`] / [`FifoRq::alloc_for_cls`] / [`FifoRq::init`] and
+//! [`FifoSubqueue::init`] (NO-STANDALONE-FN: the former free `init_fifo_rq`/
+//! `init_fifo_rq_range`/`alloc_fifo_rqs_for_cls`/`fifo_rq_init`/
+//! `fifo_subqueue_init` constructors). The six `fifo_*_task`/
+//! `fifo_select_task_rq` policy callbacks stay free — they ARE the
+//! `SchedClass` trait/vtable layer (dispatched from `SchedClass`'s methods in
+//! `sched.rs`, never as instance methods); see the per-fn floor notes.
 
 #![allow(non_upper_case_globals)]
 
@@ -50,8 +58,15 @@ fn fifo_rqs_set(cls: usize, p: *mut FifoRq) {
 }
 
 // ---------------------------------------------------------------------------
-// Subqueue helpers
+// Subqueue / bank helpers
 // ---------------------------------------------------------------------------
+// NO-STANDALONE-FN floor: these stay free. `fifo_minor_prio`/`subqueue` are
+// the private glue of the `SchedClass` policy callbacks below (a callback that
+// reads a *Freeze* `SchedEntity`/`FifoRq` field through a raw `*mut` handed in
+// by the dispatcher — the exact freeze-noalias-in-loop hazard class, per
+// 46320f2), so they belong to that floor layer, not to `FifoRq`'s constructor
+// API. `fifo_rqs_get`/`fifo_rqs_set` (above) are a raw accessor pair over the
+// module-private `FIFO_RQS` static (no `FifoRq` receiver), likewise floor.
 #[inline]
 fn fifo_minor_prio(se: *mut SchedEntity) -> c_int {
     unsafe { minor_priority((*se).priority) }
@@ -65,6 +80,11 @@ fn subqueue(fifo_rq: *mut FifoRq, minor_prio: c_int) -> *mut FifoSubqueue {
 // ---------------------------------------------------------------------------
 // sched_class callbacks
 // ---------------------------------------------------------------------------
+// NO-STANDALONE-FN floor (all six below): these are the `SchedClass::Fifo`
+// policy callbacks, invoked polymorphically through `SchedClass`'s methods in
+// `sched.rs` (the trait/vtable layer) — never as `FifoRq` instance methods, so
+// they cannot become methods without a receiver the dispatcher does not pass.
+// Same class as the C `sched_class` fn-pointer table they replaced.
 pub(super) unsafe fn fifo_pick_next_task(rq: *mut Rq) -> *mut SchedEntity {
     let fifo_rq = rq as *mut FifoRq;
     let mask = (*fifo_rq).ready_mask;
@@ -189,55 +209,64 @@ pub(super) unsafe fn fifo_select_task_rq(
 // (`sched.rs`). The formerly-`None` slots need no representation.
 
 // ---------------------------------------------------------------------------
-// init helpers
+// init helpers (NO-STANDALONE-FN: associated fns on the run-queue types)
 // ---------------------------------------------------------------------------
-fn fifo_subqueue_init(sq: *mut FifoSubqueue) {
-    unsafe {
-        cffi::list_init(&raw mut (*sq).head);
-        (*sq).count = 0;
-    }
-}
-
-fn fifo_rq_init(fifo_rq: *mut FifoRq, cls_id: c_int, cpu_id: c_int) {
-    for i in 0..FIFO_RQ_SUBLEVELS {
-        fifo_subqueue_init(unsafe { &raw mut (*fifo_rq).subqueues[i] });
-    }
-    unsafe {
-        (*fifo_rq).ready_mask = 0;
-        cffi::rq_init(&raw mut (*fifo_rq).rq);
-        cffi::rq_clear_ready(cls_id, cpu_id);
-    }
-}
-
-fn alloc_fifo_rqs_for_cls(cls_id: c_int) {
-    let size = core::mem::size_of::<FifoRq>() * NCPU;
-    let p = unsafe { cffi::kmm_alloc_zeroed(size) as *mut FifoRq };
-    if p.is_null() {
+impl FifoSubqueue {
+    /// Zero-init one subqueue (was the free `fifo_subqueue_init`).
+    fn init(sq: *mut FifoSubqueue) {
         unsafe {
-            cffi::panic_proc(
-                b"alloc_fifo_rqs: failed to allocate fifo_rqs\0",
-            );
-        }
-    }
-    fifo_rqs_set(cls_id as usize, p);
-    for i in 0..NCPU {
-        unsafe {
-            fifo_rq_init(p.add(i), cls_id, i as c_int);
-            cffi::rq_register(&raw mut (*p.add(i)).rq, cls_id, i as c_int);
+            cffi::list_init(&raw mut (*sq).head);
+            (*sq).count = 0;
         }
     }
 }
 
-// P3-1B: only caller is `init_fifo_rq` (same file) -- demoted.
-extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
-    for cls in start_cls_id..end_cls_id {
-        cffi::sched_class_register(cls, SchedClass::Fifo);
-        alloc_fifo_rqs_for_cls(cls);
+impl FifoRq {
+    /// Init one per-CPU `FifoRq` (was the free `fifo_rq_init`).
+    fn init(fifo_rq: *mut FifoRq, cls_id: c_int, cpu_id: c_int) {
+        for i in 0..FIFO_RQ_SUBLEVELS {
+            FifoSubqueue::init(unsafe { &raw mut (*fifo_rq).subqueues[i] });
+        }
+        unsafe {
+            (*fifo_rq).ready_mask = 0;
+            cffi::rq_init(&raw mut (*fifo_rq).rq);
+            cffi::rq_clear_ready(cls_id, cpu_id);
+        }
     }
-}
 
-// P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
-// not an `extern` redeclaration) -- demoted.
-pub(super) extern "C" fn init_fifo_rq() {
-    init_fifo_rq_range(1, IDLE_MAJOR_PRIORITY);
+    /// Allocate + register the per-CPU bank for one cls id (was the free
+    /// `alloc_fifo_rqs_for_cls`).
+    fn alloc_for_cls(cls_id: c_int) {
+        let size = core::mem::size_of::<FifoRq>() * NCPU;
+        let p = unsafe { cffi::kmm_alloc_zeroed(size) as *mut FifoRq };
+        if p.is_null() {
+            unsafe {
+                cffi::panic_proc(
+                    b"alloc_fifo_rqs: failed to allocate fifo_rqs\0",
+                );
+            }
+        }
+        fifo_rqs_set(cls_id as usize, p);
+        for i in 0..NCPU {
+            unsafe {
+                FifoRq::init(p.add(i), cls_id, i as c_int);
+                cffi::rq_register(&raw mut (*p.add(i)).rq, cls_id, i as c_int);
+            }
+        }
+    }
+
+    /// Register + allocate the FIFO class over `[start, end)` (was the free
+    /// `init_fifo_rq_range`).
+    fn init_range(start_cls_id: c_int, end_cls_id: c_int) {
+        for cls in start_cls_id..end_cls_id {
+            cffi::sched_class_register(cls, SchedClass::Fifo);
+            FifoRq::alloc_for_cls(cls);
+        }
+    }
+
+    /// Boot entry: build every FIFO run-queue bank (was the free
+    /// `init_fifo_rq`). Sole caller is `proc/rq.rs`'s `global_init`.
+    pub(super) fn init_all() {
+        FifoRq::init_range(1, IDLE_MAJOR_PRIORITY);
+    }
 }

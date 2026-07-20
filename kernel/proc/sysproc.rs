@@ -4,6 +4,22 @@
 //! syscall dispatch table. Heavy lifting (exit, wait, kill, clone, ...)
 //! still lives in the existing C kernel routines; this module only
 //! handles user-argument extraction, copyin/copyout, and trivial glue.
+//!
+//! NO-STANDALONE-FN floor record (whole file):
+//! * Methods/assoc fns: the syscall bodies already delegate to methods —
+//!   `Proc::{exit,wait,waitpid}`, `Pgroup::{setpgid,getpgid}`,
+//!   `ThreadAccess::{resolve_tgid,pid,group_exit,parent_ptr,vm_ptr,...}`,
+//!   `CloneArgs::spawn`; `Utsname::zeroed` is already an associated fn.
+//! * Every `sys_*` stays a nullary `extern "C"` fn: it is reached out-of-`proc`
+//!   only as a fn-pointer *value* in `crate::irq::syscall`'s dispatch table
+//!   (the C syscall ABI), never through a struct receiver — the exact C-ABI
+//!   dispatch-table floor. Argument state lives in the trapframe (via the
+//!   `arg*` helpers / `current()`), not in a Rust value we could take `self` on.
+//! * The three file-private helpers stay free (foreign-fn adapter floor, no
+//!   natural receiver): `current` aliases the imported `xv6_current_thread`;
+//!   `either_copyout` is a `*const`→`*mut` cast adapter over the foreign
+//!   `mm::either_copyout`; `thread_clone` is a layout-identity typed wrapper
+//!   that forwards to `CloneArgs::spawn`.
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
