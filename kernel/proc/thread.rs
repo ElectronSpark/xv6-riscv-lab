@@ -154,14 +154,14 @@ fn __proctab_set_initproc(p: *mut thread) {
 /// Family tag for thread keys — an ASCII marker distinct from `SID_TAG`
 /// (`b"SESSION\0"`); only its distinctness matters (it makes [`Tid`] a
 /// different, non-interchangeable type from `Sid`/any future family key).
-pub(crate) const TID_TAG: u64 = u64::from_le_bytes(*b"THREAD\0\0");
+const TID_TAG: u64 = u64::from_le_bytes(*b"THREAD\0\0");
 
 /// Typed generational handle to a live thread in [`THREAD_TABLE`], distinct
 /// from the userspace numeric `pid`. A stale `Tid` (its thread exited and was
 /// removed from the table) resolves to `None`/null. The `NONE` sentinel
 /// (`generation == 0`) is the in-struct "no thread" edge — see the `parent`
 /// field, which stores a bare `Tid` (8 bytes, generation-0 == "no parent").
-pub(crate) type Tid = GenKey<TID_TAG>;
+pub(super) type Tid = GenKey<TID_TAG>;
 
 /// Native `struct thread` (`kernel/inc/proc/thread_types.h`) — the
 /// per-thread control block, laid out at the top of its kernel stack.
@@ -209,7 +209,7 @@ pub struct Thread {
     // the "no parent" edge (init and detached children). Resolved to a
     // `*mut thread` through [`THREAD_TABLE`] by the `parent` accessors
     // (`ThreadAccess::parent_ptr`/`set_parent` → `proc_shims::t_parent`/
-    // `t_set_parent` → `thread_parent_resolve`/`thread_parent_store`); a
+    // `t_set_parent` → `THREAD_TABLE.parent_resolve`/`parent_store`); a
     // stale `Tid` (parent freed) resolves to null — the existing "parent
     // gone" semantics reparent/wait already handle. `vfork_parent` below
     // stays `*mut Thread` (later sub-step).
@@ -390,94 +390,106 @@ const NR_THREAD: usize = 10_000;
 /// synchronized; all access is serialized by `pid_lock` — `pid_wlock` for the
 /// `&mut self` mutators (`insert`/`remove_ptr`), `pid_lock` (read, or a held
 /// write lock) for the `&self` resolver (`get`/`key_of`).
-struct ThreadTableCell(core::cell::UnsafeCell<GenTable<Thread, NR_THREAD, TID_TAG>>);
+pub(super) struct ThreadTableCell(core::cell::UnsafeCell<GenTable<Thread, NR_THREAD, TID_TAG>>);
 // SAFETY: every access below is taken while holding `pid_lock` at the
 // required strength (mutators assert `pid_wlock`); the raw `UnsafeCell`
 // access is thus race-free, same discipline as `SESSION_TABLE`.
 unsafe impl Sync for ThreadTableCell {}
 
-static THREAD_TABLE: ThreadTableCell =
+pub(super) static THREAD_TABLE: ThreadTableCell =
     ThreadTableCell(core::cell::UnsafeCell::new(GenTable::new()));
 
-/// Register `p` in [`THREAD_TABLE`], returning its fresh [`Tid`] (discarded
-/// by callers, which address threads by their stable pointer for this
-/// sub-step). `None` only if the table is full — impossible given
-/// [`NR_THREAD`]'s sizing. Called from `proctab_proc_add` under `pid_wlock`.
-pub(crate) fn thread_table_insert(p: *mut thread) -> Option<Tid> {
-    pid_assert_wholding();
-    let nn = NonNull::new(p)?;
-    // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
-    // registry is exclusive — no other hart holds a reference into the table
-    // (resolvers need `pid_lock`, excluded by our write lock).
-    let table = unsafe { &mut *THREAD_TABLE.0.get() };
-    table.insert(nn)
-}
-
-/// Deregister `p` from [`THREAD_TABLE`] (by its stable pointer — the thread
-/// caches no key), bumping the slot generation so any outstanding [`Tid`] to
-/// it (e.g. a child's `parent` edge) goes stale → resolves to null. A no-op
-/// if `p` was never registered. Called from `proctab_proc_remove` under
-/// `pid_wlock`.
-pub(crate) fn thread_table_remove(p: *mut thread) {
-    pid_assert_wholding();
-    let Some(nn) = NonNull::new(p) else { return };
-    // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
-    let table = unsafe { &mut *THREAD_TABLE.0.get() };
-    table.remove_ptr(nn);
-}
-
-/// Resolve thread `p`'s stored `parent` [`Tid`] to a live `*mut thread`, or
-/// null if it is [`Tid::NONE`] ("no parent" — init / a detached child) or
-/// stale (the parent exited and was removed → the correct "parent gone"
-/// answer reparent/wait already handle). The backing read for
-/// `ThreadAccess::parent_ptr` / `proc_shims::t_parent`.
-///
-/// Caller holds `pid_lock` where the edge is walked under it (attach/detach/
-/// reparent); the few pre-existing lock-free readers (e.g. `sys_getppid`)
-/// inherit exactly their prior best-effort profile — a single, non-looping
-/// generation-checked lookup (no freeze-hoist loop), and a *live* thread's
-/// parent slot is never concurrently removed (a parent with a live child is
-/// never reaped), so the resolved pointer is stable for them.
-pub(crate) fn thread_parent_resolve(p: *mut thread) -> *mut thread {
-    // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its
-    // own `parent` `Tid` field is a plain aligned word read.
-    let tid: Tid = unsafe { (*p).parent };
-    if tid.is_none() {
-        return ptr::null_mut();
+// N-METH: the four registry operations that genuinely act on `THREAD_TABLE`
+// (insert / remove / parent-edge resolve+store) are methods on the table
+// newtype — the natural `table.op(thread)` shape the brief calls out for the
+// GenTable family. The receiver is the registry; each body forms `&mut self`
+// (mutators) or `&self` (resolvers) to the inner `GenTable` under `pid_lock`
+// and hands back only raw `NonNull`/`*mut` — never a `&Thread` of a
+// concurrently-mutated pointee — so no Freeze-noalias hazard is introduced
+// (the `GenTable` doc above). The session/pgroup edge shims below stay free
+// fns: they resolve through *foreign* tables (`SESSION_TABLE`/`PGROUP_TABLE`,
+// other modules) and only touch the thread's own key field, so this table is
+// not their receiver.
+impl ThreadTableCell {
+    /// Register `p`, returning its fresh [`Tid`] (discarded by callers, which
+    /// address threads by their stable pointer for this sub-step). `None` only
+    /// if the table is full — impossible given [`NR_THREAD`]'s sizing. Called
+    /// from `proctab_proc_add` under `pid_wlock`.
+    pub(super) fn insert(&self, p: *mut thread) -> Option<Tid> {
+        pid_assert_wholding();
+        let nn = NonNull::new(p)?;
+        // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
+        // registry is exclusive — no other hart holds a reference into the
+        // table (resolvers need `pid_lock`, excluded by our write lock).
+        let table = unsafe { &mut *self.0.get() };
+        table.insert(nn)
     }
-    // SAFETY: shared `&self` into the registry; excludes every `&mut self`
-    // mutator (they hold `pid_wlock`). No `&Thread` is formed — the raw
-    // pointer is handed straight back (freeze note above).
-    let table = unsafe { &*THREAD_TABLE.0.get() };
-    match table.get(tid) {
-        Some(nn) => nn.as_ptr(),
-        None => ptr::null_mut(),
-    }
-}
 
-/// Store `par` as thread `p`'s `parent` edge: `par == null` → [`Tid::NONE`]
-/// ("no parent"), otherwise `par`'s current [`Tid`] (reverse-looked-up in the
-/// registry). The backing write for `ThreadAccess::set_parent` /
-/// `proc_shims::t_set_parent`. If `par` is somehow unregistered it stores
-/// `NONE` (resolves to null) — the same "no reachable parent" outcome a
-/// dangling raw pointer would have been null-checked into.
-///
-/// Caller holds `pid_wlock` (every `set_parent` site — attach/detach/clone —
-/// does; the registry read is race-free under it).
-pub(crate) fn thread_parent_store(p: *mut thread, par: *mut thread) {
-    let tid = match NonNull::new(par) {
-        None => Tid::NONE,
-        Some(nn) => {
-            // SAFETY: shared `&self` into the registry under the caller's
-            // `pid_wlock` (exclusive vs other mutators). Reverse lookup only.
-            let table = unsafe { &*THREAD_TABLE.0.get() };
-            table.key_of(nn).unwrap_or(Tid::NONE)
+    /// Deregister `p` (by its stable pointer — the thread caches no key),
+    /// bumping the slot generation so any outstanding [`Tid`] to it (e.g. a
+    /// child's `parent` edge) goes stale → resolves to null. A no-op if `p` was
+    /// never registered. Called from `proctab_proc_remove` under `pid_wlock`.
+    pub(super) fn remove(&self, p: *mut thread) {
+        pid_assert_wholding();
+        let Some(nn) = NonNull::new(p) else { return };
+        // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`.
+        let table = unsafe { &mut *self.0.get() };
+        table.remove_ptr(nn);
+    }
+
+    /// Resolve thread `p`'s stored `parent` [`Tid`] to a live `*mut thread`, or
+    /// null if it is [`Tid::NONE`] ("no parent" — init / a detached child) or
+    /// stale (the parent exited and was removed → the correct "parent gone"
+    /// answer reparent/wait already handle). The backing read for
+    /// `ThreadAccess::parent_ptr` / `proc_shims::t_parent`.
+    ///
+    /// Caller holds `pid_lock` where the edge is walked under it (attach/detach/
+    /// reparent); the few pre-existing lock-free readers (e.g. `sys_getppid`)
+    /// inherit exactly their prior best-effort profile — a single, non-looping
+    /// generation-checked lookup (no freeze-hoist loop), and a *live* thread's
+    /// parent slot is never concurrently removed (a parent with a live child is
+    /// never reaped), so the resolved pointer is stable for them.
+    pub(super) fn parent_resolve(&self, p: *mut thread) -> *mut thread {
+        // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its
+        // own `parent` `Tid` field is a plain aligned word read.
+        let tid: Tid = unsafe { (*p).parent };
+        if tid.is_none() {
+            return ptr::null_mut();
         }
-    };
-    // SAFETY: `p` is a live `*mut thread`; writing its own `parent` field
-    // under the caller's `pid_wlock` (exclusive) is race-free.
-    unsafe {
-        (*p).parent = tid;
+        // SAFETY: shared `&self` into the registry; excludes every `&mut self`
+        // mutator (they hold `pid_wlock`). No `&Thread` is formed — the raw
+        // pointer is handed straight back (freeze note above).
+        let table = unsafe { &*self.0.get() };
+        match table.get(tid) {
+            Some(nn) => nn.as_ptr(),
+            None => ptr::null_mut(),
+        }
+    }
+
+    /// Store `par` as thread `p`'s `parent` edge: `par == null` → [`Tid::NONE`]
+    /// ("no parent"), otherwise `par`'s current [`Tid`] (reverse-looked-up in
+    /// the registry). The backing write for `ThreadAccess::set_parent` /
+    /// `proc_shims::t_set_parent`. If `par` is somehow unregistered it stores
+    /// `NONE` (resolves to null) — the same "no reachable parent" outcome a
+    /// dangling raw pointer would have been null-checked into.
+    ///
+    /// Caller holds `pid_wlock` (every `set_parent` site — attach/detach/clone
+    /// — does; the registry read is race-free under it).
+    pub(super) fn parent_store(&self, p: *mut thread, par: *mut thread) {
+        let tid = match NonNull::new(par) {
+            None => Tid::NONE,
+            Some(nn) => {
+                // SAFETY: shared `&self` into the registry under the caller's
+                // `pid_wlock` (exclusive vs other mutators). Reverse lookup only.
+                let table = unsafe { &*self.0.get() };
+                table.key_of(nn).unwrap_or(Tid::NONE)
+            }
+        };
+        // SAFETY: `p` is a live `*mut thread`; writing its own `parent` field
+        // under the caller's `pid_wlock` (exclusive) is race-free.
+        unsafe {
+            (*p).parent = tid;
+        }
     }
 }
 
@@ -491,7 +503,7 @@ pub(crate) fn thread_parent_store(p: *mut thread, par: *mut thread) {
 /// [`session_lookup`], which requires it and does a single non-looping,
 /// generation-checked table read (no `&Session` formed — freeze-hazard note in
 /// the `GenTable` doc).
-pub(crate) fn thread_session_resolve(p: *mut thread) -> *mut session {
+pub(super) fn thread_session_resolve(p: *mut thread) -> *mut session {
     // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its own
     // `session` `Sid` field is a plain aligned word read.
     let sid: Sid = unsafe { (*p).session };
@@ -504,7 +516,7 @@ pub(crate) fn thread_session_resolve(p: *mut thread) -> *mut session {
 /// `proc_shims::t_set_session`.
 ///
 /// Caller holds `pid_wlock` (every `set_session` site does).
-pub(crate) fn thread_session_store(p: *mut thread, s: *mut session) {
+pub(super) fn thread_session_store(p: *mut thread, s: *mut session) {
     let sid = session_key_of(s);
     // SAFETY: `p` is a live `*mut thread`; writing its own `session` field
     // under the caller's `pid_wlock` (exclusive) is race-free.
@@ -523,7 +535,7 @@ pub(crate) fn thread_session_store(p: *mut thread, s: *mut session) {
 /// [`pgroup_lookup`], which requires it and does a single non-looping,
 /// generation-checked table read (no `&Pgroup` formed — freeze-hazard note in
 /// the `GenTable` doc).
-pub(crate) fn thread_pgroup_resolve(p: *mut thread) -> *mut pgroup {
+pub(super) fn thread_pgroup_resolve(p: *mut thread) -> *mut pgroup {
     // SAFETY: `p` is a live `*mut thread` (accessor contract); reading its own
     // `pgroup` `Pgid` field is a plain aligned word read.
     let pgid: Pgid = unsafe { (*p).pgroup };
@@ -536,7 +548,7 @@ pub(crate) fn thread_pgroup_resolve(p: *mut thread) -> *mut pgroup {
 /// `proc_shims::t_set_pgroup`.
 ///
 /// Caller holds `pid_wlock` (every `set_pgroup` site does).
-pub(crate) fn thread_pgroup_store(p: *mut thread, pg: *mut pgroup) {
+pub(super) fn thread_pgroup_store(p: *mut thread, pg: *mut pgroup) {
     let pgid = pgroup_key_of(pg);
     // SAFETY: `p` is a live `*mut thread`; writing its own `pgroup` field under
     // the caller's `pid_wlock` (exclusive) is race-free.
@@ -711,31 +723,35 @@ fn current_thread() -> *mut thread {
 }
 
 #[inline]
-fn thread_state_get(p: *mut thread) -> thread_state {
-    match ta_of(p) {
-        Some(t) => t.state_load() as thread_state,
-        None => THREAD_UNUSED,
-    }
-}
-#[inline]
 fn thread_state_set(p: *mut thread, s: thread_state) {
     if let Some(t) = ta_of(p) { t.state_store(s as u32); }
 }
-#[inline]
-fn thread_is_awoken(p: *mut thread) -> bool {
-    let s = thread_state_get(p);
-    s == THREAD_RUNNING || s == THREAD_WAKENING
-}
-#[inline]
-fn thread_is_sleeping(p: *mut thread) -> bool {
-    let s = thread_state_get(p);
-    s == THREAD_INTERRUPTIBLE || s == THREAD_UNINTERRUPTIBLE
-        || s == THREAD_KIILABLE || s == THREAD_TIMER || s == THREAD_KIILABLE_TIMER
-}
-#[inline]
-fn thread_set_user_space(p: *mut thread) {
-    if let Some(t) = ta_of(p) {
-        t.flags_set_bit(THREAD_FLAG_USER_SPACE);
+
+// N-METH: the derived thread-state predicates and the user-space-flag action
+// that used to be the free fns `thread_is_awoken`/`thread_is_sleeping`/
+// `thread_set_user_space` are inherent methods on the `ThreadAccess` handle
+// (defined in `proc::access`, extended here in-crate). They read only through
+// the handle's existing `pub` sound accessors (`state_load`/`flags_set_bit`) —
+// never forming a `&Thread` — so they carry the same no-Freeze-hazard profile
+// as every other `ThreadAccess` accessor (the brief's "route through
+// ThreadAccess" sound form), while living beside the `THREAD_*` state
+// constants that are their single source of truth. Kept module-private (used
+// only by this file's create/destroy paths).
+impl<'a> ThreadAccess<'a> {
+    #[inline]
+    fn is_awoken(&self) -> bool {
+        let s = self.state_load() as thread_state;
+        s == THREAD_RUNNING || s == THREAD_WAKENING
+    }
+    #[inline]
+    fn is_sleeping(&self) -> bool {
+        let s = self.state_load() as thread_state;
+        s == THREAD_INTERRUPTIBLE || s == THREAD_UNINTERRUPTIBLE
+            || s == THREAD_KIILABLE || s == THREAD_TIMER || s == THREAD_KIILABLE_TIMER
+    }
+    #[inline]
+    fn set_user_space(&self) {
+        self.flags_set_bit(THREAD_FLAG_USER_SPACE);
         core::sync::atomic::fence(Ordering::SeqCst);
     }
 }
@@ -912,15 +928,15 @@ fn proc_assert_holding_impl(p: *mut thread) {
     );
 }
 
-pub(crate) fn tcb_lock(p: *mut thread) { tcb_lock_impl(p) }
-pub(crate) fn tcb_unlock(p: *mut thread) { tcb_unlock_impl(p) }
-pub(crate) fn proc_assert_holding(p: *mut thread) { proc_assert_holding_impl(p) }
+pub(super) fn tcb_lock(p: *mut thread) { tcb_lock_impl(p) }
+pub(super) fn tcb_unlock(p: *mut thread) { tcb_unlock_impl(p) }
+pub(super) fn proc_assert_holding(p: *mut thread) { proc_assert_holding_impl(p) }
 
 // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
 pub(crate) extern "C" fn thread_init() { __proctab_init(); }
 
-pub(crate) fn attach_child(parent: *mut thread, child: *mut thread) {
+pub(super) fn attach_child(parent: *mut thread, child: *mut thread) {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
@@ -940,7 +956,7 @@ pub(crate) fn attach_child(parent: *mut thread, child: *mut thread) {
     }
 }
 
-pub(crate) fn detach_child(parent: *mut thread, child: *mut thread) {
+pub(super) fn detach_child(parent: *mut thread, child: *mut thread) {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
@@ -1003,7 +1019,7 @@ fn thread_create_inner(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c
     }
 }
 
-pub(crate) fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
+pub(super) fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
     result_to_errptr(thread_create_inner(entry, arg1, arg2, kstack_order))
 }
 
@@ -1143,14 +1159,14 @@ extern "C" fn thread_destroy_rcu_callback(data: *mut c_void) {
     page_free(t.kstack_addr() as *mut c_void, t.kstack_order());
 }
 
-pub(crate) fn thread_destroy(p: *mut thread) {
+pub(super) fn thread_destroy(p: *mut thread) {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         kassert!(!p.is_null(), "thread_destroy called with NULL thread");
-        kassert!(!thread_is_awoken(p), "thread_destroy called with a runnable thread");
-        kassert!(!thread_is_sleeping(p), "thread_destroy called with a sleeping thread");
+        kassert!(!ta_of(p).is_some_and(|t| t.is_awoken()), "thread_destroy called with a runnable thread");
+        kassert!(!ta_of(p).is_some_and(|t| t.is_sleeping()), "thread_destroy called with a sleeping thread");
         kassert!((*p).kstack_order >= 0 && (*p).kstack_order <= PAGE_BUDDY_MAX_ORDER,
                  "thread_destroy: invalid kstack_order");
 
@@ -1247,7 +1263,7 @@ pub(crate) extern "C" fn userinit() {
 
         safestrcpy((*p).name.as_mut_ptr(), c"initcode".as_ptr(), (*p).name.len());
 
-        thread_set_user_space(p);
+        ta_u.set_user_space();
 
         let mut attr: sched_attr = core::mem::zeroed();
         sched_attr_init(&mut attr);
@@ -1275,7 +1291,7 @@ pub(crate) extern "C" fn install_user_root() {
         kassert!(!(*p).fs.is_null(), "install_user_root: thread fs_struct is NULL");
 
         tcb_lock(p);
-        thread_set_user_space(p);
+        if let Some(t) = ta_of(p) { t.set_user_space(); }
         tcb_unlock(p);
 
         install_user_root_finish(p, root_inode);
