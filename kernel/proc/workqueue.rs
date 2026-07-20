@@ -360,51 +360,179 @@ fn alloc_work_struct() -> *mut work_struct {
     if !p.is_null() { slab_free(p as *mut c_void); }
 }
 
-fn work_struct_valid(work: *mut work_struct) -> bool {
-    let Some(w) = wsr(work) else { return false; };
-    if !work_flags_valid(w.flags()) { return false; }
-    w.func().is_some() || w.fault().is_some()
-}
+// ===========================================================================
+// N-METH (RUSTIFY-PROC): the per-object algorithms that used to be free
+// `fn(work: *mut work_struct)` / `fn(wq: WorkqueueRef<'_>)` helpers are now
+// inherent METHODS on the `WorkStructRef`/`WorkqueueRef` *handles* (defined
+// in [`crate::proc::access`]; inherent impls may live in any module of the
+// defining crate). The handles reach the underlying C struct through a
+// `NonNull` raw pointer -- crucially, NO `&WorkStruct`/`&Workqueue`
+// reference is ever formed, so the Freeze-`noalias` read-hoist hazard that
+// would fire on a `&self` method of these `Copy`/`UnsafeCell`-free (=>
+// `Freeze`) native structs is structurally avoided: a `work_struct` is
+// embedded in a queue and processed by a worker thread across a `tq_wait`
+// park, and a `workqueue`'s counter/flag fields are mutated by other harts
+// across `scheduler_yield()`. Every field touch here is a raw load/store the
+// optimizer may not reorder. `&self` borrows the *handle* (a pointer), never
+// the pointee. The raw-`*mut`-taking `*_impl` entry points below stay thin
+// null-checking delegators (the C-ABI forwarders hold raw pointers).
+// ===========================================================================
 
-fn workqueue_struct_init(wq_p: *mut workqueue) {
-    let Some(wq) = wqr(wq_p) else { return; };
-    memset(wq_p as *mut c_void, 0, core::mem::size_of::<workqueue>());
-    list_node_init_raw(wq.worker_list_ptr());
-    list_node_init_raw(wq.work_list_ptr());
-    spin_init(wq.lock_ptr(), c"workqueue_lock".as_ptr() as *mut c_char);
-    tq_init(wq.idle_queue_ptr(), c"workqueue_idle".as_ptr(), wq.lock_ptr());
-}
-
-// -------- enqueue / dequeue ----------------------------------------------
-fn enqueue_work(wq: WorkqueueRef<'_>, work: WorkStructRef<'_>) {
-    if !work.entry_ref().is_detached() {
-        xv6_panic(c"enqueue_work: work struct is already enqueued".as_ptr());
+// -------- work_struct per-object operations -------------------------------
+impl<'a> WorkStructRef<'a> {
+    /// Valid iff the flags are well-formed and at least one of
+    /// `func`/`fault` is set (was `work_struct_valid`).
+    fn is_valid(&self) -> bool {
+        work_flags_valid(self.flags()) && (self.func().is_some() || self.fault().is_some())
     }
-    work.entry_ref().push_front(wq.work_list_ptr());
-    wq.inc_pending_works();
-}
-fn dequeue_work(wq: WorkqueueRef<'_>) -> *mut work_struct {
-    let off = core::mem::offset_of!(work_struct, entry);
-    let last = list_node_pop_back_raw(wq.work_list_ptr());
-    if last.is_null() { return ptr::null_mut(); }
-    wq.dec_pending_works();
-    (last as *mut u8).wrapping_sub(off) as *mut work_struct
+    /// Full initializer (`init_work_struct_ex`); panics on invalid flags.
+    fn init_ex(
+        &self,
+        func: Option<unsafe extern "C" fn(*mut work_struct)>,
+        fault: Option<unsafe extern "C" fn(*mut work_struct)>,
+        data: u64,
+        flags: u32,
+    ) {
+        if !work_flags_valid(flags) {
+            xv6_panic(c"init_work_struct_ex: invalid work flags".as_ptr());
+        }
+        self.entry_ref().init();
+        self.set_func(func);
+        self.set_fault(fault);
+        self.set_data(data);
+        self.set_flags(flags);
+    }
+    /// Run the callback (or, on a drained inactive queue, the fault
+    /// handler), then free the item if `FREE_AFTER_RUN` is set. After a
+    /// free the handle is dangling and must not be reused (it is not).
+    fn execute(&self, queue_active: bool) {
+        let run = queue_active || self.flag_set(WORK_STRUCT_FLAG_RUN_ON_DRAIN);
+        if run {
+            if !queue_active {
+                invoke_work_cb(self.fault(), self.as_ptr());
+            } else {
+                invoke_work_cb(self.func(), self.as_ptr());
+            }
+        }
+        if self.flag_set(WORK_STRUCT_FLAG_FREE_AFTER_RUN) { free_ptr(self.as_ptr()); }
+    }
 }
 
-// -------- callbacks -------------------------------------------------------
-fn mark_workqueue_dtor_once(wq: WorkqueueRef<'_>) -> bool {
-    let should = !wq.dtor_called();
-    if should { wq.set_dtor_called(1); }
-    should
-}
-
-fn wakeup_all_idle_workers(wq: WorkqueueRef<'_>) {
-    let ret = tq_wakeup_all(wq.idle_queue_ptr(), 0, 0);
-    if ret < 0 {
-        crate::kprintln!(
-            "warning: failed to wake idle workers for workqueue {}",
-            crate::printf::Cs(wq.name_ptr()),
+// -------- workqueue per-object operations ---------------------------------
+impl<'a> WorkqueueRef<'a> {
+    /// Zero and initialize the embedded lock/queues/lists (was
+    /// `workqueue_struct_init`).
+    fn struct_init(&self) {
+        memset(self.as_ptr() as *mut c_void, 0, core::mem::size_of::<workqueue>());
+        list_node_init_raw(self.worker_list_ptr());
+        list_node_init_raw(self.work_list_ptr());
+        spin_init(self.lock_ptr(), c"workqueue_lock".as_ptr() as *mut c_char);
+        tq_init(self.idle_queue_ptr(), c"workqueue_idle".as_ptr(), self.lock_ptr());
+    }
+    /// Push a detached work item onto the work list (was `enqueue_work`).
+    fn enqueue(&self, work: WorkStructRef<'_>) {
+        if !work.entry_ref().is_detached() {
+            xv6_panic(c"enqueue_work: work struct is already enqueued".as_ptr());
+        }
+        work.entry_ref().push_front(self.work_list_ptr());
+        self.inc_pending_works();
+    }
+    /// Pop the oldest work item, or null if the list is empty (was
+    /// `dequeue_work`). Returns a raw pointer: the caller runs then frees it.
+    fn dequeue(&self) -> *mut work_struct {
+        let off = core::mem::offset_of!(work_struct, entry);
+        let last = list_node_pop_back_raw(self.work_list_ptr());
+        if last.is_null() { return ptr::null_mut(); }
+        self.dec_pending_works();
+        (last as *mut u8).wrapping_sub(off) as *mut work_struct
+    }
+    /// Latch the dtor-called flag; true exactly once (was
+    /// `mark_workqueue_dtor_once`).
+    fn mark_dtor_once(&self) -> bool {
+        let should = !self.dtor_called();
+        if should { self.set_dtor_called(1); }
+        should
+    }
+    /// Wake every idle worker parked on the idle queue.
+    fn wakeup_all_idle_workers(&self) {
+        let ret = tq_wakeup_all(self.idle_queue_ptr(), 0, 0);
+        if ret < 0 {
+            crate::kprintln!(
+                "warning: failed to wake idle workers for workqueue {}",
+                crate::printf::Cs(self.name_ptr()),
+            );
+        }
+    }
+    /// Spawn a worker thread bound to this queue (was `create_worker`).
+    fn create_worker(&self) -> c_int {
+        let worker = kthread_create(
+            c"worker_thread".as_ptr(),
+            worker_routine as *mut c_void,
+            self.as_ptr() as u64,
+            0,
+            KERNEL_STACK_ORDER,
         );
+        if is_err_or_null(worker) { return ptr_err_or(worker, -ENOMEM); }
+        let Some(wa) = ta(worker) else { return -ENOMEM; };
+        tcb_lock(worker);
+        wa.set_wq_ptr(self.as_ptr());
+        self.inc_nr_workers();
+        wa.wq_entry_ref().push_back(self.worker_list_ptr());
+        tcb_unlock(worker);
+        wakeup(worker);
+        0
+    }
+    /// Spawn the manager thread bound to this queue (was `create_manager`).
+    fn create_manager(&self) -> c_int {
+        let manager = kthread_create(
+            c"manager_thread".as_ptr(),
+            manager_routine as *mut c_void,
+            self.as_ptr() as u64,
+            0,
+            KERNEL_STACK_ORDER,
+        );
+        if is_err_or_null(manager) { return ptr_err_or(manager, -ENOMEM); }
+        let Some(ma) = ta(manager) else { return -ENOMEM; };
+        tcb_lock(manager);
+        ma.set_wq_ptr(self.as_ptr());
+        tcb_unlock(manager);
+        self.set_manager(manager);
+        0
+    }
+    /// Wake the manager thread if one is bound (was `wakeup_manager`).
+    fn wakeup_manager(&self) {
+        let m = self.manager_ptr();
+        if !m.is_null() { scheduler_wakeup(m); }
+    }
+    /// Deactivate the queue and tear down its manager (was
+    /// `workqueue_kill_impl`, minus the null check now in its delegator).
+    fn kill(&self) -> c_int {
+        self.lock_ref().lock();
+        if !self.is_active() { self.lock_ref().unlock(); return 0; }
+        self.set_active(0);
+        let should = self.mark_dtor_once();
+        let manager = self.manager_ptr();
+        self.lock_ref().unlock();
+        if should { invoke_wq_cb(self.cb_workqueue_dtor(), self.as_ptr()); }
+        if !manager.is_null() {
+            let r = kill_thread(manager, SIGKILL);
+            if r < 0 { thread_set_killed(manager); }
+            scheduler_wakeup(manager);
+        }
+        0
+    }
+    /// Validate and enqueue a work item, waking the manager (was
+    /// `queue_work_impl`, minus the null check now in its delegator).
+    fn queue_work(&self, work_p: *mut work_struct) -> bool {
+        let Some(w) = wsr(work_p) else { return false; };
+        if !w.is_valid() { return false; }
+        if !w.entry_ref().is_detached() { return false; }
+        self.lock_ref().lock();
+        if !self.is_active() { self.lock_ref().unlock(); return false; }
+        self.enqueue(w);
+        self.wakeup_manager();
+        self.lock_ref().unlock();
+        true
     }
 }
 
@@ -457,20 +585,6 @@ fn exit_manager_routine(exit_code: u64) -> ! {
     exit(exit_code as c_int)
 }
 
-// -------- execute_work ----------------------------------------------------
-fn execute_work(work_p: *mut work_struct, queue_active: bool) {
-    let Some(w) = wsr(work_p) else { return; };
-    let run = queue_active || w.flag_set(WORK_STRUCT_FLAG_RUN_ON_DRAIN);
-    if run {
-        if !queue_active {
-            invoke_work_cb(w.fault(), work_p);
-        } else {
-            invoke_work_cb(w.func(), work_p);
-        }
-    }
-    if w.flag_set(WORK_STRUCT_FLAG_FREE_AFTER_RUN) { free_ptr(work_p); }
-}
-
 // -------- worker / manager routines --------------------------------------
 unsafe extern "C" fn worker_routine() {
     let cur_t = xv6_current_thread();
@@ -487,13 +601,13 @@ unsafe extern "C" fn worker_routine() {
         wq.lock_ref().lock();
         if thread_killed(cur_t) { wq.lock_ref().unlock(); exit_worker_routine(0); }
         if !wq.is_active() {
-            let work = dequeue_work(wq);
+            let work = wq.dequeue();
             if work.is_null() { wq.lock_ref().unlock(); exit_worker_routine(0); }
             wq.lock_ref().unlock();
-            execute_work(work, false);
+            if let Some(w) = wsr(work) { w.execute(false); }
             continue;
         }
-        let mut work = dequeue_work(wq);
+        let mut work = wq.dequeue();
         if work.is_null() {
             xv6_thread_state_set(cur_t, THREAD_INTERRUPTIBLE);
             tq_wait(
@@ -507,7 +621,7 @@ unsafe extern "C" fn worker_routine() {
             if work.is_null() { wq.lock_ref().unlock(); continue; }
         }
         wq.lock_ref().unlock();
-        execute_work(work, true);
+        if let Some(w) = wsr(work) { w.execute(true); }
     }
 }
 
@@ -526,15 +640,15 @@ unsafe extern "C" fn manager_routine() {
     loop {
         if thread_killed(cur_t) {
             if wq.is_active() {
-                if create_manager(wq) == 0 { wakeup_manager(wq); }
+                if wq.create_manager() == 0 { wq.wakeup_manager(); }
             } else {
-                wakeup_all_idle_workers(wq);
+                wq.wakeup_all_idle_workers();
             }
             wq.lock_ref().unlock();
             exit_manager_routine(0);
         }
         if !wq.is_active() {
-            wakeup_all_idle_workers(wq);
+            wq.wakeup_all_idle_workers();
             wq.lock_ref().unlock();
             exit_manager_routine(0);
         }
@@ -544,7 +658,7 @@ unsafe extern "C" fn manager_routine() {
         while wq.nr_workers() < wq.min_active()
             || (wq.pending_works() > wq.nr_workers() && wq.nr_workers() < wq.max_active())
         {
-            if create_worker(wq) != 0 { break; }
+            if wq.create_worker() != 0 { break; }
         }
         let idle = wq.idle_queue_ptr();
         while tq_size(idle) != 0 && wq.nr_workers() - tq_size(idle) < wq.pending_works() {
@@ -560,45 +674,6 @@ unsafe extern "C" fn manager_routine() {
     }
 }
 
-fn create_worker(wq: WorkqueueRef<'_>) -> c_int {
-    let worker = kthread_create(
-        c"worker_thread".as_ptr(),
-        worker_routine as *mut c_void,
-        wq.as_ptr() as u64,
-        0,
-        KERNEL_STACK_ORDER,
-    );
-    if is_err_or_null(worker) { return ptr_err_or(worker, -ENOMEM); }
-    let Some(wa) = ta(worker) else { return -ENOMEM; };
-    tcb_lock(worker);
-    wa.set_wq_ptr(wq.as_ptr());
-    wq.inc_nr_workers();
-    wa.wq_entry_ref().push_back(wq.worker_list_ptr());
-    tcb_unlock(worker);
-    wakeup(worker);
-    0
-}
-fn create_manager(wq: WorkqueueRef<'_>) -> c_int {
-    let manager = kthread_create(
-        c"manager_thread".as_ptr(),
-        manager_routine as *mut c_void,
-        wq.as_ptr() as u64,
-        0,
-        KERNEL_STACK_ORDER,
-    );
-    if is_err_or_null(manager) { return ptr_err_or(manager, -ENOMEM); }
-    let Some(ma) = ta(manager) else { return -ENOMEM; };
-    tcb_lock(manager);
-    ma.set_wq_ptr(wq.as_ptr());
-    tcb_unlock(manager);
-    wq.set_manager(manager);
-    0
-}
-fn wakeup_manager(wq: WorkqueueRef<'_>) {
-    let m = wq.manager_ptr();
-    if !m.is_null() { scheduler_wakeup(m); }
-}
-
 // =========================================================================
 // Internal implementations.  Public ABI exports below all forward here.
 // =========================================================================
@@ -609,15 +684,7 @@ fn init_work_struct_ex_impl(
     data: u64,
     flags: u32,
 ) {
-    let Some(w) = wsr(work) else { return; };
-    if !work_flags_valid(flags) {
-        xv6_panic(c"init_work_struct_ex: invalid work flags".as_ptr());
-    }
-    w.entry_ref().init();
-    w.set_func(func);
-    w.set_fault(fault);
-    w.set_data(data);
-    w.set_flags(flags);
+    if let Some(w) = wsr(work) { w.init_ex(func, fault, data, flags); }
 }
 fn create_work_struct_ex_impl(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
@@ -658,8 +725,8 @@ fn workqueue_create_with_callbacks_impl(
     let name = if name.is_null() { c"unnamed".as_ptr() } else { name };
     let wq_p = alloc_workqueue();
     if wq_p.is_null() { return ptr::null_mut(); }
-    workqueue_struct_init(wq_p);
     let Some(wq) = wqr(wq_p) else { return ptr::null_mut(); };
+    wq.struct_init();
     strncpy(wq.name_buf_ptr(), name, WORKQUEUE_NAME_MAX);
     wq.copy_callbacks(callbacks);
     wq.set_max_active(max_active);
@@ -670,46 +737,27 @@ fn workqueue_create_with_callbacks_impl(
     wq.set_active(1);
     invoke_wq_cb(wq.cb_workqueue_ctor(), wq_p);
     wq.lock_ref().lock();
-    if create_manager(wq) != 0 {
-        let should = mark_workqueue_dtor_once(wq);
+    if wq.create_manager() != 0 {
+        let should = wq.mark_dtor_once();
         wq.lock_ref().unlock();
         if should { invoke_wq_cb(wq.cb_workqueue_dtor(), wq_p); }
         free_ptr(wq_p);
         return ptr::null_mut();
     }
-    wakeup_manager(wq);
+    wq.wakeup_manager();
     wq.lock_ref().unlock();
     wq_p
 }
 
+// Thin null-checking delegators: the C-ABI forwarders below hold raw
+// `*mut workqueue`/`*mut work_struct`; each wraps in a handle and calls the
+// `WorkqueueRef` method that carries the real logic.
 fn workqueue_kill_impl(wq_p: *mut workqueue) -> c_int {
-    let Some(wq) = wqr(wq_p) else { return -EINVAL; };
-    wq.lock_ref().lock();
-    if !wq.is_active() { wq.lock_ref().unlock(); return 0; }
-    wq.set_active(0);
-    let should = mark_workqueue_dtor_once(wq);
-    let manager = wq.manager_ptr();
-    wq.lock_ref().unlock();
-    if should { invoke_wq_cb(wq.cb_workqueue_dtor(), wq_p); }
-    if !manager.is_null() {
-        let r = kill_thread(manager, SIGKILL);
-        if r < 0 { thread_set_killed(manager); }
-        scheduler_wakeup(manager);
-    }
-    0
+    wqr(wq_p).map(|wq| wq.kill()).unwrap_or(-EINVAL)
 }
 
 fn queue_work_impl(wq_p: *mut workqueue, work_p: *mut work_struct) -> bool {
-    let Some(wq) = wqr(wq_p) else { return false; };
-    if !work_struct_valid(work_p) { return false; }
-    let Some(w) = wsr(work_p) else { return false; };
-    if !w.entry_ref().is_detached() { return false; }
-    wq.lock_ref().lock();
-    if !wq.is_active() { wq.lock_ref().unlock(); return false; }
-    enqueue_work(wq, w);
-    wakeup_manager(wq);
-    wq.lock_ref().unlock();
-    true
+    wqr(wq_p).map(|wq| wq.queue_work(work_p)).unwrap_or(false)
 }
 
 // =========================================================================
@@ -718,14 +766,15 @@ fn queue_work_impl(wq_p: *mut workqueue, work_p: *mut work_struct) -> bool {
 // P3-1B mesh sweep: every `xv6_wq_pub_*` alias below is genuinely dead --
 // zero callers anywhere in the tree (grep-verified). They existed only to
 // mirror the canonical names for the long-deleted `proc_rust_shims.c`'s
-// C-ABI callers; demoted from `#[no_mangle]` rather than deleted, per
-// this wave's "preserve still-plausible public API, don't silently
-// delete" convention (see `goldfish_rtc_init`'s precedent). The file's
-// existing blanket `#![allow(dead_code)]` covers these, so no per-item
-// attribute is added.
+// C-ABI callers; kept (rather than deleted) per this wave's "preserve
+// still-plausible public API, don't silently delete" convention (see
+// `goldfish_rtc_init`'s precedent). RUSTIFY-PROC visibility sweep: their
+// `pub(crate)` was the widest surface with zero justification, so they are
+// now module-PRIVATE (`extern "C" fn`, no `pub`); the file's blanket
+// `#![allow(dead_code)]` covers them.
 // =========================================================================
 
-pub(crate) extern "C" fn xv6_wq_pub_init_work_struct_ex(
+extern "C" fn xv6_wq_pub_init_work_struct_ex(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
@@ -733,105 +782,110 @@ pub(crate) extern "C" fn xv6_wq_pub_init_work_struct_ex(
     flags: u32,
 ) { init_work_struct_ex_impl(work, func, fault, data, flags) }
 
-pub(crate) extern "C" fn xv6_wq_pub_init_work_struct(
+extern "C" fn xv6_wq_pub_init_work_struct(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
 ) { init_work_struct_ex_impl(work, func, None, data, WORK_STRUCT_DEFAULT_FLAGS) }
 
-pub(crate) extern "C" fn xv6_wq_pub_init_work_struct_flags(
+extern "C" fn xv6_wq_pub_init_work_struct_flags(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
     flags: u32,
 ) { init_work_struct_ex_impl(work, func, None, data, flags) }
 
-pub(crate) extern "C" fn xv6_wq_pub_create_work_struct_ex(
+extern "C" fn xv6_wq_pub_create_work_struct_ex(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
     flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, fault, data, flags) }
 
-pub(crate) extern "C" fn xv6_wq_pub_create_work_struct(
+extern "C" fn xv6_wq_pub_create_work_struct(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
 ) -> *mut work_struct {
     create_work_struct_ex_impl(func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
 }
 
-pub(crate) extern "C" fn xv6_wq_pub_create_work_struct_flags(
+extern "C" fn xv6_wq_pub_create_work_struct_flags(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
     flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, None, data, flags) }
 
-pub(crate) extern "C" fn xv6_wq_pub_free_work_struct(work: *mut work_struct) {
+extern "C" fn xv6_wq_pub_free_work_struct(work: *mut work_struct) {
     free_work_struct_impl(work)
 }
 
-pub(crate) extern "C" fn xv6_wq_pub_workqueue_init() { workqueue_init_impl() }
+extern "C" fn xv6_wq_pub_workqueue_init() { workqueue_init_impl() }
 
-pub(crate) extern "C" fn xv6_wq_pub_workqueue_create_with_callbacks(
+extern "C" fn xv6_wq_pub_workqueue_create_with_callbacks(
     name: *const c_char,
     max_active: c_int,
     callbacks: *const workqueue_callbacks,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, callbacks) }
 
-pub(crate) extern "C" fn xv6_wq_pub_workqueue_create(
+extern "C" fn xv6_wq_pub_workqueue_create(
     name: *const c_char,
     max_active: c_int,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, ptr::null()) }
 
-pub(crate) extern "C" fn xv6_wq_pub_workqueue_kill(wq: *mut workqueue) -> c_int {
+extern "C" fn xv6_wq_pub_workqueue_kill(wq: *mut workqueue) -> c_int {
     workqueue_kill_impl(wq)
 }
 
-pub(crate) extern "C" fn xv6_wq_pub_queue_work(
+extern "C" fn xv6_wq_pub_queue_work(
     wq: *mut workqueue, work: *mut work_struct,
 ) -> bool { queue_work_impl(wq, work) }
 
-pub(crate) extern "C" fn xv6_wq_pub_workqueue_runtime_smoke_test() {}
+extern "C" fn xv6_wq_pub_workqueue_runtime_smoke_test() {}
 
 // ============== canonical ABI names ====================
-pub(crate) extern "C" fn workqueue_init() { workqueue_init_impl() }
-pub(crate) extern "C" fn workqueue_runtime_smoke_test() {}
+// RUSTIFY-PROC visibility sweep (out-of-`crate::proc` callers grep-verified):
+//   pub(crate) kept  -> reached from mm/pcache, timer/sched_timer, vfs/fs,
+//                       vfs/vfs_syscall, or start_kernel;
+//   pub(super)       -> sole callers in `crate::proc::workqueue_test`;
+//   private          -> zero callers anywhere (dead flavour variants).
+pub(crate) extern "C" fn workqueue_init() { workqueue_init_impl() }        // start_kernel
+pub(crate) extern "C" fn workqueue_runtime_smoke_test() {}                 // start_kernel
 pub(crate) fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue {
-    workqueue_create_with_callbacks_impl(name, max_active, ptr::null())
+    workqueue_create_with_callbacks_impl(name, max_active, ptr::null())    // pcache/timer/vfs/start_kernel
 }
-pub(crate) extern "C" fn workqueue_create_with_callbacks(
+pub(super) extern "C" fn workqueue_create_with_callbacks(                  // workqueue_test only
     name: *const c_char, max_active: c_int, callbacks: *const workqueue_callbacks,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, callbacks) }
-pub(crate) extern "C" fn workqueue_kill(wq: *mut workqueue) -> c_int { workqueue_kill_impl(wq) }
+pub(super) extern "C" fn workqueue_kill(wq: *mut workqueue) -> c_int { workqueue_kill_impl(wq) } // workqueue_test only
 pub(crate) fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool {
-    queue_work_impl(wq, work)
+    queue_work_impl(wq, work)                                             // pcache/timer/vfs
 }
-pub(crate) fn init_work_struct(
+pub(crate) fn init_work_struct(                                           // pcache/timer
     work: *mut work_struct, func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64,
 ) { init_work_struct_ex_impl(work, func, None, data, WORK_STRUCT_DEFAULT_FLAGS) }
-pub(crate) extern "C" fn init_work_struct_flags(
+extern "C" fn init_work_struct_flags(                                     // dead
     work: *mut work_struct, func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64, flags: u32,
 ) { init_work_struct_ex_impl(work, func, None, data, flags) }
-pub(crate) extern "C" fn init_work_struct_ex(
+extern "C" fn init_work_struct_ex(                                        // dead
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64, flags: u32,
 ) { init_work_struct_ex_impl(work, func, fault, data, flags) }
-pub(crate) fn create_work_struct(
+pub(crate) fn create_work_struct(                                        // vfs
     func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64,
 ) -> *mut work_struct {
     create_work_struct_ex_impl(func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
 }
-pub(crate) extern "C" fn create_work_struct_flags(
+extern "C" fn create_work_struct_flags(                                  // dead
     func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64, flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, None, data, flags) }
-pub(crate) extern "C" fn create_work_struct_ex(
+pub(super) extern "C" fn create_work_struct_ex(                          // workqueue_test only
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64, flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, fault, data, flags) }
-pub(crate) fn free_work_struct(work: *mut work_struct) { free_work_struct_impl(work) }
+pub(crate) fn free_work_struct(work: *mut work_struct) { free_work_struct_impl(work) } // vfs
 
 // Suppress unused-ref-helper warning (kept for future consumers).
 #[allow(dead_code)] fn _silence_helpers() { let _ = lnr as fn(_) -> _; }
