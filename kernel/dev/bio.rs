@@ -456,16 +456,20 @@ pub(crate) extern "C" fn bio_validate(bio_ptr: *mut bio, blkdev: *mut blkdev_t) 
             return neg(crate::bindings::EINVAL);
         }
 
+        // `vec_length` was bounds-checked (`0 < vec_length <= BIO_MAX_VECS`)
+        // above, so `bvecs[0..vec_length)` is the bio's own CPU-side segment
+        // metadata (not a DMA-written region -- the device writes the target
+        // *pages*, not these descriptors) and safe to walk as a slice.
+        let bvecs = core::slice::from_raw_parts((*bio_ptr).bvecs.as_ptr(), (*bio_ptr).vec_length as usize);
         let mut total_size: u32 = 0;
-        for i in 0..(*bio_ptr).vec_length {
-            let bvec_ptr = (*bio_ptr).bvecs.as_mut_ptr().add(i as usize);
-            if (*bvec_ptr).bv_page.is_null() {
+        for bvec in bvecs {
+            if bvec.bv_page.is_null() {
                 return neg(crate::bindings::EINVAL);
             }
-            if (*bvec_ptr).offset as u32 + (*bvec_ptr).len as u32 > PGSIZE {
+            if bvec.offset as u32 + bvec.len as u32 > PGSIZE {
                 return neg(crate::bindings::EINVAL);
             }
-            total_size += (*bvec_ptr).len as u32;
+            total_size += bvec.len as u32;
             if total_size > BIO_MAX_SIZE as u32 {
                 return neg(crate::bindings::EINVAL);
             }

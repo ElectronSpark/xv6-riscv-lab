@@ -438,23 +438,21 @@ unsafe fn cbo_inval(addr: usize) {
 /// `CBOM_BLOCK_SIZE`, matching the C original -- see `x1_emac.rs`'s
 /// identical helper).
 unsafe fn dma_cache_clean(addr: *mut c_void, size: usize) {
-    let mut start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
+    let start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
     let end = (addr as usize) + size;
-    while start < end {
+    for line in (start..end).step_by(CBOM_BLOCK_SIZE) {
         // SAFETY: caller contract.
-        unsafe { cbo_clean(start) };
-        start += CBOM_BLOCK_SIZE;
+        unsafe { cbo_clean(line) };
     }
 }
 /// # Safety
 /// Same as [`dma_cache_clean`]; dirty data in the touched range is lost.
 unsafe fn dma_cache_inval(addr: *mut c_void, size: usize) {
-    let mut start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
+    let start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
     let end = (addr as usize) + size;
-    while start < end {
+    for line in (start..end).step_by(CBOM_BLOCK_SIZE) {
         // SAFETY: caller contract.
-        unsafe { cbo_inval(start) };
-        start += CBOM_BLOCK_SIZE;
+        unsafe { cbo_inval(line) };
     }
 }
 
@@ -707,14 +705,10 @@ unsafe fn sdhci_set_clock(sc: *mut SdhciSoftc, target_hz: u32) {
     let div: u32 = if base_clk_hz <= target_hz {
         0 // no division needed
     } else {
-        let mut d = 1;
-        while d < 2046 {
-            if (base_clk_hz / (2 * d)) <= target_hz {
-                break;
-            }
-            d += 1;
-        }
-        d
+        // Smallest divisor `d` in `1..2046` giving `<= target_hz`; if none
+        // qualifies the C loop falls out at `d == 2046` (pure CPU
+        // arithmetic search, no MMIO).
+        (1..2046).find(|&d| base_clk_hz / (2 * d) <= target_hz).unwrap_or(2046)
     };
 
     // Set divisor and enable internal clock.

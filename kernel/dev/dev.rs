@@ -555,19 +555,19 @@ fn dev_slot_get(major: c_int, minor: c_int, alloc: bool) -> Result<(*mut device_
         if !alloc {
             return Err(neg(EINVAL)); // minor number 0 is invalid for lookup
         }
-        assigned_minor = 0;
-        for i in 1..MAX_MINOR_DEVICES {
-            // SAFETY: `dmajor` is live: either just-allocated above
-            // (exclusively owned until published a few lines up) or an
-            // existing entry, only ever freed after an RCU grace period
-            // once its last minor is unregistered -- both safe to scan
-            // while holding `dev_tab_lock()` (asserted at function entry).
-            let slot = unsafe { minor_slot_atomic(dmajor, i as c_int) }.load(Ordering::Relaxed);
-            if slot.is_null() {
-                assigned_minor = i as c_int;
-                break;
-            }
-        }
+        // Scan for the first free minor slot (0 stays reserved as the
+        // auto-assign sentinel). The slots are plain RCU-protected CPU
+        // pointer-array cells, so this is a clean collection walk.
+        assigned_minor = (1..MAX_MINOR_DEVICES)
+            .find(|&i| {
+                // SAFETY: `dmajor` is live: either just-allocated above
+                // (exclusively owned until published a few lines up) or an
+                // existing entry, only ever freed after an RCU grace period
+                // once its last minor is unregistered -- both safe to scan
+                // while holding `dev_tab_lock()` (asserted at function entry).
+                unsafe { minor_slot_atomic(dmajor, i as c_int) }.load(Ordering::Relaxed).is_null()
+            })
+            .map_or(0, |i| i as c_int);
         if assigned_minor == 0 {
             return Err(neg(ENOSPC)); // no available minor slots
         }

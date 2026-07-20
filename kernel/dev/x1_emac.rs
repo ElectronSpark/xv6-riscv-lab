@@ -429,12 +429,11 @@ unsafe fn cbo_inval(addr: usize) {
 /// C original exactly, so the actual touched range can start up to 63
 /// bytes before `addr`).
 unsafe fn dma_cache_clean(addr: *mut c_void, size: usize) {
-    let mut start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
+    let start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
     let end = (addr as usize) + size;
-    while start < end {
+    for line in (start..end).step_by(CBOM_BLOCK_SIZE) {
         // SAFETY: caller contract.
-        unsafe { cbo_clean(start) };
-        start += CBOM_BLOCK_SIZE;
+        unsafe { cbo_clean(line) };
     }
 }
 
@@ -446,12 +445,11 @@ unsafe fn dma_cache_clean(addr: *mut c_void, size: usize) {
 /// lines is lost -- only safe when the range is not shared with other
 /// live data.
 unsafe fn dma_cache_inval(addr: *mut c_void, size: usize) {
-    let mut start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
+    let start = (addr as usize) & !(CBOM_BLOCK_SIZE - 1);
     let end = (addr as usize) + size;
-    while start < end {
+    for line in (start..end).step_by(CBOM_BLOCK_SIZE) {
         // SAFETY: caller contract.
-        unsafe { cbo_inval(start) };
-        start += CBOM_BLOCK_SIZE;
+        unsafe { cbo_inval(line) };
     }
 }
 
