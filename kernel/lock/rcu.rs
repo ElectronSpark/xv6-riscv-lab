@@ -528,20 +528,17 @@ impl CbList {
 use crate::kstd::is_err_or_null;
 
 fn min_other_cpu_ts(exclude_cpu: c_int) -> u64 {
-    let mut min_ts = RCU_UINT64_MAX;
-    for i in 0..NCPU as usize {
-        if i as c_int == exclude_cpu {
-            continue;
-        }
-        let ts = cpu_rcu_ts(i).load(Ordering::Acquire);
-        if ts == 0 {
-            continue;
-        }
-        if ts < min_ts {
-            min_ts = ts;
-        }
-    }
-    min_ts
+    // Goal #2: read-only min-scan over the per-CPU RCU timestamps ->
+    // iterator fold. Each `.load(Acquire)` remains a distinct atomic
+    // op, so this is behavior-identical to the manual loop. (Atomic
+    // loads carry their own ordering and are never subject to the
+    // Freeze/noalias hoisting that pins the raw lock structs to floor,
+    // so this scan is a clean, sound conversion.)
+    (0..NCPU as usize)
+        .filter(|&i| i as c_int != exclude_cpu)
+        .map(|i| cpu_rcu_ts(i).load(Ordering::Acquire))
+        .filter(|&ts| ts != 0)
+        .fold(RCU_UINT64_MAX, u64::min)
 }
 
 fn gp_completed() -> bool {
@@ -549,16 +546,14 @@ fn gp_completed() -> bool {
     if gp_start == 0 {
         return false;
     }
-    for i in 0..NCPU as usize {
+    // Goal #2: read-only all-scan -> iterator. A CPU with ts == 0 has
+    // not recorded a quiescent state yet (skip it); any recorded
+    // ts < gp_start means the grace period has not completed. Behavior-
+    // identical to the early-return loop (distinct atomic loads).
+    (0..NCPU as usize).all(|i| {
         let ts = cpu_rcu_ts(i).load(Ordering::Acquire);
-        if ts == 0 {
-            continue;
-        }
-        if ts < gp_start {
-            return false;
-        }
-    }
-    true
+        ts == 0 || ts >= gp_start
+    })
 }
 
 fn wakeup_gp_waiters() {
