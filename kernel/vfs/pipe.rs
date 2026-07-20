@@ -114,7 +114,10 @@ use crate::bindings::{
 use crate::proc::proc_shims::xv6_current_thread;
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
-use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wait`/`tq_wakeup_all` free-fn
+// delegators were deleted; each call site builds a `TqRef` handle via
+// `from_ptr` and invokes the corresponding inherent method.
+use crate::proc::access::TqRef;
 use crate::sync::KSpinlock;
 
 // ---------------------------------------------------------------------------
@@ -423,16 +426,12 @@ fn pipe_alloc_inner(flags: c_int) -> KResult<*mut pipe> {
             ptr::addr_of_mut!((*pi).writer_lock),
             c"vfs_pipe_writer".as_ptr() as *mut c_char,
         );
-        tq_init(
-            ptr::addr_of_mut!((*pi).nread_queue),
-            c"pipe_nread_queue".as_ptr(),
-            ptr::null_mut(),
-        );
-        tq_init(
-            ptr::addr_of_mut!((*pi).nwrite_queue),
-            c"pipe_nwrite_queue".as_ptr(),
-            ptr::null_mut(),
-        );
+        if let Some(r) = TqRef::from_ptr(ptr::addr_of_mut!((*pi).nread_queue)) {
+            r.init(c"pipe_nread_queue".as_ptr(), ptr::null_mut());
+        }
+        if let Some(r) = TqRef::from_ptr(ptr::addr_of_mut!((*pi).nwrite_queue)) {
+            r.init(c"pipe_nwrite_queue".as_ptr(), ptr::null_mut());
+        }
     }
     Ok(pi)
 }
@@ -443,13 +442,13 @@ pub(crate) extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
         let g = writer_lock(pi).lock();
         freed = clear_writable(pi);
         // SAFETY: non-null `pi`.
-        tq_wakeup_all(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }, -1, 0);
+        let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(-1, 0));
         drop(g);
     } else {
         let g = reader_lock(pi).lock();
         freed = clear_readable(pi);
         // SAFETY: non-null `pi`.
-        tq_wakeup_all(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }, -1, 0);
+        let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(-1, 0));
         drop(g);
     }
     if freed {
@@ -513,13 +512,11 @@ fn pipe_wait_writer(pi: *mut pipe) -> c_int {
     // "release the passed lock before sleeping, reacquire before
     // returning" contract (same idiom as `kernel/lock/mutex.rs`'s
     // `mutex_lock`, see the module doc).
-    unsafe {
-        tq_wait(
-            ptr::addr_of_mut!((*pi).nread_queue),
-            ptr::addr_of_mut!((*pi).writer_lock),
-            ptr::null_mut(),
-        )
+    // SAFETY: non-null `pi`; raw field-address computation only.
+    let (q, lk) = unsafe {
+        (ptr::addr_of_mut!((*pi).nread_queue), ptr::addr_of_mut!((*pi).writer_lock))
     };
+    let _ = TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk, ptr::null_mut()));
     drop(g);
     if signal_pending(cur) {
         return neg(EINTR);
@@ -549,13 +546,11 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
     }
     crate::machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
     // SAFETY: see `pipe_wait_writer`.
-    unsafe {
-        tq_wait(
-            ptr::addr_of_mut!((*pi).nwrite_queue),
-            ptr::addr_of_mut!((*pi).reader_lock),
-            ptr::null_mut(),
-        )
+    // SAFETY: non-null `pi`; raw field-address computation only.
+    let (q, lk) = unsafe {
+        (ptr::addr_of_mut!((*pi).nwrite_queue), ptr::addr_of_mut!((*pi).reader_lock))
     };
+    let _ = TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk, ptr::null_mut()));
     drop(g);
     if signal_pending(cur) {
         return neg(EINTR);
@@ -614,7 +609,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
                         return neg(EAGAIN) as i64;
                     }
                     // SAFETY: non-null `pi`.
-                    tq_wakeup_all(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }, 0, 0);
+                    let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
                     g = None;
 
                     let ret = pipe_wait_writer(pi);
@@ -701,7 +696,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
     {
         let _g = reader_lock(pi).lock();
         // SAFETY: non-null `pi`.
-        tq_wakeup_all(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }, 0, 0);
+        let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
     }
     total as i64
 }
@@ -783,7 +778,7 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
                         return neg(EAGAIN) as i64;
                     }
                     // SAFETY: non-null `pi`.
-                    tq_wakeup_all(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }, 0, 0);
+                    let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
                     g = None;
 
                     let ret = pipe_wait_reader(pi);
@@ -830,7 +825,7 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
     {
         let _g = writer_lock(pi).lock();
         // SAFETY: non-null `pi`.
-        tq_wakeup_all(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }, 0, 0);
+        let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
     }
     (total as i64) - (tmp_len as i64 - tmp_pos as i64)
 }

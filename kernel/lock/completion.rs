@@ -36,7 +36,11 @@ const MAX_COMPLETIONS: c_int = 65535;
 // P3-D2a: the thread-queue primitives (kernel/proc/thread_queue.rs) are
 // ordinary Rust fns, reached as plain crate-path items instead of
 // `extern "C"` redeclarations.
-use crate::proc::{tq_bulk_move, tq_init, tq_size, tq_wait, tq_wait_cb, tq_wakeup, tq_wakeup_all};
+// NO-STANDALONE-FN: the `tq_bulk_move`/`tq_init`/`tq_size`/`tq_wait`/
+// `tq_wait_cb`/`tq_wakeup`/`tq_wakeup_all` free-fn delegators were deleted;
+// each call site builds a `TqRef` handle via `from_ptr` and invokes the
+// corresponding inherent method.
+use crate::proc::access::TqRef;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -170,10 +174,10 @@ fn try_wait_for_completion_locked(c: *mut RawCompletion) -> bool {
 /// Wake one waiter if any. Caller must hold `c->lock`.
 fn completion_do_wake(c: *mut RawCompletion) {
     let q = queue_ptr(c);
-    if tq_size(q) > 0 {
+    if TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
         // Return value (`*mut thread`) is intentionally discarded:
         // the C code keeps the same `(void)p` comment about interrupts.
-        let _ = tq_wakeup(q, 0, 0);
+        let _ = TqRef::from_ptr(q).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
     }
 }
 
@@ -268,9 +272,9 @@ pub(crate) fn completion_init(c: *mut completion_t) {
     let c = as_native(c);
     done_set(c, 0);
     spin_init(lock_ptr(c), b"completion_spin\0".as_ptr() as *const c_char);
-    tq_init(queue_ptr(c),
-            b"completion_queue\0".as_ptr() as *const c_char,
-            lock_ptr(c));
+    if let Some(r) = TqRef::from_ptr(queue_ptr(c)) {
+        r.init(b"completion_queue\0".as_ptr() as *const c_char, lock_ptr(c));
+    }
 }
 
 pub(crate) fn completion_reinit(c: *mut completion_t) {
@@ -293,7 +297,7 @@ pub(crate) fn wait_for_completion(c: *mut completion_t) {
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     while !try_wait_for_completion_locked(c) {
         machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-        let _ = tq_wait(queue_ptr(c), lock_ptr(c), null_mut());
+        let _ = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(c), null_mut()));
     }
     if done_get(c) > 0 {
         completion_do_wake(c);
@@ -309,7 +313,7 @@ pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int {
     while !try_wait_for_completion_locked(c) {
         if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait(queue_ptr(c), lock_ptr(c), null_mut());
+        let ret = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(c), null_mut()));
         if ret != 0
             && signal_pending(cur)
             && !try_wait_for_completion_locked(c)
@@ -367,13 +371,12 @@ pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
         };
 
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait_cb(
-            queue_ptr(c),
+        let ret = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
             Some(completion_timed_sleep_cb),
             Some(completion_timed_wake_cb),
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
-        );
+        ));
         if ret != 0
             && signal_pending(cur)
             && !try_wait_for_completion_locked(c)
@@ -414,16 +417,20 @@ pub(crate) fn complete_all(c: *mut completion_t) {
     // queue) and panic while self-removing, while also racing this
     // lock-free `temp_queue` drain. Waking under the lock serializes both.
     let mut temp_queue: tq_t = u! { core::mem::zeroed() };
-    tq_init(&mut temp_queue as *mut tq_t,
-            b"completion_temp\0".as_ptr() as *const c_char,
-            null_mut());
+    if let Some(r) = TqRef::from_ptr(&mut temp_queue as *mut tq_t) {
+        r.init(b"completion_temp\0".as_ptr() as *const c_char, null_mut());
+    }
 
     {
         let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
         done_set(c, MAX_COMPLETIONS);
-        tq_bulk_move(&mut temp_queue as *mut tq_t, queue_ptr(c));
-        if tq_counter(&mut temp_queue as *mut tq_t) > 0 {
-            tq_wakeup_all(&mut temp_queue as *mut tq_t, 0, 0);
+        let temp_ptr = &mut temp_queue as *mut tq_t;
+        match (TqRef::from_ptr(temp_ptr), TqRef::from_ptr(queue_ptr(c))) {
+            (Some(t), Some(f)) => { t.bulk_move_from(f); }
+            _ => {}
+        }
+        if tq_counter(temp_ptr) > 0 {
+            if let Some(r) = TqRef::from_ptr(temp_ptr) { r.wakeup_all(0, 0); }
         }
     }
 }
@@ -432,7 +439,7 @@ pub(crate) fn completion_done(c: *mut completion_t) -> bool {
     if c.is_null() { return false; }
     let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    tq_size(queue_ptr(c)) == 0
+    TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) == 0
 }
 
 // ===========================================================================

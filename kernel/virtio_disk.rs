@@ -129,7 +129,11 @@ use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 use crate::lock::completion::{complete_all, completion_reinit};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
-use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wakeup_all` free-fn delegators were
+// deleted; the two sites below build a `TqRef` handle via `from_ptr` and
+// invoke the method. (`tq_wait` here is reached through the guard's
+// `wait_on`, not called directly.)
+use crate::proc::access::TqRef;
 use crate::machine;
 use crate::proc::proc_shims::xv6_current_thread;
 
@@ -825,8 +829,8 @@ impl DiskInner {
         // lock (the `&mut self` proves it), so wake directly.
         if self.desc_freelist.available() >= 3 {
             // `desc_wait_queue` is a live, initialised `tq_t` in the guarded
-            // state; `tq_wakeup_all` is a safe, null-tolerant primitive.
-            tq_wakeup_all(&raw mut self.desc_wait_queue, 0, 0);
+            // state; `wakeup_all` is a safe, null-tolerant primitive.
+            let _ = TqRef::from_ptr(&raw mut self.desc_wait_queue).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
         }
     }
 
@@ -1364,7 +1368,7 @@ fn virtio_disk_init_one(diskno: usize) {
         d.desc_freelist.init();
         let wq = &raw mut d.desc_wait_queue;
         let lk = d.lock_ptr();
-        tq_init(wq, c"virtio_desc_wait".as_ptr(), lk);
+        if let Some(r) = TqRef::from_ptr(wq) { r.init(c"virtio_desc_wait".as_ptr(), lk); }
     }
 
     virtio_blkdev_init(diskno);

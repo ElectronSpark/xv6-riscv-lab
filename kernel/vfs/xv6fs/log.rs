@@ -49,7 +49,10 @@ use crate::bindings::{buf, spinlock_t, tq_t, xv6fs_logheader, xv6fs_superblock};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
-use crate::proc::{tq_bulk_move, tq_init, tq_wakeup_all};
+// NO-STANDALONE-FN: the `tq_bulk_move`/`tq_init`/`tq_wakeup_all` free-fn
+// delegators were deleted; each site builds a `TqRef` handle via `from_ptr`
+// and invokes the corresponding inherent method.
+use crate::proc::access::TqRef;
 // N-R7b: the log's in-memory control state is now a data-owning
 // `SpinLock<LogInner>` (lock-owns-data); `tq_wait` is reached through the
 // guard's `wait_on` instead of a bare crate-path call.
@@ -417,7 +420,9 @@ pub(crate) extern "C" fn xv6fs_initlog(xv6_sb: *mut xv6fs_superblock) {
         {
             let mut log = log_lock.lock();
             let lock_ptr = log.lock_ptr();
-            tq_init(&raw mut log.wait_queue, c"xv6fs_log_wait".as_ptr(), lock_ptr);
+            if let Some(r) = TqRef::from_ptr(&raw mut log.wait_queue) {
+                r.init(c"xv6fs_log_wait".as_ptr(), lock_ptr);
+            }
             log.start = (*disk_sb).logstart as c_int;
             log.size = (*disk_sb).nlog as c_int;
             log.dev = xv6fs_sb_dev(xv6_sb) as c_int;
@@ -563,13 +568,18 @@ pub(crate) extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
             // `log->wait_queue` (migration not yet done) or has already
             // been popped by `tq_wakeup_all` (is_enqueued() == false).
             let mut temp_queue: tq_t = core::mem::zeroed();
-            tq_init(&raw mut temp_queue, c"xv6fs_log_temp".as_ptr(), ptr::null_mut());
+            if let Some(r) = TqRef::from_ptr(&raw mut temp_queue) {
+                r.init(c"xv6fs_log_temp".as_ptr(), ptr::null_mut());
+            }
 
             let mut log = log_lock.lock();
             log.committing = 0;
-            tq_bulk_move(&raw mut temp_queue, &raw mut log.wait_queue);
+            match (TqRef::from_ptr(&raw mut temp_queue), TqRef::from_ptr(&raw mut log.wait_queue)) {
+                (Some(t), Some(f)) => { t.bulk_move_from(f); }
+                _ => {}
+            }
             if temp_queue.counter > 0 {
-                tq_wakeup_all(&raw mut temp_queue, 0, 0);
+                if let Some(r) = TqRef::from_ptr(&raw mut temp_queue) { r.wakeup_all(0, 0); }
             }
             // guard dropped -> spin_unlock
         }

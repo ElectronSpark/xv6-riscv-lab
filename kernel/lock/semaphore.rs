@@ -26,7 +26,10 @@ const SEM_VALUE_MAX: c_int = 2_147_483_640;
 // P3-D2a: the thread-queue primitives (kernel/proc/thread_queue.rs) are
 // ordinary Rust fns, reached as plain crate-path items instead of
 // `extern "C"` redeclarations.
-use crate::proc::{tq_init, tq_wait, tq_wait_cb, tq_wakeup};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wait`/`tq_wait_cb`/`tq_wakeup` free-fn
+// delegators were deleted; each call site builds a `TqRef` handle via
+// `from_ptr` and invokes the corresponding inherent method.
+use crate::proc::access::TqRef;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -243,7 +246,9 @@ extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! 
 fn sem_do_post(s: *mut RawSemaphore) -> c_int {
     let val = value_inc(s);
     if val <= 0 {
-        let t = tq_wakeup(wq_ptr(s), 0, 0);
+        // Null-queue path unreachable; empty valid queue -> `wakeup_one`
+        // returns null, matching this default (former `tq_wakeup`).
+        let t = TqRef::from_ptr(wq_ptr(s)).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
         if t.is_null() {
             return -(ENOENT as c_int);
         }
@@ -285,9 +290,9 @@ pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int) -> c_in
     };
     set_name_value(s, n, value);
     spin_init(lk_ptr(s), b"semaphore spinlock\0".as_ptr() as *const c_char);
-    tq_init(wq_ptr(s),
-            b"semaphore wait queue\0".as_ptr() as *const c_char,
-            lk_ptr(s));
+    if let Some(r) = TqRef::from_ptr(wq_ptr(s)) {
+        r.init(b"semaphore wait queue\0".as_ptr() as *const c_char, lk_ptr(s));
+    }
     0
 }
 
@@ -315,7 +320,7 @@ pub(crate) fn sem_wait(s: *mut sem_t) -> c_int {
     }
     if val >= 0 { return 0; }
     machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-    let ret = tq_wait(wq_ptr(s), lk_ptr(s), null_mut());
+    let ret = TqRef::from_ptr(wq_ptr(s)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(s), null_mut()));
     if ret != 0 {
         let wake_ret = sem_do_post(s);
         if wake_ret != 0 && wake_ret != -(ENOENT as c_int) {
@@ -365,13 +370,12 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int {
     };
 
     machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-    let ret = tq_wait_cb(
-        wq_ptr(s),
+    let ret = TqRef::from_ptr(wq_ptr(s)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
         Some(sem_timed_sleep_cb),
         Some(sem_timed_wake_cb),
         &mut ctx as *mut _ as *mut c_void,
         null_mut(),
-    );
+    ));
 
     if ret != 0 {
         let wake_ret = sem_do_post(s);

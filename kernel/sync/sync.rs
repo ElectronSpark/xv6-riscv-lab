@@ -551,11 +551,14 @@ impl<'a, T> SpinLockGuard<'a, T> {
         q: *mut crate::bindings::tq_t,
         rdata: *mut u64,
     ) -> core::ffi::c_int {
-        // `self.lock_ptr()` is the exact lock this guard holds; `tq_wait`
+        // `self.lock_ptr()` is the exact lock this guard holds; `TqRef::wait`
         // (itself a safe, null-tolerant primitive) releases it, blocks on
         // `q`, then reacquires it before returning -- restoring this
         // guard's "lock held by this hart" invariant.
-        crate::proc::tq_wait(q, self.lock_ptr(), rdata)
+        // NO-STANDALONE-FN: former `tq_wait` delegator deleted; build the
+        // handle and invoke the method (null `q` maps to -EINVAL as before).
+        crate::proc::access::TqRef::from_ptr(q)
+            .map_or(-(crate::bindings::EINVAL as core::ffi::c_int), |r| r.wait(self.lock_ptr(), rdata))
     }
 }
 

@@ -26,7 +26,10 @@ use crate::lock::rwsem::KRwSem;
 
 // P3-D2a: proc/sched.rs + proc/thread_queue.rs entry points, reached as
 // plain crate-path items instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, tq_size, wakeup};
+use crate::proc::{scheduler_yield, wakeup};
+// NO-STANDALONE-FN: the `tq_size` free-fn delegator was deleted; the two
+// sites below build a `TqRef` handle and invoke the `size` method.
+use crate::proc::access::TqRef;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -153,8 +156,8 @@ fn queue_lock(q: *mut tq_t) -> *mut spinlock_t {
 
 fn check_rwsem_integrity(label: &CStr) {
     let l = TEST_LOCK.as_mut_ptr();
-    let read_waiters = tq_size(read_queue_ptr(l));
-    let write_waiters = tq_size(write_queue_ptr(l));
+    let read_waiters = TqRef::from_ptr(read_queue_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size());
+    let write_waiters = TqRef::from_ptr(write_queue_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size());
     if read_waiters < 0 || write_waiters < 0 {
         record_integrity_failure(
             label,

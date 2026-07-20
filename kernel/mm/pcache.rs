@@ -340,9 +340,13 @@ pub(crate) use crate::proc::{init_work_struct, queue_work, workqueue_create};
 // primitives, reached as plain crate-path items instead of the `extern
 // "C"` redeclarations that used to sit in the block above.
 pub(crate) use crate::proc::{
-    sleep_on_chan, sleep_on_chan_interruptible, tq_init, tq_wait_cb, tq_wakeup_all, wakeup,
+    sleep_on_chan, sleep_on_chan_interruptible, wakeup,
     wakeup_on_chan,
 };
+// NO-STANDALONE-FN: the `tq_init`/`tq_wait_cb`/`tq_wakeup_all` free-fn
+// delegators were deleted; the sites below build a `TqRef` handle via
+// `from_ptr` and invoke the corresponding inherent method.
+pub(crate) use crate::proc::access::TqRef;
 
 // The functions below (spinlock/rwlock/rbtree primitives) are all
 // genuinely `unsafe fn`/`unsafe extern "C" fn` in their canonical
@@ -1198,11 +1202,9 @@ impl NodeHandle {
             (*n).tree_entry.__parent_color = addr_of!((*n).tree_entry) as u64;
             list_init(addr_of_mut!((*n).lru_entry));
         }
-        tq_init(
-            unsafe { addr_of_mut!((*n).io_waiters) },
-            PCACHE_IO_NAME.as_ptr() as *const c_char,
-            ptr::null_mut(),
-        );
+        if let Some(r) = TqRef::from_ptr(unsafe { addr_of_mut!((*n).io_waiters) }) {
+            r.init(PCACHE_IO_NAME.as_ptr() as *const c_char, ptr::null_mut());
+        }
         unsafe {
             (*n).blkno = u64::MAX;
             (*n).page_count = 0;
@@ -1317,17 +1319,16 @@ impl NodeHandle {
                 (*state_ptr).store(thread_state_THREAD_UNINTERRUPTIBLE as u32, Ordering::SeqCst);
             }
         }
-        tq_wait_cb(
-            unsafe { addr_of_mut!((*self.raw()).io_waiters) },
+        let _ = TqRef::from_ptr(unsafe { addr_of_mut!((*self.raw()).io_waiters) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
             Some(rwlock_r_sleep_cb),
             Some(rwlock_r_wake_cb),
             unsafe { addr_of_mut!((*p).tree_lock) as *mut c_void },
             ptr::null_mut(),
-        );
+        ));
         0
     }
     fn io_wakeup_all(self) {
-        tq_wakeup_all(unsafe { addr_of_mut!((*self.raw()).io_waiters) }, 0, 0);
+        let _ = TqRef::from_ptr(unsafe { addr_of_mut!((*self.raw()).io_waiters) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
     }
 }
 

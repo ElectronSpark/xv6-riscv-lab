@@ -60,7 +60,11 @@ use crate::kstd::{result_to_neg_errno, Errno, KResult};
 use crate::sync::{SpinLock, SpinLockGuard};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
-use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wakeup_all` free-fn delegators were
+// deleted; the two sites below build a `TqRef` handle via `from_ptr` and
+// invoke the method. (`tq_wait` here is reached through the guard's
+// `wait_on`, not called directly.)
+use crate::proc::access::TqRef;
 // P3-D2b: `signal_pending`/`kill_proc` (proc/signal.rs) and `pgroup_kill`
 // (proc/pgroup.rs) are plain crate-path items now that their
 // `#[no_mangle]` exports are gone (identical signatures).
@@ -701,7 +705,7 @@ pub(crate) unsafe fn tty_alloc(name: *const c_char, ops: Option<&'static dyn Tty
             let mut g = (*raw).inner.lock();
             let q = &raw mut g.raw_wait;
             let lk = g.lock_ptr();
-            tq_init(q, c"tty_raw".as_ptr(), lk);
+            if let Some(r) = TqRef::from_ptr(q) { r.init(c"tty_raw".as_ptr(), lk); }
         }
         // Non-guarded fields: set once here, read lock-free thereafter.
         (*raw).ops = ops;
@@ -1077,10 +1081,10 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
                 guard.raw_buf[idx] = c as u8 as c_char;
                 guard.raw_w += 1;
             }
-            // `tq_wakeup_all` is safe under the spinlock (still held via
+            // `wakeup_all` is safe under the spinlock (still held via
             // `guard`); form the raw queue pointer, then wake.
             let q = &raw mut guard.raw_wait;
-            tq_wakeup_all(q, 0, 0);
+            let _ = TqRef::from_ptr(q).map_or(-EINVAL, |r| r.wakeup_all(0, 0));
         } else {
             // Canonical mode: push into input pipe.
             let ch = c as u8 as c_char;

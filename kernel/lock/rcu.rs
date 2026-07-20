@@ -71,7 +71,10 @@ use crate::printf::trigger_panic;
 // and scheduler entry points (`kernel/proc/sched.rs`) are ordinary Rust
 // fns, reached as plain crate-path items instead of `extern "C"`
 // redeclarations.
-use crate::proc::{scheduler_yield, tq_init, tq_wakeup_all, wakeup, wakeup_interruptible};
+use crate::proc::{scheduler_yield, wakeup, wakeup_interruptible};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wakeup_all` free-fn delegators were
+// deleted; the two sites below build a `TqRef` handle and invoke the method.
+use crate::proc::access::TqRef;
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
@@ -557,7 +560,7 @@ fn gp_completed() -> bool {
 
 fn wakeup_gp_waiters() {
     let _g = gp_waitq_lock().lock();
-    tq_wakeup_all(RCU_GP_WAITQ.as_mut_ptr(), 0, 0);
+    let _ = TqRef::from_ptr(RCU_GP_WAITQ.as_mut_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
 }
 
 fn wakeup_all_kthreads() {
@@ -580,11 +583,9 @@ fn init_impl() {
     gp_lock().init(c"rcu_gp_lock".as_ptr());
     gp_waitq_lock().init(c"rcu_gp_waitq_lock".as_ptr());
 
-    tq_init(
-        RCU_GP_WAITQ.as_mut_ptr(),
-        c"rcu_gp_waitq".as_ptr(),
-        RCU_GP_WAITQ_LOCK_STORAGE.as_mut_ptr(),
-    );
+    if let Some(r) = TqRef::from_ptr(RCU_GP_WAITQ.as_mut_ptr()) {
+        r.init(c"rcu_gp_waitq".as_ptr(), RCU_GP_WAITQ_LOCK_STORAGE.as_mut_ptr());
+    }
 
     let ret = slab_cache_init(
         RCU_HEAD_SLAB.as_mut_ptr(),

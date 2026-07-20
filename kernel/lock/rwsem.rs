@@ -19,7 +19,10 @@ use crate::sync::KSpinlock;
 // P3-D2a: the thread-queue primitives (kernel/proc/thread_queue.rs) are
 // ordinary Rust fns, reached as plain crate-path items instead of
 // `extern "C"` redeclarations.
-use crate::proc::{tq_init, tq_size, tq_wait, tq_wait_cb, tq_wakeup, tq_wakeup_all};
+// NO-STANDALONE-FN: the `tq_init`/`tq_size`/`tq_wait`/`tq_wait_cb`/
+// `tq_wakeup`/`tq_wakeup_all` free-fn delegators were deleted; each call
+// site builds a `TqRef` handle via `from_ptr` and invokes the method.
+use crate::proc::access::TqRef;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -169,7 +172,7 @@ fn reader_should_wait(l: *mut RawRwsem) -> bool {
     if get_readers(l) == 0 {
         return get_holder(l) != -1;
     }
-    if (get_flags(l) & RWLOCK_PRIO_WRITE as u64) != 0 && tq_size(wq_ptr(l)) > 0 {
+    if (get_flags(l) & RWLOCK_PRIO_WRITE as u64) != 0 && TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
         return true;
     }
     false
@@ -185,12 +188,14 @@ fn writer_should_wait(l: *mut RawRwsem, pid: c_int) -> bool {
 
 // Caller holds `l->lock`.
 fn wake_readers(l: *mut RawRwsem) {
-    let _ = tq_wakeup_all(rq_ptr(l), 0, 0);
+    let _ = TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
 }
 
 // Caller holds `l->lock`.
 fn wake_writer(l: *mut RawRwsem) {
-    let next = tq_wakeup(wq_ptr(l), 0, 0);
+    // Null-queue path unreachable; empty valid queue -> null (former
+    // `tq_wakeup`). `thread_pid` filters null/ERR to -1 identically.
+    let next = TqRef::from_ptr(wq_ptr(l)).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
     let pid = machine::thread_pid(next);
     if pid != -1 {
         set_holder(l, pid);
@@ -199,15 +204,15 @@ fn wake_writer(l: *mut RawRwsem) {
 
 fn do_wake_up(l: *mut RawRwsem) {
     if (get_flags(l) & RWLOCK_PRIO_WRITE as u64) != 0 {
-        if tq_size(wq_ptr(l)) > 0 {
+        if TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
             wake_writer(l);
-        } else if tq_size(rq_ptr(l)) > 0 {
+        } else if TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
             wake_readers(l);
         }
     } else {
-        if tq_size(rq_ptr(l)) > 0 {
+        if TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
             wake_readers(l);
-        } else if tq_size(wq_ptr(l)) > 0 {
+        } else if TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
             wake_writer(l);
         }
     }
@@ -293,8 +298,8 @@ pub(crate) fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char) -> c_
     let l = as_native(l);
     spin_init(lk_ptr(l), b"rwsem spinlock\0".as_ptr() as *const c_char);
     set_readers(l, 0);
-    tq_init(rq_ptr(l), b"rwsem read queue\0".as_ptr() as *const c_char, lk_ptr(l));
-    tq_init(wq_ptr(l), b"rwsem write queue\0".as_ptr() as *const c_char, lk_ptr(l));
+    if let Some(r) = TqRef::from_ptr(rq_ptr(l)) { r.init(b"rwsem read queue\0".as_ptr() as *const c_char, lk_ptr(l)); }
+    if let Some(r) = TqRef::from_ptr(wq_ptr(l)) { r.init(b"rwsem write queue\0".as_ptr() as *const c_char, lk_ptr(l)); }
     set_name_flags(l, name, flags);
     set_holder(l, -1);
     0
@@ -307,7 +312,7 @@ pub(crate) fn rwsem_acquire_read(l: *mut rwsem_t) -> c_int {
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
         machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-        let ret = tq_wait(rq_ptr(l), lk_ptr(l), null_mut());
+        let ret = TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(l), null_mut()));
         if ret != 0 { return ret; }
     }
     set_readers(l, get_readers(l) + 1);
@@ -334,7 +339,7 @@ pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t) -> c_int {
     while reader_should_wait(l) {
         if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait(rq_ptr(l), lk_ptr(l), null_mut());
+        let ret = TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(l), null_mut()));
         if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_readers(l, get_readers(l) + 1);
@@ -367,13 +372,12 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_in
             timer_armed: false,
         };
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait_cb(
-            rq_ptr(l),
+        let ret = TqRef::from_ptr(rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
             Some(rwsem_timed_sleep_cb),
             Some(rwsem_timed_wake_cb),
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
-        );
+        ));
         if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_readers(l, get_readers(l) + 1);
@@ -388,7 +392,7 @@ pub(crate) fn rwsem_acquire_write(l: *mut rwsem_t) -> c_int {
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while writer_should_wait(l, pid) {
         machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-        let ret = tq_wait(wq_ptr(l), lk_ptr(l), null_mut());
+        let ret = TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(l), null_mut()));
         if ret != 0 { return ret; }
     }
     set_holder(l, pid);
@@ -420,7 +424,7 @@ pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t) -> c_int {
     while writer_should_wait(l, pid) {
         if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait(wq_ptr(l), lk_ptr(l), null_mut());
+        let ret = TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(l), null_mut()));
         if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_holder(l, pid);
@@ -455,13 +459,12 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_i
             timer_armed: false,
         };
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait_cb(
-            wq_ptr(l),
+        let ret = TqRef::from_ptr(wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
             Some(rwsem_timed_sleep_cb),
             Some(rwsem_timed_wake_cb),
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
-        );
+        ));
         if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_holder(l, pid);

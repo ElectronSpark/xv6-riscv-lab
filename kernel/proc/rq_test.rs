@@ -31,7 +31,11 @@ use crate::proc::sched_setattr;
 // P3-1B2: these used to be bridged via the `xv6_schport_*`/`xv6_thport_*`/
 // `xv6_tqport_*` C-ABI alias layers (`extern "C"` redeclarations below);
 // now direct crate-path calls to the real, already-Rust definitions.
-use crate::proc::{scheduler_yield, wakeup, tq_init, tq_wait, tq_wakeup_all};
+use crate::proc::{scheduler_yield, wakeup};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wait`/`tq_wakeup_all` free-fn
+// delegators were deleted; the sites below build a `TqRef` handle and
+// invoke the corresponding method.
+use crate::proc::access::TqRef;
 
 // --- priority macros (mirror inc/proc/rq.h) -------------------------------
 const PRIORITY_SUBLEVEL_MASK: c_int = 0x03;
@@ -312,7 +316,7 @@ unsafe extern "C" fn priority_test_proc_entry(my_index: u64, _unused: u64) -> c_
         spin_unlock(lock_ptr());
 
         if all_done {
-            tq_wakeup_all(tq_ptr(), 0, 0);
+            let _ = TqRef::from_ptr(tq_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
         }
         0
     }
@@ -323,7 +327,7 @@ fn test_priority_ordered_activation() {
         crate::kprintln!("TEST: Priority-Ordered Process Activation");
 
         spin_init(lock_ptr(), c"prio_test".as_ptr() as *mut c_char);
-        tq_init(tq_ptr(), c"main_wait".as_ptr(), lock_ptr());
+        if let Some(r) = TqRef::from_ptr(tq_ptr()) { r.init(c"main_wait".as_ptr(), lock_ptr()); }
         ACTIVATION_INDEX.store(0, Ordering::Release);
         PROCESSES_DONE.store(0, Ordering::Release);
         for i in 0..PRIORITY_TEST_COUNT {
@@ -371,7 +375,7 @@ fn test_priority_ordered_activation() {
         crate::kprintln!("  Phase 4: Waiting for all processes to complete");
         spin_lock(lock_ptr());
         while PROCESSES_DONE.load(Ordering::Acquire) < PRIORITY_TEST_COUNT as c_int {
-            tq_wait(tq_ptr(), lock_ptr(), core::ptr::null_mut());
+            let _ = TqRef::from_ptr(tq_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(), core::ptr::null_mut()));
         }
         spin_unlock(lock_ptr());
 

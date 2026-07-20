@@ -30,11 +30,12 @@ use crate::lock::spinlock::spin_unlock_irqrestore;
 use crate::proc::access::{
     is_err_or_null, smp_load_acquire_i32, smp_load_acquire_state, smp_rmb,
     smp_store_release_state, CpuLocalRef, RqRef, SchedEntityRef, SpinLockRef, ThreadAccess,
+    TnodeRef, TtreeRef,
 };
-use crate::proc::tnode_get_thread;
-use crate::proc::ttree_init;
-use crate::proc::ttree_wait;
-use crate::proc::ttree_wakeup_key;
+// NO-STANDALONE-FN: the `ttree_init`/`ttree_wait`/`ttree_wakeup_key` and
+// `tnode_get_thread` free-fn delegators (thread_queue.rs) were deleted; the
+// four sites below build a `TtreeRef`/`TnodeRef` handle via `from_ptr` and
+// invoke the corresponding inherent method.
 // P3-1B2: the whole `xv6_rqport_*` C-ABI alias layer these used to name
 // (some via plain `use`, some via `extern "C"` redeclaration below -- one
 // symbol, `rq_unlock_current_irqrestore`, was even redeclared twice under
@@ -489,7 +490,9 @@ fn sleep_lock_ref<'a>() -> SpinLockRef<'a> {
 }
 
 fn chan_queue_init() {
-    ttree_init(chan_queue_ptr(), c"chan_queue_root".as_ptr(), sleep_lock_ptr());
+    if let Some(r) = TtreeRef::from_ptr(chan_queue_ptr()) {
+        r.init(c"chan_queue_root".as_ptr(), sleep_lock_ptr());
+    }
 }
 
 // ---------------- sleep lock helpers ------------------------------------
@@ -838,7 +841,8 @@ fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: t
         lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").unlock();
     }
 
-    let ret = ttree_wait(chan_queue_ptr(), chan as u64, core::ptr::null_mut(), core::ptr::null_mut());
+    let ret = TtreeRef::from_ptr(chan_queue_ptr())
+        .map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(chan as u64, core::ptr::null_mut(), core::ptr::null_mut()));
 
     sleep_lock_irqsave_impl();
     thread_clear_flag(cur, THREAD_FLAG_ONCHAN);
@@ -863,7 +867,8 @@ fn sleep_on_chan_interruptible_impl(chan: *mut c_void, lk: Option<SpinLockRef<'_
 
 fn wakeup_on_chan_impl(chan: *mut c_void) {
     sleep_lock_impl();
-    let _ = ttree_wakeup_key(chan_queue_ptr(), chan as u64, 0, 0);
+    let _ = TtreeRef::from_ptr(chan_queue_ptr())
+        .map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_key(chan as u64, 0, 0));
     sleep_unlock_impl();
 }
 
@@ -915,7 +920,7 @@ unsafe fn scheduler_dump_chan_queue() {
         // `rb_first_node`/`rb_next_node` cursor.
         for node in (*root).iter() {
             let tn = (node as *mut u8).wrapping_sub(tree_entry_off) as *mut tnode_t;
-            let proc = tnode_get_thread(tn);
+            let proc = TnodeRef::from_ptr(tn).map_or(core::ptr::null_mut(), |r| r.thread_ptr());
             if proc.is_null() {
                 crate::kprintln!("  Process: NULL");
             } else {

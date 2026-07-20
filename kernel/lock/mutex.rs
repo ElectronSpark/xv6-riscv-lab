@@ -19,7 +19,10 @@ use crate::sync::KSpinlock;
 // P3-D2a: the thread-queue primitives (kernel/proc/thread_queue.rs) are
 // ordinary Rust fns, reached as plain crate-path items instead of
 // `extern "C"` redeclarations.
-use crate::proc::{tq_init, tq_wait, tq_wait_cb, tq_wakeup};
+// NO-STANDALONE-FN: the `tq_init`/`tq_wait`/`tq_wait_cb`/`tq_wakeup` free-fn
+// delegators were deleted; each call site below builds a `TqRef` handle via
+// `from_ptr` and invokes the corresponding inherent method.
+use crate::proc::access::TqRef;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -156,7 +159,10 @@ fn try_set_holder(m: *mut RawMutex, pid: c_int) -> bool {
 }
 /// Wake one waiter; caller holds `lk->lk`. Mirrors `__do_wakeup`.
 fn do_wakeup(m: *mut RawMutex) {
-    let next = tq_wakeup(wq_ptr(m), 0, 0);
+    // Null-queue path is unreachable (`wq_ptr` is a live embedded-field
+    // address); on an empty valid queue `wakeup_one` returns null, matching
+    // the `null_mut()` default here (former `tq_wakeup` null->ERR_PTR path).
+    let next = TqRef::from_ptr(wq_ptr(m)).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
     if next.is_null() {
         set_holder(m, -1);
         return;
@@ -263,9 +269,9 @@ extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 pub(crate) fn mutex_init(m: *mut mutex_t, name: *mut c_char) {
     let m = as_native(m);
     spin_init(lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
-    tq_init(wq_ptr(m),
-            b"sleep lock wait queue\0".as_ptr() as *const c_char,
-            lk_ptr(m));
+    if let Some(r) = TqRef::from_ptr(wq_ptr(m)) {
+        r.init(b"sleep lock wait queue\0".as_ptr() as *const c_char, lk_ptr(m));
+    }
     set_name(m, name);
     set_holder(m, -1);
 }
@@ -282,7 +288,7 @@ pub(crate) fn mutex_lock(m: *mut mutex_t) {
 
     while get_holder(m) != pid {
         machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-        let _ = tq_wait(wq_ptr(m), lk_ptr(m), null_mut());
+        let _ = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(m), null_mut()));
     }
 }
 
@@ -322,7 +328,7 @@ pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int {
     while get_holder(m) != pid {
         if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait(wq_ptr(m), lk_ptr(m), null_mut());
+        let ret = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(m), null_mut()));
         if ret != 0 && signal_pending(cur) && get_holder(m) != pid {
             return -(EINTR as c_int);
         }
@@ -362,13 +368,12 @@ pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
             timer_armed: false,
         };
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = tq_wait_cb(
-            wq_ptr(m),
+        let ret = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
             Some(mutex_timed_sleep_cb),
             Some(mutex_timed_wake_cb),
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
-        );
+        ));
         if ret != 0 && signal_pending(cur) && get_holder(m) != pid {
             return -(EINTR as c_int);
         }

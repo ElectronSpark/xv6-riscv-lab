@@ -20,7 +20,7 @@ use crate::list::ListNode;
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
 use crate::proc::access::{
     is_err_or_null, list_node_init_raw, list_node_pop_back_raw, ptr_err_or, ListNodeRef,
-    ThreadAccess, WorkStructRef, WorkqueueRef,
+    ThreadAccess, TqRef, WorkStructRef, WorkqueueRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -282,8 +282,11 @@ fn slab_free(obj: *mut c_void) {
 // thread-queue primitives (`kernel/proc/thread_queue.rs`) are ordinary
 // Rust fns, reached as plain crate-path items instead of the `extern
 // "C"` redeclarations that used to sit in the block above.
+// NO-STANDALONE-FN: the `tq_init`/`tq_size`/`tq_wait`/`tq_wakeup`/
+// `tq_wakeup_all` free-fn delegators were deleted; the sites below build a
+// `TqRef` handle (imported from `access` above) and invoke the method.
 use crate::proc::{
-    scheduler_wakeup, scheduler_yield, tq_init, tq_size, tq_wait, tq_wakeup, tq_wakeup_all,
+    scheduler_wakeup, scheduler_yield,
     wakeup,
 };
 // P3-D2b: `kill_thread` (proc/signal.rs) likewise.
@@ -430,7 +433,9 @@ impl<'a> WorkqueueRef<'a> {
         list_node_init_raw(self.worker_list_ptr());
         list_node_init_raw(self.work_list_ptr());
         spin_init(self.lock_ptr(), c"workqueue_lock".as_ptr() as *mut c_char);
-        tq_init(self.idle_queue_ptr(), c"workqueue_idle".as_ptr(), self.lock_ptr());
+        if let Some(r) = TqRef::from_ptr(self.idle_queue_ptr()) {
+            r.init(c"workqueue_idle".as_ptr(), self.lock_ptr());
+        }
     }
     /// Push a detached work item onto the work list (was `enqueue_work`).
     fn enqueue(&self, work: WorkStructRef<'_>) {
@@ -458,7 +463,7 @@ impl<'a> WorkqueueRef<'a> {
     }
     /// Wake every idle worker parked on the idle queue.
     fn wakeup_all_idle_workers(&self) {
-        let ret = tq_wakeup_all(self.idle_queue_ptr(), 0, 0);
+        let ret = TqRef::from_ptr(self.idle_queue_ptr()).map_or(-EINVAL, |r| r.wakeup_all(0, 0));
         if ret < 0 {
             crate::kprintln!(
                 "warning: failed to wake idle workers for workqueue {}",
@@ -620,11 +625,10 @@ unsafe extern "C" fn worker_routine() {
         let mut work = wq.dequeue();
         if work.is_null() {
             xv6_thread_state_set(cur_t, THREAD_INTERRUPTIBLE);
-            tq_wait(
-                wq.idle_queue_ptr(),
+            let _ = TqRef::from_ptr(wq.idle_queue_ptr()).map_or(-EINVAL, |r| r.wait(
                 wq.lock_ptr(),
                 &raw mut work as *mut *mut work_struct as *mut u64,
-            );
+            ));
             if !wq.lock_ref().holding() {
                 xv6_panic(c"tq_wait should return with workqueue lock held".as_ptr());
             }
@@ -673,8 +677,10 @@ unsafe extern "C" fn manager_routine() {
             if wq.create_worker() != 0 { break; }
         }
         let idle = wq.idle_queue_ptr();
-        while tq_size(idle) != 0 && wq.nr_workers() - tq_size(idle) < wq.pending_works() {
-            let p = tq_wakeup(idle, 0, 0);
+        while TqRef::from_ptr(idle).map_or(-EINVAL, |r| r.size()) != 0
+            && wq.nr_workers() - TqRef::from_ptr(idle).map_or(-EINVAL, |r| r.size()) < wq.pending_works()
+        {
+            let p = TqRef::from_ptr(idle).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
             if is_err_or_null(p) {
                 crate::kprintln!("warning: Failed to wake up idle worker");
             }
