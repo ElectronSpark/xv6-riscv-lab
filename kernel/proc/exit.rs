@@ -78,17 +78,26 @@ mod raw {
     // stays unchanged. The "valid live kernel pointer" precondition from
     // the module header is unchanged — it is documented on the shims
     // themselves.
+    // RUSTIFY-PROC (shims visibility sweep): the cross-subsystem shims that
+    // keep genuine out-of-`crate::proc` callers stay `pub(crate)`.
     pub(crate) use crate::proc::proc_shims::{
-        t_parent, t_pid, t_session, t_thread_group, xv6_current_thread,
+        xv6_current_thread, xv6_panic, xv6_pid_rlock, xv6_pid_runlock, xv6_thread_state_set,
+    };
+    // RUSTIFY-PROC: every other shim used here is now `pub(super)` in
+    // `proc_shims.rs` (in-`crate::proc` callers only); re-export at the
+    // matching narrower visibility so this file's `raw::NAME` -> `ffi::NAME`
+    // shim keeps resolving (same pattern as the `pub(super) use` block below).
+    pub(super) use crate::proc::proc_shims::{
+        t_parent, t_pid, t_session, t_thread_group,
         xv6_either_copyout_int, xv6_exit_find_stopped_child, xv6_exit_find_zombie_child,
-        xv6_exit_reap_zombie, xv6_exit_reparent_do, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
+        xv6_exit_reap_zombie, xv6_exit_reparent_do,
         xv6_pid_wlock, xv6_pid_wunlock, xv6_t_children_count, xv6_t_clone_flags, xv6_t_fdtable,
         xv6_t_fs, xv6_t_set_fdtable, xv6_t_set_fs, xv6_t_set_self_reap, xv6_t_set_sigacts,
         xv6_t_set_thread_group, xv6_t_set_vfork_parent, xv6_t_set_vm, xv6_t_set_xstate,
         xv6_t_sigacts, xv6_t_signal_esignal, xv6_t_signal_stop_signal, xv6_t_vfork_parent,
         xv6_t_vm, xv6_tcb_lock, xv6_tcb_unlock, xv6_tg_group_exit_code,
         xv6_tg_group_exit_task_is, xv6_tg_group_leader, xv6_tg_is_exiting, xv6_thread_is_stopped,
-        xv6_thread_is_zombie, xv6_thread_state_set,
+        xv6_thread_is_zombie,
     };
 
     // P3-D2a: the scheduler entry points are ordinary Rust fns in
