@@ -461,7 +461,7 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 // =========================================================================
 
 // ---- rq_set_ready / rq_clear_ready ----
-pub(crate) fn rq_set_ready(cls_id: c_int, cpu_id: c_int) {
+pub(super) fn rq_set_ready(cls_id: c_int, cpu_id: c_int) {
     let pc = rqpc_ref(cpu_id);
     let top_mask = 1u64 << (cls_id >> 3);
     let secondary_mask = 1u64 << cls_id;
@@ -469,7 +469,7 @@ pub(crate) fn rq_set_ready(cls_id: c_int, cpu_id: c_int) {
     pc.or_ready_mask_secondary(secondary_mask);
 }
 
-pub(crate) fn rq_clear_ready(cls_id: c_int, cpu_id: c_int) {
+pub(super) fn rq_clear_ready(cls_id: c_int, cpu_id: c_int) {
     let pc = rqpc_ref(cpu_id);
     let top_id = cls_id >> 3;
     let secondary_mask = 1u64 << cls_id;
@@ -492,12 +492,12 @@ fn get_rq_for_cpu_inner(cls_id: c_int, cpu_id: c_int) -> KResult<*mut rq> {
     Ok(get_rq(cls_id, cpu_id))
 }
 
-pub(crate) fn get_rq_for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
+pub(super) fn get_rq_for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
     result_to_errptr(get_rq_for_cpu_inner(cls_id, cpu_id))
 }
 
 // ---- pick_next_rq ----
-pub(crate) fn pick_next_rq() -> *mut rq {
+pub(super) fn pick_next_rq() -> *mut rq {
     let cpu = cpuid();
     let pc = rqpc_ref(cpu);
     let (top_mask, mut secondary_mask) = (pc.ready_mask(), pc.ready_mask_secondary());
@@ -522,7 +522,7 @@ pub(crate) fn pick_next_rq() -> *mut rq {
 }
 
 // ---- rq_global_init ----
-pub(crate) fn rq_global_init() {
+pub(super) fn rq_global_init() {
     rqg_ref().percpu = RQ_PERCPU_DATA.0[0].get() as *mut rq_percpu;
     for i in 0..NCPU as c_int {
         let pc = rqpc_ref(i);
@@ -545,7 +545,7 @@ pub(crate) fn rq_global_init() {
 }
 
 // ---- rq_init ----
-pub(crate) unsafe fn rq_init(r: *mut rq) {
+pub(super) unsafe fn rq_init(r: *mut rq) {
     kassert!(!r.is_null(), "rq_init: rq is NULL");
     unsafe {
         ptr::write_bytes(r as *mut u8, 0, size_of::<rq>());
@@ -554,7 +554,7 @@ pub(crate) unsafe fn rq_init(r: *mut rq) {
 }
 
 // ---- rq_register ----
-pub(crate) fn rq_register(r: *mut rq, cls_id: c_int, cpu_id: c_int) {
+pub(super) fn rq_register(r: *mut rq, cls_id: c_int, cpu_id: c_int) {
     kassert!(!r.is_null(), "rq_register: rq is NULL");
     kassert!(cls_id >= 0 && cls_id < PRIORITY_MAINLEVELS as c_int, "rq_register: invalid cls_id");
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_register: invalid cpu_id");
@@ -570,7 +570,7 @@ pub(crate) fn rq_register(r: *mut rq, cls_id: c_int, cpu_id: c_int) {
 }
 
 // ---- sched_entity_init ----
-pub(crate) fn sched_entity_init(se: *mut sched_entity, p: *mut thread) {
+pub(super) fn sched_entity_init(se: *mut sched_entity, p: *mut thread) {
     kassert!(!se.is_null(), "sched_entity_init: se is NULL");
     let sr = se_ref(se);
     sr.set_rq(ptr::null_mut());
@@ -592,7 +592,7 @@ pub(crate) fn sched_entity_init(se: *mut sched_entity, p: *mut thread) {
 // runtime guards on `cls` (non-null; has a `pick_next_task` slot) are now
 // static: an enum value is never null, and both variants implement
 // `pick_next_task` — so those `kpanic!`s (which never fired) are gone.
-pub(crate) fn sched_class_register(id: c_int, cls: SchedClass) {
+pub(super) fn sched_class_register(id: c_int, cls: SchedClass) {
     if id < 0 || id >= PRIORITY_MAINLEVELS as c_int {
         kpanic!("sched_class_register: invalid id");
     }
@@ -605,40 +605,40 @@ pub(crate) fn rq_lock(cpu_id: c_int) {
     rqpc_ref(cpu_id).lock_ref().lock();
 }
 
-pub(crate) fn rq_trylock(cpu_id: c_int) -> c_int {
+fn rq_trylock(cpu_id: c_int) -> c_int {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_trylock: invalid cpu_id");
     rqpc_ref(cpu_id).lock_ref().trylock()
 }
 
-pub(crate) fn rq_unlock(cpu_id: c_int) {
+pub(super) fn rq_unlock(cpu_id: c_int) {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_unlock: invalid cpu_id");
     kassert!(rq_lock_held(cpu_id), "rq_unlock: lock not held");
     rqpc_ref(cpu_id).lock_ref().unlock();
 }
 
-pub(crate) fn rq_lock_irqsave(cpu_id: c_int) -> c_int {
+fn rq_lock_irqsave(cpu_id: c_int) -> c_int {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_lock_irqsave: invalid cpu_id");
     rqpc_ref(cpu_id).lock_ref().lock_irqsave()
 }
 
-pub(crate) fn rq_unlock_irqrestore(cpu_id: c_int, state: c_int) {
+fn rq_unlock_irqrestore(cpu_id: c_int, state: c_int) {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_unlock_irqrestore: invalid cpu_id");
     kassert!(rq_lock_held(cpu_id), "rq_unlock_irqrestore: lock not held");
     rqpc_ref(cpu_id).lock_ref().unlock_irqrestore(state);
 }
 
-pub(crate) fn rq_lock_current_irqsave() -> c_int {
+pub(super) fn rq_lock_current_irqsave() -> c_int {
     let intr_state = intr_get() as c_int;
     intr_off();
     rq_lock_irqsave(cpuid());
     intr_state
 }
 
-pub(crate) fn rq_unlock_current_irqrestore(state: c_int) {
+pub(super) fn rq_unlock_current_irqrestore(state: c_int) {
     rq_unlock_irqrestore(cpuid(), state)
 }
 
-pub(crate) fn rq_trylock_two(c1: c_int, c2: c_int) -> c_int {
+pub(super) fn rq_trylock_two(c1: c_int, c2: c_int) -> c_int {
     kassert!(c1 >= 0 && c1 < NCPU as c_int, "rq_trylock_two: invalid c1");
     kassert!(c2 >= 0 && c2 < NCPU as c_int, "rq_trylock_two: invalid c2");
     let (first, second) = if c1 <= c2 { (c1, c2) } else { (c2, c1) };
@@ -651,7 +651,7 @@ pub(crate) fn rq_trylock_two(c1: c_int, c2: c_int) -> c_int {
     1
 }
 
-pub(crate) fn rq_unlock_two(c1: c_int, c2: c_int) {
+pub(super) fn rq_unlock_two(c1: c_int, c2: c_int) {
     kassert!(c1 >= 0 && c1 < NCPU as c_int, "rq_unlock_two: invalid c1");
     kassert!(c2 >= 0 && c2 < NCPU as c_int, "rq_unlock_two: invalid c2");
     if c1 < c2 { rq_unlock(c2); rq_unlock(c1); }
@@ -659,30 +659,30 @@ pub(crate) fn rq_unlock_two(c1: c_int, c2: c_int) {
     else { rq_unlock(c1); }
 }
 
-pub(crate) fn rq_lock_current() {
+pub(super) fn rq_lock_current() {
     let g = PreemptGuard::new();
     rq_lock(g.cpuid() as c_int);
 }
 
-pub(crate) fn rq_unlock_current() {
+pub(super) fn rq_unlock_current() {
     rq_unlock(cpuid())
 }
 
-pub(crate) fn rq_holding_current() -> c_int {
+pub(super) fn rq_holding_current() -> c_int {
     // SAFETY: `rqpc_current()` indexes into statically-allocated, always-initialized
     // per-CPU storage; never null.
     unsafe { RqPercpuRef::assume(rqpc_current()) }.lock_ref().holding() as c_int
 }
 
 // ---- rq_percpu_lock_get / put_unlock ----
-pub(crate) fn rq_percpu_lock_get(cpu_id: c_int) -> *mut rq_percpu {
+fn rq_percpu_lock_get(cpu_id: c_int) -> *mut rq_percpu {
     if cpu_id < 0 || cpu_id >= NCPU as c_int { return ptr::null_mut(); }
     let pc = rqpc(cpu_id);
     rqpc_ref(cpu_id).lock_ref().lock();
     pc
 }
 
-pub(crate) fn rq_percpu_put_unlock(pc: *mut rq_percpu) {
+fn rq_percpu_put_unlock(pc: *mut rq_percpu) {
     if pc.is_null() { return; }
     // SAFETY: `pc` is checked non-null immediately above.
     unsafe { RqPercpuRef::assume(pc) }.lock_ref().unlock();
@@ -726,80 +726,113 @@ pub(crate) fn rq_select_task_rq(se: *mut sched_entity, cpumask: cpumask_t) -> *m
     result_to_errptr(rq_select_task_rq_inner(se, cpumask))
 }
 
-// ---- enqueue / dequeue / pick / put_prev / set_next ----
-pub(crate) fn rq_enqueue_task(r: *mut rq, se: *mut sched_entity) {
-    let rr = rq_ref(r);
-    let sr = se_ref(se);
-    kassert!(rq_lock_held(rr.cpu_id()), "rq_enqueue_task: rq lock not held");
-    if !sr.rq_ptr().is_null() {
-        let p = sr.thread_ptr();
-        let pt = ThreadAccess::from_ptr(p);
-        let pn = pt.map_or(c"NULL".as_ptr(), |t| t.name_ptr());
-        let se_rq = sr.rq_ptr();
-        crate::kprintln!("rq_enqueue_task BUG: se->rq={} (cpu={}), target rq={} (cpu={})",
-            crate::printf::Ptr(se_rq as u64), if se_rq.is_null() { -1 } else { rq_ref(se_rq).cpu_id() }, crate::printf::Ptr(r as u64), rr.cpu_id());
-        crate::kprintln!("  thread={} pid={} state={} on_rq={} on_cpu={} se_cpu={}",
-            crate::printf::Cs(pn), pt.map_or(-1, |t| t.pid()), if p.is_null() { -1 } else { thread_state_get(p) },
-            sr.on_rq_plain(), sr.on_cpu_plain(), sr.cpu_id());
-        kpanic!("rq_enqueue_task: se rq is not NULL");
+// ---- enqueue / dequeue / pick : RqRef handle methods (P3-N-METH) ----
+// The full run-queue-membership operations (bookkeeping + policy dispatch)
+// are inherent methods on the `RqRef` handle from `access.rs` (a
+// `NonNull<rq>` newtype). Same-crate inherent impl (thread_queue.rs's
+// TqRef precedent); every field touch is a raw load/store through the
+// handle — NO `&Rq` is ever formed, so the Freeze-noalias read-hoist hang
+// (N-R1) is structurally impossible on these cross-hart-mutated fields.
+// `pub(super)` (callers in crate::proc: sched.rs, thread.rs, rq.rs).
+impl RqRef<'_> {
+    /// Enqueue `se` onto this run queue (was the free `rq_enqueue_task`).
+    pub(super) fn enqueue(&self, se: *mut sched_entity) {
+        let sr = se_ref(se);
+        kassert!(rq_lock_held(self.cpu_id()), "RqRef::enqueue: rq lock not held");
+        if !sr.rq_ptr().is_null() {
+            let p = sr.thread_ptr();
+            let pt = ThreadAccess::from_ptr(p);
+            let pn = pt.map_or(c"NULL".as_ptr(), |t| t.name_ptr());
+            let se_rq = sr.rq_ptr();
+            crate::kprintln!("RqRef::enqueue BUG: se->rq={} (cpu={}), target rq={} (cpu={})",
+                crate::printf::Ptr(se_rq as u64), if se_rq.is_null() { -1 } else { rq_ref(se_rq).cpu_id() }, crate::printf::Ptr(self.as_ptr() as u64), self.cpu_id());
+            crate::kprintln!("  thread={} pid={} state={} on_rq={} on_cpu={} se_cpu={}",
+                crate::printf::Cs(pn), pt.map_or(-1, |t| t.pid()), if p.is_null() { -1 } else { thread_state_get(p) },
+                sr.on_rq_plain(), sr.on_cpu_plain(), sr.cpu_id());
+            kpanic!("RqRef::enqueue: se rq is not NULL");
+        }
+        self.enqueue_task(se);
+        sr.set_rq(self.as_ptr());
+        sr.cpu_id_store_release(self.cpu_id());
+        sr.on_rq_store_release(1);
+        sr.set_sched_class(self.sched_class());
+        self.inc_task_count();
+        rq_set_ready(self.class_id(), self.cpu_id());
     }
-    rr.enqueue_task(se);
-    sr.set_rq(r);
-    sr.cpu_id_store_release(rr.cpu_id());
-    sr.on_rq_store_release(1);
-    sr.set_sched_class(rr.sched_class());
-    rr.inc_task_count();
-    rq_set_ready(rr.class_id(), rr.cpu_id());
-}
 
-pub(crate) fn rq_dequeue_task(r: *mut rq, se: *mut sched_entity) {
-    let rr = rq_ref(r);
-    let sr = se_ref(se);
-    kassert!(rq_lock_held(rr.cpu_id()), "rq_dequeue_task: rq lock not held");
-    kassert!(sr.rq_ptr() == r, "rq_dequeue_task: se->rq mismatch");
-    kassert!(rr.task_count() > 0, "rq_dequeue_task: task_count == 0");
-    kassert!(sr.sched_class() == rq_ref(sr.rq_ptr()).sched_class(), "rq_dequeue_task: sched_class mismatch");
-    rr.dequeue_task(se);
-    sr.set_rq(ptr::null_mut());
-    sr.set_sched_class(None);
-    sr.on_rq_store_release(0);
-    rr.dec_task_count();
-    if rr.task_count() == 0 {
-        rq_clear_ready(rr.class_id(), rr.cpu_id());
+    /// Dequeue `se` from this run queue (was the free `rq_dequeue_task`).
+    pub(super) fn dequeue(&self, se: *mut sched_entity) {
+        let sr = se_ref(se);
+        kassert!(rq_lock_held(self.cpu_id()), "RqRef::dequeue: rq lock not held");
+        kassert!(sr.rq_ptr() == self.as_ptr(), "RqRef::dequeue: se->rq mismatch");
+        kassert!(self.task_count() > 0, "RqRef::dequeue: task_count == 0");
+        kassert!(sr.sched_class() == rq_ref(sr.rq_ptr()).sched_class(), "RqRef::dequeue: sched_class mismatch");
+        self.dequeue_task(se);
+        sr.set_rq(ptr::null_mut());
+        sr.set_sched_class(None);
+        sr.on_rq_store_release(0);
+        self.dec_task_count();
+        if self.task_count() == 0 {
+            rq_clear_ready(self.class_id(), self.cpu_id());
+        }
+    }
+
+    /// Pick the next `se` to run from this queue (was the free
+    /// `rq_pick_next_task`).
+    pub(super) fn pick_next(&self) -> *mut sched_entity {
+        kassert!(rq_lock_held(self.cpu_id()), "RqRef::pick_next: rq lock not held");
+        self.pick_next_task()
     }
 }
 
-pub(crate) fn rq_pick_next_task(r: *mut rq) -> *mut sched_entity {
-    let rr = rq_ref(r);
-    kassert!(rq_lock_held(rr.cpu_id()), "rq_pick_next_task: rq lock not held");
-    rr.pick_next_task()
+// ---- put_prev / set_next / task_dead : SchedEntityRef handle methods ----
+// The scheduling-entity transitions (put back / mark next / dead) are
+// inherent methods on the `SchedEntityRef` handle — same handle-method,
+// raw-load, no-`&SchedEntity` discipline as the `RqRef` block above.
+impl SchedEntityRef<'_> {
+    /// Return this running entity to its run queue (was the free
+    /// `rq_put_prev_task`).
+    pub(super) fn put_prev(&self) {
+        let r = self.rq_ptr();
+        kassert!(!r.is_null(), "SchedEntityRef::put_prev: se->rq NULL");
+        let rr = rq_ref(r);
+        kassert!(rq_lock_held(rr.cpu_id()), "SchedEntityRef::put_prev: rq lock not held");
+        kassert!(rr.task_count() > 0, "SchedEntityRef::put_prev: task_count == 0");
+        kassert!(self.sched_class() == rr.sched_class(), "SchedEntityRef::put_prev: sched_class mismatch");
+        rr.put_prev_task(self.as_ptr());
+    }
+
+    /// Mark this entity as the next to run on its rq's CPU (was the free
+    /// `rq_set_next_task`).
+    pub(super) fn set_next(&self) {
+        let r = self.rq_ptr();
+        kassert!(!r.is_null(), "SchedEntityRef::set_next: se->rq NULL");
+        let rr = rq_ref(r);
+        kassert!(rq_lock_held(rr.cpu_id()), "SchedEntityRef::set_next: rq lock not held");
+        kassert!(rr.task_count() > 0, "SchedEntityRef::set_next: task_count == 0");
+        kassert!(self.sched_class() == rr.sched_class(), "SchedEntityRef::set_next: sched_class mismatch");
+        rqpc_ref(rr.cpu_id()).current_se_store_release(self.as_ptr());
+        rr.set_next_task(self.as_ptr());
+    }
+
+    /// Tear down this entity on thread death (was the free
+    /// `rq_task_dead`). Dequeues via the sibling [`RqRef::dequeue`] method.
+    pub(super) fn task_dead(&self) {
+        if !self.rq_ptr().is_null() && self.sched_class().is_some() {
+            self.call_sched_class_task_dead();
+        }
+        if !self.rq_ptr().is_null() {
+            rq_ref(self.rq_ptr()).dequeue(self.as_ptr());
+        }
+        self.set_sched_class(None);
+    }
 }
 
-pub(crate) fn rq_put_prev_task(se: *mut sched_entity) {
-    let sr = se_ref(se);
-    let r = sr.rq_ptr();
-    kassert!(!r.is_null(), "rq_put_prev_task: se->rq NULL");
-    let rr = rq_ref(r);
-    kassert!(rq_lock_held(rr.cpu_id()), "rq_put_prev_task: rq lock not held");
-    kassert!(rr.task_count() > 0, "rq_put_prev_task: task_count == 0");
-    kassert!(sr.sched_class() == rr.sched_class(), "rq_put_prev_task: sched_class mismatch");
-    rr.put_prev_task(se);
-}
-
-pub(crate) fn rq_set_next_task(se: *mut sched_entity) {
-    let sr = se_ref(se);
-    let r = sr.rq_ptr();
-    kassert!(!r.is_null(), "rq_set_next_task: se->rq NULL");
-    let rr = rq_ref(r);
-    kassert!(rq_lock_held(rr.cpu_id()), "rq_set_next_task: rq lock not held");
-    kassert!(rr.task_count() > 0, "rq_set_next_task: task_count == 0");
-    kassert!(sr.sched_class() == rr.sched_class(), "rq_set_next_task: sched_class mismatch");
-    rqpc_ref(rr.cpu_id()).current_se_store_release(se);
-    rr.set_next_task(se);
-}
-
-// ---- rq_task_fork / dead ----
-pub(crate) fn rq_task_fork(se: *mut sched_entity) {
+// ---- rq_task_fork ----
+// Left free (constructor/fork-fallback shape: keyed off the *current*
+// thread's se, not a single-handle transition; sole caller `clone.rs`
+// does not carry the handle types). `pub(super)`.
+pub(super) fn rq_task_fork(se: *mut sched_entity) {
     let sr = se_ref(se);
     // SAFETY: `xv6_current_thread()` is the running thread; the currently running
     // thread's pointer (from `xv6_current_thread()`/`current()`) is a kernel-
@@ -819,17 +852,6 @@ pub(crate) fn rq_task_fork(se: *mut sched_entity) {
     if let Some(def_cls) = sched_class_of(DEFAULT_MAJOR_PRIORITY) {
         def_cls.task_fork(sr.rq_ptr(), se);
     }
-}
-
-pub(crate) fn rq_task_dead(se: *mut sched_entity) {
-    let sr = se_ref(se);
-    if !sr.rq_ptr().is_null() && sr.sched_class().is_some() {
-        sr.call_sched_class_task_dead();
-    }
-    if !sr.rq_ptr().is_null() {
-        rq_dequeue_task(sr.rq_ptr(), se);
-    }
-    sr.set_sched_class(None);
 }
 
 // ---- wake list (LLIST) ----
@@ -871,7 +893,7 @@ unsafe fn llist_migrate(head_p: *mut *mut sched_entity) -> *mut sched_entity {
     }
 }
 
-pub(crate) fn rq_add_wake_list(cpu_id: c_int, se: *mut sched_entity) -> c_int {
+pub(super) fn rq_add_wake_list(cpu_id: c_int, se: *mut sched_entity) -> c_int {
     if se.is_null() { return -EINVAL; }
     let sr = se_ref(se);
     let p = sr.thread_ptr();
@@ -916,7 +938,7 @@ pub(crate) unsafe fn rq_flush_wake_list(cpu_id: c_int) {
             let major_prio = (*se).priority >> PRIORITY_MAINLEVEL_SHIFT;
             let r = (*pc).rqs[major_prio as usize];
             if !r.is_null() {
-                rq_enqueue_task(r, se);
+                rq_ref(r).enqueue(se);
                 __thread_state_set((*se).thread, THREAD_RUNNING);
             } else {
                 llist_push(&raw mut retry_list, se);
@@ -943,7 +965,7 @@ pub(crate) fn sched_attr_init(attr: *mut sched_attr) {
     ar.set_flags(0);
 }
 
-pub(crate) fn sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) -> c_int {
+pub(super) fn sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) -> c_int {
     if se.is_null() || attr.is_null() { return -EINVAL; }
     let sr = se_ref(se);
     // SAFETY: `attr` is checked non-null at the top of `sched_getattr` above.
@@ -984,7 +1006,7 @@ pub(crate) fn rq_cpu_activate(cpu: c_int) {
 }
 
 // ---- rq_dump / sys_dumprq ----
-pub(crate) unsafe fn rq_dump() {
+unsafe fn rq_dump() {
     unsafe {
         crate::kprintln!("Run Queue Status:");
         crate::kprint!("Priority    ");

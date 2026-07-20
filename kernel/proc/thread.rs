@@ -27,7 +27,7 @@ use crate::lock::rcu::rcu_check_callbacks;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
 use crate::proc::access::{
     is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
-    SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
+    RqRef, SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
 };
 use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
 use crate::tty::session::{session_key_of, session_lookup, Sid};
@@ -51,7 +51,7 @@ use crate::proc::sigpending_init;
 // redeclarations (some inline above, some in the block below); now direct
 // crate-path items, same precedent as the `use` imports above.
 use crate::proc::{sigpending_empty, context_switch_finish, scheduler_wakeup,
-    rq_cpu_activate, rq_enqueue_task, get_rq_for_cpu, thread_group_init, thread_group_put};
+    rq_cpu_activate, get_rq_for_cpu, thread_group_init, thread_group_put};
 // P3-D2b: the pid/thread-group/pgroup entry points (proc/{pid,
 // thread_group,pgroup}.rs) are ordinary Rust fns now that their
 // `#[no_mangle]` exports are gone; reached as plain crate-path items
@@ -1135,7 +1135,10 @@ pub(crate) fn idle_thread_init() {
 
         rq_lock_current();
         let idle_rq = get_rq_for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
-        rq_enqueue_task(idle_rq, (*p).sched_entity);
+        // SAFETY: `idle_rq` is the current CPU's live idle run queue (valid
+        // cpu/priority indices); the former free `rq_enqueue_task` likewise
+        // `assume`d it non-null.
+        RqRef::assume(idle_rq).enqueue((*p).sched_entity);
         rq_unlock_current();
         // smp_store_release on on_cpu
         let se = (*p).sched_entity;

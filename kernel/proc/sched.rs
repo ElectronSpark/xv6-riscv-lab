@@ -42,9 +42,9 @@ use crate::proc::ttree_wakeup_key;
 // imported once, by its real name, and called directly.
 use crate::proc::{
     pick_next_rq, rq_global_init, rq_holding_current, rq_lock_current_irqsave,
-    rq_put_prev_task, rq_set_next_task, rq_task_dead, rq_trylock_two, rq_unlock_two,
-    rq_pick_next_task, rq_select_task_rq, rq_unlock_current_irqrestore, rq_add_wake_list,
-    rq_flush_wake_list, rq_dequeue_task, rq_enqueue_task,
+    rq_trylock_two, rq_unlock_two,
+    rq_select_task_rq, rq_unlock_current_irqrestore, rq_add_wake_list,
+    rq_flush_wake_list,
 };
 use crate::timer::sched_timer::__do_timer_tick;
 use crate::ipi::ipi_send_single;
@@ -531,7 +531,9 @@ fn sched_pick_next() -> *mut thread {
     sched_assert_holding();
     let rq = pick_next_rq();
     if is_err_or_null(rq) { return core::ptr::null_mut(); }
-    let se = rq_pick_next_task(rq);
+    // SAFETY: `rq` is proven non-null (and not an errptr) by the
+    // `is_err_or_null` guard immediately above.
+    let se = unsafe { RqRef::assume(rq) }.pick_next();
     if se.is_null() { return core::ptr::null_mut(); }
     let cur = current_thread();
     // SAFETY: `cur` is `current_thread()`, the currently running thread; the currently
@@ -552,7 +554,7 @@ fn sched_pick_next() -> *mut thread {
     }
     let p = next.thread_ptr();
     kassert!(!p.is_null(), "sched_pick_next: se->thread is NULL");
-    rq_set_next_task(se);
+    next.set_next();
     next.on_cpu_store_release(1);
     let pstate = thread_state_get(p);
     if pstate == THREAD_WAKENING {
@@ -781,7 +783,7 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
                 return;
             }
 
-            rq_enqueue_task(rq, se);
+            RqRef::assume(rq).enqueue(se);
             spin_unlock(&raw mut (*se).pi_lock);
             rq_unlock_two(origin_cpuid, target_cpu);
             return;
@@ -818,7 +820,7 @@ fn scheduler_wakeup_stopped_impl(p: *mut thread) {
 pub(crate) fn scheduler_wakeup(p: *mut thread) { scheduler_wakeup_impl(p) }
 
 pub(crate) fn scheduler_wakeup_interruptible(p: *mut thread) { scheduler_wakeup_interruptible_impl(p) }
-pub(crate) fn scheduler_wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
+pub(super) fn scheduler_wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
 
 // ---------------- sleep_on_chan / wakeup_on_chan ------------------------
 fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: thread_state) -> c_int {
@@ -899,7 +901,7 @@ fn state_str(s: thread_state) -> *const c_char {
         .map_or_else(|| c"UNKNOWN".as_ptr(), |(_, v)| v.as_ptr() as *const c_char)
 }
 
-pub(crate) unsafe fn scheduler_dump_chan_queue() {
+unsafe fn scheduler_dump_chan_queue() {
     crate::kprintln!("Channel Queue Dump:");
     unsafe {
         let root = &raw mut (*chan_queue_ptr()).root;
@@ -979,8 +981,9 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
     next_se_ref.on_cpu_store_release(1);
     next_se_ref.set_cpu_id(cpuid_rs());
     if thread_zombie(prev) {
-        // SAFETY: `prev` is proven non-null by the diverging `kassert!` above.
-        rq_task_dead(unsafe { ThreadAccess::assume(prev) }.sched_entity_ptr());
+        // SAFETY: `prev` is proven non-null by the diverging `kassert!` above;
+        // its embedded `sched_entity` is live by kernel invariant.
+        unsafe { SchedEntityRef::assume(ThreadAccess::assume(prev).sched_entity_ptr()) }.task_dead();
     }
 }
 
@@ -995,13 +998,16 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
 
     if prev != idle {
         if state_is_running(pstate) {
-            rq_put_prev_task(se);
+            // SAFETY: `se` is `prev_access`'s embedded scheduling entity,
+            // field-derived from the already-valid `prev_access` handle above.
+            unsafe { SchedEntityRef::assume(se) }.put_prev();
         } else if state_is_sleeping(pstate) || state_is_stopped(pstate) {
             // SAFETY: `se` is `prev_access`'s embedded scheduling entity, field-
             // derived from the already-valid `prev_access` handle above.
             let se_rq = unsafe { SchedEntityRef::assume(se) }.rq_ptr();
             if !se_rq.is_null() {
-                rq_dequeue_task(se_rq, se);
+                // SAFETY: `se_rq` is proven non-null immediately above.
+                unsafe { RqRef::assume(se_rq) }.dequeue(se);
             }
         }
     }
@@ -1023,7 +1029,7 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
     rq_unlock_current_irqrestore(intr);
 }
 
-pub(crate) fn context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int) {
+pub(super) fn context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int) {
     context_switch_finish_impl(prev, next, intr)
 }
 
