@@ -459,9 +459,12 @@ impl Freelist {
 
     /// All `NUM` descriptors start out free (mirrors `freelist_init`).
     fn init(&mut self) {
-        for i in 0..NUM {
-            self.free[i] = true;
-            self.list[i] = i as u16;
+        // N-METH: zip the two backing arrays and `enumerate` instead of a
+        // `for i in 0..NUM` index loop (drops the per-slot bounds checks;
+        // `free[i]=true, list[i]=i` verbatim).
+        for (i, (free, slot)) in self.free.iter_mut().zip(self.list.iter_mut()).enumerate() {
+            *free = true;
+            *slot = i as u16;
         }
         self.idx = NUM as u16;
     }
@@ -777,92 +780,105 @@ unsafe fn thread_state_set_uninterruptible(p: *mut thread) {
 // Descriptor allocation.
 // ===========================================================================
 
-/// Mirrors `alloc_desc`: find a free descriptor, mark it non-free, return
-/// its index. N-R7g: operates on the lock-owned [`DiskInner`] free-map
-/// (`inner` is the held guard's `&mut`), so no `unsafe` -- the freelist is
-/// pure CPU-side state.
-fn alloc_desc(inner: &mut DiskInner) -> i32 {
-    inner.desc_freelist.alloc()
-}
-
-/// Mirrors `free_desc`: mark a descriptor as free, wake waiters if
-/// enough descriptors are now available. N-R7g: the free-map + wait queue
-/// come from the held guard (`inner`); `desc` is the raw DMA descriptor
-/// ring (stays raw -- the device-shared page), cleared here as before.
-///
-/// # Safety
-/// `desc` must be the disk's live descriptor ring; caller must hold the
-/// disk's `inner` lock (evidenced by the `&mut DiskInner`).
-unsafe fn free_desc(inner: &mut DiskInner, desc: *mut virtq_desc, i: i32) {
-    if inner.desc_freelist.free_item(i) != 0 {
-        panic_fixed("free_desc: invalid free");
+// N-METH: the four descriptor-management free fns `fn X(inner: &mut
+// DiskInner, ...)` become `impl DiskInner { fn X(&mut self, ...) }`. The
+// receiver was already the lock-owned [`DiskInner`] (the held guard's
+// `&mut`), so these are its natural methods -- the `&mut self` is the same
+// exclusive borrow the guard's `DerefMut` hands out (no `*mut -> &`, no
+// freeze-noalias hazard); the raw DMA descriptor ring stays a `desc: *mut
+// virtq_desc` parameter (device-shared page, unchanged). Same lock-owns-
+// data-methodization precedent as `tty.rs` (da51c6c).
+impl DiskInner {
+    /// Mirrors `alloc_desc`: find a free descriptor, mark it non-free,
+    /// return its index. Operates on the lock-owned free-map (`self` is
+    /// the held guard's `&mut`), so no `unsafe` -- the freelist is pure
+    /// CPU-side state.
+    fn alloc_desc(&mut self) -> i32 {
+        self.desc_freelist.alloc()
     }
 
-    // SAFETY: caller contract; `i` just validated as a real descriptor
-    // index by `free_item` above. `desc` is the raw device-shared ring.
-    unsafe {
-        let d = desc.add(i as usize);
-        (*d).addr = 0;
-        (*d).len = 0;
-        (*d).flags = 0;
-        (*d).next = 0;
-    }
+    /// Mirrors `free_desc`: mark a descriptor as free, wake waiters if
+    /// enough descriptors are now available. The free-map + wait queue
+    /// come from `self` (the held guard); `desc` is the raw DMA descriptor
+    /// ring (stays raw -- the device-shared page), cleared here as before.
+    ///
+    /// # Safety
+    /// `desc` must be the disk's live descriptor ring; caller must hold
+    /// the disk's `inner` lock (evidenced by the `&mut self`).
+    unsafe fn free_desc(&mut self, desc: *mut virtq_desc, i: i32) {
+        if self.desc_freelist.free_item(i) != 0 {
+            panic_fixed("free_desc: invalid free");
+        }
 
-    fence(Ordering::SeqCst);
-    // Wake waiters if enough descriptors are free. Already holding the
-    // lock (the `&mut DiskInner` proves it), so wake directly.
-    if inner.desc_freelist.available() >= 3 {
-        // `desc_wait_queue` is a live, initialised `tq_t` in the guarded
-        // state; `tq_wakeup_all` is a safe, null-tolerant primitive.
-        tq_wakeup_all(&raw mut inner.desc_wait_queue, 0, 0);
-    }
-}
-
-/// Mirrors `free_chain`: free a chain of descriptors.
-///
-/// # Safety
-/// `desc` must be the disk's live descriptor ring; caller must hold the
-/// disk's `inner` lock; `i` must be the head of a valid descriptor chain.
-unsafe fn free_chain(inner: &mut DiskInner, desc: *mut virtq_desc, mut i: i32) {
-    loop {
-        // SAFETY: caller contract; `desc` is the raw device-shared ring.
-        let (flag, nxt) = unsafe {
+        // SAFETY: caller contract; `i` just validated as a real descriptor
+        // index by `free_item` above. `desc` is the raw device-shared ring.
+        unsafe {
             let d = desc.add(i as usize);
-            ((*d).flags, (*d).next)
-        };
-        // SAFETY: caller contract.
-        unsafe { free_desc(inner, desc, i) };
-        if flag & VRING_DESC_F_NEXT != 0 {
-            i = nxt as i32;
-        } else {
-            break;
+            (*d).addr = 0;
+            (*d).len = 0;
+            (*d).flags = 0;
+            (*d).next = 0;
         }
-    }
-}
 
-/// Mirrors `alloc3_desc`: allocate three descriptors (need not be
-/// contiguous); disk transfers always use three descriptors.
-///
-/// # Safety
-/// `desc` must be the disk's live descriptor ring; caller must hold the
-/// disk's `inner` lock.
-unsafe fn alloc3_desc(inner: &mut DiskInner, desc: *mut virtq_desc, idx: &mut [i32; 3]) -> i32 {
-    // `__atomic_signal_fence(__ATOMIC_SEQ_CST)` -- compiler-reordering
-    // barrier only, no hardware fence (see module doc's barrier
-    // accounting).
-    compiler_fence(Ordering::SeqCst);
-    for i in 0..3 {
-        idx[i] = alloc_desc(inner);
-        if idx[i] < 0 {
-            // `idx[0..i)` were successfully allocated above.
-            for j in 0..i {
-                // SAFETY: caller contract; `desc` live.
-                unsafe { free_desc(inner, desc, idx[j]) };
-            }
-            return -1;
+        fence(Ordering::SeqCst);
+        // Wake waiters if enough descriptors are free. Already holding the
+        // lock (the `&mut self` proves it), so wake directly.
+        if self.desc_freelist.available() >= 3 {
+            // `desc_wait_queue` is a live, initialised `tq_t` in the guarded
+            // state; `tq_wakeup_all` is a safe, null-tolerant primitive.
+            tq_wakeup_all(&raw mut self.desc_wait_queue, 0, 0);
         }
     }
-    0
+
+    /// Mirrors `free_chain`: free a chain of descriptors.
+    ///
+    /// # Safety
+    /// `desc` must be the disk's live descriptor ring; caller must hold
+    /// the disk's `inner` lock; `i` must be the head of a valid descriptor
+    /// chain.
+    unsafe fn free_chain(&mut self, desc: *mut virtq_desc, mut i: i32) {
+        loop {
+            // SAFETY: caller contract; `desc` is the raw device-shared ring.
+            let (flag, nxt) = unsafe {
+                let d = desc.add(i as usize);
+                ((*d).flags, (*d).next)
+            };
+            // SAFETY: caller contract.
+            unsafe { self.free_desc(desc, i) };
+            if flag & VRING_DESC_F_NEXT != 0 {
+                i = nxt as i32;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Mirrors `alloc3_desc`: allocate three descriptors (need not be
+    /// contiguous); disk transfers always use three descriptors.
+    ///
+    /// # Safety
+    /// `desc` must be the disk's live descriptor ring; caller must hold
+    /// the disk's `inner` lock.
+    unsafe fn alloc3_desc(&mut self, desc: *mut virtq_desc, idx: &mut [i32; 3]) -> i32 {
+        // `__atomic_signal_fence(__ATOMIC_SEQ_CST)` -- compiler-reordering
+        // barrier only, no hardware fence (see module doc's barrier
+        // accounting).
+        compiler_fence(Ordering::SeqCst);
+        for i in 0..3 {
+            idx[i] = self.alloc_desc();
+            if idx[i] < 0 {
+                // `idx[0..i)` were successfully allocated above -- iterate
+                // that slice to roll them back (N-METH: slice iterator in
+                // place of the `for j in 0..i` index loop).
+                for &d in &idx[..i] {
+                    // SAFETY: caller contract; `desc` live.
+                    unsafe { self.free_desc(desc, d) };
+                }
+                return -1;
+            }
+        }
+        0
+    }
 }
 
 // ===========================================================================
@@ -908,7 +924,7 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
     let mut idx = [0i32; 3];
     loop {
         // SAFETY: `desc` live, lock held via `d`.
-        if unsafe { alloc3_desc(&mut d, desc, &mut idx) } == 0 {
+        if unsafe { d.alloc3_desc(desc, &mut idx) } == 0 {
             break;
         }
         // No free descriptors; wait on the per-disk queue.
@@ -1055,7 +1071,7 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
         // SAFETY: `disk` live.
         unsafe { (*disk).info[id].bio = ptr::null_mut() };
         // SAFETY: `desc` live, lock held via `d`, `id` a valid chain head.
-        unsafe { free_chain(&mut d, desc, id as i32) };
+        unsafe { d.free_chain(desc, id as i32) };
 
         // Signal bio completion -- wakes any thread in `bio_await()`.
         if !bio_ptr.is_null() {
