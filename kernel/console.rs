@@ -63,7 +63,7 @@ use crate::kstd::{cint_result, Errno, KResult};
 // crate-path items instead of `extern "C"` redeclarations. `sleep` is
 // now reached through `SpinLockGuard::sleep_on` (lock-owns-data), so
 // `sleep_on_chan` is no longer imported directly here.
-use crate::proc::{wakeup, wakeup_on_chan};
+use crate::proc::Scheduler;
 // N-R7 (lock-owns-data): the console's raw-fallback input buffer + its
 // lock are now a single data-owning `SpinLock<ConsInner>` (was a bare
 // `static mut spinlock_t` beside four `static mut` state fields).
@@ -765,7 +765,7 @@ pub(crate) extern "C" fn consoleintr(c: c_int) {
                     // Wake up consoleread() if a whole line (or
                     // end-of-file) has arrived.
                     cons.w = cons.e;
-                    wakeup_on_chan(cons_chan());
+                    Scheduler::wakeup_on_chan(cons_chan());
                 }
             }
         }
@@ -1005,7 +1005,7 @@ pub(crate) extern "C" fn consoledevinit() {
             0,
         );
         if !is_err_or_null(feeder) {
-            wakeup(feeder);
+            Scheduler::wakeup(feeder);
         }
 
         // Start the output drain thread (echo -> UART).
@@ -1017,7 +1017,7 @@ pub(crate) extern "C" fn consoledevinit() {
             0,
         );
         if !is_err_or_null(drain) {
-            wakeup(drain);
+            Scheduler::wakeup(drain);
         }
 
         // Start SBI polling thread if UART hardware not available.
@@ -1030,7 +1030,7 @@ pub(crate) extern "C" fn consoledevinit() {
                 0,
             );
             if !is_err_or_null(p) {
-                wakeup(p);
+                Scheduler::wakeup(p);
             }
         }
     }

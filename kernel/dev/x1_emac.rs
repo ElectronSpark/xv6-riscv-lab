@@ -128,7 +128,7 @@ use crate::net::{mbufalloc, mbuffree, net_rx};
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export like its neighbors here.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 use super::netdev::{netdev_register, netdev_set_link};
 
 // ===========================================================================
@@ -654,7 +654,7 @@ unsafe fn x1_emac_apmu_config(sc: *mut X1EmacSoftc) {
     // SAFETY: see above.
     unsafe { ptr::write_volatile(ctrl_reg, val) };
     fence(Ordering::SeqCst);
-    scheduler_yield(); // allow reset to propagate
+    Scheduler::yield_now(); // allow reset to propagate
 
     // Set RGMII interface mode + AXI single ID.
     val |= PHY_INTF_RGMII;
@@ -1437,7 +1437,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
             crate::kprintln!("x1_emac{}: failed to create init kthread", i as c_int);
             EMAC_INIT_DONE[i].store(-1, Ordering::Release);
         } else {
-            wakeup(t);
+            Scheduler::wakeup(t);
         }
     }
 
@@ -1527,5 +1527,5 @@ pub(crate) extern "C" fn x1_emac_init() {
         crate::kprintln!("x1_emac: failed to create init kthread");
         return;
     }
-    wakeup(t);
+    Scheduler::wakeup(t);
 }

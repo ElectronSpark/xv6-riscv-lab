@@ -696,7 +696,7 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 // P3-D3b: lock/rwsem.rs's entry points (used for `vfs_superblock.lock`)
 // are plain safe Rust fns now that their `#[no_mangle]` exports are gone;
 // reached by crate path.
@@ -1489,7 +1489,7 @@ unsafe fn init_sb_rooti(sb: *mut vfs_superblock) -> c_int {
                 Ok(i) => i,
                 Err(Errno::Again) => {
                     vfs_superblock_unlock(sb);
-                    scheduler_yield();
+                    Scheduler::yield_now();
                     vfs_superblock_wlock(sb);
                     if (*sb).flags.valid() == 0 && (*sb).flags.initialized() != 0 {
                         return neg(EINVAL);

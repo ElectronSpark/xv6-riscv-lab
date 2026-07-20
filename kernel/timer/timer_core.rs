@@ -25,7 +25,7 @@
 //! `NEEDS_RESCHED`. The heavier work — walking the timer list and invoking
 //! callbacks — happens in [`timer_tick`], which is **not** called from this
 //! handler. Its only caller is `sched_timer::__do_timer_tick`, itself called
-//! once per `scheduler_yield()` (thread context, proc/sched.rs) — so
+//! once per `Scheduler::yield_now()` (thread context, proc/sched.rs) — so
 //! `timer_tick`'s callback dispatch (and everything reachable from it,
 //! including workqueue submission) never runs in true interrupt context,
 //! even though the plan's hazard note describes this file as "runs partly
@@ -207,7 +207,7 @@ fn set_needs_resched() {
 // redeclaration. `__panic_start`/`__panic_end`/`printf` stay `extern`:
 // defined in `printf.rs`, out of this wave's scope.
 // ===========================================================================
-use crate::proc::sched_holding;
+use crate::proc::Scheduler;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
@@ -395,7 +395,7 @@ unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
         ticks.fetch_add(1, Ordering::SeqCst);
         crate::timer::sched_timer::sched_timer_tick();
     }
-    if sched_holding() == 0 {
+    if Scheduler::holding() == 0 {
         set_needs_resched();
     }
 }

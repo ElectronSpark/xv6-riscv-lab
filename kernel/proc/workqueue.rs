@@ -285,10 +285,7 @@ fn slab_free(obj: *mut c_void) {
 // NO-STANDALONE-FN: the `tq_init`/`tq_size`/`tq_wait`/`tq_wakeup`/
 // `tq_wakeup_all` free-fn delegators were deleted; the sites below build a
 // `TqRef` handle (imported from `access` above) and invoke the method.
-use crate::proc::{
-    scheduler_wakeup, scheduler_yield,
-    wakeup,
-};
+use crate::proc::Scheduler;
 // P3-D2b: `kill_thread` (proc/signal.rs) likewise.
 
 // =========================================================================
@@ -377,7 +374,7 @@ fn alloc_work_struct() -> *mut work_struct {
 // `Freeze`) native structs is structurally avoided: a `work_struct` is
 // embedded in a queue and processed by a worker thread across a `tq_wait`
 // park, and a `workqueue`'s counter/flag fields are mutated by other harts
-// across `scheduler_yield()`. Every field touch here is a raw load/store the
+// across `Scheduler::yield_now()`. Every field touch here is a raw load/store the
 // optimizer may not reorder. `&self` borrows the *handle* (a pointer), never
 // the pointee. The raw-`*mut`-taking `*_impl` entry points below stay thin
 // null-checking delegators (the C-ABI forwarders hold raw pointers).
@@ -486,7 +483,7 @@ impl<'a> WorkqueueRef<'a> {
         self.inc_nr_workers();
         wa.wq_entry_ref().push_back(self.worker_list_ptr());
         wa.tcb_unlock();
-        wakeup(worker);
+        Scheduler::wakeup(worker);
         0
     }
     /// Spawn the manager thread bound to this queue (was `create_manager`).
@@ -509,7 +506,7 @@ impl<'a> WorkqueueRef<'a> {
     /// Wake the manager thread if one is bound (was `wakeup_manager`).
     fn wakeup_manager(&self) {
         let m = self.manager_ptr();
-        if !m.is_null() { scheduler_wakeup(m); }
+        if !m.is_null() { Scheduler::wakeup_thread(m); }
     }
     /// Deactivate the queue and tear down its manager (was
     /// `workqueue_kill_impl`, minus the null check now in its delegator).
@@ -524,7 +521,7 @@ impl<'a> WorkqueueRef<'a> {
         if !manager.is_null() {
             let r = crate::proc::access::ThreadAccess::from_ptr(manager).map_or(-22, |ta| ta.kill_thread(SIGKILL));
             if r < 0 { thread_set_killed(manager); }
-            scheduler_wakeup(manager);
+            Scheduler::wakeup_thread(manager);
         }
         0
     }
@@ -686,7 +683,7 @@ unsafe extern "C" fn manager_routine() {
         }
         xv6_thread_state_set(cur_t, THREAD_INTERRUPTIBLE);
         wq.lock_ref().unlock();
-        scheduler_yield();
+        Scheduler::yield_now();
         wq.lock_ref().lock();
     }
 }

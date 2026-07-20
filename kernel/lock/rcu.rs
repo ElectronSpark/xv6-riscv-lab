@@ -71,7 +71,7 @@ use crate::printf::trigger_panic;
 // and scheduler entry points (`kernel/proc/sched.rs`) are ordinary Rust
 // fns, reached as plain crate-path items instead of `extern "C"`
 // redeclarations.
-use crate::proc::{scheduler_yield, wakeup, wakeup_interruptible};
+use crate::proc::Scheduler;
 // NO-STANDALONE-FN: the `tq_init`/`tq_wakeup_all` free-fn delegators were
 // deleted; the two sites below build a `TqRef` handle and invoke the method.
 use crate::proc::access::TqRef;
@@ -133,7 +133,7 @@ fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
 // Rust fns in `kernel/proc/rq.rs`, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
 use crate::bindings::sched_attr;
-use crate::proc::{sched_attr_init, sched_setattr};
+use crate::proc::{SchedAttr, SchedEntity};
 
 // ---------------------------------------------------------------------------
 // `cpus[]` — kernel global array of per-CPU records.
@@ -567,7 +567,7 @@ fn wakeup_all_kthreads() {
     for slot in RCU_KTHREAD.iter() {
         let p = slot.kthread.load(Ordering::Acquire);
         if !p.is_null() {
-            wakeup_interruptible(p);
+            Scheduler::wakeup_interruptible(p);
         }
     }
 }
@@ -856,7 +856,7 @@ fn synchronize_impl() {
             wakeup_all_kthreads();
             return;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
         wait_count += 1;
     }
     kwarn_msg(c"synchronize_rcu: WARNING - not all CPUs passed quiescent state\n");
@@ -891,7 +891,7 @@ fn barrier_impl() {
 
         if !all_done {
             synchronize_impl();
-            scheduler_yield();
+            Scheduler::yield_now();
             wait_count += 1;
         }
     }
@@ -928,7 +928,7 @@ fn expedited_gp() {
         if all_switched {
             break;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
         wait_count += 1;
     }
 
@@ -953,7 +953,7 @@ fn synchronize_expedited_impl() {
             return;
         }
         advance_gp();
-        scheduler_yield();
+        Scheduler::yield_now();
         wait_count += 1;
     }
     RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
@@ -1012,7 +1012,7 @@ fn kthread_wakeup_impl() {
     let p = slot.kthread.load(Ordering::Acquire);
     if !p.is_null() {
         slot.wakeup_pending.store(1, Ordering::Release);
-        wakeup_interruptible(p);
+        Scheduler::wakeup_interruptible(p);
     }
 }
 
@@ -1058,15 +1058,15 @@ fn kthread_start_cpu_impl(cpu: c_int) {
         priority: 0,
         flags: 0,
     };
-    sched_attr_init(&mut attr);
+    SchedAttr::init(&mut attr);
     attr.affinity_mask = 1u64 << cpu;
     // SAFETY: `p` is a freshly-created thread; `sched_entity` lives
     // for the thread's lifetime.
     let se = unsafe { (*p).sched_entity };
-    sched_setattr(se, &attr);
+    SchedEntity::set_attr(se, &attr);
 
     slot.kthread.store(p, Ordering::Release);
-    wakeup(p);
+    Scheduler::wakeup(p);
 
     RCU_KTHREADS_STARTED.store(1, Ordering::Release);
 }

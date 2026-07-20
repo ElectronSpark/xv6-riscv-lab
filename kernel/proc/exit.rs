@@ -108,9 +108,10 @@ mod raw {
     // `kernel/proc/sched.rs`; re-exported here so every `raw::NAME`
     // call site stays unchanged (`Thread` is a plain alias of
     // `crate::bindings::thread`, so the signatures are identical).
-    pub(crate) use crate::proc::{
-        scheduler_wakeup, scheduler_wakeup_interruptible, scheduler_yield,
-    };
+    // NO-STANDALONE-FN: the scheduler entry points are associated fns on
+    // `Scheduler` now; re-export the marker type so `raw::Scheduler::..`
+    // reaches them from this facade.
+    pub(crate) use crate::proc::Scheduler;
 
     // P3-D2b: the proc-object entry points (proc/{signal,thread_group,
     // pgroup,pid}.rs) are ordinary Rust fns now that their `#[no_mangle]`
@@ -241,9 +242,9 @@ mod ffi {
     pub fn tcb_unlock(t: *mut Thread) { raw::xv6_tcb_unlock(t) }
 
     // sched ops ---------------------------------------------------------------
-    pub fn sched_yield()                                       { raw::scheduler_yield() }
-    pub fn sched_wakeup(t: *mut Thread)                        { raw::scheduler_wakeup(t) }
-    pub fn sched_wakeup_interruptible(t: *mut Thread)          { raw::scheduler_wakeup_interruptible(t) }
+    pub fn sched_yield()                                       { raw::Scheduler::yield_now() }
+    pub fn sched_wakeup(t: *mut Thread)                        { raw::Scheduler::wakeup_thread(t) }
+    pub fn sched_wakeup_interruptible(t: *mut Thread)          { raw::Scheduler::wakeup_interruptible_thread(t) }
     pub fn kill_thread(t: *mut Thread, signo: c_int) -> c_int  { ThreadAccess::from_ptr(t).map_or(-22, |ta| ta.kill_thread(signo)) }
 
     // pgroup / session / thread group plumbing --------------------------------

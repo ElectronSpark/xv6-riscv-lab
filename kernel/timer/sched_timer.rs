@@ -14,14 +14,14 @@
 //!
 //! [`__do_timer_tick`] is the bridge from the scheduler tick to the timer
 //! wheel. It is called exactly once per [`sleep_ms`]... no — exactly once
-//! per `scheduler_yield()` (`proc/sched.rs::scheduler_yield_inner`, an
+//! per `Scheduler::yield_now()` (`proc/sched.rs::scheduler_yield_inner`, an
 //! `extern` call this crate's proc module makes into this symbol), which
 //! runs in **thread context**, not interrupt context. `timer_core::clockintr`
 //! (the actual timer ISR) never calls into this file directly; it only
 //! flips [`SCHED_TICK_CLEAR`] via `sched_timer_tick`. This dirty-flag
 //! handoff (`AtomicBool::store`/`swap`, `Release`/`Acquire`, mirroring the
 //! C `__atomic_clear`/`__atomic_test_and_set`) coalesces any number of timer
-//! interrupts that fire between two `scheduler_yield()` calls into a single
+//! interrupts that fire between two `Scheduler::yield_now()` calls into a single
 //! `timer_tick()` pass — so the workqueue submission in
 //! [`timer_callback`]/`work_callback` (which *does* allocate, via
 //! `slab_alloc`) only ever runs from thread context, never from the raw
@@ -80,7 +80,7 @@ const THREAD_RUNNING: thread_state = 8;
 // P3-D2a: `scheduler_yield`/`wakeup` (proc/sched.rs) ARE demoted by this
 // wave -- reached as plain crate-path items below.
 // ===========================================================================
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 
 // P3-D3b: proc/workqueue.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached via the
@@ -362,7 +362,7 @@ unsafe extern "C" fn sched_timer_callback(tn: *mut timer_node) {
     // `data` was set to a `*mut thread` by `sched_timer_set`.
     let p = unsafe { (*tn).data } as *mut thread;
     if thread_sleeping(p) {
-        wakeup(p);
+        Scheduler::wakeup(p);
     }
 }
 
@@ -435,11 +435,11 @@ pub(crate) fn sleep_ms(ms: u64) {
         // very short sleep.
         machine::thread_state_set(p, THREAD_RUNNING);
         machine::intr_restore(intr);
-        scheduler_yield();
+        Scheduler::yield_now();
         return;
     }
 
-    scheduler_yield();
+    Scheduler::yield_now();
 
     // After waking up, cancel the timer to avoid an unnecessary callback.
     // SAFETY: `tn` was successfully added by `sched_timer_set` above and
@@ -472,11 +472,11 @@ pub(crate) fn sleep_ms_interruptible(ms: u64) -> u64 {
     if ret != 0 {
         machine::thread_state_set(p, THREAD_RUNNING);
         machine::intr_restore(intr);
-        scheduler_yield();
+        Scheduler::yield_now();
         return 0;
     }
 
-    scheduler_yield();
+    Scheduler::yield_now();
 
     let mut remaining_ms = 0u64;
     let now = machine::read_time();
@@ -493,7 +493,7 @@ pub(crate) fn sleep_ms_interruptible(ms: u64) -> u64 {
 
 /// Rust port of `sched_timer_init()`. Called exactly once from
 /// `start_kernel.c`, after `idle_thread_init` (see that call site's
-/// comment: `idle_thread_init` must run first so `rq_cpu_activate()` has
+/// comment: `idle_thread_init` must run first so `Rq::cpu_activate()` has
 /// marked this CPU active before any `workqueue_create` can enqueue a
 /// worker thread).
 // P3-1B: only caller is `start_kernel.rs` (in-scope; convert its own

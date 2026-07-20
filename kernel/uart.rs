@@ -194,7 +194,7 @@ use crate::console::consoleintr;
 // the uninterruptible (`sleep_on`) and the interruptible
 // (`sleep_on_interruptible`) TX waits are now reached through the guard
 // (lock-owns-data), so only the waker is imported directly here.
-use crate::proc::wakeup_on_chan;
+use crate::proc::Scheduler;
 
 const EINTR: c_int = 4;
 
@@ -527,7 +527,7 @@ fn uartstart(tx: &mut UartTx) {
 
     // Maybe uartputc() is waiting for space in the buffer.
     if sent > 0 {
-        wakeup_on_chan(tx_chan());
+        Scheduler::wakeup_on_chan(tx_chan());
     }
 }
 

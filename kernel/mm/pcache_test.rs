@@ -125,7 +125,7 @@ pub(crate) use crate::mm::{
 
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
@@ -178,7 +178,7 @@ fn spawn(name: &'static core::ffi::CStr, entry: extern "C" fn(u64, u64), a1: u64
     if is_err_or_null(np) {
         false
     } else {
-        wakeup(np);
+        Scheduler::wakeup(np);
         true
     }
 }
@@ -190,7 +190,7 @@ fn wait_for(cell: &AtomicI32, expected: i32, mut spin_loops: i32) -> bool {
         if cell.load(Ordering::SeqCst) == expected {
             return true;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     false
 }
@@ -1334,7 +1334,7 @@ fn c5_conc_get_and_dirty() {
 
 extern "C" fn pcache_test_master(_a1: u64, _a2: u64) {
     for _ in 0..10_000 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     crate::kprintln!("[pcache] starting pcache tests");
 

@@ -33,7 +33,7 @@ use crate::printf::trigger_panic;
 
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 
 // P3-D3c: plain crate-path imports instead of `extern "C"` redeclarations
 // (both demoted from `#[no_mangle]` in the same wave).
@@ -81,7 +81,7 @@ use crate::kstd::is_err_or_null;
 fn spawn(name: &'static CStr, entry: extern "C" fn(u64, u64), a1: u64, a2: u64) -> *mut thread {
     let np = crate::proc::thread::Thread::kthread_create(name.as_ptr(), entry as *mut c_void, a1, a2, KERNEL_STACK_ORDER);
     if !is_err_or_null(np) {
-        wakeup(np);
+        Scheduler::wakeup(np);
     }
     np
 }
@@ -300,7 +300,7 @@ fn test_call_rcu() {
     while CALLBACK_INVOKED.load(Ordering::Acquire) == 0 && timeout > 0 {
         rcu_api::synchronize();
         rcu_api::process_callbacks();
-        scheduler_yield();
+        Scheduler::yield_now();
         timeout -= 1;
     }
 
@@ -332,7 +332,7 @@ extern "C" fn reader_thread(id: u64, iterations: u64) {
             }
         }
         if i % 10 == 0 {
-            scheduler_yield();
+            Scheduler::yield_now();
         }
     }
 
@@ -354,7 +354,7 @@ fn test_concurrent_readers() {
 
     crate::kprintln!("  Waiting for readers to complete...");
     while CONCURRENT_READERS_DONE.load(Ordering::Acquire) < RCU_TEST_NUM_READERS {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     crate::kprintln!("  PASS: Concurrent readers completed successfully");
@@ -385,7 +385,7 @@ fn test_grace_period() {
     // Context switches OUTSIDE of the RCU critical section are quiescent
     // states; these yields help advance grace periods.
     for _ in 0..10 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     rcu_api::synchronize();
@@ -762,7 +762,7 @@ fn test_list_rcu_basic() {
     for _ in 0..5 {
         rcu_api::synchronize();
         rcu_api::process_callbacks();
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     let invoked = LIST_CALLBACK_COUNT.load(Ordering::Acquire);
@@ -796,7 +796,7 @@ extern "C" fn list_stress_reader(iterations: u64, _unused: u64) {
             }
         }
         if i % 100 == 0 {
-            scheduler_yield();
+            Scheduler::yield_now();
         }
     }
     LIST_STRESS_READER_DONE.fetch_add(1, Ordering::Release);
@@ -827,7 +827,7 @@ fn test_list_rcu_concurrent_rw() {
             list_add_tail_rcu(test_list_head(), addr_of_mut!(unsafe { &mut *node }.list_entry));
         }
 
-        scheduler_yield();
+        Scheduler::yield_now();
 
         for _ in 0..3 {
             let _g = test_list_lock().lock();
@@ -841,11 +841,11 @@ fn test_list_rcu_concurrent_rw() {
             }
         }
 
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     while LIST_STRESS_READER_DONE.load(Ordering::Acquire) < 2 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     // Cleanup remaining nodes.
@@ -908,7 +908,7 @@ fn test_stress_call_rcu() {
                 // Out of memory: wait for a grace period so kthreads can
                 // process/reclaim callbacks, then retry once.
                 rcu_api::synchronize();
-                scheduler_yield();
+                Scheduler::yield_now();
                 data = kmm_alloc(size_of::<StressData>()) as *mut StressData;
                 if data.is_null() {
                     kpanic(c"panic: stress: out of memory even after processing callbacks\n");
@@ -966,7 +966,7 @@ extern "C" fn stress_list_reader(reader_id: u64, _unused: u64) {
         }
         iterations += 1;
         if iterations % 100 == 0 {
-            scheduler_yield();
+            Scheduler::yield_now();
         }
     }
 
@@ -989,7 +989,7 @@ fn test_stress_list_rcu() {
     }
 
     for _ in 0..10 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     let mut next_id: i32 = 0;
@@ -1002,7 +1002,7 @@ fn test_stress_list_rcu() {
             if node.is_null() {
                 rcu_api::synchronize();
                 rcu_api::process_callbacks();
-                scheduler_yield();
+                Scheduler::yield_now();
                 node = alloc_list_node(next_id, next_id * 10);
                 if node.is_null() {
                     continue; // Still no memory — skip this add.
@@ -1031,13 +1031,13 @@ fn test_stress_list_rcu() {
             rcu_api::process_callbacks();
         }
         if op % 100 == 0 {
-            scheduler_yield();
+            Scheduler::yield_now();
         }
     }
 
     STRESS_READERS_DONE.store(1, Ordering::Release);
     for _ in 0..50 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     crate::kprint!("  Reader iterations: ");
@@ -1123,7 +1123,7 @@ extern "C" fn mixed_reader_thread(_id: u64, target_ops: u64) {
         }
         MIXED_OPS_COMPLETED.fetch_add(1, Ordering::Release);
         if i % 100 == 0 {
-            scheduler_yield();
+            Scheduler::yield_now();
         }
     }
 
@@ -1144,7 +1144,7 @@ fn test_stress_mixed_workload() {
     }
 
     while MIXED_READERS_RUNNING.load(Ordering::Acquire) < 4 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     let mut next_id: i32 = 0;
@@ -1174,12 +1174,12 @@ fn test_stress_mixed_workload() {
         if op % 100 == 0 {
             rcu_api::synchronize();
             rcu_api::process_callbacks();
-            scheduler_yield();
+            Scheduler::yield_now();
         }
     }
 
     while MIXED_READERS_RUNNING.load(Ordering::Acquire) > 0 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     let total_ops = MIXED_OPS_COMPLETED.load(Ordering::Acquire);
@@ -1203,7 +1203,7 @@ fn test_stress_mixed_workload() {
     for _ in 0..10 {
         rcu_api::synchronize();
         rcu_api::process_callbacks();
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     crate::kprintln!("  PASS: Mixed workload stress test completed");

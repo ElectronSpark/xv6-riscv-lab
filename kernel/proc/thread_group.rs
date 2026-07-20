@@ -47,7 +47,7 @@ use crate::proc::proc_shims::{xv6_panic, xv6_pid_rlock, xv6_pid_runlock, xv6_pid
 // P3-1B2: previously bridged via the `xv6_schport_*` C-ABI alias layer
 // (`extern "C"` redeclarations above); now direct crate-path calls to the
 // real, already-Rust definitions in `sched.rs`.
-use crate::proc::{scheduler_wakeup_interruptible, scheduler_wakeup_stopped};
+use crate::proc::Scheduler;
 use crate::ipi::ipi_send_single;
 
 // ---------------------------------------------------------------------------
@@ -642,9 +642,9 @@ impl<'a> ThreadGroupAccess<'a> {
             ta.set_killed();
             ta.set_sigpending();
             if ta.is_sleeping() {
-                scheduler_wakeup_interruptible(t);
+                Scheduler::wakeup_interruptible_thread(t);
             } else if ta.is_stopped() {
-                scheduler_wakeup_stopped(t);
+                Scheduler::wakeup_stopped(t);
             }
         }
         xv6_pid_runlock();
@@ -803,17 +803,17 @@ impl<'a> ThreadGroupAccess<'a> {
                     let ta = ThreadAccess::assume(t);
                     ta.set_sigpending();
                     if ta.is_stopped() {
-                        scheduler_wakeup_stopped(t);
+                        Scheduler::wakeup_stopped(t);
                     } else if ta.is_interruptible() {
-                        scheduler_wakeup_interruptible(t);
+                        Scheduler::wakeup_interruptible_thread(t);
                     }
                 }
             } else if !target.is_null() {
                 let tta = ThreadAccess::assume(target);
                 if is_term && tta.is_stopped() {
-                    scheduler_wakeup_stopped(target);
+                    Scheduler::wakeup_stopped(target);
                 } else if tta.is_interruptible() {
-                    scheduler_wakeup_interruptible(target);
+                    Scheduler::wakeup_interruptible_thread(target);
                 } else if tta.is_running() {
                     let se = tta.sched_entity_ptr();
                     let target_cpu = SchedEntityRef::assume(se).cpu_id_load_acquire();

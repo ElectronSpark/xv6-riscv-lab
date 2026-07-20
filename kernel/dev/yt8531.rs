@@ -106,7 +106,7 @@ use crate::timer::sched_timer::sleep_ms;
 
 // P3-D2a: proc/sched.rs entry point, reached as a plain crate-path item
 // instead of an `extern "C"` redeclaration.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 
 // ===========================================================================
 // Register/bit constants -- redeclared locally per this crate's
@@ -242,7 +242,7 @@ pub(crate) unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: 
 
     // Poll until START_TRANS clears (bit 15).
     for _ in 0..(MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US) {
-        scheduler_yield();
+        Scheduler::yield_now();
         // SAFETY: caller contract.
         let val = unsafe { emac_rd(base, MAC_MDIO_CONTROL) };
         if val & MDIO_START_TRANS == 0 {
@@ -275,7 +275,7 @@ pub(crate) unsafe extern "C" fn mdio_write(base: *mut u32, phy_addr: c_int, reg:
 
     // Poll until START_TRANS clears.
     for _ in 0..(MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US) {
-        scheduler_yield();
+        Scheduler::yield_now();
         // SAFETY: caller contract.
         let v = unsafe { emac_rd(base, MAC_MDIO_CONTROL) };
         if v & MDIO_START_TRANS == 0 {

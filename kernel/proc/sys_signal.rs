@@ -77,7 +77,7 @@ fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 
 #[inline(always)]
 fn current() -> *mut bindings::thread { xv6_current_thread() }
@@ -214,7 +214,7 @@ pub(crate) extern "C" fn sys_pause() -> u64 {
             xv6_thread_state_set(p, THREAD_RUNNING);
             return (-EINTR) as u64;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 }
 

@@ -21,7 +21,7 @@
 //! hazard that would fire on a `&self` method of the (`Copy`, `UnsafeCell`-
 //! free => `Freeze`) native structs is structurally avoided: every field
 //! touch is a raw load/store the optimizer may not reorder across the
-//! `scheduler_yield()` park point. Callers hold raw `*mut tq_t`/`*mut
+//! `Scheduler::yield_now()` park point. Callers hold raw `*mut tq_t`/`*mut
 //! ttree_t` into by-value-embedded queues all over the kernel; each call
 //! site null-checks by constructing the handle with `from_ptr` (returning
 //! `Option`) before invoking the method.
@@ -251,7 +251,7 @@ const TYPE_TREE: u32 = 2;
 // Scheduler hooks. P3-1B2: previously bridged via the `xv6_schport_*`
 // C-ABI alias layer (`extern "C"` redeclarations above); now direct
 // crate-path calls to the real, already-Rust definitions in `sched.rs`.
-use crate::proc::{scheduler_yield, scheduler_wakeup};
+use crate::proc::Scheduler;
 
 // ---------------------------------------------------------------------------
 // rb_root_opts: static comparator tables
@@ -366,7 +366,7 @@ impl<'a> TnodeRef<'a> {
         self.set_error_no(error_no);
         self.set_data(rdata);
         let p = self.thread_ptr();
-        scheduler_wakeup(p);
+        Scheduler::wakeup_thread(p);
         p
     }
 }
@@ -523,7 +523,7 @@ impl<'a> TqRef<'a> {
             // for `wait`); the C-ABI callback contract is the caller's.
             cb_status = unsafe { cb(callback_data) };
         }
-        scheduler_yield();
+        Scheduler::yield_now();
         if let Some(cb) = wakeup_callback {
             // SAFETY: as above, for the paired `wakeup_callback_t`.
             unsafe { cb(callback_data, cb_status); }
@@ -691,7 +691,7 @@ impl<'a> TtreeRef<'a> {
             // for `wait`); the C-ABI callback contract is the caller's.
             cb_status = unsafe { cb(callback_data) };
         }
-        scheduler_yield();
+        Scheduler::yield_now();
         if let Some(cb) = wakeup_callback {
             // SAFETY: as above, for the paired `wakeup_callback_t`.
             unsafe { cb(callback_data, cb_status); }

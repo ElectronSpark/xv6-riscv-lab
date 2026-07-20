@@ -339,10 +339,7 @@ pub(crate) use crate::proc::{init_work_struct, queue_work, workqueue_create};
 // P3-D2a: proc/sched.rs wake/sleep entry points and proc/thread_queue.rs
 // primitives, reached as plain crate-path items instead of the `extern
 // "C"` redeclarations that used to sit in the block above.
-pub(crate) use crate::proc::{
-    sleep_on_chan, sleep_on_chan_interruptible, wakeup,
-    wakeup_on_chan,
-};
+pub(crate) use crate::proc::{sleep_on_chan, sleep_on_chan_interruptible, Scheduler};
 // NO-STANDALONE-FN: the `tq_init`/`tq_wait_cb`/`tq_wakeup_all` free-fn
 // delegators were deleted; the sites below build a `TqRef` handle via
 // `from_ptr` and invoke the corresponding inherent method.
@@ -1627,10 +1624,10 @@ fn xv6_pcache_sleep_ms(ms: u64) {
     sleep_ms(ms);
 }
 fn xv6_pcache_wakeup(t: *mut Thread) {
-    wakeup(t);
+    Scheduler::wakeup(t);
 }
 fn xv6_pcache_wakeup_on_chan(chan: *mut c_void) {
-    wakeup_on_chan(chan);
+    Scheduler::wakeup_on_chan(chan);
 }
 fn xv6_pcache_kthread_create(
     name: *const c_char,

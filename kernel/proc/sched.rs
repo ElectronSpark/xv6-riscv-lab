@@ -41,12 +41,11 @@ use crate::proc::access::{
 // symbol, `rq_unlock_current_irqrestore`, was even redeclared twice under
 // two different local names) was collapsed; every rq.rs function is now
 // imported once, by its real name, and called directly.
-use crate::proc::{
-    pick_next_rq, rq_global_init, rq_holding_current, rq_lock_current_irqsave,
-    rq_trylock_two, rq_unlock_two,
-    rq_select_task_rq, rq_unlock_current_irqrestore, rq_add_wake_list,
-    rq_flush_wake_list,
-};
+// NO-STANDALONE-FN: the cpu-keyed run-queue entry points are now
+// associated fns on `Rq` (`Rq::pick_next`/`lock_current_irqsave`/
+// `select_task_rq`/`flush_wake_list`/...); import the type, call
+// `Rq::method(..)` at the sites below.
+use crate::proc::Rq;
 use crate::timer::sched_timer::__do_timer_tick;
 use crate::ipi::ipi_send_single;
 
@@ -269,6 +268,18 @@ const EINTR: c_int = 4;
 
 const CPU_FLAG_IN_ITR: u64 = 4;
 const IPI_REASON_RESCHEDULE: c_int = 2;
+
+/// NO-STANDALONE-FN marker type for the current-thread scheduler
+/// orchestration API. The former free fns (`scheduler_yield`/`wakeup`/
+/// `scheduler_wakeup[_interruptible/_stopped]`/`wakeup_on_chan`/
+/// `context_switch_finish`/`scheduler_init`/`sched_holding`) operate on
+/// the *current* CPU/thread and per-CPU statics — no struct receiver — so
+/// the idiomatic non-standalone form is an associated fn on this marker
+/// (`Scheduler::yield_now()`, `Scheduler::wakeup(p)`, ...). The private
+/// `*_impl`/`*_inner` bodies stay as file-internal helpers (not
+/// standalone API): the freeze/asm-critical logic is unchanged, only the
+/// entry-point spelling moves onto `Scheduler`.
+pub struct Scheduler;
 
 // ---------------- extern C primitives -----------------------------------
 // P3-D3c: `timer/timer_core.rs`'s `get_jiffs` is a plain safe Rust fn now
@@ -501,11 +512,11 @@ fn sleep_lock_impl() { sleep_lock_ref().lock(); }
 fn sleep_unlock_impl() { sleep_lock_ref().unlock(); }
 fn sleep_lock_irqsave_impl() -> c_int { sleep_lock_ref().lock_irqsave() }
 fn sleep_unlock_irqrestore_impl(state: c_int) { sleep_lock_ref().unlock_irqrestore(state); }
-fn sched_holding_impl() -> c_int { rq_holding_current() }
+fn sched_holding_impl() -> c_int { Rq::holding_current() }
 
 // P3-1B: only cross-file caller is `timer/timer_core.rs::clockintr` (now a
 // direct crate-path `use`, no more `extern` redeclaration) -- demoted.
-pub(crate) fn sched_holding() -> c_int { sched_holding_impl() }
+impl Scheduler { pub(crate) fn holding() -> c_int { sched_holding_impl() } }
 
 #[inline]
 fn sched_assert_holding() {
@@ -521,18 +532,18 @@ fn scheduler_init_impl() {
     unsafe {
         spin_init(sleep_lock_ptr(), c"xv6_schport_sleep_lock".as_ptr() as *mut c_char);
         chan_queue_init();
-        rq_global_init();
+        Rq::global_init();
     }
 }
 
 // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn scheduler_init() { scheduler_init_impl() }
+impl Scheduler { pub(crate) fn init() { scheduler_init_impl() } }
 
 // ---------------- pick next ---------------------------------------------
 fn sched_pick_next() -> *mut thread {
     sched_assert_holding();
-    let rq = pick_next_rq();
+    let rq = Rq::pick_next();
     if is_err_or_null(rq) { return core::ptr::null_mut(); }
     // SAFETY: `rq` is proven non-null (and not an errptr) by the
     // `is_err_or_null` guard immediately above.
@@ -617,9 +628,9 @@ fn scheduler_yield_inner() {
     // always-initialized per-CPU `rq_percpu` storage this function
     // indexes, and the function itself range-checks it again before
     // touching anything.
-    unsafe { rq_flush_wake_list(cpuid_rs()); }
+    unsafe { Rq::flush_wake_list(cpuid_rs()); }
 
-    let intr = rq_lock_current_irqsave();
+    let intr = Rq::lock_current_irqsave();
     let proc = current_thread();
 
     kassert!(!cpu_in_itr(), "Cannot yield CPU in interrupt context");
@@ -627,11 +638,11 @@ fn scheduler_yield_inner() {
     let mut p = sched_pick_next();
 
     if p == current_thread() {
-        rq_unlock_current_irqrestore(intr);
+        Rq::unlock_current_irqrestore(intr);
     } else if p.is_null() {
         let idle = cpu_access().idle_thread_ptr();
         if proc == idle {
-            rq_unlock_current_irqrestore(intr);
+            Rq::unlock_current_irqrestore(intr);
         } else {
             p = idle;
             kassert!(!p.is_null(), "Idle process is NULL");
@@ -646,13 +657,13 @@ fn scheduler_yield_inner() {
     }
 
     // SAFETY: see the matching call above.
-    unsafe { rq_flush_wake_list(cpuid_rs()); }
+    unsafe { Rq::flush_wake_list(cpuid_rs()); }
     // Plain safe fn as of P3-D3b (its `#[no_mangle] extern "C"` export
     // is gone).
     rcu_check_callbacks();
 }
 
-pub(crate) fn scheduler_yield() { scheduler_yield_inner() }
+impl Scheduler { pub(crate) fn yield_now() { scheduler_yield_inner() } }
 
 // ---------------- scheduler_sleep ---------------------------------------
 fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) {
@@ -726,13 +737,13 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
         // retry loop
         loop {
             push_off();
-            let rq = rq_select_task_rq(se, (*se).affinity_mask);
+            let rq = Rq::select_task_rq(se, (*se).affinity_mask);
             kassert!(!is_err_or_null(rq), "do_scheduler_wakeup: rq_select_task_rq failed");
             let mut origin_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
             let target_cpu = (*rq).cpu_id;
             if origin_cpuid < 0 { origin_cpuid = target_cpu; }
 
-            if rq_trylock_two(origin_cpuid, target_cpu) == 0 {
+            if Rq::trylock_two(origin_cpuid, target_cpu) == 0 {
                 pop_off();
                 spin_unlock(&raw mut (*se).pi_lock);
                 for _ in 0..10 { cpu_relax(); }
@@ -753,7 +764,7 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
 
             let current_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
             if current_cpuid >= 0 && current_cpuid != origin_cpuid {
-                rq_unlock_two(origin_cpuid, target_cpu);
+                Rq::unlock_two(origin_cpuid, target_cpu);
                 spin_unlock(&raw mut (*se).pi_lock);
                 spin_lock(&raw mut (*se).pi_lock);
                 old_state = smp_load_acquire_state(&(*p).state as *const _);
@@ -774,21 +785,21 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
             if smp_load_acquire_i32(&(*se).on_rq as *const _) != 0 {
                 smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
                 spin_unlock(&raw mut (*se).pi_lock);
-                rq_unlock_two(origin_cpuid, target_cpu);
+                Rq::unlock_two(origin_cpuid, target_cpu);
                 return;
             }
 
             if smp_load_acquire_i32(&(*se).on_cpu as *const _) != 0 {
-                rq_add_wake_list(origin_cpuid, se);
+                Rq::add_wake_list(origin_cpuid, se);
                 spin_unlock(&raw mut (*se).pi_lock);
-                rq_unlock_two(origin_cpuid, target_cpu);
+                Rq::unlock_two(origin_cpuid, target_cpu);
                 ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
                 return;
             }
 
             RqRef::assume(rq).enqueue(se);
             spin_unlock(&raw mut (*se).pi_lock);
-            rq_unlock_two(origin_cpuid, target_cpu);
+            Rq::unlock_two(origin_cpuid, target_cpu);
             return;
         }
     }
@@ -820,10 +831,18 @@ fn scheduler_wakeup_stopped_impl(p: *mut thread) {
     do_scheduler_wakeup_safe(p, true);
 }
 
-pub(crate) fn scheduler_wakeup(p: *mut thread) { scheduler_wakeup_impl(p) }
+impl Scheduler {
+/// Wake a known-non-null thread from a sleeping state (was the free
+/// `scheduler_wakeup`).
+pub(crate) fn wakeup_thread(p: *mut thread) { scheduler_wakeup_impl(p) }
 
-pub(crate) fn scheduler_wakeup_interruptible(p: *mut thread) { scheduler_wakeup_interruptible_impl(p) }
-pub(super) fn scheduler_wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
+/// Wake a known-non-null interruptible thread (was the free
+/// `scheduler_wakeup_interruptible`).
+pub(crate) fn wakeup_interruptible_thread(p: *mut thread) { scheduler_wakeup_interruptible_impl(p) }
+
+/// Wake a stopped thread (was the free `scheduler_wakeup_stopped`).
+pub(super) fn wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
+}
 
 // ---------------- sleep_on_chan / wakeup_on_chan ------------------------
 fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: thread_state) -> c_int {
@@ -880,7 +899,7 @@ pub(crate) fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t
     sleep_on_chan_interruptible_impl(chan, lk_of(lk))
 }
 
-pub(crate) fn wakeup_on_chan(chan: *mut c_void) { wakeup_on_chan_impl(chan) }
+impl Scheduler { pub(crate) fn wakeup_on_chan(chan: *mut c_void) { wakeup_on_chan_impl(chan) } }
 
 // ---------------- dump --------------------------------------------------
 // Provide our own state-to-str (inline static in C header — re-implement).
@@ -957,9 +976,13 @@ fn wakeup_interruptible_impl(p: *mut thread) {
     scheduler_wakeup_interruptible_impl(p);
 }
 
+impl Scheduler {
+/// Null-safe generic wakeup (was the free `wakeup`).
 pub(crate) fn wakeup(p: *mut thread) { wakeup_impl(p) }
 
+/// Null-safe interruptible wakeup (was the free `wakeup_interruptible`).
 pub(crate) fn wakeup_interruptible(p: *mut thread) { wakeup_interruptible_impl(p) }
+}
 
 fn sys_dumpchan_impl() -> u64 {
     sleep_lock_impl();
@@ -1031,11 +1054,15 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
         sleep_unlock_irqrestore_impl(0);
     }
 
-    rq_unlock_current_irqrestore(intr);
+    Rq::unlock_current_irqrestore(intr);
 }
 
+impl Scheduler {
+/// Finish a context switch: put/dequeue prev, free self-reap stacks,
+/// release the rq lock (was the free `context_switch_finish`).
 pub(super) fn context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int) {
     context_switch_finish_impl(prev, next, intr)
+}
 }
 
 // The `xv6_schport_*` C-ABI alias layer that used to front chan_holding/

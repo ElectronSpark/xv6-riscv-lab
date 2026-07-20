@@ -98,7 +98,7 @@ use crate::printf::{panic_disable_bt, Cs, Ptr};
 use crate::backtrace::print_backtrace;
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 // P3-D2b: `kill`/`killed`/`handle_signal` (proc/signal.rs) likewise.
 
 
@@ -1289,7 +1289,7 @@ pub(crate) extern "C" fn usertrapret() {
     crate::proc::Signal::handle_signal();
 
     if needs_resched() {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     // we're about to switch the destination of traps from kerneltrap() to

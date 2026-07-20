@@ -99,10 +99,7 @@ use crate::ipi::{cpus_init, ipi_init, mycpu_init};
 use crate::irq::irq_core::irq_desc_init;
 use crate::irq::plic::{plicinit, plicinithart};
 use crate::irq::trap::{trapinit, trapinithart};
-use crate::proc::{
-    scheduler_init, scheduler_yield,
-    workqueue_init, workqueue_runtime_smoke_test, workqueue_test_launch_tests,
-};
+use crate::proc::{Scheduler, workqueue_init, workqueue_runtime_smoke_test, workqueue_test_launch_tests};
 // NO-STANDALONE-FN: the thread bring-up entry points are now associated fns on
 // `Thread` (`proctab_init`/`userinit`/`install_user_root`/`idle_init`).
 use crate::proc::thread::Thread;
@@ -289,7 +286,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         dev_table_init(); // Initialize the device table
         Thread::proctab_init(); // process table
         tty_init(); // Initialize TTY subsystem
-        scheduler_init(); // initialize the scheduler
+        Scheduler::init(); // initialize the scheduler
         workqueue_init(); // workqueue subsystem initialization
         irq_desc_init(); // IRQ descriptor initialization
         trapinit(); // trap vectors
@@ -305,13 +302,13 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         // Legacy iinit() and fileinit() removed - VFS handles these
         Thread::userinit(); // first user thread
         // idle_thread_init must be called before sched_timer_init (or any
-        // workqueue_create) because idle_thread_init calls rq_cpu_activate() to
-        // mark this CPU as active. Without an active CPU, rq_select_task_rq()
+        // workqueue_create) because idle_thread_init calls Rq::cpu_activate() to
+        // mark this CPU as active. Without an active CPU, Rq::select_task_rq()
         // returns NULL and new threads cannot be enqueued to any run queue.
         Thread::idle_init();
         sched_timer_init();
         // Post-init device drivers: spawned as kthreads so they run with
-        // the scheduler active and can use sleep_ms() / scheduler_yield().
+        // the scheduler active and can use sleep_ms() / Scheduler::yield_now().
         x1_emac_init(); // SpacemiT X1 EMAC (probes via FDT)
         x1_sdhci_init(); // SpacemiT X1 SDHCI SD/eMMC (probes via FDT)
         // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
@@ -392,7 +389,7 @@ pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: b
         // `scheduler_yield` (kernel/proc/sched.rs) is a safe Rust fn,
         // callable from any hart once the scheduler is initialized (true
         // on both paths above).
-        scheduler_yield();
+        Scheduler::yield_now();
         machine::intr_on();
         machine::wfi();
         machine::intr_off();

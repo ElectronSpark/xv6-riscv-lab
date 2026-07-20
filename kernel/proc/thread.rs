@@ -38,17 +38,14 @@ use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
 use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
-use crate::proc::rq_lock_current;
-use crate::proc::rq_unlock_current;
-use crate::proc::sched_attr_init;
-use crate::proc::sched_entity_init;
-use crate::proc::sched_setattr;
+use crate::proc::Rq;
+use crate::proc::SchedAttr;
+use crate::proc::SchedEntity;
 // P3-1B2: these cross into sibling proc submodules and were previously
 // bridged via `xv6_sigport_*`/`xv6_schport_*`/`xv6_rqport_*` `extern "C"`
 // redeclarations (some inline above, some in the block below); now direct
 // crate-path items, same precedent as the `use` imports above.
-use crate::proc::{context_switch_finish, scheduler_wakeup,
-    rq_cpu_activate, get_rq_for_cpu};
+use crate::proc::Scheduler;
 // P3-D2b: the pid/thread-group/pgroup entry points (proc/{pid,
 // thread_group,pgroup}.rs) are ordinary Rust fns now that their
 // `#[no_mangle]` exports are gone; reached as plain crate-path items
@@ -879,7 +876,7 @@ impl<'a> ThreadAccess<'a> {
             self.set_fdtable(fdtable);
             if !self.sched_entity_ptr().is_null() {
                 self.zero_sched_entity_storage();
-                sched_entity_init(self.sched_entity_ptr(), p);
+                SchedEntity::init(self.sched_entity_ptr(), p);
             }
         }
     }
@@ -976,7 +973,7 @@ impl Thread {
             ta.set_pgid(-1);
             ta.set_sid(-1);
 
-            sched_entity_init(se, p);
+            SchedEntity::init(se, p);
             Ok(p)
         }
     }
@@ -993,7 +990,7 @@ extern "C" fn kthread_entry(prev: *mut context) {
     thread_raw_layout! {
         kassert!(!prev.is_null(), "kthread_entry: prev context is NULL");
         let cur = Thread::current();
-        context_switch_finish(Thread::from_context(prev), cur, 0);
+        Scheduler::context_switch_finish(Thread::from_context(prev), cur, 0);
         CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
         intr_on();
         // `rcu_check_callbacks` (kernel/lock/rcu.rs) is a plain safe fn
@@ -1088,21 +1085,21 @@ impl Thread {
         cpu.set_proc(p);
         cpu.set_idle_thread(p);
 
-        rq_cpu_activate(cpuid());
+        Rq::cpu_activate(cpuid());
 
         let mut attr: sched_attr = core::mem::zeroed();
-        sched_attr_init(&mut attr);
+        SchedAttr::init(&mut attr);
         attr.priority = IDLE_PRIORITY;
         attr.affinity_mask = 1u64 << cpuid();
-        sched_setattr((*p).sched_entity, &attr);
+        SchedEntity::set_attr((*p).sched_entity, &attr);
 
-        rq_lock_current();
-        let idle_rq = get_rq_for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
+        Rq::lock_current();
+        let idle_rq = Rq::for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
         // SAFETY: `idle_rq` is the current CPU's live idle run queue (valid
         // cpu/priority indices); the former free `rq_enqueue_task` likewise
         // `assume`d it non-null.
         RqRef::assume(idle_rq).enqueue((*p).sched_entity);
-        rq_unlock_current();
+        Rq::unlock_current();
         // smp_store_release on on_cpu
         let se = (*p).sched_entity;
         core::sync::atomic::fence(Ordering::Release);
@@ -1178,7 +1175,7 @@ extern "C" fn init_entry(prev: *mut context) {
     // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         let cur = Thread::current();
-        context_switch_finish(Thread::from_context(prev), cur, 0);
+        Scheduler::context_switch_finish(Thread::from_context(prev), cur, 0);
         CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
         intr_on();
 
@@ -1243,11 +1240,11 @@ impl Thread {
             ta_u.set_user_space();
 
             let mut attr: sched_attr = core::mem::zeroed();
-            sched_attr_init(&mut attr);
-            sched_setattr((*p).sched_entity, &attr);
+            SchedAttr::init(&mut attr);
+            SchedEntity::set_attr((*p).sched_entity, &attr);
 
             ta_u.state_set(THREAD_UNINTERRUPTIBLE);
-            scheduler_wakeup(p);
+            Scheduler::wakeup_thread(p);
         }
     }
 

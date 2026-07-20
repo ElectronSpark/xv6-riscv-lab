@@ -90,7 +90,7 @@ use crate::proc::{
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
@@ -370,7 +370,7 @@ fn t7_free_after_run_stress() {
 
 extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
     for _ in 0..10_000 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     crate::kprintln!("[workqueue] starting workqueue tests");
 
@@ -399,7 +399,6 @@ extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
 // called from within this file, so file-private is both sufficient and
 // correct. P3-D2a: `wakeup` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
-use crate::proc::wakeup;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; the file-private extern
@@ -426,6 +425,6 @@ pub(crate) extern "C" fn workqueue_test_launch_tests() {
     if is_err_or_null(np) {
         crate::kprintln!("[workqueue] cannot create test master thread");
     } else {
-        wakeup(np);
+        Scheduler::wakeup(np);
     }
 }

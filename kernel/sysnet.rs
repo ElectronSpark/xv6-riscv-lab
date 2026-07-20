@@ -58,7 +58,7 @@ use crate::proc::proc_shims::xv6_current_thread;
 // recv wait now goes through the `SpinLockGuard::sleep_on_interruptible`
 // method (see [`sockread`]), so the free `sleep_on_chan_interruptible` is
 // no longer imported here -- only the wake side (`wakeup_on_chan`) is.
-use crate::proc::wakeup_on_chan;
+use crate::proc::Scheduler;
 // P3-D2b: `killed` (proc/signal.rs) likewise (identical signature).
 use crate::net::mbufq;
 use crate::sync::SpinLock;
@@ -335,7 +335,7 @@ pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16
             // rxq; the raw mbufq list op stays raw (out of scope). Lock
             // held via `s`.
             unsafe { mbufq_pushtail(&raw mut s.rxq, m) };
-            wakeup_on_chan(chan);
+            Scheduler::wakeup_on_chan(chan);
             return; // `s` then `guard` drop here (RAII).
         }
         si = unsafe { (*si).next };

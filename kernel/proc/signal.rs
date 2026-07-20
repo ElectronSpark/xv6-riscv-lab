@@ -401,8 +401,7 @@ use crate::proc::proc_shims::{
 // P3-D2a: the other scheduler wake/yield entry points join
 // `scheduler_wakeup_stopped` as plain crate-path imports (their former
 // `extern "C"` redeclarations in the block below are gone).
-use crate::proc::{scheduler_wakeup, scheduler_wakeup_interruptible, scheduler_yield};
-use crate::proc::scheduler_wakeup_stopped;
+use crate::proc::Scheduler;
 use crate::ipi::ipi_send_single;
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, SigactsAccess, SpinLockRef, ThreadAccess,
@@ -1229,7 +1228,7 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
             let pst = thread_state_get(p);
             if THREAD_IS_INTERRUPTIBLE(pst) {
                 ta_of(p).tcb_unlock();
-                scheduler_wakeup(p);
+                Scheduler::wakeup_thread(p);
             } else if pst == THREAD_RUNNING {
                 ta_of(p).tcb_unlock();
                 let se = ta.sched_entity_ptr();
@@ -1246,13 +1245,13 @@ fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
             }
         }
         if is_cont {
-            scheduler_wakeup_stopped(p);
+            Scheduler::wakeup_stopped(p);
         }
         if is_term {
             THREAD_SET_KILLED(p);
             set_term_signal_first(p, signo);
             if THREAD_STOPPED_p(p) {
-                scheduler_wakeup_stopped(p);
+                Scheduler::wakeup_stopped(p);
             }
         }
 
@@ -1330,7 +1329,7 @@ fn signal_notify(p: *mut thread)-> c_int  {
         if !THREAD_SLEEPING(p) { return -EAGAIN; }
         if thread_state_get(p) == THREAD_INTERRUPTIBLE {
             ta_of(p).tcb_unlock();
-            scheduler_wakeup_interruptible(p);
+            Scheduler::wakeup_interruptible_thread(p);
             ta_of(p).tcb_lock();
             return 0;
         }
@@ -1655,7 +1654,7 @@ fn notify_parent_child_stopped(p: *mut thread) {
         }
         xv6_pid_runlock();
         if !parent.is_null() {
-            scheduler_wakeup_interruptible(parent);
+            Scheduler::wakeup_interruptible_thread(parent);
             if notify_sigchld {
                 ta_of(parent).kill_proc(SIGCHLD);
             }
@@ -1742,7 +1741,7 @@ pub(crate) fn handle_signal() {
                 thread_state_set(p, THREAD_STOPPED);
                 ta_of(p).tcb_unlock();
                 notify_parent_child_stopped(p);
-                scheduler_yield();
+                Scheduler::yield_now();
                 continue;
             }
 
@@ -1930,7 +1929,7 @@ pub(crate) fn sigsuspend(mask: *const sigset_t)-> c_int  {
         recalc_sigpending_tsk(p);
         sigacts_unlock_impl(sa);
         thread_state_set(p, THREAD_INTERRUPTIBLE);
-        scheduler_yield();
+        Scheduler::yield_now();
         -EINTR
     }
 }
@@ -1984,7 +1983,7 @@ pub(crate) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
             sigacts_unlock_impl(sa);
 
             thread_state_set(p, THREAD_INTERRUPTIBLE);
-            scheduler_yield();
+            Scheduler::yield_now();
 
             sigacts_lock_impl(sa);
             (*p).signal.sig_mask = saved_mask;

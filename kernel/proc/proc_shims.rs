@@ -1185,7 +1185,7 @@ const SIGCHLD: u64 = 17;
 // NO-STANDALONE-FN: `detach_child`/`attach_child` are now handle methods on the
 // *parent* `ThreadAccess`, and `thread_destroy` a handle method on the thread
 // being destroyed; the call sites below construct the handle.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 
 // P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
 // referenced via a crate path instead of `extern "C"` redeclarations.
@@ -1270,7 +1270,7 @@ pub(super) fn xv6_exit_reap_zombie(
             if spin_count > 1000 {
                 xv6_thread_state_set(parent, THREAD_STATE_RUNNING);
                 xv6_pid_runlock();
-                scheduler_yield();
+                Scheduler::yield_now();
                 xv6_pid_rlock();
                 xv6_thread_state_set(parent, THREAD_STATE_INTERRUPTIBLE);
                 spin_count = 0;

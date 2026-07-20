@@ -28,7 +28,7 @@ use crate::lock::semaphore::{KSemaphore, SemError};
 
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -64,7 +64,7 @@ fn spawn(name: &'static core::ffi::CStr, entry: extern "C" fn(u64, u64), a1: u64
     if is_err_or_null(np) {
         false
     } else {
-        wakeup(np);
+        Scheduler::wakeup(np);
         true
     }
 }
@@ -95,7 +95,7 @@ fn sem_wait_for(cell: &AtomicI32, expected: i32, mut spin_loops: i32) -> bool {
         if cell.load(Ordering::SeqCst) == expected {
             return true;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     if SEM_T4_LOG_BUDGET.fetch_add(1, Ordering::SeqCst) + 1 <= 8 {
         crate::kprintln!(
@@ -297,7 +297,7 @@ extern "C" fn sem_t4_producer(_a1: u64, _a2: u64) {
             fail();
             return;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     SEM_T4_PRODUCERS_DONE.fetch_add(1, Ordering::SeqCst);
 }
@@ -369,7 +369,7 @@ extern "C" fn sem_t4_consumer(_a1: u64, _a2: u64) {
             break;
         }
 
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     SEM_T4_CONSUMERS_DONE.fetch_add(1, Ordering::SeqCst);
 }
@@ -447,7 +447,7 @@ fn sem_run_test4() {
 
 extern "C" fn semaphore_test_master(_a1: u64, _a2: u64) {
     for _ in 0..10_000 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     crate::kprintln!("[sem] starting semaphore tests");

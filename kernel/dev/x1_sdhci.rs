@@ -99,7 +99,7 @@ use crate::sync::KMutex;
 // instead of `extern "C"` redeclarations.
 // P3-D3b: `kthread_create` (proc/thread.rs) is reached via the
 // `crate::proc` glob re-export like its neighbors here.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 // P3-D3b: lock/mutex.rs's `mutex_init` and lock/completion.rs's entry
 // points are plain safe Rust fns now that their `#[no_mangle]` exports
 // are gone; reached by crate path.
@@ -471,7 +471,7 @@ unsafe fn sdhci_apmu_wait_fc(reg: *mut u32, timeout_us: c_int) -> c_int {
         if unsafe { ptr::read_volatile(reg) } & SDH_APMU_CLK_FC == 0 {
             return 0;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     -1
 }
@@ -644,7 +644,7 @@ unsafe fn sdhci_wait_bit(sc: *mut SdhciSoftc, reg: u32, mask: u32, set: bool, ti
         } else if val & mask == 0 {
             return 0;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     -1
 }
@@ -667,7 +667,7 @@ unsafe fn sdhci_reset(sc: *mut SdhciSoftc, mask: u8) -> c_int {
         if unsafe { sdhci_readb(sc, SDHCI_SOFTWARE_RESET) } & mask == 0 {
             return 0;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     crate::kprintln!(
         "x1_sdhci{}: reset timeout (mask=0x{:x})",
@@ -729,7 +729,7 @@ unsafe fn sdhci_set_clock(sc: *mut SdhciSoftc, target_hz: u32) {
     // SAFETY: caller contract.
     unsafe { sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk) };
 
-    scheduler_yield(); // brief settling time after clock enable
+    Scheduler::yield_now(); // brief settling time after clock enable
 }
 
 /// Set bus power to 3.3V.
@@ -1024,7 +1024,7 @@ unsafe fn sdhci_sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool)
             unsafe { sdhci_writel(sc, SDHCI_DMA_ADDRESS, dma_addr as u32) };
         }
 
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     crate::kprintln!(
@@ -2120,7 +2120,7 @@ extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
         if is_err_or_null(t) {
             crate::kprintln!("x1_sdhci{}: failed to create init kthread", i as c_int);
         } else {
-            wakeup(t);
+            Scheduler::wakeup(t);
         }
     }
 
@@ -2146,5 +2146,5 @@ pub(crate) extern "C" fn x1_sdhci_init() {
         crate::kprintln!("x1_sdhci: failed to create init kthread");
         return;
     }
-    wakeup(t);
+    Scheduler::wakeup(t);
 }

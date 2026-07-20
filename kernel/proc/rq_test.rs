@@ -22,16 +22,13 @@ use crate::lock::spinlock::spin_unlock;
 use crate::machine::cpuid;
 use crate::proc::access::{is_err_or_null, zeroed_sched_attr, RqRef, SchedEntityRef, ThreadAccess};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
-use crate::proc::pick_next_rq;
-use crate::proc::rq_lock;
-use crate::proc::rq_unlock;
-use crate::proc::sched_attr_init;
-use crate::proc::sched_getattr;
-use crate::proc::sched_setattr;
+use crate::proc::Rq;
+use crate::proc::SchedAttr;
+use crate::proc::SchedEntity;
 // P3-1B2: these used to be bridged via the `xv6_schport_*`/`xv6_thport_*`/
 // `xv6_tqport_*` C-ABI alias layers (`extern "C"` redeclarations below);
 // now direct crate-path calls to the real, already-Rust definitions.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 // NO-STANDALONE-FN: the `tq_init`/`tq_wait`/`tq_wakeup_all` free-fn
 // delegators were deleted; the sites below build a `TqRef` handle and
 // invoke the corresponding method.
@@ -105,7 +102,7 @@ fn test_priority_change() {
         let se = current_sched_entity();
 
         let mut attr: sched_attr = zeroed_sched_attr();
-        sched_getattr(se, &mut attr);
+        SchedEntity::get_attr(se, &mut attr);
         let original_priority = attr.priority;
         let original_major = MAJOR_PRIORITY(original_priority);
 
@@ -115,11 +112,11 @@ fn test_priority_change() {
         let new_major = if original_major == 10 { 12 } else { 10 };
         attr.priority = MAKE_PRIORITY(new_major, 1);
 
-        let ret = sched_setattr(se, &attr);
+        let ret = SchedEntity::set_attr(se, &attr);
         assert_msg(ret == 0, c"rq_test: sched_setattr failed".as_ptr());
 
         let mut new_attr: sched_attr = zeroed_sched_attr();
-        sched_getattr(se, &mut new_attr);
+        SchedEntity::get_attr(se, &mut new_attr);
         let changed_major = MAJOR_PRIORITY(new_attr.priority);
         let changed_minor = MINOR_PRIORITY(new_attr.priority);
 
@@ -128,10 +125,10 @@ fn test_priority_change() {
         assert_msg(changed_major == new_major, c"rq_test: major priority not changed".as_ptr());
         assert_msg(changed_minor == 1, c"rq_test: minor priority not changed".as_ptr());
 
-        scheduler_yield();
+        Scheduler::yield_now();
 
         attr.priority = original_priority;
-        sched_setattr(se, &attr);
+        SchedEntity::set_attr(se, &attr);
 
         crate::kprintln!("  Restored original priority");
         crate::kprintln!("  PASSED");
@@ -149,7 +146,7 @@ fn test_yield_priority() {
 
         let mut yields_completed = 0;
         for _ in 0..5 {
-            scheduler_yield();
+            Scheduler::yield_now();
             yields_completed += 1;
         }
         assert_msg(yields_completed == 5, c"rq_test: not all yields completed".as_ptr());
@@ -164,11 +161,11 @@ fn test_rq_selection() {
         crate::kprintln!("TEST: RQ Selection Consistency");
         let test_cpu = cpuid();
 
-        rq_lock(test_cpu);
-        let rq1 = pick_next_rq();
-        let rq2 = pick_next_rq();
-        let rq3 = pick_next_rq();
-        rq_unlock(test_cpu);
+        Rq::lock(test_cpu);
+        let rq1 = Rq::pick_next();
+        let rq2 = Rq::pick_next();
+        let rq3 = Rq::pick_next();
+        Rq::unlock(test_cpu);
 
         assert_msg(rq1 == rq2 && rq2 == rq3, c"rq_test: inconsistent rq selection".as_ptr());
         crate::kprintln!("  Consistent selection: class_id={}", RqRef::assume(rq1).class_id());
@@ -180,7 +177,7 @@ fn test_rq_selection() {
 fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor: c_int) -> bool {
     rq_test_raw! {
         let mut attr: sched_attr = zeroed_sched_attr();
-        sched_getattr(se, &mut attr);
+        SchedEntity::get_attr(se, &mut attr);
         let am = MAJOR_PRIORITY(attr.priority);
         let an = MINOR_PRIORITY(attr.priority);
         if am != expected_major || an != expected_minor {
@@ -195,20 +192,20 @@ fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor:
 fn set_and_check(se: *mut sched_entity, major: c_int, minor: c_int) {
     rq_test_raw! {
         let mut attr: sched_attr = zeroed_sched_attr();
-        sched_attr_init(&mut attr);
+        SchedAttr::init(&mut attr);
         attr.priority = MAKE_PRIORITY(major, minor);
-        sched_setattr(se, &attr);
+        SchedEntity::set_attr(se, &attr);
         assert_msg(verify_priority(se, major, minor), c"rq_test: priority set failed".as_ptr());
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 }
 
 fn pick_major(test_cpu: c_int) -> c_int {
     rq_test_raw! {
-        rq_lock(test_cpu);
-        let r = pick_next_rq();
+        Rq::lock(test_cpu);
+        let r = Rq::pick_next();
         let m = unsafe { (*r).class_id };
-        rq_unlock(test_cpu);
+        Rq::unlock(test_cpu);
         m
     }
 }
@@ -220,7 +217,7 @@ fn test_priority_ordering() {
         let test_cpu = cpuid();
 
         let mut original_attr: sched_attr = zeroed_sched_attr();
-        sched_getattr(se, &mut original_attr);
+        SchedEntity::get_attr(se, &mut original_attr);
 
         // Case 1: different top-layer groups
         crate::kprintln!("  Case 1: Different top-layer groups");
@@ -267,7 +264,7 @@ fn test_priority_ordering() {
         }
         crate::kprintln!("    Case 4 PASSED");
 
-        sched_setattr(se, &original_attr);
+        SchedEntity::set_attr(se, &original_attr);
         crate::kprintln!("  All priority ordering cases PASSED");
         crate::kprintln!("  PASSED");
     }
@@ -354,10 +351,10 @@ fn test_priority_ordered_activation() {
 
             let se = sched_entity_of(test_procs[i]);
             let mut attr: sched_attr = zeroed_sched_attr();
-            sched_attr_init(&mut attr);
+            SchedAttr::init(&mut attr);
             attr.priority = TEST_PRIORITIES[i];
             attr.affinity_mask = cpu_mask;
-            sched_setattr(se, &attr);
+            SchedEntity::set_attr(se, &attr);
 
             crate::kprintln!("    Created process {} (pid={}) with priority major={} on CPU {}",
                 i as c_int, ThreadAccess::assume(test_procs[i]).pid(), MAJOR_PRIORITY(TEST_PRIORITIES[i]), test_cpu);
@@ -365,12 +362,12 @@ fn test_priority_ordered_activation() {
 
         crate::kprintln!("  Phase 2: Waking up all processes");
         for i in 0..PRIORITY_TEST_COUNT {
-            wakeup(test_procs[i]);
+            Scheduler::wakeup(test_procs[i]);
         }
 
         crate::kprintln!("  Phase 3: Enabling preemption and yielding");
         drop(g);
-        scheduler_yield();
+        Scheduler::yield_now();
 
         crate::kprintln!("  Phase 4: Waiting for all processes to complete");
         spin_lock(lock_ptr());
@@ -416,27 +413,27 @@ fn test_affinity_change() {
         let se = current_sched_entity();
 
         let mut attr: sched_attr = zeroed_sched_attr();
-        sched_getattr(se, &mut attr);
+        SchedEntity::get_attr(se, &mut attr);
         let original_mask = attr.affinity_mask;
 
         crate::kprintln!("  Original affinity mask: 0x{:x}", original_mask as u64);
 
         let cur_cpu = cpuid();
         attr.affinity_mask = 1u64 << cur_cpu;
-        let ret = sched_setattr(se, &attr);
+        let ret = SchedEntity::set_attr(se, &attr);
         assert_msg(ret == 0, c"rq_test: setattr for affinity failed".as_ptr());
 
-        sched_getattr(se, &mut attr);
+        SchedEntity::get_attr(se, &mut attr);
         assert_msg(attr.affinity_mask == 1u64 << cur_cpu, c"rq_test: affinity not changed correctly".as_ptr());
 
         crate::kprintln!("  Pinned to CPU {}, mask: 0x{:x}", cur_cpu, attr.affinity_mask as u64);
-        scheduler_yield();
+        Scheduler::yield_now();
 
         let new_cpu = cpuid();
         assert_msg(new_cpu == cur_cpu, c"rq_test: CPU changed despite affinity pin".as_ptr());
 
         attr.affinity_mask = original_mask;
-        sched_setattr(se, &attr);
+        SchedEntity::set_attr(se, &attr);
         crate::kprintln!("  Restored original affinity");
         crate::kprintln!("  PASSED");
     }

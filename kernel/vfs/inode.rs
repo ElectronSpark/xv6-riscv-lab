@@ -833,7 +833,7 @@ const _: () = {
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
-use crate::proc::scheduler_yield;
+use crate::proc::Scheduler;
 
 // P3-D3b: lock/mutex.rs's entry points (for `inode->mutex`) are plain
 // safe Rust fns now that their `#[no_mangle]` exports are gone; reached
@@ -1205,7 +1205,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
         // SAFETY: non-null `inode`.
         if mutex_trylock(unsafe { ptr::addr_of_mut!((*inode).mutex) }) == 0 {
             vfs_superblock_unlock(sb);
-            scheduler_yield();
+            Scheduler::yield_now();
             continue;
         }
 
@@ -2066,7 +2066,7 @@ fn vfs_create_inner(
             vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
-            scheduler_yield();
+            Scheduler::yield_now();
             continue;
         }
 
@@ -2133,7 +2133,7 @@ pub(crate) fn vfs_mknod_inner(
             vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
-            scheduler_yield();
+            Scheduler::yield_now();
             continue;
         }
 
@@ -2404,7 +2404,7 @@ pub(crate) fn vfs_mkdir_inner(
             vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
-            scheduler_yield();
+            Scheduler::yield_now();
             continue;
         }
 
@@ -2567,7 +2567,7 @@ fn vfs_symlink_inner(
             vfs_iunlock(&raw mut *dir);
             vfs_superblock_unlock(sb);
             let _ = unsafe { sb_ops(sb).end_transaction(sb) };
-            scheduler_yield();
+            Scheduler::yield_now();
             continue;
         }
 
@@ -2998,7 +2998,7 @@ fn vfs_namei_inner(path: *const c_char, path_len: usize) -> KResult<*mut vfs_ino
         match vfs_namei_once(path, path_len) {
             Err(Errno::Again) => {
                 // Transient race condition, yield and retry.
-                scheduler_yield();
+                Scheduler::yield_now();
                 retries += 1;
                 if retries >= VFS_NAMEI_MAX_RETRIES {
                     // Too many retries, return the error.

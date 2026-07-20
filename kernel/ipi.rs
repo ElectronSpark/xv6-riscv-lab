@@ -135,7 +135,7 @@ use crate::irq::irq_core::{register_irq_handler, IrqDesc};
 // of an `extern "C"` redeclaration. Documented there as IRQ-safe
 // (spinlock-guarded intrusive-list splice, no sleep/alloc) -- see the
 // module doc's interrupt-context audit table.
-use crate::proc::rq_flush_wake_list;
+use crate::proc::Rq;
 
 // ===========================================================================
 // Small ABI constants duplicated locally (same convention used throughout
@@ -621,7 +621,7 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
                 // SAFETY: `rq_flush_wake_list` is documented IRQ-safe
                 // (see the `extern` block above and the module doc's
                 // interrupt-context audit).
-                unsafe { rq_flush_wake_list(hartid) };
+                unsafe { Rq::flush_wake_list(hartid) };
                 machine::CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
             }
             IPI_REASON_TLB_FLUSH => {

@@ -26,7 +26,7 @@ use crate::lock::rwsem::KRwSem;
 
 // P3-D2a: proc/sched.rs + proc/thread_queue.rs entry points, reached as
 // plain crate-path items instead of `extern "C"` redeclarations.
-use crate::proc::{scheduler_yield, wakeup};
+use crate::proc::Scheduler;
 // NO-STANDALONE-FN: the `tq_size` free-fn delegator was deleted; the two
 // sites below build a `TqRef` handle and invoke the `size` method.
 use crate::proc::access::TqRef;
@@ -62,7 +62,7 @@ fn spawn(name: &'static CStr, entry: extern "C" fn(u64, u64)) -> bool {
     if is_err_or_null(np) {
         false
     } else {
-        wakeup(np);
+        Scheduler::wakeup(np);
         true
     }
 }
@@ -76,7 +76,7 @@ fn wait_for(cell: &AtomicI32, expected: i32, mut spin_loops: i32) -> bool {
         if cell.load(Ordering::SeqCst) == expected {
             return true;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     false
 }
@@ -225,7 +225,7 @@ extern "C" fn t1_reader(_a1: u64, _a2: u64) {
     // Wait until main test signals release so all readers hold the lock
     // concurrently.
     while T1_RELEASE_READERS.load(Ordering::SeqCst) == 0 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     ACTIVE_READERS.fetch_sub(1, Ordering::SeqCst);
     drop(g);
@@ -290,7 +290,7 @@ extern "C" fn t2_reader(_a1: u64, _a2: u64) {
     check_rwsem_integrity(c"T2 reader acquired");
     ACTIVE_READERS.fetch_add(1, Ordering::SeqCst);
     for _ in 0..5 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     ACTIVE_READERS.fetch_sub(1, Ordering::SeqCst);
     drop(g);
@@ -317,7 +317,7 @@ extern "C" fn t2_writer(_a1: u64, _a2: u64) {
     ACTIVE_WRITERS.store(1, Ordering::SeqCst);
     T2_WRITER_ACQUIRED.store(1, Ordering::SeqCst);
     for _ in 0..5 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     ACTIVE_WRITERS.store(0, Ordering::SeqCst);
     drop(g);
@@ -379,9 +379,9 @@ extern "C" fn t3_writer(_a1: u64, _a2: u64) {
         fail();
     }
     ACTIVE_WRITERS.store(1, Ordering::SeqCst);
-    scheduler_yield();
-    scheduler_yield();
-    scheduler_yield();
+    Scheduler::yield_now();
+    Scheduler::yield_now();
+    Scheduler::yield_now();
     ACTIVE_WRITERS.store(0, Ordering::SeqCst);
     drop(g);
     check_rwsem_integrity(c"T3 writer released");
@@ -472,7 +472,7 @@ extern "C" fn t4_writer(_a1: u64, _a2: u64) {
         }
         drop(g);
         check_rwsem_integrity(c"T4 writer released");
-        scheduler_yield(); // allow readers to interleave
+        Scheduler::yield_now(); // allow readers to interleave
     }
     T4_WRITERS_DONE.fetch_add(1, Ordering::SeqCst);
 }
@@ -545,7 +545,7 @@ extern "C" fn t4_reader(_a1: u64, _a2: u64) {
         if T4_WRITERS_DONE.load(Ordering::SeqCst) >= T4_WRITER_THREADS {
             break;
         }
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     T4_READER_DONE.fetch_add(1, Ordering::SeqCst);
 }
@@ -600,7 +600,7 @@ fn run_test4() {
 
 extern "C" fn rwsem_test_master(_a1: u64, _a2: u64) {
     for _ in 0..10_000 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
     // SAFETY: static format strings, no arguments, throughout this fn.
     unsafe { crate::kprintln!("[rwsem] starting simple rwsem tests"); }

@@ -112,7 +112,20 @@ pub(super) mod raw {
     // bottom of this file), so the pointer casts are ABI-identity.
     // (P3-10e: `sched_class` is no longer a pointer — `SchedClass` is a
     // closed-set enum passed by value, no cast needed.)
-    pub(in crate::proc) use crate::proc::{rq_clear_ready, rq_set_ready};
+    // NO-STANDALONE-FN: `rq_set_ready`/`rq_clear_ready` are associated fns
+    // on `Rq` now (`Rq::set_ready`/`Rq::clear_ready`); the former
+    // re-export becomes thin cffi adapters so the policy modules'
+    // `cffi::rq_set_ready(..)` call sites (which sit at the C-mirror
+    // boundary this facade owns) stay unchanged.
+    #[inline]
+    pub(in crate::proc) fn rq_set_ready(cls_id: c_int, cpu_id: c_int) {
+        crate::proc::Rq::set_ready(cls_id, cpu_id)
+    }
+
+    #[inline]
+    pub(in crate::proc) fn rq_clear_ready(cls_id: c_int, cpu_id: c_int) {
+        crate::proc::Rq::clear_ready(cls_id, cpu_id)
+    }
 
     #[inline]
     pub(in crate::proc) fn rq_init(rq: *mut Rq) {
@@ -120,12 +133,12 @@ pub(super) mod raw {
         // `rq`) is enforced by its callers exactly as before, when this
         // was a `safe fn` extern redeclaration of the same symbol; the
         // cast is ABI-identity per the module comment above.
-        unsafe { crate::proc::rq_init(rq as *mut crate::bindings::rq) }
+        unsafe { crate::proc::Rq::init(rq as *mut crate::bindings::rq) }
     }
 
     #[inline]
     pub(in crate::proc) fn rq_register(rq: *mut Rq, cls_id: c_int, cpu_id: c_int) {
-        crate::proc::rq_register(rq as *mut crate::bindings::rq, cls_id, cpu_id)
+        crate::proc::Rq::register(rq as *mut crate::bindings::rq, cls_id, cpu_id)
     }
 
     // P3-10e: `SchedClass` is a closed-set enum now (`SchedClass::Idle`/
@@ -133,7 +146,7 @@ pub(super) mod raw {
     // no pointer, no cast.
     #[inline]
     pub(in crate::proc) fn sched_class_register(id: c_int, cls: SchedClass) {
-        crate::proc::sched_class_register(id, cls)
+        crate::proc::SchedClass::register(id, cls)
     }
 }
 

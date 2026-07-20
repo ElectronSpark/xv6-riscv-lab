@@ -162,7 +162,7 @@ use crate::proc::thread_group::ThreadGroup;
 // (`Thread` is a plain alias of `crate::bindings::thread`, so the
 // signatures are identical; `rq_task_fork`'s one call site casts its
 // `*mut c_void` sched-entity handle to the real pointee type).
-use crate::proc::{context_switch_finish, rq_task_fork, scheduler_wakeup, scheduler_yield};
+use crate::proc::{Scheduler, Rq};
 
 // P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
 // referenced via a crate path instead of `extern "C"` redeclarations.
@@ -243,7 +243,7 @@ extern "C" fn forkret_entry(prev: *mut Context) {
         panic_clone("forkret_entry: prev context is NULL");
     }
 
-    context_switch_finish(xv6_thread_from_context(prev), cur, 0);
+    Scheduler::context_switch_finish(xv6_thread_from_context(prev), cur, 0);
     xv6_mycpu_clear_noff();
     xv6_intr_on();
     rcu_check_callbacks();
@@ -394,7 +394,7 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     xv6_tcb_lock(child);
     xv6_t_set_user_space(child);
     xv6_thread_state_set(child, THREAD_UNINTERRUPTIBLE);
-    rq_task_fork(xv6_t_sched_entity(child) as *mut crate::bindings::sched_entity);
+    Rq::task_fork(xv6_t_sched_entity(child) as *mut crate::bindings::sched_entity);
     if args.flags & CLONE_VFORK != 0 {
         xv6_t_set_vfork_parent(child, p);
         xv6_thread_state_set(p, THREAD_UNINTERRUPTIBLE);
@@ -448,10 +448,10 @@ pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     }
     xv6_pid_wunlock();
 
-    scheduler_wakeup(child);
+    Scheduler::wakeup_thread(child);
 
     if args.flags & CLONE_VFORK != 0 {
-        scheduler_yield();
+        Scheduler::yield_now();
     }
 
     xv6_t_pid(child)
