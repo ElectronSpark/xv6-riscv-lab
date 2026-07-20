@@ -162,7 +162,8 @@ macro_rules! bit_set {
 }
 
 #[inline]
-pub fn write_out<T>(p: *mut T, v: T) {
+// RUSTIFY-PROC: in-`crate::proc` callers only (signal, thread_queue) -> pub(super).
+pub(super) fn write_out<T>(p: *mut T, v: T) {
     unsafe { *p = v; }
 }
 
@@ -173,7 +174,8 @@ pub fn write_out<T>(p: *mut T, v: T) {
 /// or niche-optimized enums -- so the all-zero bit pattern is a valid
 /// value for every field.
 #[inline]
-pub fn zeroed_sched_attr() -> sched_attr {
+// RUSTIFY-PROC: in-`crate::proc` caller only (rq_test) -> pub(super).
+pub(super) fn zeroed_sched_attr() -> sched_attr {
     // SAFETY: see the doc comment above -- `sched_attr` is plain-integer
     // POD, so `mem::zeroed` cannot produce an invalid value.
     unsafe { core::mem::zeroed() }
@@ -192,21 +194,24 @@ pub fn zeroed_sched_attr() -> sched_attr {
 /// matches the pre-existing behavior of the generic `zeroed::<T>()` it
 /// replaces.)
 #[inline]
-pub fn zeroed_ksiginfo() -> ksiginfo {
+// RUSTIFY-PROC: out-of-`proc` caller (tty/session.rs) -> pub(crate).
+pub(crate) fn zeroed_ksiginfo() -> ksiginfo {
     // SAFETY: see the doc comment above -- every `ksiginfo` field is a
     // plain integer or raw pointer, valid when zero/null.
     unsafe { core::mem::zeroed() }
 }
 
 #[inline]
-pub fn zero_obj<T>(p: *mut T) {
+// RUSTIFY-PROC: used only inside `access.rs` -> private.
+fn zero_obj<T>(p: *mut T) {
     if !p.is_null() {
         unsafe { core::ptr::write_bytes(p, 0, 1); }
     }
 }
 
 #[inline]
-pub fn copy_out<T: Copy>(dst: *mut T, src: *const T) {
+// RUSTIFY-PROC: no callers tree-wide -> private (file `#![allow(dead_code)]`).
+fn copy_out<T: Copy>(dst: *mut T, src: *const T) {
     if !dst.is_null() && !src.is_null() {
         unsafe { *dst = *src; }
     }
@@ -227,21 +232,21 @@ pub use crate::kstd::is_err as is_err_const;
 /// convention) kept for `thread_queue.rs`'s `err_ptr_errno as err_ptr`
 /// import; `kstd::err_ptr` itself expects an already-negative `errno`.
 #[inline]
-pub fn err_ptr_errno<T>(errno: c_int) -> *mut T {
+pub(super) fn err_ptr_errno<T>(errno: c_int) -> *mut T {
     err_ptr(-errno)
 }
 
 /// `-ptr_err(p)` -- the positive-errno counterpart of [`err_ptr_errno`],
 /// kept for the same `thread_queue.rs` call site.
 #[inline]
-pub fn ptr_err_errno<T>(p: *mut T) -> c_int {
+pub(super) fn ptr_err_errno<T>(p: *mut T) -> c_int {
     -ptr_err(p)
 }
 
 /// `workqueue.rs`'s local convenience: the pointer's encoded errno if it
 /// carries one, else the caller-supplied fallback `err`.
 #[inline]
-pub fn ptr_err_or<T>(p: *mut T, err: c_int) -> c_int {
+pub(super) fn ptr_err_or<T>(p: *mut T, err: c_int) -> c_int {
     if is_err(p) { ptr_err(p) } else { err }
 }
 
@@ -1128,7 +1133,9 @@ impl<'a> RqPercpuRef<'a> {
 }
 
 #[inline]
-pub fn sched_entity_llist_push_head(head: &mut *mut sched_entity, node: *mut sched_entity) {
+// RUSTIFY-PROC: in-`crate::proc` caller only (rq) -> pub(super). (CAS-retry
+// llist push -- floor, not iterator-convertible.)
+pub(super) fn sched_entity_llist_push_head(head: &mut *mut sched_entity, node: *mut sched_entity) {
     unsafe { sched_entity_llist_push(head as *mut *mut sched_entity, node); }
 }
 
@@ -1400,7 +1407,8 @@ impl<'a> SigActionAccess<'a> {
 }
 
 #[inline]
-pub fn make_ksiginfo(signo: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo {
+// RUSTIFY-PROC: in-`crate::proc` caller only (signal) -> pub(super).
+pub(super) fn make_ksiginfo(signo: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo {
     let mut info: ksiginfo = zeroed_ksiginfo();
     info.signo = signo;
     info.sender = sender;
@@ -1799,45 +1807,53 @@ impl<'a> ListNodeRef<'a> {
 }
 
 #[inline]
-pub fn list_node_init_raw(p: *mut list_node_t) {
+// RUSTIFY-PROC: the `list_node_*_raw` group are the raw-`*mut list_node_t`
+// forwarders (the `ListNodeRef` handle already carries the method form);
+// their callers hold bare node pointers, so they stay free-fn floor (same
+// forwarder precedent as `sched.rs`/`proc_shims.rs`). Every caller is in
+// `crate::proc` (thread, workqueue, thread_group, signal) -> pub(super).
+pub(super) fn list_node_init_raw(p: *mut list_node_t) {
     if let Some(r) = unsafe { ListNodeRef::from_raw(p) } { r.init(); }
 }
 #[inline]
-pub fn list_node_is_detached_raw(p: *mut list_node_t) -> bool {
+pub(super) fn list_node_is_detached_raw(p: *mut list_node_t) -> bool {
     match unsafe { ListNodeRef::from_raw(p) } {
         Some(r) => r.is_detached(),
         None => true,
     }
 }
 #[inline]
-pub fn list_node_is_empty_raw(p: *mut list_node_t) -> bool {
+pub(super) fn list_node_is_empty_raw(p: *mut list_node_t) -> bool {
     match unsafe { ListNodeRef::from_raw(p) } {
         Some(r) => r.is_empty(),
         None => true,
     }
 }
 #[inline]
-pub fn list_node_next_raw(p: *mut list_node_t) -> *mut list_node_t {
+pub(super) fn list_node_next_raw(p: *mut list_node_t) -> *mut list_node_t {
     unsafe { (*p).next }
 }
 #[inline]
-pub fn list_container_of<T>(n: *mut list_node_t, member_off: usize) -> *mut T {
+// RUSTIFY-PROC: many out-of-`proc` callers (kstd, timer, mm, machine, dev,
+// lock) -> pub(crate).
+pub(crate) fn list_container_of<T>(n: *mut list_node_t, member_off: usize) -> *mut T {
     (n as *mut u8).wrapping_sub(member_off) as *mut T
 }
 #[inline]
-pub fn list_node_detach_raw(p: *mut list_node_t) {
+pub(super) fn list_node_detach_raw(p: *mut list_node_t) {
     if let Some(r) = unsafe { ListNodeRef::from_raw(p) } { r.detach(); }
 }
 #[inline]
-pub fn list_node_push_front_raw(head: *mut list_node_t, n: *mut list_node_t) {
+// RUSTIFY-PROC: no callers tree-wide -> private (file `#![allow(dead_code)]`).
+fn list_node_push_front_raw(head: *mut list_node_t, n: *mut list_node_t) {
     if let Some(r) = unsafe { ListNodeRef::from_raw(n) } { r.push_front(head); }
 }
 #[inline]
-pub fn list_node_push_back_raw(head: *mut list_node_t, n: *mut list_node_t) {
+pub(super) fn list_node_push_back_raw(head: *mut list_node_t, n: *mut list_node_t) {
     if let Some(r) = unsafe { ListNodeRef::from_raw(n) } { r.push_back(head); }
 }
 #[inline]
-pub fn list_node_pop_back_raw(head: *mut list_node_t) -> *mut list_node_t {
+pub(super) fn list_node_pop_back_raw(head: *mut list_node_t) -> *mut list_node_t {
     let last = unsafe { (*head).prev };
     if last == head { return core::ptr::null_mut(); }
     list_node_detach_raw(last);
@@ -1857,7 +1873,8 @@ const TYPE_LIST_U32: u32 = 1;
 const TYPE_TREE_U32: u32 = 2;
 
 #[inline]
-pub fn tnode_entry_offset() -> usize {
+// RUSTIFY-PROC: used only inside `access.rs` -> private.
+fn tnode_entry_offset() -> usize {
     // P3-N2: `tnode_t` IS `thread_queue::Tnode` now; the anonymous
     // union field bindgen used to call `__bindgen_anon_1` is `u`.
     core::mem::offset_of!(tnode_t, u)
@@ -2042,23 +2059,25 @@ impl<'a> TnodeRef<'a> {
 }
 
 #[inline]
-pub fn zero_tnode_ptr(p: *mut tnode_t) {
+// RUSTIFY-PROC: the `tnode_*`/`zeroed_tnode` group's only out-of-file caller
+// is `crate::proc::thread_queue` -> pub(super).
+pub(super) fn zero_tnode_ptr(p: *mut tnode_t) {
     if !p.is_null() {
         unsafe { core::ptr::write_bytes(p, 0, 1); }
     }
 }
 
 #[inline]
-pub fn zeroed_tnode() -> tnode_t {
+pub(super) fn zeroed_tnode() -> tnode_t {
     unsafe { core::mem::zeroed() }
 }
 
 #[inline]
-pub fn tnode_from_list_entry(entry: *mut list_node_t) -> *mut tnode_t {
+pub(super) fn tnode_from_list_entry(entry: *mut list_node_t) -> *mut tnode_t {
     (entry as *mut u8).wrapping_sub(tnode_entry_offset()) as *mut tnode_t
 }
 #[inline]
-pub fn tnode_from_tree_entry(entry: *mut rb_node) -> *mut tnode_t {
+pub(super) fn tnode_from_tree_entry(entry: *mut rb_node) -> *mut tnode_t {
     (entry as *mut u8).wrapping_sub(tnode_entry_offset()) as *mut tnode_t
 }
 

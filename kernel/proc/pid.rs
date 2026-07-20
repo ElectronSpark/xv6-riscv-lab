@@ -68,7 +68,8 @@ fn panic_pid(msg: &str) -> ! {
 
 // P3-1B: only caller is `proc/thread.rs::thread_init` (already a direct
 // crate-path `use`) -- demoted.
-pub(crate) extern "C" fn __proctab_init() {
+// RUSTIFY-PROC: in-`crate::proc` caller only (thread.rs) -> pub(super).
+pub(super) extern "C" fn __proctab_init() {
     xv6_proctab_init_storage();
 }
 
@@ -86,10 +87,11 @@ pub(crate) fn pid_wunlock() { xv6_pid_wunlock(); }
 // P3-1B: zero callers anywhere in the tree (grep-verified). Demoted from
 // `#[no_mangle]`; the file's blanket `#![allow(dead_code)]` (line 11)
 // already covers these, no per-item attribute needed.
-pub(crate) extern "C" fn pid_try_lock_upgrade() -> bool {
+// RUSTIFY-PROC: zero callers anywhere -> private (file `#![allow(dead_code)]`).
+extern "C" fn pid_try_lock_upgrade() -> bool {
     xv6_pid_try_lock_upgrade() != 0
 }
-pub(crate) extern "C" fn pid_wholding() -> bool {
+extern "C" fn pid_wholding() -> bool {
     xv6_pid_wholding() != 0
 }
 pub(crate) fn pid_assert_wholding() {
@@ -105,7 +107,8 @@ pub(crate) fn pid_assert_wholding() {
 // P3-1B: only caller is `proc/thread.rs` (crate-path `use`, casting its
 // own `*mut bindings::thread` to this file's `pub` opaque `Thread` marker
 // -- same precedent as `sysproc.rs`'s `thread_clone` wrapper) -- demoted.
-pub(crate) extern "C" fn __proctab_set_initproc(p: *mut Thread) {
+// RUSTIFY-PROC: in-`crate::proc` caller only (thread.rs) -> pub(super).
+pub(super) extern "C" fn __proctab_set_initproc(p: *mut Thread) {
     xv6_pid_wlock();
     if p.is_null() {
         panic_pid("NULL initproc");
@@ -130,14 +133,17 @@ pub(crate) fn __proctab_get_initproc() -> *mut Thread {
 
 // P3-1B: callers are `proc/thread.rs` and `proc/clone.rs` (both
 // crate-path `use`, not `extern` redeclarations) -- demoted.
-pub(crate) extern "C" fn __alloc_pid() -> i32 {
+// RUSTIFY-PROC: in-`crate::proc` callers only (thread.rs, clone.rs) -> pub(super).
+pub(super) extern "C" fn __alloc_pid() -> i32 {
     xv6_proctab_alloc_pid_slot()
 }
 
 // P3-1B: callers are `proc/clone.rs`, `proc/thread.rs`, `proc/exit.rs`,
 // and `proc/proc_shims.rs` (all crate-path `use`, not `extern`
 // redeclarations) -- demoted.
-pub(crate) extern "C" fn __free_pid() {
+// RUSTIFY-PROC: in-`crate::proc` callers only (thread.rs, clone.rs, exit.rs,
+// proc_shims.rs) -> pub(super).
+pub(super) extern "C" fn __free_pid() {
     if xv6_proctab_allocated_cnt() <= 0 {
         panic_pid("__free_pid: allocated_cnt underflow");
     }
@@ -161,7 +167,8 @@ fn nextpid_advance(pid: i32) {
 // crate-path `use`, casting their own thread-pointer types to this
 // file's `pub` opaque `Thread` marker -- same precedent as
 // `sysproc.rs`'s `thread_clone` wrapper) -- demoted.
-pub(crate) extern "C" fn proctab_proc_add(p: *mut Thread) {
+// RUSTIFY-PROC: in-`crate::proc` callers only (thread.rs, clone.rs) -> pub(super).
+pub(super) extern "C" fn proctab_proc_add(p: *mut Thread) {
     if xv6_pid_wholding() == 0 {
         panic_pid("pid lock not held");
     }
@@ -172,15 +179,24 @@ pub(crate) extern "C" fn proctab_proc_add(p: *mut Thread) {
         panic_pid("Process is already in the dump list");
     }
 
-    // Find an unused PID number.
+    // Find an unused PID number: scan candidate PIDs starting at the
+    // current `nextpid`, wrapping at MAXPID back to 2, until a free slot is
+    // found. RUSTIFY-PROC: the old `while` loop advanced the global
+    // `nextpid` on every probe and re-read it; the scan below is a pure
+    // `successors(..).find(..)` over the identical candidate sequence
+    // (`pid_lock` is held throughout this fn, so the intermediate `nextpid`
+    // writes were never observable) — only the final `nextpid_advance` then
+    // persists the allocator position, exactly as before. `.find`'s probe is
+    // an opaque shim call per candidate PID, not a freeze-in-loop read.
     let start = xv6_proctab_nextpid_get();
-    while !xv6_proctab_get_locked(xv6_proctab_nextpid_get()).is_null() {
-        nextpid_advance(xv6_proctab_nextpid_get());
-        if xv6_proctab_nextpid_get() == start {
-            panic_pid("proctab_proc_add: no free PID (should not happen)");
-        }
-    }
-    let newpid = xv6_proctab_nextpid_get();
+    let newpid = core::iter::successors(Some(start), |&pid| {
+        let np = pid.wrapping_add(1);
+        let np = if np >= MAXPID { 2 } else { np };
+        // stop once the scan has wrapped all the way back to `start`
+        (np != start).then_some(np)
+    })
+    .find(|&pid| xv6_proctab_get_locked(pid).is_null())
+    .unwrap_or_else(|| panic_pid("proctab_proc_add: no free PID (should not happen)"));
     t_set_pid(p, newpid);
     nextpid_advance(newpid);
 
@@ -219,7 +235,9 @@ pub(crate) fn get_pid_thread(pid: i32) -> *mut Thread {
 // P3-1B: callers are `proc/exit.rs` and `proc/proc_shims.rs` (both
 // crate-path `use`, casting their own thread-pointer types to this
 // file's `pub` opaque `Thread` marker) -- demoted.
-pub(crate) extern "C" fn proctab_proc_remove(p: *mut Thread) {
+// RUSTIFY-PROC: in-`crate::proc` callers only (proc_shims.rs, thread.rs,
+// exit.rs) -> pub(super).
+pub(super) extern "C" fn proctab_proc_remove(p: *mut Thread) {
     if xv6_pid_wholding() == 0 {
         panic_pid("pid lock not held");
     }
@@ -248,8 +266,8 @@ pub(crate) fn procdump() {
     });
 }
 
-// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
-pub(crate) extern "C" fn procdump_bt() {
+// P3-1B/RUSTIFY-PROC: only caller is `sys_dumpproc` (same file) -> private.
+extern "C" fn procdump_bt() {
     xv6_procdump_bt_header();
     proc_shims::for_each_proctab_thread(|p| {
         xv6_procdump_bt_one(p as *mut Thread);
@@ -257,8 +275,8 @@ pub(crate) extern "C" fn procdump_bt() {
     xv6_procdump_bt_footer();
 }
 
-// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
-pub(crate) extern "C" fn procdump_bt_pid(pid: i32) {
+// P3-1B/RUSTIFY-PROC: only caller is `sys_dumpproc` (same file) -> private.
+extern "C" fn procdump_bt_pid(pid: i32) {
     xv6_procdump_bt_pid(pid);
 }
 
@@ -266,8 +284,8 @@ pub(crate) extern "C" fn procdump_bt_pid(pid: i32) {
 // procdump_tree / procdump_tree_pid
 // ---------------------------------------------------------------------------
 
-// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
-pub(crate) extern "C" fn procdump_tree() {
+// P3-1B/RUSTIFY-PROC: only caller is `sys_dumpproc` (same file) -> private.
+extern "C" fn procdump_tree() {
     crate::kprintln!("Process Tree:");
     xv6_pid_rlock();
     let initproc = xv6_proctab_initproc_raw();
@@ -280,8 +298,8 @@ pub(crate) extern "C" fn procdump_tree() {
     xv6_pid_runlock();
 }
 
-// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
-pub(crate) extern "C" fn procdump_tree_pid(target_pid: i32) {
+// P3-1B/RUSTIFY-PROC: only caller is `sys_dumpproc` (same file) -> private.
+extern "C" fn procdump_tree_pid(target_pid: i32) {
     crate::kprintln!("Process Tree (from pid {}):", target_pid);
     xv6_pid_rlock();
     let p = xv6_proctab_get_locked(target_pid);
@@ -302,8 +320,8 @@ unsafe extern "C" fn dump_session_cb(s: *mut Session, _arg: *mut c_void) {
     xv6_dump_session(s);
 }
 
-// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
-pub(crate) extern "C" fn procdump_sessions() {
+// P3-1B/RUSTIFY-PROC: only caller is `sys_dumpproc` (same file) -> private.
+extern "C" fn procdump_sessions() {
     crate::kprintln!("\n=== Process Hierarchy (Session / PGroup / Process / Thread) ===");
     xv6_pid_rlock();
     session_for_each_all(Some(dump_session_cb), ptr::null_mut());
@@ -311,8 +329,8 @@ pub(crate) extern "C" fn procdump_sessions() {
     crate::kprintln!("\n=== End Hierarchy ===");
 }
 
-// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
-pub(crate) extern "C" fn procdump_sessions_sid(target_sid: i32) {
+// P3-1B/RUSTIFY-PROC: only caller is `sys_dumpproc` (same file) -> private.
+extern "C" fn procdump_sessions_sid(target_sid: i32) {
     crate::kprintln!("\n=== Session {} Hierarchy ===", target_sid);
     xv6_pid_rlock();
     let leader = get_pid_thread(target_sid);
@@ -364,7 +382,8 @@ pub(crate) extern "C" fn sys_dumpproc() -> u64 {
 
 // P3-1B: zero callers anywhere in the tree (grep-verified) -- see
 // `pid_try_lock_upgrade` above.
-pub(crate) unsafe extern "C" fn proctab_for_each_rcu(
+// RUSTIFY-PROC: zero callers anywhere -> private (ABI-preserved shell only).
+unsafe extern "C" fn proctab_for_each_rcu(
     fnp: unsafe extern "C" fn(*mut Thread, *mut c_void),
     arg: *mut c_void,
 ) {

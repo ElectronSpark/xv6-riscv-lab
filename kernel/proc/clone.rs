@@ -64,8 +64,10 @@ const USERSTACK_MINSZ: u64 = 4096 * 4; // PAGE_SIZE << 2
 const PAGE_SIZE:       u64 = 4096;
 
 // clone_args layout (matches uabi/clone_flags.h)
+// RUSTIFY-PROC: the only out-of-file namer is `proc/sysproc.rs` (in
+// `crate::proc`, via the `pub use clone::*` glob) -> pub(super).
 #[repr(C)]
-pub struct CloneArgs {
+pub(super) struct CloneArgs {
     pub flags:      u64,
     pub stack:      u64,
     pub stack_size: u64,
@@ -224,8 +226,11 @@ fn clone_args_mut<'a>(args: *mut CloneArgs) -> Option<&'a mut CloneArgs> {
 // `extern "C"`: the address is stored as a raw entry pointer and invoked
 // through the context-switch return path (`proc/swtch.S`-restored `ra`),
 // so the C ABI is load-bearing.
+// RUSTIFY-PROC: zero namers anywhere outside this file (its address is taken
+// only by `thread_clone` below) -> private; `extern "C"` stays (the stored
+// entry pointer is invoked through the context-switch return path).
 // ---------------------------------------------------------------------------
-pub(crate) extern "C" fn forkret_entry(prev: *mut Context) {
+extern "C" fn forkret_entry(prev: *mut Context) {
     let cur = xv6_current_thread();
     xv6_forkret_assert_user(cur);
     if prev.is_null() {
@@ -256,7 +261,9 @@ fn check_ptr<T>(ptr: *mut T) -> Result<*mut T, c_int> {
 // ---------------------------------------------------------------------------
 // P3-D3c: `#[no_mangle] extern "C"` dropped -- the only caller
 // (`proc/sysproc.rs`) already reaches it via `crate::proc::thread_clone`.
-pub(crate) fn thread_clone(args: *mut CloneArgs) -> c_int {
+// RUSTIFY-PROC: that caller is in `crate::proc` (via the `pub use clone::*`
+// glob) -> pub(super).
+pub(super) fn thread_clone(args: *mut CloneArgs) -> c_int {
     let Some(args) = clone_args_mut(args) else { return -EINVAL };
     let p = xv6_current_thread();
 

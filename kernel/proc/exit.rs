@@ -179,7 +179,9 @@ mod raw {
     // layout-identical) opaque marker from this file's own `Thread` --
     // reinterpreted via a thin wrapper, same precedent as `sysproc.rs`'s
     // `thread_clone`.
-    pub(crate) use crate::proc::pid::__free_pid;
+    // RUSTIFY-PROC: `pid::__free_pid` tightened to `pub(super)` (in-`crate::proc`
+    // callers only), so this re-export narrows to `pub(super)` to match.
+    pub(super) use crate::proc::pid::__free_pid;
     #[inline(always)]
     pub fn proctab_proc_remove(t: *mut Thread) {
         crate::proc::pid::proctab_proc_remove(t as *mut core::ffi::c_void as *mut crate::proc::pid::Thread);
@@ -338,8 +340,10 @@ fn reparent_impl(p: *mut Thread) {
 // `#[allow(dead_code)]` documents the gap rather than silently deleting
 // still-plausible public API (matches this wave's `goldfish_rtc_init`/
 // `sched_timer_add` precedent).
+// RUSTIFY-PROC: still zero callers tree-wide (grep-verified) -> private
+// (minimize visibility; the ABI-preserved shell is retained, not deleted).
 #[allow(dead_code)]
-pub(crate) extern "C" fn reparent(p: *mut Thread) {
+extern "C" fn reparent(p: *mut Thread) {
     reparent_impl(p)
 }
 
@@ -475,7 +479,8 @@ pub(crate) fn exit(mut status: c_int) -> ! {
 
 // P3-1B: only caller is `proc/sysproc.rs::sys_wait` (crate-path `use`, not
 // an `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn wait(addr: u64) -> c_int {
+// RUSTIFY-PROC: in-`crate::proc` caller only (sysproc.rs) -> pub(super).
+pub(super) extern "C" fn wait(addr: u64) -> c_int {
     let p = ffi::current();
     let mut pid: c_int;
     let mut xstate: c_int = 0;
@@ -512,7 +517,8 @@ pub(crate) extern "C" fn wait(addr: u64) -> c_int {
 
 // P3-1B: only caller is `proc/sysproc.rs::sys_waitpid` (crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn waitpid(target_pid: c_int, addr: u64, options: c_int) -> c_int {
+// RUSTIFY-PROC: in-`crate::proc` caller only (sysproc.rs) -> pub(super).
+pub(super) extern "C" fn waitpid(target_pid: c_int, addr: u64, options: c_int) -> c_int {
     if options & !(WNOHANG | WUNTRACED) != 0 {
         return -EINVAL;
     }
