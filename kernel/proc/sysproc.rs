@@ -10,7 +10,6 @@
 #![allow(non_upper_case_globals)]
 
 use core::ffi::{c_char, c_int, c_void};
-use core::ptr;
 
 use crate::bindings;
 // P3-1D mesh sweep: dev/nullrand.rs is in scope for this wave; real
@@ -480,20 +479,18 @@ pub(crate) extern "C" fn sys_getrandom() -> u64 {
     if len == 0 { return 0; }
 
     let mut kbuf = [0u8; 64];
-    let mut done: c_int = 0;
-    while done < len {
-        let mut chunk = len - done;
-        if chunk > kbuf.len() as c_int {
-            chunk = kbuf.len() as c_int;
-        }
+    // `done` walks `[0, len)` in `kbuf`-sized strides; each iteration fills and
+    // copies out `chunk = min(len - done, kbuf.len())` bytes. The chunk sizes
+    // sum to exactly `len`, so a normal exit means all `len` bytes were written
+    // (was a manual `while done < len { ...; done += chunk }` accumulator).
+    for done in (0..len).step_by(kbuf.len()) {
+        let chunk = core::cmp::min(len - done, kbuf.len() as c_int);
         random_fill_bytes(kbuf.as_mut_ptr(), chunk as usize);
         if either_copyout(1, ubuf + done as u64,
                           kbuf.as_ptr() as *const c_void,
                           chunk as u64) < 0 {
             return if done != 0 { done as u64 } else { (-EFAULT) as u64 };
         }
-        done += chunk;
     }
-    let _ = ptr::null_mut::<u8>(); // silence unused import warning if any
-    done as u64
+    len as u64
 }
