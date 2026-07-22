@@ -113,70 +113,74 @@ const _: () = {
     assert!(core::mem::offset_of!(RawCompletion, wait_queue) == 32, "completion.wait_queue offset");
 };
 
-/// Reinterpret the bindgen `*mut completion_t` as the native mirror.
-///
-/// SAFETY: layout equivalence is proven at compile time by the
-/// assertions above; the caller provides a valid, non-dangling
-/// `*mut completion_t`.
-#[inline(always)]
-fn as_native(c: *mut completion_t) -> *mut RawCompletion {
-    c as *mut RawCompletion
-}
-
-// ---------------------------------------------------------------------------
-// Field accessors (centralised unsafe)
-// ---------------------------------------------------------------------------
-
-#[inline(always)]
-fn done_get(c: *mut RawCompletion) -> c_int {
-    // SAFETY: caller holds `c->lock` (per the C contract).
-    u! { (*c).done }
-}
-#[inline(always)]
-fn done_set(c: *mut RawCompletion, v: c_int) {
-    // SAFETY: caller holds `c->lock`.
-    u! { (*c).done = v; }
-}
-#[inline(always)]
-fn lock_ptr(c: *mut RawCompletion) -> *mut spinlock_t {
-    // SAFETY: dereferences a structurally-valid completion. We only
-    // take the address of the embedded lock; no field is read.
-    u! { addr_of_mut!((*c).lock) as *mut spinlock_t }
-}
-#[inline(always)]
-fn queue_ptr(c: *mut RawCompletion) -> *mut tq_t {
-    // SAFETY: see `lock_ptr`.
-    u! { addr_of_mut!((*c).wait_queue) }
-}
-#[inline(always)]
-fn tq_counter(q: *mut tq_t) -> c_int {
-    // SAFETY: caller holds the tq's protecting lock.
-    u! { (*q).counter }
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Try to consume one completion token. Caller must hold `c->lock`.
-fn try_wait_for_completion_locked(c: *mut RawCompletion) -> bool {
-    let d = done_get(c);
-    if d <= 0 {
-        return false;
+impl RawCompletion {
+    /// Reinterpret the bindgen `*mut completion_t` as the native mirror.
+    ///
+    /// SAFETY: layout equivalence is proven at compile time by the
+    /// assertions above; the caller provides a valid, non-dangling
+    /// `*mut completion_t`.
+    #[inline(always)]
+    fn as_native(c: *mut completion_t) -> *mut RawCompletion {
+        c as *mut RawCompletion
     }
-    if d != MAX_COMPLETIONS {
-        done_set(c, d - 1);
-    }
-    true
-}
 
-/// Wake one waiter if any. Caller must hold `c->lock`.
-fn completion_do_wake(c: *mut RawCompletion) {
-    let q = queue_ptr(c);
-    if TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
-        // Return value (`*mut thread`) is intentionally discarded:
-        // the C code keeps the same `(void)p` comment about interrupts.
-        let _ = TqRef::from_ptr(q).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
+    // -----------------------------------------------------------------
+    // Field accessors (centralised unsafe). Raw-pointer parameter kept
+    // (NOT `&self`): see the module doc's freeze-noalias note (mirrors
+    // spinlock.rs's pilot conversion).
+    // -----------------------------------------------------------------
+
+    #[inline(always)]
+    fn done_get(c: *mut RawCompletion) -> c_int {
+        // SAFETY: caller holds `c->lock` (per the C contract).
+        u! { (*c).done }
+    }
+    #[inline(always)]
+    fn done_set(c: *mut RawCompletion, v: c_int) {
+        // SAFETY: caller holds `c->lock`.
+        u! { (*c).done = v; }
+    }
+    #[inline(always)]
+    fn lock_ptr(c: *mut RawCompletion) -> *mut spinlock_t {
+        // SAFETY: dereferences a structurally-valid completion. We only
+        // take the address of the embedded lock; no field is read.
+        u! { addr_of_mut!((*c).lock) as *mut spinlock_t }
+    }
+    #[inline(always)]
+    fn queue_ptr(c: *mut RawCompletion) -> *mut tq_t {
+        // SAFETY: see `Self::lock_ptr`.
+        u! { addr_of_mut!((*c).wait_queue) }
+    }
+    #[inline(always)]
+    fn tq_counter(q: *mut tq_t) -> c_int {
+        // SAFETY: caller holds the tq's protecting lock.
+        u! { (*q).counter }
+    }
+
+    // -----------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------
+
+    /// Try to consume one completion token. Caller must hold `c->lock`.
+    fn try_wait_for_completion_locked(c: *mut RawCompletion) -> bool {
+        let d = Self::done_get(c);
+        if d <= 0 {
+            return false;
+        }
+        if d != MAX_COMPLETIONS {
+            Self::done_set(c, d - 1);
+        }
+        true
+    }
+
+    /// Wake one waiter if any. Caller must hold `c->lock`.
+    fn completion_do_wake(c: *mut RawCompletion) {
+        let q = Self::queue_ptr(c);
+        if TqRef::from_ptr(q).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) > 0 {
+            // Return value (`*mut thread`) is intentionally discarded:
+            // the C code keeps the same `(void)p` comment about interrupts.
+            let _ = TqRef::from_ptr(q).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
+        }
     }
 }
 
@@ -221,9 +225,9 @@ extern "C" fn completion_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
         }
     }
 
-    let status = RawSpinlock::is_holding(lock_ptr(comp));
+    let status = RawSpinlock::is_holding(RawCompletion::lock_ptr(comp));
     if status != 0 {
-        RawSpinlock::unlock(lock_ptr(comp));
+        RawSpinlock::unlock(RawCompletion::lock_ptr(comp));
     }
     status
 }}
@@ -243,7 +247,7 @@ extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
     }
 
     if sleep_cb_status != 0 {
-        RawSpinlock::lock(lock_ptr(comp));
+        RawSpinlock::lock(RawCompletion::lock_ptr(comp));
     }
 }}
 
@@ -266,179 +270,181 @@ extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
 // entry points (every operation inside is a call to an already-safe helper;
 // the audited `unsafe` lives in the field accessors + the `zeroed()`/
 // `from_raw` sites), as the `u!` macro's own doc prescribes.
-pub(crate) fn completion_init(c: *mut completion_t) {
-    if c.is_null() { return; }
-    let c = as_native(c);
-    done_set(c, 0);
-    spin_init(lock_ptr(c), b"completion_spin\0".as_ptr() as *const c_char);
-    if let Some(r) = TqRef::from_ptr(queue_ptr(c)) {
-        r.init(b"completion_queue\0".as_ptr() as *const c_char, lock_ptr(c));
-    }
-}
-
-pub(crate) fn completion_reinit(c: *mut completion_t) {
-    if c.is_null() { return; }
-    let c = as_native(c);
-    done_set(c, 0);
-}
-
-pub(crate) fn try_wait_for_completion(c: *mut completion_t) -> bool {
-    if c.is_null() { return false; }
-    let c = as_native(c);
-    let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    try_wait_for_completion_locked(c)
-}
-
-pub(crate) fn wait_for_completion(c: *mut completion_t) {
-    if c.is_null() { return; }
-    let c = as_native(c);
-    let cur = machine::current_thread_ptr();
-    let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    while !try_wait_for_completion_locked(c) {
-        machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-        let _ = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(c), null_mut()));
-    }
-    if done_get(c) > 0 {
-        completion_do_wake(c);
-    }
-}
-
-pub(crate) fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int {
-    if c.is_null() { return -(EINVAL as c_int); }
-    let c = as_native(c);
-    let cur = machine::current_thread_ptr();
-
-    let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    while !try_wait_for_completion_locked(c) {
-        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-        machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(c), null_mut()));
-        if ret != 0
-            && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
-            && !try_wait_for_completion_locked(c)
-        {
-            return -(EINTR as c_int);
+impl RawCompletion {
+    pub(crate) fn init(c: *mut completion_t) {
+        if c.is_null() { return; }
+        let c = Self::as_native(c);
+        Self::done_set(c, 0);
+        spin_init(Self::lock_ptr(c), b"completion_spin\0".as_ptr() as *const c_char);
+        if let Some(r) = TqRef::from_ptr(Self::queue_ptr(c)) {
+            r.init(b"completion_queue\0".as_ptr() as *const c_char, Self::lock_ptr(c));
         }
     }
-    if done_get(c) > 0 {
-        completion_do_wake(c);
+
+    pub(crate) fn reinit(c: *mut completion_t) {
+        if c.is_null() { return; }
+        let c = Self::as_native(c);
+        Self::done_set(c, 0);
     }
-    0
-}
 
-pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
-                                        timeout_ms: u64) -> c_int {
-    if c.is_null() { return -(EINVAL as c_int); }
-    let cur = machine::current_thread_ptr();
+    pub(crate) fn try_wait(c: *mut completion_t) -> bool {
+        if c.is_null() { return false; }
+        let c = Self::as_native(c);
+        let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+        Self::try_wait_for_completion_locked(c)
+    }
 
-    if timeout_ms == 0 {
-        if try_wait_for_completion(c) {
+    pub(crate) fn wait(c: *mut completion_t) {
+        if c.is_null() { return; }
+        let c = Self::as_native(c);
+        let cur = machine::current_thread_ptr();
+        let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+        while !Self::try_wait_for_completion_locked(c) {
+            machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+            let _ = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lock_ptr(c), null_mut()));
+        }
+        if Self::done_get(c) > 0 {
+            Self::completion_do_wake(c);
+        }
+    }
+
+    pub(crate) fn wait_interruptible(c: *mut completion_t) -> c_int {
+        if c.is_null() { return -(EINVAL as c_int); }
+        let c = Self::as_native(c);
+        let cur = machine::current_thread_ptr();
+
+        let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+        while !Self::try_wait_for_completion_locked(c) {
+            if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
+            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            let ret = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lock_ptr(c), null_mut()));
+            if ret != 0
+                && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
+                && !Self::try_wait_for_completion_locked(c)
+            {
+                return -(EINTR as c_int);
+            }
+        }
+        if Self::done_get(c) > 0 {
+            Self::completion_do_wake(c);
+        }
+        0
+    }
+
+    pub(crate) fn wait_timed(c: *mut completion_t,
+                                            timeout_ms: u64) -> c_int {
+        if c.is_null() { return -(EINVAL as c_int); }
+        let cur = machine::current_thread_ptr();
+
+        if timeout_ms == 0 {
+            if Self::try_wait(c) {
+                return 0;
+            }
+            return -(ETIMEDOUT as c_int);
+        }
+
+        let c = Self::as_native(c);
+        let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+        if Self::try_wait_for_completion_locked(c) {
+            if Self::done_get(c) > 0 {
+                Self::completion_do_wake(c);
+            }
             return 0;
         }
-        return -(ETIMEDOUT as c_int);
-    }
 
-    let c = as_native(c);
-    let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    if try_wait_for_completion_locked(c) {
-        if done_get(c) > 0 {
-            completion_do_wake(c);
+        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
+        let start = machine::read_time();
+
+        while !Self::try_wait_for_completion_locked(c) {
+            if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
+            let now = machine::read_time();
+            let elapsed = now.wrapping_sub(start);
+            if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
+            let remaining_ticks = timeout_ticks - elapsed;
+            let tm = machine::tick_ms();
+            let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
+            if remaining_ms == 0 { remaining_ms = 1; }
+
+            let mut ctx = CompletionTimedCtx {
+                comp: c,
+                // SAFETY: zeroed `timer_node` is the documented initial
+                // state (matches C `.timer = {0}` implicit zero-init).
+                timer: u! { core::mem::zeroed() },
+                timeout_ms: remaining_ms,
+                timer_armed: false,
+            };
+
+            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            let ret = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
+                Some(completion_timed_sleep_cb),
+                Some(completion_timed_wake_cb),
+                &mut ctx as *mut _ as *mut c_void,
+                null_mut(),
+            ));
+            if ret != 0
+                && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
+                && !Self::try_wait_for_completion_locked(c)
+            {
+                return -(EINTR as c_int);
+            }
         }
-        return 0;
+
+        if Self::done_get(c) > 0 {
+            Self::completion_do_wake(c);
+        }
+        0
     }
 
-    let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-    let start = machine::read_time();
+    pub(crate) fn complete(c: *mut completion_t) {
+        if c.is_null() { return; }
+        let c = Self::as_native(c);
+        let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+        let d = Self::done_get(c);
+        if d != MAX_COMPLETIONS {
+            Self::done_set(c, d + 1);
+        }
+        Self::completion_do_wake(c);
+    }
 
-    while !try_wait_for_completion_locked(c) {
-        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-        let now = machine::read_time();
-        let elapsed = now.wrapping_sub(start);
-        if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
-        let remaining_ticks = timeout_ticks - elapsed;
-        let tm = machine::tick_ms();
-        let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
-        if remaining_ms == 0 { remaining_ms = 1; }
+    pub(crate) fn complete_all(c: *mut completion_t) {
+        if c.is_null() { return; }
+        let c = Self::as_native(c);
 
-        let mut ctx = CompletionTimedCtx {
-            comp: c,
-            // SAFETY: zeroed `timer_node` is the documented initial
-            // state (matches C `.timer = {0}` implicit zero-init).
-            timer: u! { core::mem::zeroed() },
-            timeout_ms: remaining_ms,
-            timer_armed: false,
-        };
+        // Local temporary queue: drain the waiters into it and wake them, all
+        // under the completion lock. The wake MUST stay inside the same
+        // critical section as `tq_bulk_move`: a waiter's `tq_wait`/`tq_wait_cb`
+        // uses this completion lock as its guard, so a signal-interrupted
+        // waiter re-checks `is_enqueued()` under that same lock. Waking outside
+        // the lock would open a window where a signal wakes a waiter after it
+        // was migrated to `temp_queue` but before `tq_wakeup_all` popped it:
+        // the waiter would observe itself on `temp_queue` (not the completion
+        // queue) and panic while self-removing, while also racing this
+        // lock-free `temp_queue` drain. Waking under the lock serializes both.
+        let mut temp_queue: tq_t = u! { core::mem::zeroed() };
+        if let Some(r) = TqRef::from_ptr(&mut temp_queue as *mut tq_t) {
+            r.init(b"completion_temp\0".as_ptr() as *const c_char, null_mut());
+        }
 
-        machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-            Some(completion_timed_sleep_cb),
-            Some(completion_timed_wake_cb),
-            &mut ctx as *mut _ as *mut c_void,
-            null_mut(),
-        ));
-        if ret != 0
-            && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
-            && !try_wait_for_completion_locked(c)
         {
-            return -(EINTR as c_int);
+            let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+            Self::done_set(c, MAX_COMPLETIONS);
+            let temp_ptr = &mut temp_queue as *mut tq_t;
+            match (TqRef::from_ptr(temp_ptr), TqRef::from_ptr(Self::queue_ptr(c))) {
+                (Some(t), Some(f)) => { t.bulk_move_from(f); }
+                _ => {}
+            }
+            if Self::tq_counter(temp_ptr) > 0 {
+                if let Some(r) = TqRef::from_ptr(temp_ptr) { r.wakeup_all(0, 0); }
+            }
         }
     }
 
-    if done_get(c) > 0 {
-        completion_do_wake(c);
+    pub(crate) fn is_done(c: *mut completion_t) -> bool {
+        if c.is_null() { return false; }
+        let c = Self::as_native(c);
+        let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
+        TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) == 0
     }
-    0
-}
-
-pub(crate) fn complete(c: *mut completion_t) {
-    if c.is_null() { return; }
-    let c = as_native(c);
-    let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    let d = done_get(c);
-    if d != MAX_COMPLETIONS {
-        done_set(c, d + 1);
-    }
-    completion_do_wake(c);
-}
-
-pub(crate) fn complete_all(c: *mut completion_t) {
-    if c.is_null() { return; }
-    let c = as_native(c);
-
-    // Local temporary queue: drain the waiters into it and wake them, all
-    // under the completion lock. The wake MUST stay inside the same
-    // critical section as `tq_bulk_move`: a waiter's `tq_wait`/`tq_wait_cb`
-    // uses this completion lock as its guard, so a signal-interrupted
-    // waiter re-checks `is_enqueued()` under that same lock. Waking outside
-    // the lock would open a window where a signal wakes a waiter after it
-    // was migrated to `temp_queue` but before `tq_wakeup_all` popped it:
-    // the waiter would observe itself on `temp_queue` (not the completion
-    // queue) and panic while self-removing, while also racing this
-    // lock-free `temp_queue` drain. Waking under the lock serializes both.
-    let mut temp_queue: tq_t = u! { core::mem::zeroed() };
-    if let Some(r) = TqRef::from_ptr(&mut temp_queue as *mut tq_t) {
-        r.init(b"completion_temp\0".as_ptr() as *const c_char, null_mut());
-    }
-
-    {
-        let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-        done_set(c, MAX_COMPLETIONS);
-        let temp_ptr = &mut temp_queue as *mut tq_t;
-        match (TqRef::from_ptr(temp_ptr), TqRef::from_ptr(queue_ptr(c))) {
-            (Some(t), Some(f)) => { t.bulk_move_from(f); }
-            _ => {}
-        }
-        if tq_counter(temp_ptr) > 0 {
-            if let Some(r) = TqRef::from_ptr(temp_ptr) { r.wakeup_all(0, 0); }
-        }
-    }
-}
-
-pub(crate) fn completion_done(c: *mut completion_t) -> bool {
-    if c.is_null() { return false; }
-    let c = as_native(c);
-    let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
-    TqRef::from_ptr(queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.size()) == 0
 }
 
 // ===========================================================================
@@ -491,37 +497,37 @@ impl KCompletion {
     /// Initialise the underlying storage. Mirrors C `completion_init`.
     #[inline]
     pub fn init(self) {
-        // SAFETY: `completion_init` accepts any valid `*mut completion_t`;
+        // SAFETY: `RawCompletion::init` accepts any valid `*mut completion_t`;
         // caller asserts the pointer is to live storage not yet shared.
-        u! { completion_init(self.raw); }
+        u! { RawCompletion::init(self.raw); }
     }
 
     /// Re-arm the completion. Mirrors C `completion_reinit`.
     #[inline]
     pub fn reinit(self) {
         // SAFETY: as above; lock-protected internally.
-        u! { completion_reinit(self.raw); }
+        u! { RawCompletion::reinit(self.raw); }
     }
 
     /// Block (uninterruptible) until a token is available.
     #[inline]
     pub fn wait(self) {
         // SAFETY: handle wraps a structurally-valid completion.
-        u! { wait_for_completion(self.raw); }
+        u! { RawCompletion::wait(self.raw); }
     }
 
     /// Non-blocking try-wait. `true` iff a token was consumed.
     #[inline]
     pub fn try_wait(self) -> bool {
         // SAFETY: see `wait`.
-        u! { try_wait_for_completion(self.raw) }
+        u! { RawCompletion::try_wait(self.raw) }
     }
 
     /// Block (interruptible). Returns `Err(Interrupted)` on signal.
     #[inline]
     pub fn wait_interruptible(self) -> Result<(), CompletionError> {
         // SAFETY: see `wait`.
-        let r = u! { wait_for_completion_interruptible(self.raw) };
+        let r = u! { RawCompletion::wait_interruptible(self.raw) };
         if r == 0 { Ok(()) }
         else if r == -(EINTR as c_int) { Err(CompletionError::Interrupted) }
         else { Err(CompletionError::Invalid) }
@@ -531,7 +537,7 @@ impl KCompletion {
     #[inline]
     pub fn wait_timed(self, timeout_ms: u64) -> Result<(), CompletionError> {
         // SAFETY: see `wait`.
-        let r = u! { wait_for_completion_timed(self.raw, timeout_ms) };
+        let r = u! { RawCompletion::wait_timed(self.raw, timeout_ms) };
         if r == 0 { Ok(()) }
         else if r == -(ETIMEDOUT as c_int) { Err(CompletionError::TimedOut) }
         else if r == -(EINTR as c_int) { Err(CompletionError::Interrupted) }
@@ -542,20 +548,20 @@ impl KCompletion {
     #[inline]
     pub fn complete(self) {
         // SAFETY: see `wait`.
-        u! { complete(self.raw); }
+        u! { RawCompletion::complete(self.raw); }
     }
 
     /// Saturate the counter and wake all waiters.
     #[inline]
     pub fn complete_all(self) {
         // SAFETY: see `wait`.
-        u! { complete_all(self.raw); }
+        u! { RawCompletion::complete_all(self.raw); }
     }
 
     /// `true` iff there are no pending waiters.
     #[inline]
     pub fn done(self) -> bool {
         // SAFETY: see `wait`.
-        u! { completion_done(self.raw) }
+        u! { RawCompletion::is_done(self.raw) }
     }
 }

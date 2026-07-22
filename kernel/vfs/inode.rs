@@ -841,7 +841,7 @@ use crate::proc::Scheduler;
 // P3-D3b: lock/mutex.rs's entry points (for `inode->mutex`) are plain
 // safe Rust fns now that their `#[no_mangle]` exports are gone; reached
 // by crate path.
-use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_trylock, mutex_unlock};
+use crate::lock::mutex::RawMutex;
 
 unsafe extern "C" {
     // printf.rs — C-variadic.
@@ -1091,7 +1091,7 @@ impl VfsInode {
         // SAFETY: non-null `inode`; only reads the mutex-held flag and the
         // valid/superblock-valid bitfields.
         unsafe {
-            if holding_mutex(ptr::addr_of_mut!((*inode).mutex)) == 0 {
+            if RawMutex::is_holding(ptr::addr_of_mut!((*inode).mutex)) == 0 {
                 return neg(EPERM);
             }
             if (*inode).flags.valid() == 0 {
@@ -1121,7 +1121,7 @@ impl VfsInode {
         // SAFETY: caller supplies a freshly allocated, otherwise-untouched
         // `vfs_inode` (matches the C original's documented precondition).
         unsafe {
-            mutex_init(
+            RawMutex::init(
                 ptr::addr_of_mut!((*inode).mutex),
                 c"vfs_inode_mutex".as_ptr() as *mut c_char,
             );
@@ -1141,13 +1141,13 @@ impl VfsInode {
     pub(crate) fn vfs_ilock(inode: *mut vfs_inode) {
         kassert!(!inode.is_null(), "vfs_ilock: inode is NULL");
         // SAFETY: non-null `inode`.
-        mutex_lock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
+        RawMutex::lock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
     }
 
     pub(crate) fn vfs_iunlock(inode: *mut vfs_inode) {
         kassert!(!inode.is_null(), "vfs_iunlock: inode is NULL");
         // SAFETY: non-null `inode`.
-        mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
+        RawMutex::unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
     }
 
     /// Increment inode reference count. Atomic-only: no locks, no sleeping,
@@ -1182,7 +1182,7 @@ impl VfsInode {
                 !holds_wlock,
                 "vfs_iput: cannot hold superblock write lock when calling"
             );
-            let holds_ilock = holding_mutex(ptr::addr_of_mut!((*inode_in).mutex)) != 0;
+            let holds_ilock = RawMutex::is_holding(ptr::addr_of_mut!((*inode_in).mutex)) != 0;
             kassert!(!holds_ilock, "vfs_iput: cannot hold inode lock when calling");
         }
 
@@ -1204,7 +1204,7 @@ impl VfsInode {
 
             VfsSuperblock::vfs_superblock_wlock(sb);
             // SAFETY: non-null `inode`.
-            if mutex_trylock(unsafe { ptr::addr_of_mut!((*inode).mutex) }) == 0 {
+            if RawMutex::trylock(unsafe { ptr::addr_of_mut!((*inode).mutex) }) == 0 {
                 VfsSuperblock::vfs_superblock_unlock(sb);
                 Scheduler::yield_now();
                 continue;
@@ -1212,7 +1212,7 @@ impl VfsInode {
 
             if atomic_dec_unless(VfsInode::refcount_atomic(inode), 1) {
                 // SAFETY: non-null `inode`.
-                mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
+                RawMutex::unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
                 VfsSuperblock::vfs_superblock_unlock(sb);
                 return;
             }
@@ -1244,7 +1244,7 @@ impl VfsInode {
                 let old = VfsInode::refcount_atomic(inode).fetch_sub(1, Ordering::SeqCst);
                 kassert!(old - 1 >= 0, "vfs_iput: inode refcount underflow");
                 // SAFETY: non-null `inode`.
-                mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
+                RawMutex::unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
                 VfsSuperblock::vfs_superblock_unlock(sb);
                 return;
             }
@@ -1277,7 +1277,7 @@ impl VfsInode {
             let valid = unsafe { (*inode).flags.valid() != 0 };
             if dirty && valid && !failed_clean && attached {
                 // SAFETY: non-null `inode`.
-                mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
+                RawMutex::unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
                 VfsSuperblock::vfs_superblock_unlock(sb);
                 failed_clean = VfsInode::vfs_sync_inode(inode) != 0;
                 continue;
@@ -1308,7 +1308,7 @@ impl VfsInode {
                     // Release locks before acquiring the transaction:
                     // destroy_inode may do begin/end_op cycles internally
                     // for batching and cannot run with these locks held.
-                    unsafe { mutex_unlock(ptr::addr_of_mut!((*inode).mutex)) };
+                    unsafe { RawMutex::unlock(ptr::addr_of_mut!((*inode).mutex)) };
                     VfsSuperblock::vfs_superblock_unlock(sb);
 
                     let mut skip_destroy = false;
@@ -1318,7 +1318,7 @@ impl VfsInode {
                         // recovery. Still need to remove from cache.
                         unsafe { (*inode).flags.set_destroying(0) };
                         VfsSuperblock::vfs_superblock_wlock(sb);
-                        unsafe { mutex_lock(ptr::addr_of_mut!((*inode).mutex)) };
+                        unsafe { RawMutex::lock(ptr::addr_of_mut!((*inode).mutex)) };
                         skip_destroy = true;
                     }
 
@@ -1334,7 +1334,7 @@ impl VfsInode {
 
                         VfsSuperblock::vfs_superblock_wlock(sb);
                         unsafe {
-                            mutex_lock(ptr::addr_of_mut!((*inode).mutex));
+                            RawMutex::lock(ptr::addr_of_mut!((*inode).mutex));
                             // After destroy, on-disk data is freed: mark
                             // invalid/not-dirty so we never try to sync it.
                             (*inode).flags.set_valid(0);
@@ -1355,7 +1355,7 @@ impl VfsInode {
 
             let should_free_sb = !attached && unsafe { (*sb).orphan_count } == 0;
 
-            unsafe { mutex_unlock(ptr::addr_of_mut!((*inode).mutex)) };
+            unsafe { RawMutex::unlock(ptr::addr_of_mut!((*inode).mutex)) };
             VfsSuperblock::vfs_superblock_unlock(sb);
 
             // out:

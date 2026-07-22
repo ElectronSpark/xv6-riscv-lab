@@ -298,7 +298,7 @@ use crate::dev::bio::{bio_add_seg, bio_alloc};
 use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
 // P3-D3b: lock/completion.rs's wait entry points are plain safe Rust fns
 // now that their `#[no_mangle]` exports are gone; reached by crate path.
-use crate::lock::completion::{wait_for_completion, wait_for_completion_interruptible};
+use crate::lock::completion::RawCompletion;
 // P3-9b: `KArc<bio>` replaces the manual `bio_alloc`/`bio_release` pairing
 // in `xv6fs_pcache_read_page`/`xv6fs_pcache_write_page` below -- see
 // `kernel/kobject.rs`'s `KArc` doc and `kernel/dev/bio.rs`'s `HasKobject`
@@ -403,11 +403,11 @@ impl Xv6fs {
     /// `bio` must point to a live, submitted `struct bio`.
     unsafe fn bio_await(bio: *mut bio) -> c_int {
         unsafe {
-            let ret = wait_for_completion_interruptible(ptr::addr_of_mut!((*bio).io_completion));
+            let ret = RawCompletion::wait_interruptible(ptr::addr_of_mut!((*bio).io_completion));
             if ret == Xv6fs::neg(crate::bindings::EINTR) {
                 // Signal received but I/O is in flight -- must let it finish
                 // so the bio/buffer resources are safe to release.
-                wait_for_completion(ptr::addr_of_mut!((*bio).io_completion));
+                RawCompletion::wait(ptr::addr_of_mut!((*bio).io_completion));
                 return if (*bio).error != 0 { (*bio).error } else { Xv6fs::neg(crate::bindings::EINTR) };
             }
             (*bio).error

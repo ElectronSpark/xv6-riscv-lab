@@ -75,7 +75,7 @@ fn __page_to_pa(page: *mut page_t) -> u64 {
 use crate::dev::blkdev::blkdev_register;
 // P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached by crate path.
-use crate::lock::completion::{complete_all, completion_reinit};
+use crate::lock::completion::RawCompletion;
 
 /// `kernel/inc/uabi/stat.h` `S_IFBLK`, same local copy as other `dev/*.rs`.
 const S_IFBLK: u32 = 0o060_000;
@@ -159,7 +159,7 @@ unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
         (*bio_ptr).flags.set_done(0);
         (*bio_ptr).done_size = 0;
         (*bio_ptr).error = 0;
-        completion_reinit(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
     }
     fence(Ordering::SeqCst);
 }
@@ -189,7 +189,7 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
     unsafe {
         bio_end_io_acct(bio_ptr);
         bio_endio(bio_ptr);
-        complete_all(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
     }
 }
 

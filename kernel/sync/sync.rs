@@ -595,8 +595,8 @@ use core::ffi::{c_char, c_int};
 
 use crate::bindings::{completion_t, mutex_t, rwlock as rwlock_t, rwsem_t, semaphore as sem_t};
 
-pub(crate) use crate::lock::completion::{complete, complete_all, completion_done, completion_init, completion_reinit, try_wait_for_completion, wait_for_completion, wait_for_completion_interruptible, wait_for_completion_timed};
-pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_lock_interruptible, mutex_lock_timed, mutex_trylock, mutex_unlock};
+pub(crate) use crate::lock::completion::RawCompletion;
+pub(crate) use crate::lock::mutex::RawMutex;
 // `crate::lock::rwlock::rwlock_*` are genuinely `unsafe fn`; this file's
 // original extern declaration asserted `pub safe fn` (this crate's usual
 // FFI-facade convention — every method below already documents its own
@@ -626,7 +626,7 @@ safe_rwlock_wrapper!(rwlock_wunlock(l: *mut rwlock_t));
 safe_rwlock_wrapper!(rwlock_runlock_irqrestore(l: *mut rwlock_t, intena: c_int));
 safe_rwlock_wrapper!(rwlock_wunlock_irqrestore(l: *mut rwlock_t, intena: c_int));
 pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_read_interruptible, rwsem_acquire_read_timed, rwsem_acquire_write, rwsem_acquire_write_interruptible, rwsem_acquire_write_timed, rwsem_init, rwsem_is_write_holding, rwsem_release, rwsem_try_acquire_read, rwsem_try_acquire_write};
-pub(crate) use crate::lock::semaphore::{sem_getvalue, sem_init, sem_post, sem_timedwait, sem_trywait, sem_wait, sem_wait_interruptible};
+pub(crate) use crate::lock::semaphore::RawSemaphore;
 
 // ---------------------------------------------------------------------------
 // KMutex — typed handle + RAII guard around `mutex_t`.
@@ -646,22 +646,22 @@ impl KMutex {
     #[inline(always)]
     pub fn as_ptr(self) -> *mut mutex_t { self.raw }
     #[inline(always)]
-    pub fn init(self, name: *mut c_char) { mutex_init(self.raw, name); }
+    pub fn init(self, name: *mut c_char) { RawMutex::init(self.raw, name); }
     #[inline(always)]
-    pub fn holding(self) -> bool { holding_mutex(self.raw) != 0 }
+    pub fn holding(self) -> bool { RawMutex::is_holding(self.raw) != 0 }
 
     /// Block until the mutex is acquired; returns a guard that
     /// releases on drop.
     #[inline(always)]
     pub fn lock(self) -> KMutexGuard {
-        mutex_lock(self.raw);
+        RawMutex::lock(self.raw);
         KMutexGuard { raw: self.raw, _not_send_sync: PhantomData }
     }
 
     /// Try once. `Some(guard)` if acquired, `None` otherwise.
     #[inline(always)]
     pub fn try_lock(self) -> Option<KMutexGuard> {
-        if mutex_trylock(self.raw) != 0 {
+        if RawMutex::trylock(self.raw) != 0 {
             Some(KMutexGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { None }
     }
@@ -670,7 +670,7 @@ impl KMutex {
     /// signal / null pointer.
     #[inline(always)]
     pub fn lock_interruptible(self) -> Result<KMutexGuard, c_int> {
-        let r = mutex_lock_interruptible(self.raw);
+        let r = RawMutex::lock_interruptible(self.raw);
         if r == 0 {
             Ok(KMutexGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
@@ -679,7 +679,7 @@ impl KMutex {
     /// Acquire with a timeout in milliseconds.
     #[inline(always)]
     pub fn lock_timed(self, timeout_ms: u64) -> Result<KMutexGuard, c_int> {
-        let r = mutex_lock_timed(self.raw, timeout_ms);
+        let r = RawMutex::lock_timed(self.raw, timeout_ms);
         if r == 0 {
             Ok(KMutexGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
@@ -701,7 +701,7 @@ pub struct KMutexGuard {
 
 impl Drop for KMutexGuard {
     #[inline(always)]
-    fn drop(&mut self) { mutex_unlock(self.raw); }
+    fn drop(&mut self) { RawMutex::unlock(self.raw); }
 }
 
 // ---------------------------------------------------------------------------
@@ -824,31 +824,31 @@ impl KCompletion {
     #[inline(always)]
     pub fn as_ptr(self) -> *mut completion_t { self.raw }
     #[inline(always)]
-    pub fn init(self) { completion_init(self.raw); }
+    pub fn init(self) { RawCompletion::init(self.raw); }
     #[inline(always)]
-    pub fn reinit(self) { completion_reinit(self.raw); }
+    pub fn reinit(self) { RawCompletion::reinit(self.raw); }
     #[inline(always)]
-    pub fn try_wait(self) -> bool { try_wait_for_completion(self.raw) }
+    pub fn try_wait(self) -> bool { RawCompletion::try_wait(self.raw) }
     #[inline(always)]
-    pub fn wait(self) { wait_for_completion(self.raw); }
+    pub fn wait(self) { RawCompletion::wait(self.raw); }
     #[inline(always)]
     pub fn wait_interruptible(self) -> Result<(), c_int> {
-        match wait_for_completion_interruptible(self.raw) {
+        match RawCompletion::wait_interruptible(self.raw) {
             0 => Ok(()), e => Err(e),
         }
     }
     #[inline(always)]
     pub fn wait_timed(self, timeout_ms: u64) -> Result<(), c_int> {
-        match wait_for_completion_timed(self.raw, timeout_ms) {
+        match RawCompletion::wait_timed(self.raw, timeout_ms) {
             0 => Ok(()), e => Err(e),
         }
     }
     #[inline(always)]
-    pub fn complete(self) { complete(self.raw); }
+    pub fn complete(self) { RawCompletion::complete(self.raw); }
     #[inline(always)]
-    pub fn complete_all(self) { complete_all(self.raw); }
+    pub fn complete_all(self) { RawCompletion::complete_all(self.raw); }
     #[inline(always)]
-    pub fn is_done(self) -> bool { completion_done(self.raw) }
+    pub fn is_done(self) -> bool { RawCompletion::is_done(self.raw) }
 }
 
 // ---------------------------------------------------------------------------
@@ -870,47 +870,47 @@ impl KSemaphore {
     pub fn as_ptr(self) -> *mut sem_t { self.raw }
     #[inline(always)]
     pub fn init(self, name: *const c_char, value: c_int) -> c_int {
-        sem_init(self.raw, name, value)
+        RawSemaphore::init(self.raw, name, value)
     }
     #[inline(always)]
     pub fn value(self) -> Result<c_int, c_int> {
         let mut v: c_int = 0;
-        match sem_getvalue(self.raw, &mut v as *mut c_int) {
+        match RawSemaphore::getvalue(self.raw, &mut v as *mut c_int) {
             0 => Ok(v), e => Err(e),
         }
     }
     /// Try to decrement once.
     #[inline(always)]
     pub fn try_acquire(self) -> Option<KSemPermit> {
-        if sem_trywait(self.raw) == 0 {
+        if RawSemaphore::trywait(self.raw) == 0 {
             Some(KSemPermit { raw: self.raw, _not_send_sync: PhantomData })
         } else { None }
     }
     /// Decrement, blocking if the count is zero.
     #[inline(always)]
     pub fn acquire(self) -> Result<KSemPermit, c_int> {
-        match sem_wait(self.raw) {
+        match RawSemaphore::wait(self.raw) {
             0 => Ok(KSemPermit { raw: self.raw, _not_send_sync: PhantomData }),
             e => Err(e),
         }
     }
     #[inline(always)]
     pub fn acquire_interruptible(self) -> Result<KSemPermit, c_int> {
-        match sem_wait_interruptible(self.raw) {
+        match RawSemaphore::wait_interruptible(self.raw) {
             0 => Ok(KSemPermit { raw: self.raw, _not_send_sync: PhantomData }),
             e => Err(e),
         }
     }
     #[inline(always)]
     pub fn acquire_timed(self, timeout_ms: u64) -> Result<KSemPermit, c_int> {
-        match sem_timedwait(self.raw, timeout_ms) {
+        match RawSemaphore::timedwait(self.raw, timeout_ms) {
             0 => Ok(KSemPermit { raw: self.raw, _not_send_sync: PhantomData }),
             e => Err(e),
         }
     }
     /// Release one count manually (no guard).
     #[inline(always)]
-    pub fn post(self) -> c_int { sem_post(self.raw) }
+    pub fn post(self) -> c_int { RawSemaphore::post(self.raw) }
 }
 
 /// Permit returned from a successful semaphore `acquire`. Dropping
@@ -929,7 +929,7 @@ impl KSemPermit {
 
 impl Drop for KSemPermit {
     #[inline(always)]
-    fn drop(&mut self) { let _ = sem_post(self.raw); }
+    fn drop(&mut self) { let _ = RawSemaphore::post(self.raw); }
 }
 
 // ---------------------------------------------------------------------------

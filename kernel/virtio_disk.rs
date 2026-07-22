@@ -126,7 +126,7 @@ use crate::sync::SpinLock;
 use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 // P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached by crate path.
-use crate::lock::completion::{complete_all, completion_reinit};
+use crate::lock::completion::RawCompletion;
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
 // NO-STANDALONE-FN: the `tq_init`/`tq_wakeup_all` free-fn delegators were
@@ -687,7 +687,7 @@ unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
         (*bio_ptr).flags.set_done(0);
         (*bio_ptr).done_size = 0;
         (*bio_ptr).error = 0;
-        completion_reinit(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
     }
     fence(Ordering::SeqCst);
 }
@@ -717,7 +717,7 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
     unsafe {
         bio_end_io_acct(bio_ptr);
         bio_endio(bio_ptr);
-        complete_all(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
     }
 }
 

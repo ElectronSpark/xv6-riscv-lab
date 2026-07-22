@@ -429,7 +429,7 @@ unsafe extern "C" {
 
 // P3-D3b: lock/mutex.rs's `mutex_init` (for `file->lock`) is a plain safe
 // Rust fn now that its `#[no_mangle]` export is gone; reached by crate path.
-use crate::lock::mutex::mutex_init;
+use crate::lock::mutex::RawMutex;
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -755,7 +755,7 @@ impl VfsFile {
         unsafe {
             ptr::write_bytes(file, 0, 1);
             ptr::addr_of_mut!((*file).ops).write(None);
-            mutex_init(ptr::addr_of_mut!((*file).lock), c"vfs_file_lock".as_ptr() as *mut c_char);
+            RawMutex::init(ptr::addr_of_mut!((*file).lock), c"vfs_file_lock".as_ptr() as *mut c_char);
             (*file).ref_count = 1;
         }
         file

@@ -53,7 +53,7 @@
 //! two in this order. Both `bget` exit paths (`return`ed a cached hit
 //! or a freshly recycled buffer) call `drop(bc)` -- releasing the
 //! `SpinLockGuard` -- immediately before `mutex_lock`, mirroring the C
-//! original's `spin_unlock(&bcache.lock); mutex_lock(&b->lock);`
+//! original's `spin_unlock(&bcache.lock); RawMutex::lock(&b->lock);`
 //! ordering exactly.
 //!
 //! # Data structures
@@ -237,8 +237,8 @@ const _: () = {
 use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
 use crate::dev::bio::{bio_add_seg, bio_alloc, bio_release};
 pub(crate) use crate::hlist::{hlist_get, hlist_init, hlist_pop, hlist_put};
-pub(crate) use crate::lock::completion::{wait_for_completion, wait_for_completion_interruptible};
-pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};
+pub(crate) use crate::lock::completion::RawCompletion;
+pub(crate) use crate::lock::mutex::RawMutex;
 
 // `page_alloc`/`__pa_to_page` are genuinely `unsafe fn` in `crate::mm::page`
 // (`pub(crate)` since P3-D3a); this file's original extern
@@ -475,9 +475,9 @@ fn bio_await(bio_ptr: *mut bio) -> c_int {
     // SAFETY: `bio_ptr` is a live bio this file just submitted and owns
     // exclusively until this wait completes; `io_completion` is a plain
     // embedded field.
-    let ret = unsafe { wait_for_completion_interruptible(&raw mut (*bio_ptr).io_completion) };
+    let ret = unsafe { RawCompletion::wait_interruptible(&raw mut (*bio_ptr).io_completion) };
     if ret == -EINTR {
-        unsafe { wait_for_completion(&raw mut (*bio_ptr).io_completion) };
+        unsafe { RawCompletion::wait(&raw mut (*bio_ptr).io_completion) };
         let err = unsafe { (*bio_ptr).error };
         return if err != 0 { err } else { -EINTR };
     }
@@ -598,7 +598,7 @@ pub(crate) fn binit() {
             machine::list_entry_init(&raw mut (*b).free_entry);
             machine::list_entry_init(&raw mut (*b).dirty_entry);
             (*b).dirty = 0;
-            mutex_init(&raw mut (*b).lock, c"buffer".as_ptr() as *mut core::ffi::c_char);
+            RawMutex::init(&raw mut (*b).lock, c"buffer".as_ptr() as *mut core::ffi::c_char);
             ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
         }
     }
@@ -633,7 +633,7 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
         // sleeplock -- see module doc's "Lock-ordering hazard" note.
         drop(bc);
         // SAFETY: `b` live.
-        mutex_lock(unsafe { &raw mut (*b).lock });
+        RawMutex::lock(unsafe { &raw mut (*b).lock });
         return b;
     }
 
@@ -698,7 +698,7 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
     // point the C original's `spin_unlock(&bcache.lock)` sat at).
     drop(bc);
     // SAFETY: `b` live.
-    mutex_lock(unsafe { &raw mut (*b).lock });
+    RawMutex::lock(unsafe { &raw mut (*b).lock });
     b
 }
 
@@ -748,7 +748,7 @@ pub(crate) fn bwrite(b: *mut buf) {
     // address-of-field needs an (immediately-scoped) `unsafe`, matching
     // the C precondition.
     // SAFETY: `b` caller-owned.
-    if holding_mutex(unsafe { &raw mut (*b).lock }) == 0 {
+    if RawMutex::is_holding(unsafe { &raw mut (*b).lock }) == 0 {
         xv6_panic(c"bwrite".as_ptr());
     }
     // SAFETY: `b` caller-owned and locked (just checked above).
@@ -792,7 +792,7 @@ pub(crate) fn bwrite(b: *mut buf) {
 pub(crate) fn bwrite_async(b: *mut buf) {
     // See `bwrite`: only the raw address-of-field needs `unsafe`.
     // SAFETY: `b` caller-owned.
-    if holding_mutex(unsafe { &raw mut (*b).lock }) == 0 {
+    if RawMutex::is_holding(unsafe { &raw mut (*b).lock }) == 0 {
         xv6_panic(c"bwrite_async".as_ptr());
     }
     let mut bc = BCACHE.lock();
@@ -840,7 +840,7 @@ pub(crate) fn bsync() {
 
         // Lock buffer and write to disk.
         // SAFETY: `b` live.
-        mutex_lock(unsafe { &raw mut (*b).lock });
+        RawMutex::lock(unsafe { &raw mut (*b).lock });
 
         // SAFETY: `b` locked (mutex held by this thread, just above).
         let valid = unsafe { (*b).valid } != 0;
@@ -860,7 +860,7 @@ pub(crate) fn bsync() {
         }
 
         // SAFETY: `b` live.
-        mutex_unlock(unsafe { &raw mut (*b).lock });
+        RawMutex::unlock(unsafe { &raw mut (*b).lock });
 
         // Release our reference.
         let mut bc = BCACHE.lock();
@@ -886,13 +886,13 @@ pub(crate) fn bdirty_count() -> u32 {
 pub(crate) fn brelse(b: *mut buf) {
     // SAFETY: `b` caller-owned; lock-holding checked, then released --
     // matches the C precondition, before `bcache.lock` is taken below
-    // (`holding_mutex`/`mutex_unlock` are safe FFI forwards; only the
-    // raw address-of-field genuinely needs `unsafe`).
+    // (`RawMutex::is_holding`/`RawMutex::unlock` are safe FFI forwards;
+    // only the raw address-of-field genuinely needs `unsafe`).
     unsafe {
-        if holding_mutex(&raw mut (*b).lock) == 0 {
+        if RawMutex::is_holding(&raw mut (*b).lock) == 0 {
             xv6_panic(c"brelse".as_ptr());
         }
-        mutex_unlock(&raw mut (*b).lock);
+        RawMutex::unlock(&raw mut (*b).lock);
     }
 
     let mut bc = BCACHE.lock();

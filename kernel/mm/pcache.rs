@@ -349,7 +349,7 @@ mod ffi {
 pub(crate) use crate::printf::{__panic_end, __panic_start};
 pub(crate) use crate::timer::sched_timer::sleep_ms;
 pub(crate) use crate::timer::timer_core::get_jiffs;
-pub(crate) use crate::lock::completion::{complete_all, completion_init, completion_reinit, wait_for_completion};
+pub(crate) use crate::lock::completion::RawCompletion;
 pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
 // P3-D3b: `kthread_create` (proc/thread.rs) and the proc/workqueue.rs
 // entry points are plain safe Rust fns now that their `#[no_mangle]`
@@ -938,19 +938,19 @@ impl PcacheHandle {
     }
     #[inline]
     fn flush_completion_init(self) {
-        completion_init(self.flush_completion_ptr());
+        RawCompletion::init(self.flush_completion_ptr());
     }
     #[inline]
     fn flush_completion_reinit(self) {
-        completion_reinit(self.flush_completion_ptr());
+        RawCompletion::reinit(self.flush_completion_ptr());
     }
     #[inline]
     fn flush_completion_complete_all(self) {
-        complete_all(self.flush_completion_ptr());
+        RawCompletion::complete_all(self.flush_completion_ptr());
     }
     #[inline]
     fn flush_completion_wait(self) {
-        wait_for_completion(self.flush_completion_ptr());
+        RawCompletion::wait(self.flush_completion_ptr());
     }
 
     // -- rb tree (page_map) ------------------------------------------------
@@ -1404,7 +1404,7 @@ impl Pcache {
 
 
     fn global_flusher_complete_all() {
-        complete_all(Pcache::global_completion());
+        RawCompletion::complete_all(Pcache::global_completion());
     }
 
 
@@ -2112,7 +2112,7 @@ impl Pcache {
             return;
         }
         Pcache::set_flusher_running(true);
-        completion_reinit(Pcache::global_completion());
+        RawCompletion::reinit(Pcache::global_completion());
         let pcb = (unsafe { *PCACHE_FLUSHER_THREAD_PCB.get() });
         if machine::current_thread_ptr() != pcb {
             Pcache::wakeup(pcb);
@@ -2123,7 +2123,7 @@ impl Pcache {
 
     fn wait_flusher() -> c_int {
         if Pcache::get_flusher_running() {
-            wait_for_completion(Pcache::global_completion());
+            RawCompletion::wait(Pcache::global_completion());
         }
         0
     }
@@ -2727,7 +2727,7 @@ impl Pcache {
         assert_msg(!wq.is_null(), b"Failed to create global pcache flush workqueue\0");
         Pcache::set_flush_wq(wq);
         crate::kprintln!("Page cache subsystem initialized");
-        completion_init(Pcache::global_completion());
+        RawCompletion::init(Pcache::global_completion());
         Pcache::global_flusher_complete_all();
         Pcache::create_flusher_thread();
     }

@@ -102,77 +102,81 @@ const _: () = {
     assert!(core::mem::offset_of!(RawMutex, holder) == 80, "mutex.holder offset");
 };
 
-/// Reinterpret the bindgen `*mut mutex_t` as the native mirror.
-///
-/// SAFETY: layout equivalence is proven at compile time by the
-/// assertions above; the caller provides a valid, non-dangling
-/// `*mut mutex_t`.
-#[inline(always)]
-fn as_native(m: *mut mutex_t) -> *mut RawMutex {
-    m as *mut RawMutex
-}
-
-// ---------------------------------------------------------------------------
-// Centralised-unsafe field accessors
-// ---------------------------------------------------------------------------
-
-#[inline(always)]
-fn lk_ptr(m: *mut RawMutex) -> *mut spinlock_t {
-    // SAFETY: structurally valid mutex.
-    u! { addr_of_mut!((*m).lk) as *mut spinlock_t }
-}
-#[inline(always)]
-fn wq_ptr(m: *mut RawMutex) -> *mut tq_t {
-    // SAFETY: see `lk_ptr`.
-    u! { addr_of_mut!((*m).wait_queue) }
-}
-#[inline(always)]
-fn holder_atomic<'a>(m: *mut RawMutex) -> &'a AtomicI32 {
-    // SAFETY: `holder` is a 4-byte aligned `pid_t` (`c_int`). We model
-    // it as `AtomicI32` to perform `smp_store_release` / `_load_acquire`
-    // / `atomic_cas` matching the C macros.
-    u! { &*(addr_of_mut!((*m).holder) as *const AtomicI32) }
-}
-#[inline(always)]
-fn set_name(m: *mut RawMutex, name: *mut c_char) {
-    // SAFETY: caller has exclusive access at init time.
-    u! { (*m).name = name; }
-}
-/// Mirror `__mutex_set_holder` (smp_store_release).
-#[inline(always)]
-fn set_holder(m: *mut RawMutex, pid: c_int) {
-    holder_atomic(m).store(pid, Ordering::Release);
-}
-/// Mirror `__mutex_holder` (smp_load_acquire).
-#[inline(always)]
-fn get_holder(m: *mut RawMutex) -> c_int {
-    holder_atomic(m).load(Ordering::Acquire)
-}
-/// Mirror `__mutex_try_set_holder` = atomic_cas(&holder, -1, pid).
-/// Returns true on success (we took the lock).
-#[inline(always)]
-fn try_set_holder(m: *mut RawMutex, pid: c_int) -> bool {
-    holder_atomic(m)
-        .compare_exchange(-1, pid, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-}
-/// Wake one waiter; caller holds `lk->lk`. Mirrors `__do_wakeup`.
-fn do_wakeup(m: *mut RawMutex) {
-    // Null-queue path is unreachable (`wq_ptr` is a live embedded-field
-    // address); on an empty valid queue `wakeup_one` returns null, matching
-    // the `null_mut()` default here (former `tq_wakeup` null->ERR_PTR path).
-    let next = TqRef::from_ptr(wq_ptr(m)).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
-    if next.is_null() {
-        set_holder(m, -1);
-        return;
+impl RawMutex {
+    /// Reinterpret the bindgen `*mut mutex_t` as the native mirror.
+    ///
+    /// SAFETY: layout equivalence is proven at compile time by the
+    /// assertions above; the caller provides a valid, non-dangling
+    /// `*mut mutex_t`.
+    #[inline(always)]
+    fn as_native(m: *mut mutex_t) -> *mut RawMutex {
+        m as *mut RawMutex
     }
-    // `machine::thread_pid` already filters out null and IS_ERR pointers,
-    // returning -1; in that case we leave the holder unchanged to
-    // match the C `assert(!IS_ERR(...))` shape (do not propagate the
-    // bogus value into `holder`).
-    let pid = machine::thread_pid(next);
-    if pid != -1 {
-        set_holder(m, pid);
+
+    // -----------------------------------------------------------------
+    // Centralised-unsafe field accessors. Raw-pointer parameter kept
+    // (NOT `&self`): see the module doc's freeze-noalias note (mirrors
+    // spinlock.rs's pilot conversion).
+    // -----------------------------------------------------------------
+
+    #[inline(always)]
+    fn lk_ptr(m: *mut RawMutex) -> *mut spinlock_t {
+        // SAFETY: structurally valid mutex.
+        u! { addr_of_mut!((*m).lk) as *mut spinlock_t }
+    }
+    #[inline(always)]
+    fn wq_ptr(m: *mut RawMutex) -> *mut tq_t {
+        // SAFETY: see `Self::lk_ptr`.
+        u! { addr_of_mut!((*m).wait_queue) }
+    }
+    #[inline(always)]
+    fn holder_atomic<'a>(m: *mut RawMutex) -> &'a AtomicI32 {
+        // SAFETY: `holder` is a 4-byte aligned `pid_t` (`c_int`). We model
+        // it as `AtomicI32` to perform `smp_store_release` / `_load_acquire`
+        // / `atomic_cas` matching the C macros.
+        u! { &*(addr_of_mut!((*m).holder) as *const AtomicI32) }
+    }
+    #[inline(always)]
+    fn set_name(m: *mut RawMutex, name: *mut c_char) {
+        // SAFETY: caller has exclusive access at init time.
+        u! { (*m).name = name; }
+    }
+    /// Mirror `__mutex_set_holder` (smp_store_release).
+    #[inline(always)]
+    fn set_holder(m: *mut RawMutex, pid: c_int) {
+        Self::holder_atomic(m).store(pid, Ordering::Release);
+    }
+    /// Mirror `__mutex_holder` (smp_load_acquire).
+    #[inline(always)]
+    fn get_holder(m: *mut RawMutex) -> c_int {
+        Self::holder_atomic(m).load(Ordering::Acquire)
+    }
+    /// Mirror `__mutex_try_set_holder` = atomic_cas(&holder, -1, pid).
+    /// Returns true on success (we took the lock).
+    #[inline(always)]
+    fn try_set_holder(m: *mut RawMutex, pid: c_int) -> bool {
+        Self::holder_atomic(m)
+            .compare_exchange(-1, pid, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+    /// Wake one waiter; caller holds `lk->lk`. Mirrors `__do_wakeup`.
+    fn do_wakeup(m: *mut RawMutex) {
+        // Null-queue path is unreachable (`wq_ptr` is a live embedded-field
+        // address); on an empty valid queue `wakeup_one` returns null, matching
+        // the `null_mut()` default here (former `tq_wakeup` null->ERR_PTR path).
+        let next = TqRef::from_ptr(Self::wq_ptr(m)).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
+        if next.is_null() {
+            Self::set_holder(m, -1);
+            return;
+        }
+        // `machine::thread_pid` already filters out null and IS_ERR pointers,
+        // returning -1; in that case we leave the holder unchanged to
+        // match the C `assert(!IS_ERR(...))` shape (do not propagate the
+        // bogus value into `holder`).
+        let pid = machine::thread_pid(next);
+        if pid != -1 {
+            Self::set_holder(m, pid);
+        }
     }
 }
 
@@ -229,8 +233,8 @@ extern "C" fn mutex_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
             ctx.set_armed(true);
         }
     }
-    let status = RawSpinlock::is_holding(lk_ptr(m));
-    if status != 0 { RawSpinlock::unlock(lk_ptr(m)); }
+    let status = RawSpinlock::is_holding(RawMutex::lk_ptr(m));
+    if status != 0 { RawSpinlock::unlock(RawMutex::lk_ptr(m)); }
     status
 }}
 
@@ -247,7 +251,7 @@ extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
         sched_timer_done(tn);
         ctx.set_armed(false);
     }
-    if sleep_cb_status != 0 { RawSpinlock::lock(lk_ptr(m)); }
+    if sleep_cb_status != 0 { RawSpinlock::lock(RawMutex::lk_ptr(m)); }
 }}
 
 // ---------------------------------------------------------------------------
@@ -265,119 +269,121 @@ extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 // the public entry points (all inner operations are already-safe helper
 // calls; the audited `unsafe` stays in the field accessors + `zeroed()`/
 // `from_raw`).
-pub(crate) fn mutex_init(m: *mut mutex_t, name: *mut c_char) {
-    let m = as_native(m);
-    spin_init(lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
-    if let Some(r) = TqRef::from_ptr(wq_ptr(m)) {
-        r.init(b"sleep lock wait queue\0".as_ptr() as *const c_char, lk_ptr(m));
+impl RawMutex {
+    pub(crate) fn init(m: *mut mutex_t, name: *mut c_char) {
+        let m = Self::as_native(m);
+        spin_init(Self::lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
+        if let Some(r) = TqRef::from_ptr(Self::wq_ptr(m)) {
+            r.init(b"sleep lock wait queue\0".as_ptr() as *const c_char, Self::lk_ptr(m));
+        }
+        Self::set_name(m, name);
+        Self::set_holder(m, -1);
     }
-    set_name(m, name);
-    set_holder(m, -1);
-}
 
-pub(crate) fn mutex_lock(m: *mut mutex_t) {
-    let m = as_native(m);
-    let cur = machine::current_thread_ptr();
-    let pid = machine::thread_pid(cur);
+    pub(crate) fn lock(m: *mut mutex_t) {
+        let m = Self::as_native(m);
+        let cur = machine::current_thread_ptr();
+        let pid = machine::thread_pid(cur);
 
-    if try_set_holder(m, pid) { return; }
+        if Self::try_set_holder(m, pid) { return; }
 
-    let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
-    if try_set_holder(m, pid) { return; }
+        let _g = KSpinlock::from_bindings(Self::lk_ptr(m)).lock();
+        if Self::try_set_holder(m, pid) { return; }
 
-    while get_holder(m) != pid {
-        machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
-        let _ = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(m), null_mut()));
-    }
-}
-
-pub(crate) fn mutex_unlock(m: *mut mutex_t) {
-    let m = as_native(m);
-    let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
-    do_wakeup(m);
-}
-
-pub(crate) fn holding_mutex(m: *mut mutex_t) -> c_int {
-    let m = as_native(m);
-    let cur = machine::current_thread_ptr();
-    if cur.is_null() { return 0; }
-    // SeqCst load to match `__atomic_load_n(..., SEQ_CST)` in C.
-    let h = holder_atomic(m).load(Ordering::SeqCst);
-    if h == machine::thread_pid(cur) { 1 } else { 0 }
-}
-
-pub(crate) fn mutex_trylock(m: *mut mutex_t) -> c_int {
-    let m = as_native(m);
-    let cur = machine::current_thread_ptr();
-    let pid = machine::thread_pid(cur);
-    if try_set_holder(m, pid) { 1 } else { 0 }
-}
-
-pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int {
-    if m.is_null() { return -(EINVAL as c_int); }
-    let m = as_native(m);
-    let cur = machine::current_thread_ptr();
-    let pid = machine::thread_pid(cur);
-
-    if try_set_holder(m, pid) { return 0; }
-
-    let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
-    if try_set_holder(m, pid) { return 0; }
-
-    while get_holder(m) != pid {
-        if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-        machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lk_ptr(m), null_mut()));
-        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && get_holder(m) != pid {
-            return -(EINTR as c_int);
+        while Self::get_holder(m) != pid {
+            machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+            let _ = TqRef::from_ptr(Self::wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(m), null_mut()));
         }
     }
-    0
-}
 
-pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
-    if m.is_null() { return -(EINVAL as c_int); }
-    let m = as_native(m);
-    let cur = machine::current_thread_ptr();
-    let pid = machine::thread_pid(cur);
-
-    if try_set_holder(m, pid) { return 0; }
-    if timeout_ms == 0 { return -(ETIMEDOUT as c_int); }
-
-    let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
-    if try_set_holder(m, pid) { return 0; }
-
-    let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-    let start = machine::read_time();
-    let tm = machine::tick_ms();
-
-    while get_holder(m) != pid {
-        let now = machine::read_time();
-        let elapsed = now.wrapping_sub(start);
-        if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
-        let remaining_ticks = timeout_ticks - elapsed;
-        let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
-        if remaining_ms == 0 { remaining_ms = 1; }
-
-        let mut ctx = MutexTimedCtx {
-            lock: m,
-            // SAFETY: zero-init of `timer_node` mirrors C `.timer = {0}`.
-            timer: u! { core::mem::zeroed() },
-            timeout_ms: remaining_ms,
-            timer_armed: false,
-        };
-        machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
-        let ret = TqRef::from_ptr(wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-            Some(mutex_timed_sleep_cb),
-            Some(mutex_timed_wake_cb),
-            &mut ctx as *mut _ as *mut c_void,
-            null_mut(),
-        ));
-        if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && get_holder(m) != pid {
-            return -(EINTR as c_int);
-        }
+    pub(crate) fn unlock(m: *mut mutex_t) {
+        let m = Self::as_native(m);
+        let _g = KSpinlock::from_bindings(Self::lk_ptr(m)).lock();
+        Self::do_wakeup(m);
     }
-    0
+
+    pub(crate) fn is_holding(m: *mut mutex_t) -> c_int {
+        let m = Self::as_native(m);
+        let cur = machine::current_thread_ptr();
+        if cur.is_null() { return 0; }
+        // SeqCst load to match `__atomic_load_n(..., SEQ_CST)` in C.
+        let h = Self::holder_atomic(m).load(Ordering::SeqCst);
+        if h == machine::thread_pid(cur) { 1 } else { 0 }
+    }
+
+    pub(crate) fn trylock(m: *mut mutex_t) -> c_int {
+        let m = Self::as_native(m);
+        let cur = machine::current_thread_ptr();
+        let pid = machine::thread_pid(cur);
+        if Self::try_set_holder(m, pid) { 1 } else { 0 }
+    }
+
+    pub(crate) fn lock_interruptible(m: *mut mutex_t) -> c_int {
+        if m.is_null() { return -(EINVAL as c_int); }
+        let m = Self::as_native(m);
+        let cur = machine::current_thread_ptr();
+        let pid = machine::thread_pid(cur);
+
+        if Self::try_set_holder(m, pid) { return 0; }
+
+        let _g = KSpinlock::from_bindings(Self::lk_ptr(m)).lock();
+        if Self::try_set_holder(m, pid) { return 0; }
+
+        while Self::get_holder(m) != pid {
+            if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
+            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            let ret = TqRef::from_ptr(Self::wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(m), null_mut()));
+            if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && Self::get_holder(m) != pid {
+                return -(EINTR as c_int);
+            }
+        }
+        0
+    }
+
+    pub(crate) fn lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
+        if m.is_null() { return -(EINVAL as c_int); }
+        let m = Self::as_native(m);
+        let cur = machine::current_thread_ptr();
+        let pid = machine::thread_pid(cur);
+
+        if Self::try_set_holder(m, pid) { return 0; }
+        if timeout_ms == 0 { return -(ETIMEDOUT as c_int); }
+
+        let _g = KSpinlock::from_bindings(Self::lk_ptr(m)).lock();
+        if Self::try_set_holder(m, pid) { return 0; }
+
+        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
+        let start = machine::read_time();
+        let tm = machine::tick_ms();
+
+        while Self::get_holder(m) != pid {
+            let now = machine::read_time();
+            let elapsed = now.wrapping_sub(start);
+            if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
+            let remaining_ticks = timeout_ticks - elapsed;
+            let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
+            if remaining_ms == 0 { remaining_ms = 1; }
+
+            let mut ctx = MutexTimedCtx {
+                lock: m,
+                // SAFETY: zero-init of `timer_node` mirrors C `.timer = {0}`.
+                timer: u! { core::mem::zeroed() },
+                timeout_ms: remaining_ms,
+                timer_armed: false,
+            };
+            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            let ret = TqRef::from_ptr(Self::wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
+                Some(mutex_timed_sleep_cb),
+                Some(mutex_timed_wake_cb),
+                &mut ctx as *mut _ as *mut c_void,
+                null_mut(),
+            ));
+            if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && Self::get_holder(m) != pid {
+                return -(EINTR as c_int);
+            }
+        }
+        0
+    }
 }
 
 // ===========================================================================
@@ -395,12 +401,14 @@ pub enum MutexError {
     Other(c_int),
 }
 
-fn map_mutex_err(r: c_int) -> MutexError {
-    match -r as u32 {
-        EINVAL => MutexError::Invalid,
-        EINTR => MutexError::Interrupted,
-        ETIMEDOUT => MutexError::TimedOut,
-        _ => MutexError::Other(r),
+impl RawMutex {
+    fn map_mutex_err(r: c_int) -> MutexError {
+        match -r as u32 {
+            EINVAL => MutexError::Invalid,
+            EINTR => MutexError::Interrupted,
+            ETIMEDOUT => MutexError::TimedOut,
+            _ => MutexError::Other(r),
+        }
     }
 }
 
@@ -422,21 +430,21 @@ impl KMutex {
     #[inline]
     pub fn init(self, name: *mut c_char) {
         // SAFETY: handle wraps live storage.
-        u! { mutex_init(self.raw, name); }
+        u! { RawMutex::init(self.raw, name); }
     }
 
     /// `true` iff the current thread holds this mutex.
     #[inline]
     pub fn holding(self) -> bool {
         // SAFETY: see `init`.
-        u! { holding_mutex(self.raw) != 0 }
+        u! { RawMutex::is_holding(self.raw) != 0 }
     }
 
     /// Acquire (uninterruptible). Returns RAII guard.
     #[inline]
     pub fn lock(self) -> KMutexGuard {
         // SAFETY: see `init`.
-        u! { mutex_lock(self.raw); }
+        u! { RawMutex::lock(self.raw); }
         KMutexGuard { raw: self.raw, _ns: PhantomData }
     }
 
@@ -444,7 +452,7 @@ impl KMutex {
     #[inline]
     pub fn try_lock(self) -> Option<KMutexGuard> {
         // SAFETY: see `init`. Returns 1 on success.
-        let got = u! { mutex_trylock(self.raw) };
+        let got = u! { RawMutex::trylock(self.raw) };
         if got != 0 {
             Some(KMutexGuard { raw: self.raw, _ns: PhantomData })
         } else {
@@ -456,11 +464,11 @@ impl KMutex {
     #[inline]
     pub fn lock_interruptible(self) -> Result<KMutexGuard, MutexError> {
         // SAFETY: see `init`.
-        let r = u! { mutex_lock_interruptible(self.raw) };
+        let r = u! { RawMutex::lock_interruptible(self.raw) };
         if r == 0 {
             Ok(KMutexGuard { raw: self.raw, _ns: PhantomData })
         } else {
-            Err(map_mutex_err(r))
+            Err(RawMutex::map_mutex_err(r))
         }
     }
 
@@ -468,11 +476,11 @@ impl KMutex {
     #[inline]
     pub fn lock_timed(self, timeout_ms: u64) -> Result<KMutexGuard, MutexError> {
         // SAFETY: see `init`.
-        let r = u! { mutex_lock_timed(self.raw, timeout_ms) };
+        let r = u! { RawMutex::lock_timed(self.raw, timeout_ms) };
         if r == 0 {
             Ok(KMutexGuard { raw: self.raw, _ns: PhantomData })
         } else {
-            Err(map_mutex_err(r))
+            Err(RawMutex::map_mutex_err(r))
         }
     }
 
@@ -495,6 +503,6 @@ impl Drop for KMutexGuard {
     #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: guard was constructed only after a successful acquire.
-        u! { mutex_unlock(self.raw); }
+        u! { RawMutex::unlock(self.raw); }
     }
 }

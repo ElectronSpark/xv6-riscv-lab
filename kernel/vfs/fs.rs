@@ -694,7 +694,7 @@ use crate::lock::rwsem::{
 };
 // P3-D3b: same for lock/mutex.rs's entry points (inode mutexes and
 // `__MOUNT_MUTEX`).
-use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};
+use crate::lock::mutex::RawMutex;
 
 // P3-D3c: the spinlock primitives (`vfs_superblock.spinlock`,
 // `fs_struct.lock`) are genuinely `unsafe fn`s in `crate::lock::spinlock`
@@ -1041,7 +1041,7 @@ impl VfsInode {
         // `holding_mutex` reads the mutex holder via a SeqCst atomic
         // load; a raw pointer derived from the shared borrow of the
         // interior-synchronized `mutex` field is sound to hand it.
-        if holding_mutex(&raw const self.mutex as *mut _) == 0 {
+        if RawMutex::is_holding(&raw const self.mutex as *mut _) == 0 {
             return neg(EPERM);
         }
         if self.flags.valid() == 0 {
@@ -1065,7 +1065,7 @@ impl VfsInode {
     /// free fn; callers (`VfsInode::vfs_mount`, `VfsInode::vfs_get_mnt_rooti`) hold the inode
     /// mutex first.
     pub(crate) fn dir_check_valid_holding(&self) -> c_int {
-        if holding_mutex(&raw const self.mutex as *mut _) == 0 {
+        if RawMutex::is_holding(&raw const self.mutex as *mut _) == 0 {
             return neg(EPERM);
         }
         if self.flags.valid() == 0 {
@@ -1171,7 +1171,7 @@ impl VfsFsType {
     /// Locking: caller must hold the mount mutex via [`Vfs::vfs_mount_lock`].
     pub(crate) fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int {
         unsafe {
-            if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
+            if RawMutex::is_holding(&raw mut __MOUNT_MUTEX) == 0 {
                 return neg(EPERM);
             }
             // The old per-slot checks (`mount`/`free` non-null) collapsed
@@ -1209,7 +1209,7 @@ impl VfsFsType {
             if name.is_null() {
                 return neg(EINVAL);
             }
-            if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
+            if RawMutex::is_holding(&raw mut __MOUNT_MUTEX) == 0 {
                 return neg(EPERM);
             }
             let pos = VfsFsType::get_fs_type_locked(name);
@@ -1231,7 +1231,7 @@ impl VfsFsType {
                 return ptr::null_mut();
             }
             kassert!(
-                holding_mutex(&raw mut __MOUNT_MUTEX) != 0,
+                RawMutex::is_holding(&raw mut __MOUNT_MUTEX) != 0,
                 "VfsFsType::vfs_put_fs_type: must hold mount mutex"
             );
             let fs_type = VfsFsType::get_fs_type_locked(name);
@@ -1249,7 +1249,7 @@ impl VfsFsType {
                 return;
             }
             kassert!(
-                holding_mutex(&raw mut __MOUNT_MUTEX) != 0,
+                RawMutex::is_holding(&raw mut __MOUNT_MUTEX) != 0,
                 "VfsFsType::vfs_put_fs_type: must hold mount mutex"
             );
             crate::kobject::kobject_put(&raw mut (*fs_type).kobj);
@@ -1657,7 +1657,7 @@ impl VfsSuperblock {
                 "Superblock lock must be write held to set mountpoint"
             );
             kassert!(
-                holding_mutex(&raw mut (*mountpoint).mutex) != 0,
+                RawMutex::is_holding(&raw mut (*mountpoint).mutex) != 0,
                 "Mountpoint inode lock must be held to set mountpoint"
             );
             kassert!(
@@ -1866,7 +1866,7 @@ impl VfsSuperblock {
                 "Cannot put superblock while holding its lock"
             );
             kassert!(
-                holding_mutex(&raw mut __MOUNT_MUTEX) == 0,
+                RawMutex::is_holding(&raw mut __MOUNT_MUTEX) == 0,
                 "Cannot put superblock while holding mount mutex"
             );
             kassert!(
@@ -2093,7 +2093,7 @@ impl VfsSuperblock {
                 "Superblock lock must be write held to remove inode"
             );
             kassert!(
-                holding_mutex(&raw mut (*inode).mutex) != 0,
+                RawMutex::is_holding(&raw mut (*inode).mutex) != 0,
                 "Inode lock must be held to remove inode"
             );
             // Allow removal from detached superblocks (lazy unmount cleanup).
@@ -2262,7 +2262,7 @@ impl VfsInode {
                 );
             }
             kassert!(
-                holding_mutex(&raw mut (*mountpoint).mutex) != 0,
+                RawMutex::is_holding(&raw mut (*mountpoint).mutex) != 0,
                 "Mountpoint inode lock must be held to turn into mountpoint"
             );
             if VfsInode::inode_refcount(mountpoint) > 2 {
@@ -2298,7 +2298,7 @@ impl VfsInode {
                 );
             }
             kassert!(
-                holding_mutex(&raw mut (*mountpoint).mutex) != 0,
+                RawMutex::is_holding(&raw mut (*mountpoint).mutex) != 0,
                 "Mountpoint inode lock must be held to clear mountpoint"
             );
             kassert!(
@@ -2341,7 +2341,7 @@ impl VfsInode {
                 crate::kprintln!("VfsInode::vfs_mount: invalid arguments");
                 return neg(EINVAL);
             }
-            if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
+            if RawMutex::is_holding(&raw mut __MOUNT_MUTEX) == 0 {
                 crate::kprintln!("VfsInode::vfs_mount: mount mutex not held");
                 return neg(EPERM);
             }
@@ -2489,10 +2489,10 @@ impl VfsInode {
             if mountpoint.is_null() {
                 return neg(EINVAL);
             }
-            if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
+            if RawMutex::is_holding(&raw mut __MOUNT_MUTEX) == 0 {
                 return neg(EPERM);
             }
-            if holding_mutex(&raw mut (*mountpoint).mutex) == 0 {
+            if RawMutex::is_holding(&raw mut (*mountpoint).mutex) == 0 {
                 return neg(EPERM);
             }
             let mut ret_val = (*mountpoint).check_valid();
@@ -2519,7 +2519,7 @@ impl VfsInode {
             if mounted_inode.is_null() {
                 return neg(EINVAL);
             }
-            if holding_mutex(&raw mut (*mounted_inode).mutex) == 0 {
+            if RawMutex::is_holding(&raw mut (*mounted_inode).mutex) == 0 {
                 return neg(EPERM);
             }
             ret_val = (*mounted_inode).check_valid();
@@ -2626,7 +2626,7 @@ impl VfsInode {
                 "Must hold sb wlock to make orphan"
             );
             kassert!(
-                holding_mutex(&raw mut (*inode).mutex) != 0,
+                RawMutex::is_holding(&raw mut (*inode).mutex) != 0,
                 "Must hold inode lock to make orphan"
             );
 
@@ -2660,10 +2660,10 @@ impl VfsInode {
             if mountpoint.is_null() {
                 return neg(EINVAL);
             }
-            if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
+            if RawMutex::is_holding(&raw mut __MOUNT_MUTEX) == 0 {
                 return neg(EPERM);
             }
-            if holding_mutex(&raw mut (*mountpoint).mutex) == 0 {
+            if RawMutex::is_holding(&raw mut (*mountpoint).mutex) == 0 {
                 return neg(EPERM);
             }
 
@@ -3005,7 +3005,7 @@ impl Vfs {
         unsafe {
             VfsInode::vfs_rooti_init();
             ln_init(&raw mut VFS_FS_TYPES);
-            mutex_init(&raw mut __MOUNT_MUTEX, c"vfs_mount_mutex".as_ptr() as *mut c_char);
+            RawMutex::init(&raw mut __MOUNT_MUTEX, c"vfs_mount_mutex".as_ptr() as *mut c_char);
             VfsFdtable::__vfs_fdtable_global_init();
             let mut ret = slab_cache_init(
                 &raw mut VFS_SUPERBLOCK_CACHE,
@@ -3157,12 +3157,12 @@ impl Vfs {
 
     /// Mirrors `Vfs::vfs_mount_lock()`.
     pub(crate) fn vfs_mount_lock() {
-        mutex_lock(unsafe { &raw mut __MOUNT_MUTEX });
+        RawMutex::lock(unsafe { &raw mut __MOUNT_MUTEX });
     }
 
     /// Mirrors `Vfs::vfs_mount_unlock()`.
     pub(crate) fn vfs_mount_unlock() {
-        mutex_unlock(unsafe { &raw mut __MOUNT_MUTEX });
+        RawMutex::unlock(unsafe { &raw mut __MOUNT_MUTEX });
     }
 }
 

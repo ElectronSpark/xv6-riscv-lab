@@ -103,8 +103,8 @@ use crate::proc::Scheduler;
 // P3-D3b: lock/mutex.rs's `mutex_init` and lock/completion.rs's entry
 // points are plain safe Rust fns now that their `#[no_mangle]` exports
 // are gone; reached by crate path.
-use crate::lock::completion::{complete_all, completion_reinit};
-use crate::lock::mutex::mutex_init;
+use crate::lock::completion::RawCompletion;
+use crate::lock::mutex::RawMutex;
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -1780,7 +1780,7 @@ unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
         (*bio_ptr).flags.set_done(0);
         (*bio_ptr).done_size = 0;
         (*bio_ptr).error = 0;
-        completion_reinit(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
     }
     fence(Ordering::SeqCst);
 }
@@ -1811,7 +1811,7 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
     unsafe {
         bio_end_io_acct(bio_ptr);
         bio_endio(bio_ptr);
-        complete_all(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
     }
 }
 
@@ -1942,7 +1942,7 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
     unsafe { memset(sc as *mut c_void, 0, core::mem::size_of::<SdhciSoftc>()) };
     // SAFETY: `sc` zeroed above, exclusively owned.
     unsafe {
-        mutex_init(&raw mut (*sc).lock, c"x1_sdhci".as_ptr() as *mut c_char);
+        RawMutex::init(&raw mut (*sc).lock, c"x1_sdhci".as_ptr() as *mut c_char);
         (*sc).index = idx as c_int;
         (*sc).irq = platform.sdhci[idx].irq as c_int;
 

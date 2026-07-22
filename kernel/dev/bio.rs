@@ -78,7 +78,7 @@ unsafe extern "C" {
 // now that its `#[no_mangle]` export is gone; reached by crate path (the
 // call site sits in an `unsafe` block that stays required for its raw
 // field projections).
-use crate::lock::completion::completion_init;
+use crate::lock::completion::RawCompletion;
 
 // P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
 // `crate::mm::kalloc` now that their `#[no_mangle]` exports are gone;
@@ -348,7 +348,7 @@ fn bio_alloc_inner(
         (*bio_ptr).kobj.name = c"bio".as_ptr();
         (*bio_ptr).kobj.ops.release = Some(bio_release_kobj_cb);
         kobject_init(&raw mut (*bio_ptr).kobj);
-        completion_init(&raw mut (*bio_ptr).io_completion);
+        RawCompletion::init(&raw mut (*bio_ptr).io_completion);
     }
     Ok(bio_ptr)
 }
