@@ -773,7 +773,10 @@ use crate::vfs::devtmpfs::superblock::{devtmpfs_init, devtmpfs_post_mount_popula
 use crate::vfs::fdtable::VfsFdtable;
 use crate::vfs::file::VfsFile;
 use crate::vfs::inode::{inode_ops, VfsInode};
-use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
+// Wave A: `tmpfs_init`/`tmpfs_mount_root` are now `Tmpfs::init`/
+// `Tmpfs::mount_root` associated fns (see `tmpfs/superblock.rs`'s own
+// sweep doc); called via the fully-qualified path below, matching
+// `Xv6fs::init`/`Xv6fs::mount_root`'s own no-`use` call style just below.
 // Wave A: `xv6fs_init`/`xv6fs_mount_root` are now `Xv6fs::init`/
 // `Xv6fs::mount_root` associated fns (`xv6fs/superblock.rs`'s own
 // free-fn -> associated-fn sweep); called via the fully qualified path
@@ -3046,12 +3049,12 @@ impl Vfs {
             (*thread).fdtable = VfsFdtable::vfs_fdtable_init();
 
             // Initialize filesystem types (registers them with VFS).
-            tmpfs_init();
+            crate::vfs::tmpfs::superblock::Tmpfs::init();
             crate::vfs::xv6fs::superblock::Xv6fs::init();
             devtmpfs_init();
 
             // Mount filesystems.
-            tmpfs_mount_root();
+            crate::vfs::tmpfs::superblock::Tmpfs::mount_root();
             crate::vfs::xv6fs::superblock::Xv6fs::mount_root();
 
             // Mount tmpfs at /tmp (after chroot to xv6fs).

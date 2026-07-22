@@ -22,6 +22,23 @@
 //! symbol `tmpfs_private.h` declares `extern` (see the module doc) even
 //! where today's only caller is another tmpfs submodule, so the header
 //! stays an honest contract for Wave 20 (devtmpfs).
+//!
+//! # Wave A free-fn -> associated-fn sweep
+//!
+//! Every relocatable free fn that used to live in this file is now an
+//! associated fn: `impl TmpfsSuperblock` (the cache getters and every
+//! `sb`-orchestration fn, even `alloc_inode_inner`/`get_inode_inner`
+//! whose `sb` param is the generic `*mut vfs_superblock` -- their
+//! subject is unambiguously "the tmpfs superblock", so they stay off
+//! the per-file `Tmpfs` marker) or `impl Tmpfs` (`Tmpfs::init`/
+//! `Tmpfs::mount_root`, which take no `sb` at all, plus the small scalar
+//! `neg` helper). [`Tmpfs`] here is `pub(crate)` (unlike `inode.rs`'s
+//! private copy) because `vfs/fs.rs` calls `Tmpfs::init`/
+//! `Tmpfs::mount_root` cross-module -- still a separate marker per
+//! tmpfs submodule, not shared (same precedent as `xv6fs`'s per-file
+//! `Xv6fs`). Every relocated body is byte-identical to its old free-fn
+//! form; the slab facade and `hlist_*` intrusive-hashlist walk helpers
+//! stay free fns (floor, matching `inode.rs`'s own copy).
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -165,9 +182,20 @@ use crate::vfs::inode::VfsInode;
 use crate::kassert;
 use crate::kstd::{Errno, KResult};
 
-#[inline(always)]
-const fn neg(e: u32) -> c_int {
-    -(e as c_int)
+/// ZST marker (Wave A free-fn -> associated-fn sweep, this file only)
+/// for `tmpfs_init`/`tmpfs_mount_root` (no `sb` param -- fs-type-level
+/// orchestration, not a superblock instance method) and the small
+/// scalar `neg` helper with no natural type home. Private to this
+/// file's cross-module callers (`vfs/fs.rs`), matching `inode.rs`/
+/// `truncate.rs`'s own separate `Tmpfs` markers (each tmpfs submodule
+/// keeps its own -- same per-file-marker precedent as `xv6fs`'s `Xv6fs`).
+pub(crate) struct Tmpfs;
+
+impl Tmpfs {
+    #[inline(always)]
+    const fn neg(e: u32) -> c_int {
+        -(e as c_int)
+    }
 }
 
 // ===========================================================================
@@ -190,209 +218,213 @@ unsafe impl Sync for TmpfsSlabCell {}
 static __TMPFS_INODE_CACHE: TmpfsSlabCell = TmpfsSlabCell(UnsafeCell::new(MaybeUninit::zeroed()));
 static __TMPFS_SB_CACHE: TmpfsSlabCell = TmpfsSlabCell(UnsafeCell::new(MaybeUninit::zeroed()));
 
-#[inline]
-fn tmpfs_inode_cache() -> *mut slab_cache_t {
-    __TMPFS_INODE_CACHE.0.get() as *mut slab_cache_t
-}
-#[inline]
-fn tmpfs_sb_cache() -> *mut slab_cache_t {
-    __TMPFS_SB_CACHE.0.get() as *mut slab_cache_t
-}
+impl TmpfsSuperblock {
+    #[inline]
+    fn inode_cache() -> *mut slab_cache_t {
+        __TMPFS_INODE_CACHE.0.get() as *mut slab_cache_t
+    }
+    #[inline]
+    fn sb_cache() -> *mut slab_cache_t {
+        __TMPFS_SB_CACHE.0.get() as *mut slab_cache_t
+    }
 
-fn __tmpfs_init_cache() -> c_int {
-    let ret = slab_cache_init(
-        tmpfs_inode_cache(),
-        c"tmpfs_inode_cache".as_ptr() as *mut c_char,
-        core::mem::size_of::<tmpfs_inode>(),
-        (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
-    );
-    if ret != 0 {
-        return ret; // Failed to initialize tmpfs inode cache
+    fn init_cache() -> c_int {
+        let ret = slab_cache_init(
+            TmpfsSuperblock::inode_cache(),
+            c"tmpfs_inode_cache".as_ptr() as *mut c_char,
+            core::mem::size_of::<tmpfs_inode>(),
+            (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
+        );
+        if ret != 0 {
+            return ret; // Failed to initialize tmpfs inode cache
+        }
+        slab_cache_init(
+            TmpfsSuperblock::sb_cache(),
+            c"tmpfs_superblock_cache".as_ptr() as *mut c_char,
+            core::mem::size_of::<tmpfs_superblock>(),
+            (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
+        )
     }
-    slab_cache_init(
-        tmpfs_sb_cache(),
-        c"tmpfs_superblock_cache".as_ptr() as *mut c_char,
-        core::mem::size_of::<tmpfs_superblock>(),
-        (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
-    )
-}
 
-/// Shrink all tmpfs slab caches to release unused memory.
-///
-/// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
-/// declaration even though — like the C original — nothing calls it
-/// today (its only caller, `tmpfs_smoketest.c`, was dead code and is
-/// deleted with this port; see the module doc).
-pub(crate) extern "C" fn tmpfs_shrink_caches() {
-    slab_cache_shrink(tmpfs_inode_cache(), 0x7fffffff);
-    slab_cache_shrink(tmpfs_sb_cache(), 0x7fffffff);
-}
+    /// Shrink all tmpfs slab caches to release unused memory.
+    ///
+    /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
+    /// declaration even though — like the C original — nothing calls it
+    /// today (its only caller, `tmpfs_smoketest.c`, was dead code and is
+    /// deleted with this port; see the module doc).
+    pub(crate) extern "C" fn shrink_caches() {
+        slab_cache_shrink(TmpfsSuperblock::inode_cache(), 0x7fffffff);
+        slab_cache_shrink(TmpfsSuperblock::sb_cache(), 0x7fffffff);
+    }
 
-fn __tmpfs_alloc_inode_structure() -> *mut tmpfs_inode {
-    let ti = slab_alloc(tmpfs_inode_cache()) as *mut tmpfs_inode;
-    if ti.is_null() {
-        return ptr::null_mut();
+    fn alloc_inode_structure() -> *mut tmpfs_inode {
+        let ti = slab_alloc(TmpfsSuperblock::inode_cache()) as *mut tmpfs_inode;
+        if ti.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `ti` is a freshly allocated, exclusively-owned
+        // `tmpfs_inode`-sized block from the slab cache.
+        unsafe {
+            ptr::write_bytes(ti as *mut u8, 0, core::mem::size_of::<tmpfs_inode>());
+            (*ti).vfs_inode.ops = Some(&TMPFS_INODE_OPS);
+        }
+        ti
     }
-    // SAFETY: `ti` is a freshly allocated, exclusively-owned
-    // `tmpfs_inode`-sized block from the slab cache.
-    unsafe {
-        ptr::write_bytes(ti as *mut u8, 0, core::mem::size_of::<tmpfs_inode>());
-        (*ti).vfs_inode.ops = Some(&TMPFS_INODE_OPS);
-    }
-    ti
-}
 
-/// Mirrors `tmpfs_alloc_inode()`. `pub(crate)`: reached through
-/// [`SuperblockOps`] for tmpfs itself and reused directly by
-/// devtmpfs's delegating trait impl (P3-10b).
-pub(crate) fn tmpfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
-    if sb.is_null() {
-        return Err(Errno::Inval);
+    /// Mirrors `tmpfs_alloc_inode()`. `pub(crate)`: reached through
+    /// [`SuperblockOps`] for tmpfs itself and reused directly by
+    /// devtmpfs's delegating trait impl (P3-10b).
+    pub(crate) fn alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
+        if sb.is_null() {
+            return Err(Errno::Inval);
+        }
+        // SAFETY: non-null `sb`, `fs_data` checked before deref.
+        let private_data = unsafe { (*sb).fs_data as *mut tmpfs_sb_private };
+        if private_data.is_null() {
+            return Err(Errno::Inval);
+        }
+        let ti = TmpfsSuperblock::alloc_inode_structure();
+        if ti.is_null() {
+            return Err(Errno::NoMem);
+        }
+        // SAFETY: caller (`tmpfs_alloc_inode`) holds a live superblock whose
+        // `fs_data` was set to `&sb->private_data` by `tmpfs_alloc_superblock`.
+        let ino = unsafe { (*private_data).ino_alloc() };
+        // SAFETY: `ti` was just allocated above and is exclusively owned here.
+        unsafe {
+            (*ti).vfs_inode.ino = ino;
+        }
+        if ino == 0 {
+            slab_free(ti as *mut c_void);
+            return Err(Errno::NoEnt);
+        }
+        // Add the inode to the superblock's inode hash list -- done by the
+        // generic `vfs_alloc_inode()` caller in `vfs/fs.rs`, not here (matches
+        // the C original's own comment).
+        // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`;
+        // `vfs_inode` is its first field (offset 0).
+        Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
     }
-    // SAFETY: non-null `sb`, `fs_data` checked before deref.
-    let private_data = unsafe { (*sb).fs_data as *mut tmpfs_sb_private };
-    if private_data.is_null() {
-        return Err(Errno::Inval);
-    }
-    let ti = __tmpfs_alloc_inode_structure();
-    if ti.is_null() {
-        return Err(Errno::NoMem);
-    }
-    // SAFETY: caller (`tmpfs_alloc_inode`) holds a live superblock whose
-    // `fs_data` was set to `&sb->private_data` by `tmpfs_alloc_superblock`.
-    let ino = unsafe { (*private_data).ino_alloc() };
-    // SAFETY: `ti` was just allocated above and is exclusively owned here.
-    unsafe {
-        (*ti).vfs_inode.ino = ino;
-    }
-    if ino == 0 {
+
+    /// Mirrors `tmpfs_free_inode()`.
+    ///
+    /// VFS guarantees inodes are truncated to zero (regular files) or empty
+    /// (directories) before this is called. `inode` must be a live
+    /// `vfs_inode` embedded in a `tmpfs_inode` allocated by
+    /// [`tmpfs_alloc_inode`] (`vfs_inode` is its first field, offset 0).
+    pub(crate) fn free_inode(inode: *mut vfs_inode) {
+        let ti = inode as *mut tmpfs_inode;
         slab_free(ti as *mut c_void);
-        return Err(Errno::NoEnt);
     }
-    // Add the inode to the superblock's inode hash list -- done by the
-    // generic `vfs_alloc_inode()` caller in `vfs/fs.rs`, not here (matches
-    // the C original's own comment).
-    // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode`;
-    // `vfs_inode` is its first field (offset 0).
-    Ok(unsafe { ptr::addr_of_mut!((*ti).vfs_inode) })
-}
 
-/// Mirrors `tmpfs_free_inode()`.
-///
-/// VFS guarantees inodes are truncated to zero (regular files) or empty
-/// (directories) before this is called. `inode` must be a live
-/// `vfs_inode` embedded in a `tmpfs_inode` allocated by
-/// [`tmpfs_alloc_inode`] (`vfs_inode` is its first field, offset 0).
-pub(crate) fn tmpfs_free_inode(inode: *mut vfs_inode) {
-    let ti = inode as *mut tmpfs_inode;
-    slab_free(ti as *mut c_void);
-}
-
-/// Mirrors `tmpfs_alloc_superblock()`.
-pub(crate) extern "C" fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock {
-    let sb = slab_alloc(tmpfs_sb_cache()) as *mut tmpfs_superblock;
-    if sb.is_null() {
-        return ptr::null_mut();
+    /// Mirrors `tmpfs_alloc_superblock()`.
+    pub(crate) extern "C" fn alloc_superblock() -> *mut tmpfs_superblock {
+        let sb = slab_alloc(TmpfsSuperblock::sb_cache()) as *mut tmpfs_superblock;
+        if sb.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `sb` is a freshly allocated, exclusively-owned
+        // `tmpfs_superblock`-sized block from the slab cache.
+        unsafe {
+            ptr::write_bytes(sb as *mut u8, 0, core::mem::size_of::<tmpfs_superblock>());
+            (*sb).vfs_sb.flags.set_backendless(1); // tmpfs is backendless
+            (*sb).vfs_sb.fs_data = ptr::addr_of_mut!((*sb).private_data) as *mut c_void;
+        }
+        sb
     }
-    // SAFETY: `sb` is a freshly allocated, exclusively-owned
-    // `tmpfs_superblock`-sized block from the slab cache.
-    unsafe {
-        ptr::write_bytes(sb as *mut u8, 0, core::mem::size_of::<tmpfs_superblock>());
-        (*sb).vfs_sb.flags.set_backendless(1); // tmpfs is backendless
-        (*sb).vfs_sb.fs_data = ptr::addr_of_mut!((*sb).private_data) as *mut c_void;
-    }
-    sb
-}
 
-/// Mirrors `tmpfs_free()`. `sb` must be a live `vfs_superblock` embedded
-/// in a `tmpfs_superblock` allocated by [`tmpfs_alloc_superblock`]
-/// (`vfs_sb` is its first field, offset 0).
-pub(crate) fn tmpfs_free_impl(sb: *mut vfs_superblock) {
-    let tsb = sb as *mut tmpfs_superblock;
-    slab_free(tsb as *mut c_void);
+    /// Mirrors `tmpfs_free()`. `sb` must be a live `vfs_superblock` embedded
+    /// in a `tmpfs_superblock` allocated by [`tmpfs_alloc_superblock`]
+    /// (`vfs_sb` is its first field, offset 0).
+    pub(crate) fn free_impl(sb: *mut vfs_superblock) {
+        let tsb = sb as *mut tmpfs_superblock;
+        slab_free(tsb as *mut c_void);
+    }
 }
 
 // ===========================================================================
 // Superblock inode operations
 // ===========================================================================
 
-/// Mirrors `tmpfs_get_inode()`. tmpfs does not persist inodes, so it
-/// cannot load an inode by number -- always `-ENOENT`. `pub(crate)`:
-/// see [`tmpfs_alloc_inode_inner`].
-pub(crate) fn tmpfs_get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs_inode> {
-    if sb.is_null() {
-        return Err(Errno::Inval);
+impl TmpfsSuperblock {
+    /// Mirrors `tmpfs_get_inode()`. tmpfs does not persist inodes, so it
+    /// cannot load an inode by number -- always `-ENOENT`. `pub(crate)`:
+    /// see [`TmpfsSuperblock::alloc_inode_inner`].
+    pub(crate) fn get_inode_inner(sb: *mut vfs_superblock, _ino: u64) -> KResult<*mut vfs_inode> {
+        if sb.is_null() {
+            return Err(Errno::Inval);
+        }
+        Err(Errno::NoEnt)
     }
-    Err(Errno::NoEnt)
-}
 
-/// Mirrors `tmpfs_sync_fs()`. tmpfs is an in-memory filesystem, nothing
-/// to sync. `pub(crate)`: see [`tmpfs_alloc_inode_inner`].
-pub(crate) fn tmpfs_sync_fs_impl(sb: *mut vfs_superblock, _wait: c_int) -> KResult<()> {
-    // SAFETY: `sb` is a live `vfs_superblock` (caller's contract, same
-    // as the `SuperblockOps::sync_fs` callback convention).
-    unsafe { (*sb).flags.set_dirty(0) };
-    Ok(())
-}
-
-/// `tmpfs_unmount_begin` — prepare tmpfs for unmount by evicting
-/// unreferenced inodes.
-///
-/// For strict unmount to succeed, every cached inode with `ref_count ==
-/// 0` must be evicted from the hash list: backendless filesystems keep
-/// inodes alive in the cache as long as `n_links > 0`, so they need
-/// explicit cleanup before unmounting.
-///
-/// Locking: caller holds the superblock write lock.
-///
-/// Walks `sb`'s generic inode hash list (`vfs_superblock.inodes`, NOT
-/// tmpfs's own directory hash) via a local, non-RCU
-/// first/next-entry walk mirroring `hlist_foreach_node_safe` (the C
-/// macro precomputes `next` before running the loop body, so removing
-/// `pos` mid-iteration is safe) -- reimplemented here rather than
-/// shared with `inode.rs`'s directory-hash walk because the C original
-/// never shared a function either (both are macro-expansion call
-/// sites), matching this crate's established per-file self-contained
-/// convention.
-pub(crate) fn tmpfs_unmount_begin_impl(sb: *mut vfs_superblock) {
-    if sb.is_null() {
-        return;
+    /// Mirrors `tmpfs_sync_fs()`. tmpfs is an in-memory filesystem, nothing
+    /// to sync. `pub(crate)`: see [`TmpfsSuperblock::alloc_inode_inner`].
+    pub(crate) fn sync_fs_impl(sb: *mut vfs_superblock, _wait: c_int) -> KResult<()> {
+        // SAFETY: `sb` is a live `vfs_superblock` (caller's contract, same
+        // as the `SuperblockOps::sync_fs` callback convention).
+        unsafe { (*sb).flags.set_dirty(0) };
+        Ok(())
     }
-    // SAFETY: non-null `sb`, caller holds the superblock write lock.
-    unsafe {
-        let root_inode = (*sb).root_inode;
-        let hlist = ptr::addr_of_mut!((*sb).inodes);
 
-        let mut cur = hlist_first_entry(hlist);
-        while !cur.is_null() {
-            let next = hlist_next_entry(hlist, cur);
-            // `hash_entry` is the first field of `vfs_inode` (offset 0).
-            let inode = cur as *mut vfs_inode;
+    /// `tmpfs_unmount_begin` — prepare tmpfs for unmount by evicting
+    /// unreferenced inodes.
+    ///
+    /// For strict unmount to succeed, every cached inode with `ref_count ==
+    /// 0` must be evicted from the hash list: backendless filesystems keep
+    /// inodes alive in the cache as long as `n_links > 0`, so they need
+    /// explicit cleanup before unmounting.
+    ///
+    /// Locking: caller holds the superblock write lock.
+    ///
+    /// Walks `sb`'s generic inode hash list (`vfs_superblock.inodes`, NOT
+    /// tmpfs's own directory hash) via a local, non-RCU
+    /// first/next-entry walk mirroring `hlist_foreach_node_safe` (the C
+    /// macro precomputes `next` before running the loop body, so removing
+    /// `pos` mid-iteration is safe) -- reimplemented here rather than
+    /// shared with `inode.rs`'s directory-hash walk because the C original
+    /// never shared a function either (both are macro-expansion call
+    /// sites), matching this crate's established per-file self-contained
+    /// convention.
+    pub(crate) fn unmount_begin_impl(sb: *mut vfs_superblock) {
+        if sb.is_null() {
+            return;
+        }
+        // SAFETY: non-null `sb`, caller holds the superblock write lock.
+        unsafe {
+            let root_inode = (*sb).root_inode;
+            let hlist = ptr::addr_of_mut!((*sb).inodes);
 
-            // Skip root inode -- handled by vfs_unmount.
-            if inode != root_inode {
-                // Only evict inodes with no references.
-                if (*inode).ref_count == 0 {
-                    VfsInode::vfs_ilock(inode);
-                    // Double-check ref_count under lock.
+            let mut cur = hlist_first_entry(hlist);
+            while !cur.is_null() {
+                let next = hlist_next_entry(hlist, cur);
+                // `hash_entry` is the first field of `vfs_inode` (offset 0).
+                let inode = cur as *mut vfs_inode;
+
+                // Skip root inode -- handled by vfs_unmount.
+                if inode != root_inode {
+                    // Only evict inodes with no references.
                     if (*inode).ref_count == 0 {
-                        // Destroy the inode's data if it has any.
-                        // (P3-10b: `destroy_inode`/`free_inode` are
-                        // required trait methods — the old `None`-slot
-                        // skips had no live instance.)
-                        crate::vfs::inode::inode_ops(inode).destroy_inode(inode);
-                        // Remove from hash and mark invalid.
-                        (*inode).flags.set_valid(0);
-                        VfsSuperblock::vfs_remove_inode(sb, inode);
-                        VfsInode::vfs_iunlock(inode);
-                        // Free the inode structure.
-                        crate::vfs::inode::inode_ops(inode).free_inode(inode);
-                    } else {
-                        VfsInode::vfs_iunlock(inode);
+                        VfsInode::vfs_ilock(inode);
+                        // Double-check ref_count under lock.
+                        if (*inode).ref_count == 0 {
+                            // Destroy the inode's data if it has any.
+                            // (P3-10b: `destroy_inode`/`free_inode` are
+                            // required trait methods — the old `None`-slot
+                            // skips had no live instance.)
+                            crate::vfs::inode::inode_ops(inode).destroy_inode(inode);
+                            // Remove from hash and mark invalid.
+                            (*inode).flags.set_valid(0);
+                            VfsSuperblock::vfs_remove_inode(sb, inode);
+                            VfsInode::vfs_iunlock(inode);
+                            // Free the inode structure.
+                            crate::vfs::inode::inode_ops(inode).free_inode(inode);
+                        } else {
+                            VfsInode::vfs_iunlock(inode);
+                        }
                     }
                 }
+                cur = next;
             }
-            cur = next;
         }
     }
 }
@@ -509,16 +541,16 @@ pub struct TmpfsSuperblockOps;
 
 impl SuperblockOps for TmpfsSuperblockOps {
     unsafe fn alloc_inode(&self, sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
-        tmpfs_alloc_inode_inner(sb)
+        TmpfsSuperblock::alloc_inode_inner(sb)
     }
     unsafe fn get_inode(&self, sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
-        tmpfs_get_inode_inner(sb, ino)
+        TmpfsSuperblock::get_inode_inner(sb, ino)
     }
     unsafe fn sync_fs(&self, sb: *mut vfs_superblock, wait: c_int) -> KResult<()> {
-        tmpfs_sync_fs_impl(sb, wait)
+        TmpfsSuperblock::sync_fs_impl(sb, wait)
     }
     unsafe fn unmount_begin(&self, sb: *mut vfs_superblock) {
-        tmpfs_unmount_begin_impl(sb);
+        TmpfsSuperblock::unmount_begin_impl(sb);
     }
     unsafe fn statfs(&self, _sb: *mut vfs_superblock, buf: *mut statfs) -> KResult<()> {
         // SAFETY: `buf` is a live `statfs` (caller's contract, matches
@@ -557,18 +589,18 @@ impl FsTypeOps for TmpfsFsTypeOps {
         if !device.is_null() {
             return Err(Errno::Inval); // tmpfs does not support device inode
         }
-        let sb = tmpfs_alloc_superblock();
+        let sb = TmpfsSuperblock::alloc_superblock();
         if sb.is_null() {
             return Err(Errno::NoMem);
         }
-        let root_inode = __tmpfs_alloc_inode_structure();
+        let root_inode = TmpfsSuperblock::alloc_inode_structure();
         if root_inode.is_null() {
             // SAFETY: `sb` is a live, exclusively-owned `tmpfs_superblock`;
             // `vfs_sb` is its first field (offset 0).
-            tmpfs_free_impl(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
+            TmpfsSuperblock::free_impl(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
             return Err(Errno::NoMem);
         }
-        super::inode::tmpfs_make_directory(root_inode);
+        super::inode::TmpfsInode::make_directory(root_inode);
         // SAFETY: `sb`/`root_inode` are freshly allocated and exclusively
         // owned here.
         unsafe {
@@ -584,80 +616,84 @@ impl FsTypeOps for TmpfsFsTypeOps {
     }
 
     unsafe fn free(&self, sb: *mut vfs_superblock) {
-        tmpfs_free_impl(sb);
+        TmpfsSuperblock::free_impl(sb);
     }
 }
 
 static TMPFS_FS_TYPE_OPS: TmpfsFsTypeOps = TmpfsFsTypeOps;
 
-/// `tmpfs_init` - Initialize tmpfs filesystem type (caches and
-/// registration).
-///
-/// This only initializes the tmpfs infrastructure. It does NOT mount
-/// anything. Call this once during kernel initialization before any
-/// tmpfs can be mounted.
-pub(crate) extern "C" fn tmpfs_init() {
-    let ret = __tmpfs_init_cache();
-    kassert!(ret == 0, "tmpfs_init: __tmpfs_init_cache failed");
+impl Tmpfs {
+    /// `tmpfs_init` - Initialize tmpfs filesystem type (caches and
+    /// registration).
+    ///
+    /// This only initializes the tmpfs infrastructure. It does NOT mount
+    /// anything. Call this once during kernel initialization before any
+    /// tmpfs can be mounted.
+    pub(crate) extern "C" fn init() {
+        let ret = TmpfsSuperblock::init_cache();
+        kassert!(ret == 0, "tmpfs_init: __tmpfs_init_cache failed");
 
-    let fs_type = VfsFsType::vfs_fs_type_allocate();
-    kassert!(!fs_type.is_null(), "tmpfs_init: vfs_fs_type_allocate failed");
-    // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
-    unsafe {
-        (*fs_type).name = c"tmpfs".as_ptr();
-        (*fs_type).ops = Some(&TMPFS_FS_TYPE_OPS);
-    }
+        let fs_type = VfsFsType::vfs_fs_type_allocate();
+        kassert!(!fs_type.is_null(), "tmpfs_init: vfs_fs_type_allocate failed");
+        // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
+        unsafe {
+            (*fs_type).name = c"tmpfs".as_ptr();
+            (*fs_type).ops = Some(&TMPFS_FS_TYPE_OPS);
+        }
 
-    Vfs::vfs_mount_lock();
-    let ret = VfsFsType::vfs_register_fs_type(fs_type);
-    kassert!(ret == 0, "tmpfs_init: vfs_register_fs_type failed");
-    Vfs::vfs_mount_unlock();
+        Vfs::vfs_mount_lock();
+        let ret = VfsFsType::vfs_register_fs_type(fs_type);
+        kassert!(ret == 0, "tmpfs_init: vfs_register_fs_type failed");
+        Vfs::vfs_mount_unlock();
 
-    // SAFETY: `printf` is C-variadic; arguments match the `%lu %lu`/`%lu`
-    // format strings exactly.
-    unsafe {
-        crate::kprintln!(
-            "sizeof(tmpfs_inode)={}, TMPFS_INODE_EMBEDDED_DATA_LEN={}",
-            core::mem::size_of::<tmpfs_inode>() as u64,
-            super::inode::TMPFS_INODE_EMBEDDED_DATA_LEN as u64,
-        );
-        crate::kprintln!(
-            "tmpfs max file size={} bytes",
-            super::TMPFS_MAX_FILE_SIZE as u64,
-        );
+        // SAFETY: `printf` is C-variadic; arguments match the `%lu %lu`/`%lu`
+        // format strings exactly.
+        unsafe {
+            crate::kprintln!(
+                "sizeof(tmpfs_inode)={}, TMPFS_INODE_EMBEDDED_DATA_LEN={}",
+                core::mem::size_of::<tmpfs_inode>() as u64,
+                super::inode::TMPFS_INODE_EMBEDDED_DATA_LEN as u64,
+            );
+            crate::kprintln!(
+                "tmpfs max file size={} bytes",
+                super::TMPFS_MAX_FILE_SIZE as u64,
+            );
+        }
     }
 }
 
-/// `tmpfs_mount_root` - Mount tmpfs as the root filesystem.
-///
-/// This mounts a fresh tmpfs instance at the VFS root inode and sets it
-/// as the process root. Call this after [`tmpfs_init`] during early boot.
-pub(crate) extern "C" fn tmpfs_mount_root() {
-    Vfs::vfs_mount_lock();
-    // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
-    // (`vfs/fs.rs`), always live.
-    unsafe { VfsInode::vfs_ilock(ptr::addr_of_mut!(vfs_root_inode)) };
+impl Tmpfs {
+    /// `tmpfs_mount_root` - Mount tmpfs as the root filesystem.
+    ///
+    /// This mounts a fresh tmpfs instance at the VFS root inode and sets it
+    /// as the process root. Call this after [`Tmpfs::init`] during early boot.
+    pub(crate) extern "C" fn mount_root() {
+        Vfs::vfs_mount_lock();
+        // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
+        // (`vfs/fs.rs`), always live.
+        unsafe { VfsInode::vfs_ilock(ptr::addr_of_mut!(vfs_root_inode)) };
 
-    // SAFETY: same as above.
-    let ret = unsafe {
-        VfsInode::vfs_mount(
-            c"tmpfs".as_ptr(),
-            ptr::addr_of_mut!(vfs_root_inode),
-            ptr::null_mut(),
-            0,
-            ptr::null(),
-        )
-    };
-    kassert!(ret == 0, "tmpfs_mount_root: vfs_mount failed");
-    // On success, release locks. On failure, vfs_mount already released
-    // them (matches the C original's own comment).
-    if ret == 0 {
-        unsafe { VfsInode::vfs_iunlock(ptr::addr_of_mut!(vfs_root_inode)) };
+        // SAFETY: same as above.
+        let ret = unsafe {
+            VfsInode::vfs_mount(
+                c"tmpfs".as_ptr(),
+                ptr::addr_of_mut!(vfs_root_inode),
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+            )
+        };
+        kassert!(ret == 0, "tmpfs_mount_root: vfs_mount failed");
+        // On success, release locks. On failure, vfs_mount already released
+        // them (matches the C original's own comment).
+        if ret == 0 {
+            unsafe { VfsInode::vfs_iunlock(ptr::addr_of_mut!(vfs_root_inode)) };
+        }
+        Vfs::vfs_mount_unlock();
+
+        // SAFETY: same as above.
+        let mnt_rooti = unsafe { vfs_root_inode.dev_mnt.mnt.mnt_rooti };
+        let ret = VfsInode::vfs_chroot(mnt_rooti);
+        kassert!(ret == 0, "tmpfs_mount_root: vfs_chroot failed");
     }
-    Vfs::vfs_mount_unlock();
-
-    // SAFETY: same as above.
-    let mnt_rooti = unsafe { vfs_root_inode.dev_mnt.mnt.mnt_rooti };
-    let ret = VfsInode::vfs_chroot(mnt_rooti);
-    kassert!(ret == 0, "tmpfs_mount_root: vfs_chroot failed");
 }

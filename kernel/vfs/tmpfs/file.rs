@@ -211,7 +211,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
             count = super::inode::TMPFS_INODE_EMBEDDED_DATA_LEN - pos as usize;
         }
         // SAFETY: `ti` is live and locked.
-        let src = unsafe { super::inode::embedded_data(ti).add(pos as usize) };
+        let src = unsafe { super::inode::TmpfsInode::embedded_data(ti).add(pos as usize) };
         if user {
             // SAFETY: `current()` is the live running thread.
             if Vm::vm_copyout(unsafe { (*current()).vm }, buf as u64, src as *const c_void, count as u64) < 0 {
@@ -317,7 +317,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
         if end_pos as usize <= super::inode::TMPFS_INODE_EMBEDDED_DATA_LEN {
             // Still fits in embedded storage.
             // SAFETY: `ti` is live and locked.
-            let dst = unsafe { super::inode::embedded_data(ti).add(pos as usize) };
+            let dst = unsafe { super::inode::TmpfsInode::embedded_data(ti).add(pos as usize) };
             if user {
                 // SAFETY: `current()` is the live running thread.
                 if Vm::vm_copyin(unsafe { (*current()).vm }, dst as *mut c_void, buf as u64, count as u64) < 0 {
@@ -337,7 +337,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             return Ok(count as isize);
         }
         // Need to migrate to pcache storage.
-        let ret = super::truncate::__tmpfs_migrate_to_allocated_blocks(ti);
+        let ret = super::inode::TmpfsInode::migrate_to_allocated_blocks(ti);
         if ret != 0 {
             VfsInode::vfs_iunlock(inode);
             // Sibling-module already-negative `c_int` — passthrough
@@ -507,7 +507,7 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
             unsafe {
                 memmove(
                     pa,
-                    super::inode::embedded_data(ti).add(file_off as usize) as *const c_void,
+                    super::inode::TmpfsInode::embedded_data(ti).add(file_off as usize) as *const c_void,
                     bytes_to_read as usize,
                 );
             }

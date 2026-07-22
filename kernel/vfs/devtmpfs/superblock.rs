@@ -139,11 +139,14 @@ use crate::sync::SpinLock;
 // to plain crate-path items (identical signatures).
 use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_release_dentry};
 use crate::vfs::inode::VfsInode;
-use crate::vfs::tmpfs::inode::tmpfs_make_directory;
-use crate::vfs::tmpfs::superblock::{
-    tmpfs_alloc_inode_inner, tmpfs_alloc_superblock, tmpfs_free_impl, tmpfs_get_inode_inner,
-    tmpfs_sync_fs_impl, tmpfs_unmount_begin_impl,
-};
+// Wave A: tmpfs's `tmpfs_make_directory`/`tmpfs_alloc_inode_inner`/
+// `tmpfs_alloc_superblock`/`tmpfs_free_impl`/`tmpfs_get_inode_inner`/
+// `tmpfs_sync_fs_impl`/`tmpfs_unmount_begin_impl` are now associated fns
+// on `TmpfsInode`/`TmpfsSuperblock` (see those modules' own sweep docs);
+// call sites below use `TmpfsInode::make_directory`/
+// `TmpfsSuperblock::alloc_inode_inner` etc.
+use crate::vfs::tmpfs::inode::TmpfsInode;
+use crate::vfs::tmpfs::superblock::TmpfsSuperblock;
 
 // ===========================================================================
 // Externs — see the module doc above for the convention.
@@ -591,16 +594,16 @@ struct DevtmpfsSuperblockOps;
 
 impl SuperblockOps for DevtmpfsSuperblockOps {
     unsafe fn alloc_inode(&self, sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
-        tmpfs_alloc_inode_inner(sb)
+        TmpfsSuperblock::alloc_inode_inner(sb)
     }
     unsafe fn get_inode(&self, sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
-        tmpfs_get_inode_inner(sb, ino)
+        TmpfsSuperblock::get_inode_inner(sb, ino)
     }
     unsafe fn sync_fs(&self, sb: *mut vfs_superblock, wait: core::ffi::c_int) -> KResult<()> {
-        tmpfs_sync_fs_impl(sb, wait)
+        TmpfsSuperblock::sync_fs_impl(sb, wait)
     }
     unsafe fn unmount_begin(&self, sb: *mut vfs_superblock) {
-        tmpfs_unmount_begin_impl(sb);
+        TmpfsSuperblock::unmount_begin_impl(sb);
     }
 }
 
@@ -633,7 +636,7 @@ impl FsTypeOps for DevtmpfsFsTypeOps {
         return Err(Errno::Inval); // devtmpfs is backendless
     }
 
-    let sb = tmpfs_alloc_superblock();
+    let sb = TmpfsSuperblock::alloc_superblock();
     if sb.is_null() {
         return Err(Errno::NoMem);
     }
@@ -648,15 +651,15 @@ impl FsTypeOps for DevtmpfsFsTypeOps {
 
     // Use tmpfs's inode allocator to get a proper inode from the shared
     // cache (P3-10b: `KResult`-native, no ERR_PTR decode).
-    let vi = match tmpfs_alloc_inode_inner(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) }) {
+    let vi = match TmpfsSuperblock::alloc_inode_inner(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) }) {
         Ok(vi) => vi,
         Err(e) => {
-            tmpfs_free_impl(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
+            TmpfsSuperblock::free_impl(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
             return Err(e);
         }
     };
     let root_inode = vi as *mut tmpfs_inode;
-    tmpfs_make_directory(root_inode);
+    TmpfsInode::make_directory(root_inode);
     // SAFETY: `sb`/`root_inode` are freshly allocated and exclusively
     // owned here.
     unsafe {
@@ -687,7 +690,7 @@ impl FsTypeOps for DevtmpfsFsTypeOps {
         if __DEVTMPFS_SB.load(Ordering::Relaxed) == sb {
             __DEVTMPFS_SB.store(ptr::null_mut(), Ordering::Relaxed);
         }
-        tmpfs_free_impl(sb);
+        TmpfsSuperblock::free_impl(sb);
     }
 }
 
