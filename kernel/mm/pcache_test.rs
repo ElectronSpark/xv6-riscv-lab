@@ -115,7 +115,8 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // `size_of::<Page>() == 128` / `align_of::<Page>() == 64` compile-time
 // checks, so the cast is layout-safe.
 use crate::bindings::page_t as Page;
-use crate::bindings::{pcache_ops, EAGAIN, EBUSY, EINVAL, EIO};
+use crate::bindings::{EAGAIN, EBUSY, EINVAL, EIO};
+use crate::mm::pcache::PcacheOps;
 // `__page_alloc`/`__page_free`/`page_lock_acquire`/`page_lock_release` are
 // now `impl Page` associated fns (page.rs KERNEL-OO wave); called
 // fully-qualified at their call sites below instead of `use`-imported.
@@ -239,8 +240,9 @@ macro_rules! check_eq {
 }
 
 // ---------------------------------------------------------------------------
-// Fixture: one reusable static `pcache` + a fixed `pcache_ops` table whose
-// callbacks forward into atomics below. Only one test (or one concurrency
+// Fixture: one reusable static `pcache` + a fixed `TestPcacheOps` (a
+// `PcacheOps` trait implementor) whose methods forward into atomics
+// below. Only one test (or one concurrency
 // group) is ever active at a time — the master kthread runs T01..T23/A1/A2
 // sequentially, and each concurrency case fully joins its worker threads
 // before the next starts — so the shared statics need no locking beyond
@@ -282,36 +284,41 @@ static WRITE_END_ERR: AtomicI32 = AtomicI32::new(0);
 /// and block, mirroring the C `conc_slow_read_page`.
 static SLOW_READ: AtomicI32 = AtomicI32::new(0);
 
-unsafe extern "C" fn cb_read_page(_p: *mut Pcache, _page: *mut Page) -> c_int {
-    READ_PAGE_CALLS.fetch_add(1, Ordering::SeqCst);
-    if SLOW_READ.load(Ordering::SeqCst) != 0 {
-        SchedTimer::sleep_ms(50);
+/// Zero-sized [`PcacheOps`] implementor for the test fixture
+/// (fn-pointer-ops-table -> trait dispatch campaign; was the `static
+/// pcache_ops TEST_OPS` fn-pointer table with five `unsafe extern "C"`
+/// callback fns, `cb_read_page`/`cb_write_page`/`cb_write_begin`/
+/// `cb_write_end`/`cb_mark_dirty`). Unlike the real xv6fs/tmpfs
+/// implementors this one overrides every method (the old table left no
+/// slot `None`), so it exercises the trait's non-default paths too.
+struct TestPcacheOps;
+
+impl PcacheOps for TestPcacheOps {
+    unsafe fn read_page(&self, _p: *mut Pcache, _page: *mut Page) -> c_int {
+        READ_PAGE_CALLS.fetch_add(1, Ordering::SeqCst);
+        if SLOW_READ.load(Ordering::SeqCst) != 0 {
+            SchedTimer::sleep_ms(50);
+        }
+        -(READ_PAGE_ERR.swap(0, Ordering::SeqCst))
     }
-    -(READ_PAGE_ERR.swap(0, Ordering::SeqCst))
-}
-unsafe extern "C" fn cb_write_page(_p: *mut Pcache, _page: *mut Page) -> c_int {
-    WRITE_PAGE_CALLS.fetch_add(1, Ordering::SeqCst);
-    -(WRITE_PAGE_ERR.swap(0, Ordering::SeqCst))
-}
-unsafe extern "C" fn cb_write_begin(_p: *mut Pcache, _page: *mut Page) -> c_int {
-    WRITE_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
-    -(WRITE_BEGIN_ERR.swap(0, Ordering::SeqCst))
-}
-unsafe extern "C" fn cb_write_end(_p: *mut Pcache, _page: *mut Page) -> c_int {
-    WRITE_END_CALLS.fetch_add(1, Ordering::SeqCst);
-    -(WRITE_END_ERR.swap(0, Ordering::SeqCst))
-}
-unsafe extern "C" fn cb_mark_dirty(_p: *mut Pcache, _page: *mut Page) {
-    MARK_DIRTY_CALLS.fetch_add(1, Ordering::SeqCst);
+    unsafe fn write_page(&self, _p: *mut Pcache, _page: *mut Page) -> c_int {
+        WRITE_PAGE_CALLS.fetch_add(1, Ordering::SeqCst);
+        -(WRITE_PAGE_ERR.swap(0, Ordering::SeqCst))
+    }
+    unsafe fn write_begin(&self, _p: *mut Pcache, _page: *mut Page) -> c_int {
+        WRITE_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        -(WRITE_BEGIN_ERR.swap(0, Ordering::SeqCst))
+    }
+    unsafe fn write_end(&self, _p: *mut Pcache, _page: *mut Page) -> c_int {
+        WRITE_END_CALLS.fetch_add(1, Ordering::SeqCst);
+        -(WRITE_END_ERR.swap(0, Ordering::SeqCst))
+    }
+    unsafe fn mark_dirty(&self, _p: *mut Pcache, _page: *mut Page) {
+        MARK_DIRTY_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
-static TEST_OPS: pcache_ops = pcache_ops {
-    read_page: Some(cb_read_page),
-    write_page: Some(cb_write_page),
-    write_begin: Some(cb_write_begin),
-    write_end: Some(cb_write_end),
-    mark_dirty: Some(cb_mark_dirty),
-};
+static TEST_OPS: TestPcacheOps = TestPcacheOps;
 
 fn reset_fixture() {
     READ_PAGE_CALLS.store(0, Ordering::SeqCst);
@@ -343,7 +350,7 @@ fn with_cache(blk_count: u64, max_pages: u64, body: impl FnOnce(*mut Pcache)) {
     // ("Needs to be zero-initialized before use").
     unsafe {
         core::ptr::write_bytes(p as *mut u8, 0, size_of::<Pcache>());
-        (*p).ops = (&TEST_OPS as *const pcache_ops) as *mut pcache_ops;
+        (*p).ops = Some(&TEST_OPS);
         (*p).blk_count = blk_count;
         if max_pages != 0 {
             (*p).max_pages = max_pages;

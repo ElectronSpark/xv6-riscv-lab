@@ -45,9 +45,10 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::bindings::{
-    loff_t, page_t, pcache, pcache_node, pcache_ops, thread, tmpfs_inode, vfs_file,
+    loff_t, page_t, pcache, pcache_node, thread, tmpfs_inode, vfs_file,
     vfs_inode, vma, EINVAL,
 };
+use crate::mm::pcache::PcacheOps;
 
 // P3-10a: the ops table is the `FileOps` trait now (`&'static dyn`
 // dispatch, see `vfs/file.rs`); the file callbacks return [`KResult`]
@@ -143,26 +144,35 @@ impl Tmpfs {
 //   - write_page: no-op (data stays in memory, no disk to persist to)
 // ===========================================================================
 
-extern "C" fn tmpfs_pcache_read_page(_pcache: *mut pcache, page: *mut page_t) -> c_int {
-    let pcn = Pcache::page_get_node(page);
-    // SAFETY: `pcn` is a live `pcache_node` (caller's contract, matches
-    // the C `pcache_ops.read_page` callback convention).
-    unsafe { memset((*pcn).data, 0, crate::bindings::PGSIZE as usize) };
-    0
+/// Zero-sized [`PcacheOps`] implementor for tmpfs regular-file pcaches
+/// (fn-pointer-ops-table -> trait dispatch campaign; was the `static
+/// pcache_ops TMPFS_PCACHE_OPS` fn-pointer table with two `extern "C"`
+/// callback fns, `tmpfs_pcache_read_page`/`tmpfs_pcache_write_page`).
+/// For a backendless filesystem the pcache IS the backing store:
+/// `read_page` zero-fills the page (holes/first access), `write_page` is
+/// a no-op (data stays in memory, nothing to persist).
+struct TmpfsPcacheOps;
+
+impl PcacheOps for TmpfsPcacheOps {
+    unsafe fn read_page(&self, _pcache: *mut pcache, page: *mut page_t) -> c_int {
+        let pcn = Pcache::page_get_node(page);
+        // SAFETY: `pcn` is a live `pcache_node` (caller's contract,
+        // matches the old C `pcache_ops.read_page` callback convention).
+        unsafe { memset((*pcn).data, 0, crate::bindings::PGSIZE as usize) };
+        0
+    }
+
+    unsafe fn write_page(&self, _pcache: *mut pcache, _page: *mut page_t) -> c_int {
+        // No-op for tmpfs -- data stays in memory, nothing to persist.
+        0
+    }
+
+    // `write_begin`/`write_end`/`mark_dirty` are not overridden: tmpfs
+    // left all three `None` in the old fn-pointer table, and the trait's
+    // default bodies (0/0/no-op) reproduce that exactly.
 }
 
-extern "C" fn tmpfs_pcache_write_page(_pcache: *mut pcache, _page: *mut page_t) -> c_int {
-    // No-op for tmpfs -- data stays in memory, nothing to persist.
-    0
-}
-
-static TMPFS_PCACHE_OPS: pcache_ops = pcache_ops {
-    read_page: Some(tmpfs_pcache_read_page),
-    write_page: Some(tmpfs_pcache_write_page),
-    write_begin: None,
-    write_end: None,
-    mark_dirty: None,
-};
+static TMPFS_PCACHE_OPS: TmpfsPcacheOps = TmpfsPcacheOps;
 
 /// Initialize the embedded per-inode pcache (`i_data`) for tmpfs. Call
 /// once for every regular-file inode after deciding to use pcache.
@@ -176,7 +186,7 @@ pub(crate) extern "C" fn tmpfs_inode_pcache_init(inode: *mut vfs_inode) {
     // by this call (caller holds the inode mutex).
     unsafe {
         ptr::write_bytes(pc, 0, 1);
-        (*pc).ops = ptr::addr_of!(TMPFS_PCACHE_OPS) as *mut pcache_ops;
+        (*pc).ops = Some(&TMPFS_PCACHE_OPS);
         // blk_count in 512-byte units, rounded up to page boundary.
         (*pc).blk_count = (TMPFS_MAX_FILE_SIZE / 512 + PCACHE_BLKS_PER_PAGE - 1)
             & !(PCACHE_BLKS_PER_PAGE - 1);

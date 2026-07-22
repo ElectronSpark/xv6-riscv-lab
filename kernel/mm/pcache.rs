@@ -52,7 +52,11 @@
 //! primitives (`list_init`/`list_detach`/`list_insert`/`list_push_front`/
 //! `list_is_empty`/`list_entry_is_detached`, not pcache/node-specific),
 //! and the generic panic/assert helpers (`pcache_assert`/`assert_msg`/
-//! `xv6_pcache_panic`/`ops_call_optional`).
+//! `xv6_pcache_panic`). `PcacheOps` (the filesystem page-IO vtable) was
+//! converted from a C-style fn-pointer table to a trait
+//! (fn-pointer-ops-table -> trait dispatch campaign); `ops_call_optional`
+//! is gone, its old `None`-slot behavior now lives in the trait's own
+//! default method bodies (see `PcacheOps`'s doc comment below).
 //!
 //! Locking order (matches C):
 //!   1. global pcache spinlock
@@ -101,10 +105,11 @@ use crate::mm::mm_safe::{SlabBox, SlabCacheRef};
 // [`PcacheNodeFlagBits`] (field `flags`) — both with safe masking
 // accessors bit-identical to bindgen's little-endian unit (N5's
 // `VfsInodeFlagBits` precedent); consumers re-pointed from
-// `__bindgen_anon_1`. The ops-table fn-pointer fields reproduce
-// bindgen's `Option<unsafe extern "C" fn>` forms exactly
-// (trait-ification is P3-10's job). Copy fidelity: `pcache_ops` derived
-// Copy/Clone in the pre-nativization bindgen output; `pcache` and
+// `__bindgen_anon_1`. The `pcache_ops` fn-pointer table has since been
+// trait-ified (fn-pointer-ops-table -> trait dispatch campaign): `ops`
+// is now `Option<&'static dyn PcacheOps>`, a 16-byte fat pointer (was an
+// 8-byte `*mut PcacheOps`), so `pcache_ops`'s Copy/Clone-derived-struct
+// fidelity note below is historical; `pcache` and
 // `pcache_node` derived NEITHER, so the natives deliberately have no
 // derives — the native `VfsInode` embeds `pcache` BY VALUE (`i_data`)
 // and has no derives either (accurate NONCOPY answer in build.rs).
@@ -177,24 +182,76 @@ pcache_flag_bit!(PcacheNodeFlagBits {
     io_in_progress, set_io_in_progress, 2;
 });
 
-/// `struct pcache_ops` (`kernel/inc/mm/pcache_types.h`) — the
-/// filesystem-facing page IO vtable.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct PcacheOps {
-    pub read_page: Option<
-        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
-    >,
-    pub write_page: Option<
-        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
-    >,
-    pub write_begin: Option<
-        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
-    >,
-    pub write_end: Option<
-        unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t) -> c_int,
-    >,
-    pub mark_dirty: Option<unsafe extern "C" fn(pcache: *mut Pcache, page: *mut page_t)>,
+/// The filesystem-facing page IO vtable — trait-based replacement
+/// (fn-pointer-ops-table -> trait dispatch campaign) for the former
+/// C-style `struct pcache_ops` fn-pointer table. Implementors are
+/// zero-sized unit structs with a `static` instance (`Xv6fsPcacheOps` in
+/// `kernel/vfs/xv6fs/superblock.rs`, `TmpfsPcacheOps` in
+/// `kernel/vfs/tmpfs/file.rs`, `TestPcacheOps` in
+/// `kernel/mm/pcache_test.rs`) installed into [`Pcache::ops`] as
+/// `Some(&STATIC)`. Follows the `CdevOps`/`BlkdevOps`/`TtyOps` precedent
+/// exactly (`kernel/dev/cdev.rs`, `kernel/dev/blkdev.rs`,
+/// `kernel/tty/tty.rs`).
+///
+/// Slot-nullability mapping (each old `Option<fn>` slot's `None`
+/// dispatch behavior is preserved exactly):
+///
+/// * `read_page`/`write_page` — required methods: `Pcache::init_validate`
+///   rejects registration unless the whole `ops` vtable is present, and
+///   every real implementor always supplies both (the old
+///   `Option<fn>` slots for these two were never `None` on a registered
+///   pcache).
+/// * `write_begin`/`write_end` — default `0` (success/no-op): exactly
+///   what the old `ops_call_optional` helper returned for a `None` slot
+///   (the tmpfs/xv6fs implementors both left these unset).
+/// * `mark_dirty` — default no-op: exactly the old `None`-slot behavior
+///   (`Pcache::ops_call_mark_dirty` only invoked the callback when
+///   `Some`).
+///
+/// `Sync` supertrait: instances are shared crate-wide as `&'static`
+/// references reachable from any CPU.
+pub trait PcacheOps: Sync {
+    /// Fill `page` with the on-disk (or synthesized, e.g. tmpfs's
+    /// zero-fill) contents for the pcache node it is attached to.
+    /// `Ok`-style: `0` on success, negative `errno` on failure.
+    ///
+    /// # Safety
+    /// `pcache`/`page` must be live, as required by the pcache page-IO
+    /// contract (matches the old `unsafe extern "C" fn` callback
+    /// convention).
+    unsafe fn read_page(&self, pcache: *mut Pcache, page: *mut page_t) -> c_int;
+
+    /// Write `page`'s dirty contents back to the pcache's backing store
+    /// (a no-op for backendless filesystems like tmpfs).
+    ///
+    /// # Safety
+    /// Same contract as [`PcacheOps::read_page`].
+    unsafe fn write_page(&self, pcache: *mut Pcache, page: *mut page_t) -> c_int;
+
+    /// Optional pre-writeback hook, run just before [`PcacheOps::write_page`]
+    /// while the page is unlocked. Default: `0` (old `None`-slot behavior).
+    ///
+    /// # Safety
+    /// Same contract as [`PcacheOps::read_page`].
+    unsafe fn write_begin(&self, _pcache: *mut Pcache, _page: *mut page_t) -> c_int {
+        0
+    }
+
+    /// Optional post-writeback hook, run after [`PcacheOps::write_page`].
+    /// Default: `0` (old `None`-slot behavior).
+    ///
+    /// # Safety
+    /// Same contract as [`PcacheOps::read_page`].
+    unsafe fn write_end(&self, _pcache: *mut Pcache, _page: *mut page_t) -> c_int {
+        0
+    }
+
+    /// Optional dirty-notification hook. Default: no-op (old `None`-slot
+    /// behavior).
+    ///
+    /// # Safety
+    /// Same contract as [`PcacheOps::read_page`].
+    unsafe fn mark_dirty(&self, _pcache: *mut Pcache, _page: *mut page_t) {}
 }
 
 /// `struct pcache` (`kernel/inc/mm/pcache_types.h`) — one page cache.
@@ -223,7 +280,7 @@ pub struct Pcache {
     pub tree_lock: rwlock,
     pub page_map: rb_root,
     pub gfp_flags: crate::bindings::uint64,
-    pub ops: *mut PcacheOps,
+    pub ops: Option<&'static dyn PcacheOps>,
     pub flush_work: work_struct,
     pub flush_error: c_int,
     pub wait_refcount: crate::bindings::uint32,
@@ -281,10 +338,16 @@ const _: () = {
     assert!(core::mem::offset_of!(Pcache, tree_lock) == 384, "pcache.tree_lock");
     assert!(core::mem::offset_of!(Pcache, page_map) == 448, "pcache.page_map");
     assert!(core::mem::offset_of!(Pcache, gfp_flags) == 464, "pcache.gfp_flags");
+    // `ops` widened from an 8-byte `*mut PcacheOps` to a 16-byte
+    // `Option<&'static dyn PcacheOps>` fat pointer (trait-ification);
+    // every field after it shifts by +8. The struct's overall size stays
+    // 576 (the existing tail padding to the `align(64)` boundary
+    // absorbs the growth) but `flush_work`/`flush_error`/`wait_refcount`
+    // move.
     assert!(core::mem::offset_of!(Pcache, ops) == 472, "pcache.ops");
-    assert!(core::mem::offset_of!(Pcache, flush_work) == 480, "pcache.flush_work");
-    assert!(core::mem::offset_of!(Pcache, flush_error) == 528, "pcache.flush_error");
-    assert!(core::mem::offset_of!(Pcache, wait_refcount) == 532, "pcache.wait_refcount");
+    assert!(core::mem::offset_of!(Pcache, flush_work) == 488, "pcache.flush_work");
+    assert!(core::mem::offset_of!(Pcache, flush_error) == 536, "pcache.flush_error");
+    assert!(core::mem::offset_of!(Pcache, wait_refcount) == 540, "pcache.wait_refcount");
 
     assert!(core::mem::size_of::<PcacheNode>() == 160, "pcache_node size");
     assert!(core::mem::align_of::<PcacheNode>() == 8, "pcache_node align");
@@ -301,13 +364,21 @@ const _: () = {
     assert!(core::mem::offset_of!(PcacheNode, size) == 104, "pcache_node.size");
     assert!(core::mem::offset_of!(PcacheNode, io_waiters) == 112, "pcache_node.io_waiters");
 
-    assert!(core::mem::size_of::<PcacheOps>() == 40, "pcache_ops size");
-    assert!(core::mem::align_of::<PcacheOps>() == 8, "pcache_ops align");
-    assert!(core::mem::offset_of!(PcacheOps, read_page) == 0, "pcache_ops.read_page");
-    assert!(core::mem::offset_of!(PcacheOps, write_page) == 8, "pcache_ops.write_page");
-    assert!(core::mem::offset_of!(PcacheOps, write_begin) == 16, "pcache_ops.write_begin");
-    assert!(core::mem::offset_of!(PcacheOps, write_end) == 24, "pcache_ops.write_end");
-    assert!(core::mem::offset_of!(PcacheOps, mark_dirty) == 32, "pcache_ops.mark_dirty");
+    // `PcacheOps` is a trait now (trait-ification); the old field-offset
+    // pins for its five fn-pointer slots no longer apply (the type no
+    // longer exists as a POD struct). Kept: the `Option<&'static dyn
+    // PcacheOps>` staying a plain 16-byte fat pointer (`None` = the
+    // zeroed/unregistered state — valid via the null-data-pointer niche,
+    // same reasoning as `Cdev`'s `Option<&'static dyn CdevOps>`,
+    // `kernel/dev/cdev.rs`).
+    assert!(
+        core::mem::size_of::<Option<&'static dyn PcacheOps>>() == 16,
+        "pcache ops fat pointer size"
+    );
+    assert!(
+        core::mem::align_of::<Option<&'static dyn PcacheOps>>() == 8,
+        "pcache ops fat pointer alignment"
+    );
 };
 
 pub type Page = page_t;
@@ -911,24 +982,8 @@ impl PcacheHandle {
 
     // -- ops vtable ----------------------------------------------------
     #[inline]
-    fn ops_read_page(self) -> Option<unsafe extern "C" fn(*mut Pcache, *mut Page) -> c_int> {
-        unsafe { (*(*self.raw()).ops).read_page }
-    }
-    #[inline]
-    fn ops_write_page(self) -> Option<unsafe extern "C" fn(*mut Pcache, *mut Page) -> c_int> {
-        unsafe { (*(*self.raw()).ops).write_page }
-    }
-    #[inline]
-    fn ops_write_begin(self) -> Option<unsafe extern "C" fn(*mut Pcache, *mut Page) -> c_int> {
-        unsafe { (*(*self.raw()).ops).write_begin }
-    }
-    #[inline]
-    fn ops_write_end(self) -> Option<unsafe extern "C" fn(*mut Pcache, *mut Page) -> c_int> {
-        unsafe { (*(*self.raw()).ops).write_end }
-    }
-    #[inline]
-    fn ops_mark_dirty(self) -> Option<unsafe extern "C" fn(*mut Pcache, *mut Page)> {
-        unsafe { (*(*self.raw()).ops).mark_dirty }
+    fn ops(self) -> Option<&'static dyn PcacheOps> {
+        unsafe { (*self.raw()).ops }
     }
 
     // -- flush completion -------------------------------------------------
@@ -1588,46 +1643,50 @@ impl Pcache {
 }
 
 // ---------------------------------------------------------------------------
-// pcache_ops vtable call helpers, tightened to a null-check-and-call
-// (read_page/write_page are guaranteed present by `pcache_init_validate`
-// before a pcache is ever registered; write_begin/write_end/mark_dirty
-// are optional and share one generic caller).
+// PcacheOps trait-dispatch call helpers (read_page/write_page are
+// guaranteed present by `pcache_init_validate` before a pcache is ever
+// registered -- `unwrap_unchecked` on the vtable itself; write_begin/
+// write_end/mark_dirty are optional per implementor and dispatch through
+// the trait's own default methods, which already replicate the old
+// `None`-slot behavior -- see `PcacheOps`'s doc comment).
 // ---------------------------------------------------------------------------
 impl Pcache {
     fn ops_call_read_page(p: *mut Pcache, page: *mut Page) -> c_int {
-        let f = unsafe { PcacheHandle::new(p) }.ops_read_page();
-        // SAFETY: `pcache_init_validate` rejects any pcache whose
-        // `ops->read_page` is null before the pcache is registered.
-        unsafe { (f.unwrap_unchecked())(p, page) }
+        let ops = unsafe { PcacheHandle::new(p) }.ops();
+        // SAFETY: `pcache_init_validate` rejects any pcache whose `ops`
+        // vtable is absent before the pcache is registered.
+        let ops = unsafe { ops.unwrap_unchecked() };
+        unsafe { ops.read_page(p, page) }
     }
 
 
     fn ops_call_write_page(p: *mut Pcache, page: *mut Page) -> c_int {
-        let f = unsafe { PcacheHandle::new(p) }.ops_write_page();
-        // SAFETY: see `xv6_pcache_ops_call_read_page`.
-        unsafe { (f.unwrap_unchecked())(p, page) }
+        let ops = unsafe { PcacheHandle::new(p) }.ops();
+        // SAFETY: see `ops_call_read_page`.
+        let ops = unsafe { ops.unwrap_unchecked() };
+        unsafe { ops.write_page(p, page) }
     }
-}
-fn ops_call_optional(
-    f: Option<unsafe extern "C" fn(*mut Pcache, *mut Page) -> c_int>,
-    p: *mut Pcache,
-    page: *mut Page,
-) -> c_int {
-    match f {
-        Some(f) => unsafe { f(p, page) },
-        None => 0,
+
+    fn ops_call_write_begin(p: *mut Pcache, page: *mut Page) -> c_int {
+        let ops = unsafe { PcacheHandle::new(p) }.ops();
+        // SAFETY: see `ops_call_read_page`.
+        let ops = unsafe { ops.unwrap_unchecked() };
+        unsafe { ops.write_begin(p, page) }
     }
-}
-impl Pcache {
+
     fn ops_call_write_end(p: *mut Pcache, page: *mut Page) -> c_int {
-        ops_call_optional(unsafe { PcacheHandle::new(p) }.ops_write_end(), p, page)
+        let ops = unsafe { PcacheHandle::new(p) }.ops();
+        // SAFETY: see `ops_call_read_page`.
+        let ops = unsafe { ops.unwrap_unchecked() };
+        unsafe { ops.write_end(p, page) }
     }
 
 
     fn ops_call_mark_dirty(p: *mut Pcache, page: *mut Page) {
-        if let Some(f) = unsafe { PcacheHandle::new(p) }.ops_mark_dirty() {
-            unsafe { f(p, page) };
-        }
+        let ops = unsafe { PcacheHandle::new(p) }.ops();
+        // SAFETY: see `ops_call_read_page`.
+        let ops = unsafe { ops.unwrap_unchecked() };
+        unsafe { ops.mark_dirty(p, page) };
     }
 }
 
@@ -1854,13 +1913,14 @@ impl Pcache {
         // (registered) anywhere, so nothing else can be concurrently
         // mutating it while we validate it.
         let ops = unsafe { (*p).ops };
-        if ops.is_null() {
+        if ops.is_none() {
             return Err(Errno::Inval);
         }
-        let (read_page, write_page) = unsafe { ((*ops).read_page, (*ops).write_page) };
-        if read_page.is_none() || write_page.is_none() {
-            return Err(Errno::Inval);
-        }
+        // `read_page`/`write_page` are required `PcacheOps` trait methods
+        // now (no default body) -- any `Some(ops)` vtable already
+        // supplies both, so the separate per-slot `None` checks the old
+        // fn-pointer table needed are now a structural invariant instead
+        // of a runtime check.
         if Pcache::blk_count(p) == 0 {
             return Err(Errno::Inval);
         }
@@ -2170,7 +2230,7 @@ extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
         drop(p_guard);
 
         // Real write outside lock
-        let mut ret = (ops_call_optional(unsafe { PcacheHandle::new(p) }.ops_write_begin(), p, page));
+        let mut ret = Pcache::ops_call_write_begin(p, page);
         if ret != 0 {
             p_guard = Pcache::lock_local(p);
             Pcache::set_flush_error(p, ret);

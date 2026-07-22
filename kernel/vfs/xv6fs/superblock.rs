@@ -41,15 +41,21 @@
 //! here is a private-to-this-file ZST — see its own doc for why it isn't
 //! shared with `inode.rs`/`truncate.rs`'s markers of the same name (this
 //! file's `major`/`minor` return `i32`, not `inode.rs`'s `i16` — a single
-//! shared type would collide the two). Four functions stay free fns
+//! shared type would collide the two). Two functions stay free fns
 //! (floor): `slab_cache_init`/`slab_cache_shrink`/`slab_alloc`/`slab_free`
 //! are this crate's established self-contained per-file C-ABI slab facade
-//! (`inode.rs`'s own `slab_free` copy is the precedent), and
-//! `xv6fs_pcache_read_page`/`xv6fs_pcache_write_page` are address-taken
-//! (`Some(...)` in the `XV6FS_PCACHE_OPS` static fn-pointer table). Every
+//! (`inode.rs`'s own `slab_free` copy is the precedent). Every
 //! relocated body is byte-identical to its old free-fn form; no raw-pointer
 //! first param became `&self`/`&T` (see this crate's freeze-noalias hazard
 //! note for why that would be unsound here).
+//!
+//! `xv6fs_pcache_read_page`/`xv6fs_pcache_write_page` (formerly two more
+//! address-taken floor free fns) are GONE (fn-pointer-ops-table -> trait
+//! dispatch campaign): their bodies moved unchanged into
+//! `Xv6fsPcacheOps::read_page`/`write_page`, a zero-sized
+//! `crate::mm::pcache::PcacheOps` trait implementor (`&'static dyn`
+//! dispatch), replacing the `static pcache_ops XV6FS_PCACHE_OPS`
+//! fn-pointer table.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -59,10 +65,11 @@ use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::bindings::{
-    bio, blkdev_t, buf, dinode, page_t, pcache, pcache_ops, slab_cache_t, statfs,
+    bio, blkdev_t, buf, dinode, page_t, pcache, slab_cache_t, statfs,
     vfs_fs_type, vfs_inode, vfs_superblock, xv6fs_inode,
     xv6fs_superblock, EINVAL, EIO, ENOMEM, ENOSPC, PGSIZE,
 };
+use crate::mm::pcache::PcacheOps;
 use crate::vfs::fs::{FsTypeOps, SuperblockOps};
 
 use super::inode::{Xv6fsInode, XV6FS_INODE_OPS};
@@ -415,110 +422,121 @@ impl Xv6fs {
     }
 }
 
-extern "C" fn xv6fs_pcache_read_page(pc: *mut pcache, page: *mut page_t) -> c_int {
-    // SAFETY: `pc`/`page` are live (caller's contract, matches the C
-    // `pcache_ops.read_page` callback convention); `private_data` was set
-    // to a live `vfs_inode` by `xv6fs_inode_pcache_init`.
-    unsafe {
-        let inode = (*pc).private_data as *mut vfs_inode;
-        let ip = inode as *mut xv6fs_inode;
-        let xv6_sb = (*inode).sb as *mut xv6fs_superblock;
-        let pcnode = Pcache::page_get_node(page);
-        let base_bn = (*pcnode).blkno / BLK512_PER_BSIZE;
+/// Zero-sized [`PcacheOps`] implementor for xv6fs regular-file pcaches
+/// (fn-pointer-ops-table -> trait dispatch campaign; was the `static
+/// pcache_ops XV6FS_PCACHE_OPS` fn-pointer table with two `extern "C"`
+/// callback fns, `xv6fs_pcache_read_page`/`xv6fs_pcache_write_page`).
+struct Xv6fsPcacheOps;
 
-        for i in 0..BSIZE_PER_PAGE as u64 {
-            let addr = Xv6fsInode::bmap_read(ip, (base_bn + i) as u32);
-            if addr == 0 {
-                memset(((*pcnode).data as *mut u8).add((i * super::BSIZE as u64) as usize) as *mut c_void, 0, super::BSIZE as usize);
-                continue;
-            }
+impl PcacheOps for Xv6fsPcacheOps {
+    // SAFETY (both methods): `pc`/`page` are live (caller's contract,
+    // matches the old C `pcache_ops.read_page`/`write_page` callback
+    // convention); `private_data` was set to a live `vfs_inode` by
+    // `xv6fs_inode_pcache_init`.
+    unsafe fn read_page(&self, pc: *mut pcache, page: *mut page_t) -> c_int {
+        unsafe {
+            let inode = (*pc).private_data as *mut vfs_inode;
+            let ip = inode as *mut xv6fs_inode;
+            let xv6_sb = (*inode).sb as *mut xv6fs_superblock;
+            let pcnode = Pcache::page_get_node(page);
+            let base_bn = (*pcnode).blkno / BLK512_PER_BSIZE;
 
-            let b = Bio::alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, false as crate::bindings::bool_, None, ptr::null_mut());
-            if is_err_or_null(b) {
-                return Xv6fs::neg(ENOMEM);
+            for i in 0..BSIZE_PER_PAGE as u64 {
+                let addr = Xv6fsInode::bmap_read(ip, (base_bn + i) as u32);
+                if addr == 0 {
+                    memset(((*pcnode).data as *mut u8).add((i * super::BSIZE as u64) as usize) as *mut c_void, 0, super::BSIZE as usize);
+                    continue;
+                }
+
+                let b = Bio::alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, false as crate::bindings::bool_, None, ptr::null_mut());
+                if is_err_or_null(b) {
+                    return Xv6fs::neg(ENOMEM);
+                }
+                // SAFETY: `bio_alloc`'s success postcondition (one held
+                // kobject reference) is exactly `KArc::from_raw`'s
+                // precondition -- see `kernel/dev/bio.rs`'s `HasKobject`
+                // impl. `b` (the KArc) now owns that reference; every exit
+                // path below (the two error `return`s and the fallthrough to
+                // the next loop iteration) drops it automatically, replacing
+                // the three manual `bio_release(b)` calls the pre-P3-9b code
+                // needed on this same set of paths.
+                let b = KArc::<bio>::from_raw(b);
+                let bp = KArc::as_ptr(&b);
+                (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
+                let ret = Bio::add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
+                if ret != 0 {
+                    return ret; // `b` drops here, releasing the reference.
+                }
+                let ret = Blkdev::submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
+                if ret != 0 {
+                    return ret; // `b` drops here, releasing the reference.
+                }
+                let ret = Xv6fs::bio_await(bp);
+                if ret != 0 {
+                    return ret; // `b` drops here (release either way).
+                }
+                // `b` drops at the end of this loop iteration -- releases the
+                // reference exactly where the old unconditional
+                // `bio_release(b)` after `bio_await` ran.
             }
-            // SAFETY: `bio_alloc`'s success postcondition (one held
-            // kobject reference) is exactly `KArc::from_raw`'s
-            // precondition -- see `kernel/dev/bio.rs`'s `HasKobject`
-            // impl. `b` (the KArc) now owns that reference; every exit
-            // path below (the two error `return`s and the fallthrough to
-            // the next loop iteration) drops it automatically, replacing
-            // the three manual `bio_release(b)` calls the pre-P3-9b code
-            // needed on this same set of paths.
-            let b = KArc::<bio>::from_raw(b);
-            let bp = KArc::as_ptr(&b);
-            (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
-            let ret = Bio::add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
-            if ret != 0 {
-                return ret; // `b` drops here, releasing the reference.
-            }
-            let ret = Blkdev::submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
-            if ret != 0 {
-                return ret; // `b` drops here, releasing the reference.
-            }
-            let ret = Xv6fs::bio_await(bp);
-            if ret != 0 {
-                return ret; // `b` drops here (release either way).
-            }
-            // `b` drops at the end of this loop iteration -- releases the
-            // reference exactly where the old unconditional
-            // `bio_release(b)` after `bio_await` ran.
+            0
         }
-        0
     }
-}
 
-extern "C" fn xv6fs_pcache_write_page(pc: *mut pcache, page: *mut page_t) -> c_int {
-    // SAFETY: `pc`/`page` are live (caller's contract).
-    unsafe {
-        let inode = (*pc).private_data as *mut vfs_inode;
-        // The flush worker may run concurrently with inode teardown. If the
-        // inode has already been detached from its superblock
-        // (inode->sb == NULL), skip the writeback -- the data is about to
-        // be truncated anyway.
-        if inode.is_null() || (*inode).sb.is_null() {
-            return 0;
+    unsafe fn write_page(&self, pc: *mut pcache, page: *mut page_t) -> c_int {
+        unsafe {
+            let inode = (*pc).private_data as *mut vfs_inode;
+            // The flush worker may run concurrently with inode teardown. If the
+            // inode has already been detached from its superblock
+            // (inode->sb == NULL), skip the writeback -- the data is about to
+            // be truncated anyway.
+            if inode.is_null() || (*inode).sb.is_null() {
+                return 0;
+            }
+
+            let ip = inode as *mut xv6fs_inode;
+            let xv6_sb = (*inode).sb as *mut xv6fs_superblock;
+            let pcnode = Pcache::page_get_node(page);
+            let base_bn = (*pcnode).blkno / BLK512_PER_BSIZE;
+
+            for i in 0..BSIZE_PER_PAGE as u64 {
+                let addr = Xv6fsInode::bmap_read(ip, (base_bn + i) as u32);
+                if addr == 0 {
+                    continue; // Sparse / beyond file -- nothing to write back.
+                }
+
+                let b = Bio::alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, true as crate::bindings::bool_, None, ptr::null_mut());
+                if is_err_or_null(b) {
+                    return Xv6fs::neg(ENOMEM);
+                }
+                // SAFETY: see the identical comment in `read_page` above --
+                // same postcondition, same `HasKobject` impl.
+                let b = KArc::<bio>::from_raw(b);
+                let bp = KArc::as_ptr(&b);
+                (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
+                let ret = Bio::add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
+                if ret != 0 {
+                    return ret; // `b` drops here, releasing the reference.
+                }
+                let ret = Blkdev::submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
+                if ret != 0 {
+                    return ret; // `b` drops here, releasing the reference.
+                }
+                let ret = Xv6fs::bio_await(bp);
+                if ret != 0 {
+                    return ret; // `b` drops here (release either way).
+                }
+                // `b` drops at the end of this loop iteration -- releases the
+                // reference exactly where the old unconditional
+                // `bio_release(b)` after `bio_await` ran.
+            }
+            0
         }
-
-        let ip = inode as *mut xv6fs_inode;
-        let xv6_sb = (*inode).sb as *mut xv6fs_superblock;
-        let pcnode = Pcache::page_get_node(page);
-        let base_bn = (*pcnode).blkno / BLK512_PER_BSIZE;
-
-        for i in 0..BSIZE_PER_PAGE as u64 {
-            let addr = Xv6fsInode::bmap_read(ip, (base_bn + i) as u32);
-            if addr == 0 {
-                continue; // Sparse / beyond file -- nothing to write back.
-            }
-
-            let b = Bio::alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, true as crate::bindings::bool_, None, ptr::null_mut());
-            if is_err_or_null(b) {
-                return Xv6fs::neg(ENOMEM);
-            }
-            // SAFETY: see the identical comment in
-            // `xv6fs_pcache_read_page` above -- same postcondition, same
-            // `HasKobject` impl.
-            let b = KArc::<bio>::from_raw(b);
-            let bp = KArc::as_ptr(&b);
-            (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
-            let ret = Bio::add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
-            if ret != 0 {
-                return ret; // `b` drops here, releasing the reference.
-            }
-            let ret = Blkdev::submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
-            if ret != 0 {
-                return ret; // `b` drops here, releasing the reference.
-            }
-            let ret = Xv6fs::bio_await(bp);
-            if ret != 0 {
-                return ret; // `b` drops here (release either way).
-            }
-            // `b` drops at the end of this loop iteration -- releases the
-            // reference exactly where the old unconditional
-            // `bio_release(b)` after `bio_await` ran.
-        }
-        0
     }
+
+    // `write_begin`/`write_end`/`mark_dirty` are not overridden: xv6fs
+    // left all three `None` in the old fn-pointer table, and the trait's
+    // default bodies (0/0/no-op) reproduce that exactly.
 }
 
 impl Xv6fsSuperblock {
@@ -530,13 +548,7 @@ impl Xv6fsSuperblock {
     }
 }
 
-static XV6FS_PCACHE_OPS: pcache_ops = pcache_ops {
-    read_page: Some(xv6fs_pcache_read_page),
-    write_page: Some(xv6fs_pcache_write_page),
-    write_begin: None,
-    write_end: None,
-    mark_dirty: None,
-};
+static XV6FS_PCACHE_OPS: Xv6fsPcacheOps = Xv6fsPcacheOps;
 
 impl Xv6fs {
     /// Initialise the embedded per-inode pcache (`i_data`). Call once for
@@ -552,7 +564,7 @@ impl Xv6fs {
             }
             let pc = ptr::addr_of_mut!((*inode).i_data);
             ptr::write_bytes(pc, 0, 1);
-            (*pc).ops = ptr::addr_of!(XV6FS_PCACHE_OPS) as *mut pcache_ops;
+            (*pc).ops = Some(&XV6FS_PCACHE_OPS);
             // blk_count in 512-byte units, rounded up to page boundary (8 blocks).
             let maxfile_blk512 = super::MAXFILE as u64 * BLK512_PER_BSIZE;
             (*pc).blk_count = (maxfile_blk512 + 7) & !7u64;

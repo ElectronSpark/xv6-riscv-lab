@@ -120,7 +120,9 @@ pub use crate::mm::vm::Vm as vm;
 pub use crate::mm::vm::Vm as vm_t;
 pub use crate::mm::vm::Vma as vma;
 pub use crate::mm::pcache::Pcache as pcache;
-pub use crate::mm::pcache::PcacheOps as pcache_ops;
+// `pcache_ops` facade alias retired (fn-pointer-ops-table -> trait
+// dispatch campaign): `PcacheOps` is a trait now, reached by crate path
+// at its implementors (`Xv6fsPcacheOps`/`TmpfsPcacheOps`/`TestPcacheOps`).
 pub use crate::mm::pcache::PcacheNode as pcache_node;
 pub use crate::mm::page::PageStruct as page_struct;
 pub use crate::mm::page::PageStruct as page_t;
