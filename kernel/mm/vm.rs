@@ -1132,7 +1132,7 @@ impl Vm {
     #[inline]
     fn xv6_vm_assert_vm_write_held(vm_ptr: *mut vm, msg: *const c_char) {
         if current_thread().is_null() { return; }
-        if rwsem_is_write_holding(machine::vm_rw_lock_ptr(vm_ptr)) { return; }
+        if RawRwsem::is_write_holding(machine::vm_rw_lock_ptr(vm_ptr)) { return; }
         __panic_start();
         if msg.is_null() {
             crate::kprintln!("PANIC: vm rwsem must be write-held");
@@ -1323,25 +1323,25 @@ impl Vm {
     pub(crate) fn vm_rlock(vm_ptr: *mut vm) {
         // SAFETY: caller supplies a live `vm` (C-ABI lock entry point; the
         // paired `vm_runlock` is always called before `vm_ptr` is freed).
-        unsafe { rwsem_acquire_read(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
+        unsafe { RawRwsem::acquire_read(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
     }
 
     /// Release VM read lock.
     pub(crate) fn vm_runlock(vm_ptr: *mut vm) {
         // SAFETY: caller supplies a live `vm` currently read-locked by `vm_rlock`.
-        unsafe { rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
+        unsafe { RawRwsem::release(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
     }
 
     /// Acquire VM write lock for VMA-tree modification (rwsem, sleepable).
     pub(crate) fn vm_wlock(vm_ptr: *mut vm) {
         // SAFETY: caller supplies a live `vm`.
-        unsafe { rwsem_acquire_write(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
+        unsafe { RawRwsem::acquire_write(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
     }
 
     /// Release VM write lock.
     pub(crate) fn vm_wunlock(vm_ptr: *mut vm) {
         // SAFETY: caller supplies a live `vm` currently write-locked by `vm_wlock`.
-        unsafe { rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
+        unsafe { RawRwsem::release(&mut (*vm_ptr).rw_lock as *mut rwsem_t) };
     }
 
     /// Acquire VM page-table spinlock for PTE modifications.
@@ -1521,7 +1521,7 @@ impl Vm {
                 &mut (*vm_ptr).spinlock as *mut spinlock_t,
                 VM_PGTABLE_LOCK_NAME.as_ptr() as *mut c_char,
             );
-            rwsem_init(
+            RawRwsem::init(
                 &mut (*vm_ptr).rw_lock as *mut rwsem_t,
                 RWLOCK_PRIO_READ as u64,
                 VM_RW_LOCK_NAME.as_ptr() as *const c_char,
@@ -2763,7 +2763,7 @@ mod ffi {
         // `xv6_vm_panic` shim that lived in vm_pgtab_shims.c (still declared
         // here for now; see __vm_panic_str below).
     }
-pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_write, rwsem_init, rwsem_is_write_holding, rwsem_release};
+pub(crate) use crate::lock::rwsem::RawRwsem;
 pub(crate) use crate::mm::vm_pgtab::{vm_dump_flags, xv6_vm_sfence_vma, PageTable};
 pub(crate) use crate::sbi::sbi_remote_hfence_vma;
     // P3-1C mesh sweep: vfs/fs.rs is in scope for this wave; its

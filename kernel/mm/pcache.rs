@@ -716,23 +716,23 @@ impl PcacheHandle {
     }
     #[inline]
     fn tree_lock_init(self) {
-        unsafe { crate::lock::rwlock::rwlock_init(self.tree_lock_ptr(), PCACHE_TREE_LOCK_NAME.as_ptr() as *const c_char) };
+        unsafe { crate::lock::rwlock::RawRwlock::init(self.tree_lock_ptr(), PCACHE_TREE_LOCK_NAME.as_ptr() as *const c_char) };
     }
     #[inline]
     fn tree_rlock(self) {
-        unsafe { crate::lock::rwlock::rwlock_rlock(self.tree_lock_ptr()) };
+        unsafe { crate::lock::rwlock::RawRwlock::rlock(self.tree_lock_ptr()) };
     }
     #[inline]
     fn tree_runlock(self) {
-        unsafe { crate::lock::rwlock::rwlock_runlock(self.tree_lock_ptr()) };
+        unsafe { crate::lock::rwlock::RawRwlock::runlock(self.tree_lock_ptr()) };
     }
     #[inline]
     fn tree_wlock(self) {
-        unsafe { crate::lock::rwlock::rwlock_wlock(self.tree_lock_ptr()) };
+        unsafe { crate::lock::rwlock::RawRwlock::wlock(self.tree_lock_ptr()) };
     }
     #[inline]
     fn tree_wunlock(self) {
-        unsafe { crate::lock::rwlock::rwlock_wunlock(self.tree_lock_ptr()) };
+        unsafe { crate::lock::rwlock::RawRwlock::wunlock(self.tree_lock_ptr()) };
     }
 
     #[inline]

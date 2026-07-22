@@ -1307,8 +1307,8 @@ pub(super) fn xv6_exit_reap_zombie(
 //
 // Kernel primitives consumed:
 //   * `hlist_init/get/get_rcu/put_rcu/pop_rcu`     — extern C (kernel/hlist.c)
-//   * `rwlock_init/wlock/wunlock/rlock/runlock`,
-//     `__rwl_try_update`, `__rwl_w_holding`        — crate::lock::rwlock (plain Rust fns)
+//   * `RawRwlock::{init,wlock,wunlock,rlock,runlock}`,
+//     `RawRwlock::{rwl_try_update,rwl_w_holding}`  — crate::lock::rwlock (assoc fns)
 //   * `hlist_hash_int`, `rcu_assign_pointer`,
 //     `rcu_dereference`, `list_entry_add_tail_rcu`,
 //     `list_entry_del_init_rcu`, `atomic_inc_unless`,
@@ -1339,10 +1339,7 @@ use crate::hlist::{hlist_get, hlist_get_rcu, hlist_init, hlist_pop_rcu, hlist_pu
 // Direct crate-path imports (kernel/lock/rwlock.rs) — these used to be
 // C-ABI symbol redeclarations; the `#[no_mangle]` exports are gone. All
 // stay `unsafe fn`, so the `u! { ... }` call sites below are unchanged.
-use crate::lock::rwlock::{
-    __rwl_try_update, __rwl_w_holding, rwlock_init, rwlock_rlock, rwlock_runlock, rwlock_wlock,
-    rwlock_wunlock,
-};
+use crate::lock::rwlock::RawRwlock;
 
 // --- Rust replacements for the C macros / static inlines -------------------
 
@@ -1547,7 +1544,7 @@ pub(super) fn xv6_proctab_init_storage() {
             NR_THREAD_HASH_BUCKETS as u64,
             &raw mut funcs,
         );
-        rwlock_init(&raw mut t.pid_lock, c"pid_lock".as_ptr());
+        RawRwlock::init(&raw mut t.pid_lock, c"pid_lock".as_ptr());
         list_init(&raw mut t.procs_list);
         t.initproc = ptr::null_mut();
         t.nextpid = 1;
@@ -1556,37 +1553,37 @@ pub(super) fn xv6_proctab_init_storage() {
 
 pub(super) fn xv6_pid_wlock() {
     // SAFETY: see `pt()`. These four are the `pid_lock` primitives
-    // themselves; `rwlock_w{,un}lock`/`rwlock_r{,un}lock` handle concurrent
-    // access to the lock's own state internally, so no external
-    // synchronisation is required to call them beyond `pt()`'s pointer
-    // validity and the usual lock/unlock balancing the caller owes.
-    u! { rwlock_wlock(&raw mut (*pt()).pid_lock) }
+    // themselves; `RawRwlock::{wlock,wunlock}`/`RawRwlock::{rlock,runlock}`
+    // handle concurrent access to the lock's own state internally, so no
+    // external synchronisation is required to call them beyond `pt()`'s
+    // pointer validity and the usual lock/unlock balancing the caller owes.
+    u! { RawRwlock::wlock(&raw mut (*pt()).pid_lock) }
 }
 pub(super) fn xv6_pid_wunlock() {
     // SAFETY: see `xv6_pid_wlock`.
-    u! { rwlock_wunlock(&raw mut (*pt()).pid_lock) }
+    u! { RawRwlock::wunlock(&raw mut (*pt()).pid_lock) }
 }
 pub(crate) fn xv6_pid_rlock() {
     // SAFETY: see `xv6_pid_wlock`.
-    u! { rwlock_rlock(&raw mut (*pt()).pid_lock) }
+    u! { RawRwlock::rlock(&raw mut (*pt()).pid_lock) }
 }
 pub(crate) fn xv6_pid_runlock() {
     // SAFETY: see `xv6_pid_wlock`.
-    u! { rwlock_runlock(&raw mut (*pt()).pid_lock) }
+    u! { RawRwlock::runlock(&raw mut (*pt()).pid_lock) }
 }
 pub(super) fn xv6_pid_try_lock_upgrade() -> c_int {
-    // SAFETY: see `xv6_pid_wlock`; `__rwl_try_update` is the primitive
-    // implementing a read-to-write lock upgrade attempt.
-    if u! { __rwl_try_update(&raw mut (*pt()).pid_lock) } {
+    // SAFETY: see `xv6_pid_wlock`; `RawRwlock::rwl_try_update` is the
+    // primitive implementing a read-to-write lock upgrade attempt.
+    if u! { RawRwlock::rwl_try_update(&raw mut (*pt()).pid_lock) } {
         1
     } else {
         0
     }
 }
 pub(super) fn xv6_pid_wholding() -> c_int {
-    // SAFETY: see `xv6_pid_wlock`; `__rwl_w_holding` only inspects the
-    // lock's own internally-synchronised state.
-    if u! { __rwl_w_holding(&raw mut (*pt()).pid_lock) } {
+    // SAFETY: see `xv6_pid_wlock`; `RawRwlock::rwl_w_holding` only inspects
+    // the lock's own internally-synchronised state.
+    if u! { RawRwlock::rwl_w_holding(&raw mut (*pt()).pid_lock) } {
         1
     } else {
         0

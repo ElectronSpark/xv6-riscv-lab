@@ -597,35 +597,38 @@ use crate::bindings::{completion_t, mutex_t, rwlock as rwlock_t, rwsem_t, semaph
 
 pub(crate) use crate::lock::completion::RawCompletion;
 pub(crate) use crate::lock::mutex::RawMutex;
-// `crate::lock::rwlock::rwlock_*` are genuinely `unsafe fn`; this file's
-// original extern declaration asserted `pub safe fn` (this crate's usual
-// FFI-facade convention — every method below already documents its own
-// pointer-validity contract via `KRwlock::from_ptr`'s doc). Thin safe
+// `crate::lock::rwlock::RawRwlock::*` are genuinely `unsafe fn`; this
+// file's original extern declaration asserted `pub safe fn` (this crate's
+// usual FFI-facade convention — every method below already documents its
+// own pointer-validity contract via `KRwlock::from_ptr`'s doc). Thin safe
 // wrappers preserve that facade instead of pushing `unsafe {}` onto every
-// call site below.
+// call site below. NO-STANDALONE-FN: `rwlock.rs`'s free fns moved into
+// `impl RawRwlock` (prefix stripped), so the macro now maps a local
+// wrapper name to the differently-named associated fn it delegates to.
+use crate::lock::rwlock::RawRwlock;
 macro_rules! safe_rwlock_wrapper {
-    ($name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?) => {
+    ($name:ident => $target:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?) => {
         #[inline(always)]
         fn $name($($arg: $ty),*) $(-> $ret)? {
-            // SAFETY: see `crate::lock::rwlock::$name`'s contract; every
-            // call site here goes through `KRwlock`/`KRwlockGuard`, which
-            // only ever hold a pointer obtained from `KRwlock::from_ptr`.
-            unsafe { crate::lock::rwlock::$name($($arg),*) }
+            // SAFETY: see `RawRwlock::$target`'s contract; every call site
+            // here goes through `KRwlock`/`KRwlockGuard`, which only ever
+            // hold a pointer obtained from `KRwlock::from_ptr`.
+            unsafe { RawRwlock::$target($($arg),*) }
         }
     };
 }
-safe_rwlock_wrapper!(rwlock_init(l: *mut rwlock_t, name: *const c_char));
-safe_rwlock_wrapper!(rwlock_rlock(l: *mut rwlock_t));
-safe_rwlock_wrapper!(rwlock_wlock(l: *mut rwlock_t));
-safe_rwlock_wrapper!(rwlock_wlock_expedited(l: *mut rwlock_t));
-safe_rwlock_wrapper!(rwlock_graceful_wlock(l: *mut rwlock_t));
-safe_rwlock_wrapper!(rwlock_rlock_irqsave(l: *mut rwlock_t) -> c_int);
-safe_rwlock_wrapper!(rwlock_wlock_irqsave(l: *mut rwlock_t) -> c_int);
-safe_rwlock_wrapper!(rwlock_runlock(l: *mut rwlock_t));
-safe_rwlock_wrapper!(rwlock_wunlock(l: *mut rwlock_t));
-safe_rwlock_wrapper!(rwlock_runlock_irqrestore(l: *mut rwlock_t, intena: c_int));
-safe_rwlock_wrapper!(rwlock_wunlock_irqrestore(l: *mut rwlock_t, intena: c_int));
-pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_read_interruptible, rwsem_acquire_read_timed, rwsem_acquire_write, rwsem_acquire_write_interruptible, rwsem_acquire_write_timed, rwsem_init, rwsem_is_write_holding, rwsem_release, rwsem_try_acquire_read, rwsem_try_acquire_write};
+safe_rwlock_wrapper!(rwlock_init => init(l: *mut rwlock_t, name: *const c_char));
+safe_rwlock_wrapper!(rwlock_rlock => rlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_wlock => wlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_wlock_expedited => wlock_expedited(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_graceful_wlock => graceful_wlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_rlock_irqsave => rlock_irqsave(l: *mut rwlock_t) -> c_int);
+safe_rwlock_wrapper!(rwlock_wlock_irqsave => wlock_irqsave(l: *mut rwlock_t) -> c_int);
+safe_rwlock_wrapper!(rwlock_runlock => runlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_wunlock => wunlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_runlock_irqrestore => runlock_irqrestore(l: *mut rwlock_t, intena: c_int));
+safe_rwlock_wrapper!(rwlock_wunlock_irqrestore => wunlock_irqrestore(l: *mut rwlock_t, intena: c_int));
+pub(crate) use crate::lock::rwsem::RawRwsem;
 pub(crate) use crate::lock::semaphore::RawSemaphore;
 
 // ---------------------------------------------------------------------------
@@ -723,61 +726,61 @@ impl KRwsem {
     pub fn as_ptr(self) -> *mut rwsem_t { self.raw }
     #[inline(always)]
     pub fn init(self, flags: u64, name: *const c_char) -> c_int {
-        rwsem_init(self.raw, flags, name)
+        RawRwsem::init(self.raw, flags, name)
     }
     #[inline(always)]
-    pub fn holding_write(self) -> bool { rwsem_is_write_holding(self.raw) }
+    pub fn holding_write(self) -> bool { RawRwsem::is_write_holding(self.raw) }
 
     #[inline(always)]
     pub fn read(self) -> Result<KRwsemReadGuard, c_int> {
-        let r = rwsem_acquire_read(self.raw);
+        let r = RawRwsem::acquire_read(self.raw);
         if r == 0 {
             Ok(KRwsemReadGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
     }
     #[inline(always)]
     pub fn try_read(self) -> Option<KRwsemReadGuard> {
-        if rwsem_try_acquire_read(self.raw) == 0 {
+        if RawRwsem::try_acquire_read(self.raw) == 0 {
             Some(KRwsemReadGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { None }
     }
     #[inline(always)]
     pub fn read_interruptible(self) -> Result<KRwsemReadGuard, c_int> {
-        let r = rwsem_acquire_read_interruptible(self.raw);
+        let r = RawRwsem::acquire_read_interruptible(self.raw);
         if r == 0 {
             Ok(KRwsemReadGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
     }
     #[inline(always)]
     pub fn read_timed(self, timeout_ms: u64) -> Result<KRwsemReadGuard, c_int> {
-        let r = rwsem_acquire_read_timed(self.raw, timeout_ms);
+        let r = RawRwsem::acquire_read_timed(self.raw, timeout_ms);
         if r == 0 {
             Ok(KRwsemReadGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
     }
     #[inline(always)]
     pub fn write(self) -> Result<KRwsemWriteGuard, c_int> {
-        let r = rwsem_acquire_write(self.raw);
+        let r = RawRwsem::acquire_write(self.raw);
         if r == 0 {
             Ok(KRwsemWriteGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
     }
     #[inline(always)]
     pub fn try_write(self) -> Option<KRwsemWriteGuard> {
-        if rwsem_try_acquire_write(self.raw) == 0 {
+        if RawRwsem::try_acquire_write(self.raw) == 0 {
             Some(KRwsemWriteGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { None }
     }
     #[inline(always)]
     pub fn write_interruptible(self) -> Result<KRwsemWriteGuard, c_int> {
-        let r = rwsem_acquire_write_interruptible(self.raw);
+        let r = RawRwsem::acquire_write_interruptible(self.raw);
         if r == 0 {
             Ok(KRwsemWriteGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
     }
     #[inline(always)]
     pub fn write_timed(self, timeout_ms: u64) -> Result<KRwsemWriteGuard, c_int> {
-        let r = rwsem_acquire_write_timed(self.raw, timeout_ms);
+        let r = RawRwsem::acquire_write_timed(self.raw, timeout_ms);
         if r == 0 {
             Ok(KRwsemWriteGuard { raw: self.raw, _not_send_sync: PhantomData })
         } else { Err(r) }
@@ -791,7 +794,7 @@ pub struct KRwsemReadGuard {
 }
 impl Drop for KRwsemReadGuard {
     #[inline(always)]
-    fn drop(&mut self) { rwsem_release(self.raw); }
+    fn drop(&mut self) { RawRwsem::release(self.raw); }
 }
 
 #[must_use = "rwsem write lock is released when the guard is dropped"]
@@ -801,7 +804,7 @@ pub struct KRwsemWriteGuard {
 }
 impl Drop for KRwsemWriteGuard {
     #[inline(always)]
-    fn drop(&mut self) { rwsem_release(self.raw); }
+    fn drop(&mut self) { RawRwsem::release(self.raw); }
 }
 
 // ---------------------------------------------------------------------------

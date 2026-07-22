@@ -688,10 +688,9 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 use crate::proc::Scheduler;
 // P3-D3b: lock/rwsem.rs's entry points (used for `vfs_superblock.lock`)
 // are plain safe Rust fns now that their `#[no_mangle]` exports are gone;
-// reached by crate path.
-use crate::lock::rwsem::{
-    rwsem_acquire_read, rwsem_acquire_write, rwsem_init, rwsem_is_write_holding, rwsem_release,
-};
+// reached by crate path. NO-STANDALONE-FN: they moved into `impl RawRwsem`
+// (prefix stripped), so this file reaches them as `RawRwsem::*` now.
+use crate::lock::rwsem::RawRwsem;
 // P3-D3b: same for lock/mutex.rs's entry points (inode mutexes and
 // `__MOUNT_MUTEX`).
 use crate::lock::mutex::RawMutex;
@@ -1543,7 +1542,7 @@ impl VfsSuperblock {
             (*sb).orphan_count = 0;
             VfsSuperblock::sb_refcount_atomic(sb).store(0, Ordering::SeqCst);
             VfsSuperblock::sb_mountcount_atomic(sb).store(0, Ordering::SeqCst);
-            rwsem_init(
+            RawRwsem::init(
                 &raw mut (*sb).lock,
                 RWLOCK_PRIO_READ as u64,
                 c"vfs_superblock_lock".as_ptr(),
@@ -1648,12 +1647,12 @@ impl VfsSuperblock {
         unsafe {
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
                 kassert!(
-                    rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock),
+                    RawRwsem::is_write_holding(&raw mut (*(*mountpoint).sb).lock),
                     "Mountpoint inode's superblock lock must be write held to set mountpoint"
                 );
             }
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "Superblock lock must be write held to set mountpoint"
             );
             kassert!(
@@ -1679,7 +1678,7 @@ impl VfsSuperblock {
         unsafe {
             let mut evicted = 0usize;
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "Superblock lock must be write held to evict inodes"
             );
 
@@ -1783,14 +1782,14 @@ impl VfsSuperblock {
     /// Mirrors `VfsSuperblock::vfs_superblock_rlock()`.
     pub(crate) fn vfs_superblock_rlock(sb: *mut vfs_superblock) {
         if !sb.is_null() {
-            unsafe { rwsem_acquire_read(&raw mut (*sb).lock) };
+            unsafe { RawRwsem::acquire_read(&raw mut (*sb).lock) };
         }
     }
 
     /// Mirrors `VfsSuperblock::vfs_superblock_wlock()`.
     pub(crate) fn vfs_superblock_wlock(sb: *mut vfs_superblock) {
         if !sb.is_null() {
-            unsafe { rwsem_acquire_write(&raw mut (*sb).lock) };
+            unsafe { RawRwsem::acquire_write(&raw mut (*sb).lock) };
         }
     }
 
@@ -1799,13 +1798,13 @@ impl VfsSuperblock {
         if sb.is_null() {
             return false;
         }
-        unsafe { rwsem_is_write_holding(&raw mut (*sb).lock) }
+        unsafe { RawRwsem::is_write_holding(&raw mut (*sb).lock) }
     }
 
     /// Mirrors `VfsSuperblock::vfs_superblock_unlock()`.
     pub(crate) fn vfs_superblock_unlock(sb: *mut vfs_superblock) {
         if !sb.is_null() {
-            unsafe { rwsem_release(&raw mut (*sb).lock) };
+            unsafe { RawRwsem::release(&raw mut (*sb).lock) };
         }
     }
 
@@ -1882,7 +1881,7 @@ impl VfsSuperblock {
                 return Err(Errno::Inval);
             }
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "VfsSuperblock::vfs_alloc_inode: must hold superblock write lock"
             );
             if (*sb).flags.valid() == 0 {
@@ -1916,7 +1915,7 @@ impl VfsSuperblock {
                 return Err(Errno::Inval);
             }
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "VfsSuperblock::vfs_get_inode: must hold superblock write lock"
             );
             if (*sb).flags.valid() == 0 {
@@ -1955,7 +1954,7 @@ impl VfsSuperblock {
                 return neg(EINVAL);
             }
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "VfsSuperblock::vfs_sync_superblock: must hold superblock write lock"
             );
             if (*sb).flags.valid() == 0 {
@@ -2028,7 +2027,7 @@ impl VfsSuperblock {
                 return Err(Errno::Inval);
             }
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "Superblock lock must be write held to add inode"
             );
             if (*sb).flags.valid() == 0 && (*sb).flags.initialized() != 0 {
@@ -2089,7 +2088,7 @@ impl VfsSuperblock {
                 return neg(EINVAL);
             }
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "Superblock lock must be write held to remove inode"
             );
             kassert!(
@@ -2257,7 +2256,7 @@ impl VfsInode {
         unsafe {
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
                 kassert!(
-                    rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock),
+                    RawRwsem::is_write_holding(&raw mut (*(*mountpoint).sb).lock),
                     "Mountpoint inode's superblock lock must be write held to turn into mountpoint"
                 );
             }
@@ -2293,7 +2292,7 @@ impl VfsInode {
         unsafe {
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
                 kassert!(
-                    rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock),
+                    RawRwsem::is_write_holding(&raw mut (*(*mountpoint).sb).lock),
                     "Mountpoint inode's superblock lock must be write held to clear mountpoint"
                 );
             }
@@ -2352,7 +2351,7 @@ impl VfsInode {
                 return ret_val;
             }
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
-                if !rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock) {
+                if !RawRwsem::is_write_holding(&raw mut (*(*mountpoint).sb).lock) {
                     crate::kprintln!("VfsInode::vfs_mount: mountpoint superblock write lock not held");
                     return neg(EPERM);
                 }
@@ -2470,7 +2469,7 @@ impl VfsInode {
                 // reference `VfsFsType::vfs_get_fs_type` acquired above -- replaces the
                 // old unconditional `VfsFsType::vfs_put_fs_type(fs_type)` on this path.
                 return ret_val;
-            } else if rwsem_is_write_holding(&raw mut (*sb).lock) {
+            } else if RawRwsem::is_write_holding(&raw mut (*sb).lock) {
                 (*sb).flags.set_initialized(1);
                 (*sb).flags.set_valid(1);
                 (*sb).flags.set_attached(1);
@@ -2499,7 +2498,7 @@ impl VfsInode {
             if ret_val != 0 {
                 return ret_val;
             }
-            if !rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock) {
+            if !RawRwsem::is_write_holding(&raw mut (*(*mountpoint).sb).lock) {
                 return neg(EPERM);
             }
             if (*(*mountpoint).sb).flags.valid() == 0 {
@@ -2526,7 +2525,7 @@ impl VfsInode {
             if ret_val != 0 {
                 return ret_val;
             }
-            if !rwsem_is_write_holding(&raw mut (*sb).lock) {
+            if !RawRwsem::is_write_holding(&raw mut (*sb).lock) {
                 return neg(EPERM);
             }
             if (*sb).flags.valid() == 0 {
@@ -2622,7 +2621,7 @@ impl VfsInode {
             }
 
             kassert!(
-                rwsem_is_write_holding(&raw mut (*sb).lock),
+                RawRwsem::is_write_holding(&raw mut (*sb).lock),
                 "Must hold sb wlock to make orphan"
             );
             kassert!(
@@ -2668,7 +2667,7 @@ impl VfsInode {
             }
 
             let parent_sb = (*mountpoint).sb;
-            if !parent_sb.is_null() && !rwsem_is_write_holding(&raw mut (*parent_sb).lock) {
+            if !parent_sb.is_null() && !RawRwsem::is_write_holding(&raw mut (*parent_sb).lock) {
                 return neg(EPERM);
             }
 
@@ -2892,7 +2891,7 @@ impl VfsInode {
                 Err(_) => {}
             }
 
-            if !rwsem_is_write_holding(&raw mut (*sb).lock) {
+            if !RawRwsem::is_write_holding(&raw mut (*sb).lock) {
                 VfsSuperblock::vfs_superblock_unlock(sb);
                 VfsSuperblock::vfs_superblock_wlock(sb);
             }
