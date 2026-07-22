@@ -8,9 +8,9 @@
 //!
 //! Each tty owns an input pipe (driver -> reader) and an output pipe
 //! (writer -> driver). The line discipline sits between the driver and
-//! the pipes: [`tty_input`] processes incoming characters through the
+//! the pipes: [`Tty::input`] processes incoming characters through the
 //! discipline before pushing them into the input pipe, while
-//! [`tty_write`] performs output post-processing before pushing data
+//! [`Tty::write`] performs output post-processing before pushing data
 //! into the output pipe.
 //!
 //! # Locking / concurrency
@@ -21,7 +21,7 @@
 //! `ref_count`, the raw-mode ring buffer (`raw_buf`/`raw_r`/`raw_w`) and
 //! the raw wait queue (`raw_wait`) — every field inside [`TtyInner`]. A
 //! `.lock()` returns a [`crate::sync::SpinLockGuard`] that
-//! `Deref`s/`DerefMut`s straight to [`TtyInner`]. [`tty_input`] and
+//! `Deref`s/`DerefMut`s straight to [`TtyInner`]. [`Tty::input`] and
 //! [`Tty::echo_char`] both need to call into `Pipe::pipe_write()`, which can
 //! sleep (the pipe may be full) — exactly like the C original, the guard
 //! is `drop()`-ed immediately before any such call and re-`.lock()`-ed
@@ -31,7 +31,7 @@
 //!
 //! The non-guarded fields (`ops`, `input_pipe`, `output_pipe`,
 //! `driver_data`, `session`, `name`) stay plain `Tty` fields: they are
-//! set once at [`tty_alloc`] and read lock-free thereafter (the pipe
+//! set once at [`Tty::alloc`] and read lock-free thereafter (the pipe
 //! pointers are also the `pty.rs` peer's data path; `session` is
 //! dereferenced without the lock by [`Tty::signal_fg_pgroup`] and the
 //! ioctl paths, matching the C original).
@@ -71,7 +71,9 @@ use crate::proc::access::TqRef;
 use crate::proc::Pgroup;
 
 use super::session::{Session, SessionTable};
-use super::termios::termios_init_default;
+// NO-STANDALONE-FN: `termios_init_default` relocated to `Termios::init_default`
+// (kernel/tty/termios.rs) -- `Termios` is this file's own local type, so no
+// import is needed to call it here.
 // P3-1C mesh sweep: vfs/pipe.rs is in scope for this wave; converted from
 // `extern "C"` redeclarations to plain crate-path items (identical
 // signatures).
@@ -250,7 +252,7 @@ const _: () = {
 /// `Sync` supertrait: instances are shared crate-wide as `&'static`
 /// references reachable from any CPU.
 pub trait TtyOps: Sync {
-    /// Driver open hook, called from [`tty_open`] after the refcount
+    /// Driver open hook, called from [`Tty::open`] after the refcount
     /// bump. Default: success (the old `None` fallback returned 0).
     ///
     /// # Safety
@@ -260,7 +262,7 @@ pub trait TtyOps: Sync {
         Ok(())
     }
 
-    /// Driver close hook, called from [`tty_close`] before the
+    /// Driver close hook, called from [`Tty::close`] before the
     /// refcount drop. Default: no-op.
     ///
     /// # Safety
@@ -269,7 +271,7 @@ pub trait TtyOps: Sync {
         let _ = tty;
     }
 
-    /// Carrier-loss hook, called from [`tty_hangup`]. Default: no-op.
+    /// Carrier-loss hook, called from [`Tty::hangup`]. Default: no-op.
     ///
     /// # Safety
     /// Same contract as [`TtyOps::open`].
@@ -335,7 +337,7 @@ pub trait TtyOps: Sync {
     ///
     /// # Safety
     /// `tty` as in [`TtyOps::open`]; `arg`'s required validity depends
-    /// on `cmd` (same contract as [`tty_ioctl`]).
+    /// on `cmd` (same contract as [`Tty::ioctl`]).
     unsafe fn ioctl(
         &self,
         tty: *mut Tty,
@@ -382,7 +384,7 @@ pub struct Tty {
 
 /// The lock-guarded per-tty state (N-R7h). Everything the per-tty lock
 /// protects lives here and is reached only through a
-/// [`crate::sync::SpinLockGuard`] (or, at [`tty_alloc`] time, before any
+/// [`crate::sync::SpinLockGuard`] (or, at [`Tty::alloc`] time, before any
 /// concurrent access). `#[repr(C)]` so `SpinLock<TtyInner>` keeps the
 /// `spinlock_t`-then-guarded-fields byte layout `console.rs`'s
 /// `consolewrite` (which now takes `(*tty).inner.lock()` to read
@@ -598,29 +600,34 @@ impl<T> SyncCell<T> {
 
 static TTY_CACHE: SyncCell<slab_cache_t> = SyncCell::uninit();
 
-pub(crate) extern "C" fn tty_init() {
-    // SAFETY: `TTY_CACHE` is written here (its first use) before any
-    // other `tty_*` entry point can run (mirrors the C original's
-    // `start_kernel.c`-ordered single call); `slab_cache_init`
-    // unconditionally overwrites every field of the cache descriptor.
-    let ret = unsafe {
-        slab_cache_init(
-            TTY_CACHE.get(),
-            c"tty_cache".as_ptr() as *mut c_char,
-            core::mem::size_of::<tty>(),
-            crate::bindings::SLAB_FLAG_STATIC as u64,
-        )
-    };
-    if ret != 0 {
-        __panic_start();
-        crate::kprintln!(
-            "ASSERTION_FAILURE {}:{}: In function '{}':",
-            "kernel/tty/tty.rs",
-            line!(),
-            "tty_init",
-        );
-        crate::kprintln!("tty_init: failed to init tty_cache slab, errno={}", ret);
-        __panic_end();
+// NO-STANDALONE-FN: `tty_init` (global once-at-boot cache init) relocated to
+// `Tty::init`, dropping the `tty_` prefix; `extern "C"` preserved exactly
+// (called once from `start_kernel.rs`).
+impl Tty {
+    pub(crate) extern "C" fn init() {
+        // SAFETY: `TTY_CACHE` is written here (its first use) before any
+        // other `Tty::*` entry point can run (mirrors the C original's
+        // `start_kernel.c`-ordered single call); `slab_cache_init`
+        // unconditionally overwrites every field of the cache descriptor.
+        let ret = unsafe {
+            slab_cache_init(
+                TTY_CACHE.get(),
+                c"tty_cache".as_ptr() as *mut c_char,
+                core::mem::size_of::<tty>(),
+                crate::bindings::SLAB_FLAG_STATIC as u64,
+            )
+        };
+        if ret != 0 {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/tty/tty.rs",
+                line!(),
+                "Tty::init",
+            );
+            crate::kprintln!("Tty::init: failed to init tty_cache slab, errno={}", ret);
+            __panic_end();
+        }
     }
 }
 
@@ -640,134 +647,150 @@ pub(crate) extern "C" fn tty_init() {
 /// # Safety
 /// `name` must be a valid, NUL-terminated C string for the duration of
 /// this call.
-pub(crate) unsafe fn tty_alloc(name: *const c_char, ops: Option<&'static dyn TtyOps>) -> *mut tty {
-    let raw = slab_alloc(TTY_CACHE.get()) as *mut tty;
-    if raw.is_null() {
-        return err_ptr(-ENOMEM);
-    }
-
-    // Two blocking pipes: input (driver->user) and output (user->driver).
-    let inp = Pipe::pipe_alloc(0);
-    if is_err(inp) {
-        slab_free(raw as *mut c_void);
-        // Propagate the encoded ERR_PTR value, reinterpreted as `*mut
-        // tty` -- mirrors the C original's `return (struct tty *)inp;`.
-        return inp as *mut tty;
-    }
-    let outp = Pipe::pipe_alloc(0);
-    if is_err(outp) {
-        Pipe::pipe_close(inp, 1);
-        Pipe::pipe_close(inp, 0);
-        slab_free(raw as *mut c_void);
-        return outp as *mut tty;
-    }
-
-    // SAFETY: `raw` is freshly allocated, exclusively-owned slab memory;
-    // every field used elsewhere in this file is written below before
-    // `raw` is returned to any other code (matches the C original's
-    // field-by-field initialization -- no blanket zeroing was ever done
-    // there either).
-    unsafe {
-        // N-R7h: build the lock-guarded state, then move a fully
-        // initialised `SpinLock<TtyInner>` into the slab slot. Only the
-        // wait queue needs a post-construction fix-up (`tq_init` wires it
-        // to *this* lock), done under the guard before `raw` is published.
-        // `termios_init_default` writes through a pointer, so seed a stack
-        // `termios` first. `raw_buf` is zeroed here (the C original left
-        // it uninitialised -- harmless, only `raw_r`/`raw_w` index it).
-        let mut termios0: termios = core::mem::zeroed();
-        termios_init_default(&raw mut termios0);
-        let inner = TtyInner {
-            termios: termios0,
-            winsize: crate::bindings::winsize {
-                ws_row: DEFAULT_ROWS,
-                ws_col: DEFAULT_COLS,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            },
-            ref_count: 1,
-            raw_buf: [0; 256],
-            raw_r: 0,
-            raw_w: 0,
-            // Placeholder; `tq_init` below initialises it in place against
-            // this lock.
-            raw_wait: core::mem::zeroed(),
-        };
-        // Move the constructed lock into the (uninitialised) slab slot.
-        core::ptr::write(&raw mut (*raw).inner, SpinLock::new(c"tty", inner));
-        // Wire the raw-mode wait queue to this exact lock. Runs before
-        // `raw` is returned, so no other hart can race the acquire; the
-        // guard hands `tq_init` this lock's `spinlock_t*` (so a later
-        // `wait_on(&raw mut tty.raw_wait, ..)` releases/reacquires it).
-        {
-            let mut g = (*raw).inner.lock();
-            let q = &raw mut g.raw_wait;
-            let lk = g.lock_ptr();
-            if let Some(r) = TqRef::from_ptr(q) { r.init(c"tty_raw".as_ptr(), lk); }
+// NO-STANDALONE-FN: `tty_alloc` relocated to `Tty::alloc`, dropping the
+// `tty_` prefix; still a plain `unsafe fn` (no `extern "C"` -- the `Option<&
+// 'static dyn TtyOps>` fat pointer is not FFI-safe, unchanged from before).
+impl Tty {
+    pub(crate) unsafe fn alloc(name: *const c_char, ops: Option<&'static dyn TtyOps>) -> *mut tty {
+        let raw = slab_alloc(TTY_CACHE.get()) as *mut tty;
+        if raw.is_null() {
+            return err_ptr(-ENOMEM);
         }
-        // Non-guarded fields: set once here, read lock-free thereafter.
-        (*raw).ops = ops;
-        (*raw).input_pipe = inp;
-        (*raw).output_pipe = outp;
-        (*raw).driver_data = core::ptr::null_mut();
-        (*raw).session = core::ptr::null_mut();
-        safestrcpy((*raw).name.as_mut_ptr(), name, (*raw).name.len());
-    }
 
-    raw
-}
-
-/// # Safety
-/// `t`, if non-null, must be a `tty` previously returned by
-/// [`tty_alloc`], not already freed, and not concurrently accessed.
-pub(crate) unsafe extern "C" fn tty_free(t: *mut tty) {
-    if t.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees `t` is a live, exclusively-owned `tty`
-    // (fn doc); the pipe pointers were set by `tty_alloc` and never
-    // mutated afterward except here.
-    unsafe {
-        let inp = (*t).input_pipe;
-        if !inp.is_null() {
+        // Two blocking pipes: input (driver->user) and output (user->driver).
+        let inp = Pipe::pipe_alloc(0);
+        if is_err(inp) {
+            slab_free(raw as *mut c_void);
+            // Propagate the encoded ERR_PTR value, reinterpreted as `*mut
+            // tty` -- mirrors the C original's `return (struct tty *)inp;`.
+            return inp as *mut tty;
+        }
+        let outp = Pipe::pipe_alloc(0);
+        if is_err(outp) {
             Pipe::pipe_close(inp, 1);
             Pipe::pipe_close(inp, 0);
+            slab_free(raw as *mut c_void);
+            return outp as *mut tty;
         }
-        let outp = (*t).output_pipe;
-        if !outp.is_null() {
-            Pipe::pipe_close(outp, 1);
-            Pipe::pipe_close(outp, 0);
+
+        // SAFETY: `raw` is freshly allocated, exclusively-owned slab memory;
+        // every field used elsewhere in this file is written below before
+        // `raw` is returned to any other code (matches the C original's
+        // field-by-field initialization -- no blanket zeroing was ever done
+        // there either).
+        unsafe {
+            // N-R7h: build the lock-guarded state, then move a fully
+            // initialised `SpinLock<TtyInner>` into the slab slot. Only the
+            // wait queue needs a post-construction fix-up (`tq_init` wires it
+            // to *this* lock), done under the guard before `raw` is published.
+            // `Termios::init_default` writes through a pointer, so seed a
+            // stack `termios` first. `raw_buf` is zeroed here (the C
+            // original left it uninitialised -- harmless, only `raw_r`/
+            // `raw_w` index it).
+            let mut termios0: termios = core::mem::zeroed();
+            Termios::init_default(&raw mut termios0);
+            let inner = TtyInner {
+                termios: termios0,
+                winsize: crate::bindings::winsize {
+                    ws_row: DEFAULT_ROWS,
+                    ws_col: DEFAULT_COLS,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                },
+                ref_count: 1,
+                raw_buf: [0; 256],
+                raw_r: 0,
+                raw_w: 0,
+                // Placeholder; `tq_init` below initialises it in place against
+                // this lock.
+                raw_wait: core::mem::zeroed(),
+            };
+            // Move the constructed lock into the (uninitialised) slab slot.
+            core::ptr::write(&raw mut (*raw).inner, SpinLock::new(c"tty", inner));
+            // Wire the raw-mode wait queue to this exact lock. Runs before
+            // `raw` is returned, so no other hart can race the acquire; the
+            // guard hands `tq_init` this lock's `spinlock_t*` (so a later
+            // `wait_on(&raw mut tty.raw_wait, ..)` releases/reacquires it).
+            {
+                let mut g = (*raw).inner.lock();
+                let q = &raw mut g.raw_wait;
+                let lk = g.lock_ptr();
+                if let Some(r) = TqRef::from_ptr(q) { r.init(c"tty_raw".as_ptr(), lk); }
+            }
+            // Non-guarded fields: set once here, read lock-free thereafter.
+            (*raw).ops = ops;
+            (*raw).input_pipe = inp;
+            (*raw).output_pipe = outp;
+            (*raw).driver_data = core::ptr::null_mut();
+            (*raw).session = core::ptr::null_mut();
+            safestrcpy((*raw).name.as_mut_ptr(), name, (*raw).name.len());
         }
-        slab_free(t as *mut c_void);
+
+        raw
     }
 }
 
-/// # Safety
-/// `t` must be a live, non-null `tty` (mirrors the C original, which
-/// also unconditionally dereferences `t->lock`).
-pub(crate) unsafe extern "C" fn tty_ref(t: *mut tty) {
-    // SAFETY: see fn doc -- creating `&(*t).inner` to lock it is the only
-    // deref; `ref_count` is then a safe guarded field access.
-    let mut guard = unsafe { (*t).inner.lock() };
-    guard.ref_count += 1;
-}
+// NO-STANDALONE-FN: `tty_free`/`tty_ref`/`tty_unref` relocated to
+// `Tty::free`/`Tty::ref_`/`Tty::unref` (dropping the `tty_` prefix; `ref` is
+// a keyword, so `ref_` -- matches the `Session::ref_`/`unref` precedent in
+// `kernel/tty/session.rs`). Raw `*mut tty` params kept, no `&self` (`Tty`
+// is `!Freeze` so a shared receiver would be sound here too, but keeping
+// the raw-pointer receiver matches the sibling wave's convention for the
+// alloc/free/refcount trio and keeps every `unsafe extern "C"` signature
+// byte-identical for fn-pointer use).
+impl Tty {
+    /// # Safety
+    /// `t`, if non-null, must be a `tty` previously returned by
+    /// [`Tty::alloc`], not already freed, and not concurrently accessed.
+    pub(crate) unsafe extern "C" fn free(t: *mut tty) {
+        if t.is_null() {
+            return;
+        }
+        // SAFETY: caller guarantees `t` is a live, exclusively-owned `tty`
+        // (fn doc); the pipe pointers were set by `Tty::alloc` and never
+        // mutated afterward except here.
+        unsafe {
+            let inp = (*t).input_pipe;
+            if !inp.is_null() {
+                Pipe::pipe_close(inp, 1);
+                Pipe::pipe_close(inp, 0);
+            }
+            let outp = (*t).output_pipe;
+            if !outp.is_null() {
+                Pipe::pipe_close(outp, 1);
+                Pipe::pipe_close(outp, 0);
+            }
+            slab_free(t as *mut c_void);
+        }
+    }
 
-/// # Safety
-/// `t` must be a live, non-null `tty` previously returned by
-/// [`tty_alloc`] (mirrors the C original's unconditional dereference).
-pub(crate) unsafe extern "C" fn tty_unref(t: *mut tty) {
-    let should_free;
-    {
-        // SAFETY: see fn doc -- `&(*t).inner` to lock is the only deref.
+    /// # Safety
+    /// `t` must be a live, non-null `tty` (mirrors the C original, which
+    /// also unconditionally dereferences `t->lock`).
+    pub(crate) unsafe extern "C" fn ref_(t: *mut tty) {
+        // SAFETY: see fn doc -- creating `&(*t).inner` to lock it is the only
+        // deref; `ref_count` is then a safe guarded field access.
         let mut guard = unsafe { (*t).inner.lock() };
-        guard.ref_count -= 1;
-        should_free = guard.ref_count <= 0;
+        guard.ref_count += 1;
     }
-    if should_free {
-        // SAFETY: `t` is caller-guaranteed live (fn doc); a ref_count
-        // that just dropped to <= 0 means this call owns the last
-        // reference, matching the C original's `tty_free(tty)` call.
-        unsafe { tty_free(t) };
+
+    /// # Safety
+    /// `t` must be a live, non-null `tty` previously returned by
+    /// [`Tty::alloc`] (mirrors the C original's unconditional dereference).
+    pub(crate) unsafe extern "C" fn unref(t: *mut tty) {
+        let should_free;
+        {
+            // SAFETY: see fn doc -- `&(*t).inner` to lock is the only deref.
+            let mut guard = unsafe { (*t).inner.lock() };
+            guard.ref_count -= 1;
+            should_free = guard.ref_count <= 0;
+        }
+        if should_free {
+            // SAFETY: `t` is caller-guaranteed live (fn doc); a ref_count
+            // that just dropped to <= 0 means this call owns the last
+            // reference, matching the C original's `tty_free(tty)` call.
+            unsafe { Self::free(t) };
+        }
     }
 }
 
@@ -908,7 +931,7 @@ impl Tty {
     /// # Locking
     /// Must be called with `self`'s lock **not** held (it dereferences
     /// `self.session` lock-free, matching the C original -- see the call
-    /// sites in [`tty_input`], all of which drop the guard immediately
+    /// sites in [`Tty::input`], all of which drop the guard immediately
     /// before calling this). With `&self` the former
     /// `unsafe { (*t).session }` is now a plain safe field read.
     fn signal_fg_pgroup(&self, signum: c_int) {
@@ -932,262 +955,271 @@ impl Tty {
 // Line-discipline input processing.
 // ===========================================================================
 
-/// Receive raw characters from the driver.
-///
-/// Called from thread context only (see the module doc). Applies input
-/// flags, canonical editing, echo, and signal generation, then pushes
-/// completed data into the input pipe. Returns the number of
-/// characters consumed.
-///
-/// # Safety
-/// `t` must be a live `tty`. `buf` must point to at least `count`
-/// readable bytes.
-pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64 {
-    let n = count as usize;
-    // N-METH: bind `&Tty` once (`this`). `Tty` embeds a `SpinLock`
-    // (`UnsafeCell`) so it is NOT `Freeze` -- this shared receiver carries
-    // no `noalias`/`readonly`, and the mutation of `TtyInner` through
-    // `this.inner`'s guard is the standard `Mutex`-shared-`&self` pattern
-    // (sound; no LLVM read-hoist hazard). This turns every former
-    // `unsafe { (*t).inner.lock() }` re-lock into a safe `this.inner.lock()`
-    // and lets the two internal helpers be called as methods
-    // (`this.echo_char(..)` / `this.signal_fg_pgroup(..)`); the guard's
-    // `'this` lifetime is what makes `echo_char`'s returned guard valid.
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    let this: &Tty = unsafe { &*t };
-    let mut guard = this.inner.lock();
+// NO-STANDALONE-FN: `tty_input` relocated to `Tty::input`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly (raw `*mut
+// tty` receiver kept, no `&self` -- matches the rest of this trio).
+impl Tty {
+    /// Receive raw characters from the driver.
+    ///
+    /// Called from thread context only (see the module doc). Applies input
+    /// flags, canonical editing, echo, and signal generation, then pushes
+    /// completed data into the input pipe. Returns the number of
+    /// characters consumed.
+    ///
+    /// # Safety
+    /// `t` must be a live `tty`. `buf` must point to at least `count`
+    /// readable bytes.
+    pub(crate) unsafe extern "C" fn input(t: *mut tty, buf: *const c_char, count: u64) -> i64 {
+        let n = count as usize;
+        // N-METH: bind `&Tty` once (`this`). `Tty` embeds a `SpinLock`
+        // (`UnsafeCell`) so it is NOT `Freeze` -- this shared receiver carries
+        // no `noalias`/`readonly`, and the mutation of `TtyInner` through
+        // `this.inner`'s guard is the standard `Mutex`-shared-`&self` pattern
+        // (sound; no LLVM read-hoist hazard). This turns every former
+        // `unsafe { (*t).inner.lock() }` re-lock into a safe `this.inner.lock()`
+        // and lets the two internal helpers be called as methods
+        // (`this.echo_char(..)` / `this.signal_fg_pgroup(..)`); the guard's
+        // `'this` lifetime is what makes `echo_char`'s returned guard valid.
+        // SAFETY: `t` is caller-guaranteed live (fn doc).
+        let this: &Tty = unsafe { &*t };
+        let mut guard = this.inner.lock();
 
-    // N-METH (goal #2): the manual `for i in 0..n { *buf.add(i) }` index
-    // walk became a slice iteration -- one `from_raw_parts` up front
-    // replaces `n` per-byte raw derefs.
-    // SAFETY: caller guarantees `buf[..count]` is readable (fn doc); `buf`
-    // is not mutated for the duration of this call (input-only).
-    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, n) };
-    for &raw_byte in bytes {
-        let mut c = raw_byte as i32;
+        // N-METH (goal #2): the manual `for i in 0..n { *buf.add(i) }` index
+        // walk became a slice iteration -- one `from_raw_parts` up front
+        // replaces `n` per-byte raw derefs.
+        // SAFETY: caller guarantees `buf[..count]` is readable (fn doc); `buf`
+        // is not mutated for the duration of this call (input-only).
+        let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, n) };
+        for &raw_byte in bytes {
+            let mut c = raw_byte as i32;
 
-        // ---------- input flag processing ----------
+            // ---------- input flag processing ----------
 
-        if guard.i_istrip() {
-            c &= 0x7F;
-        }
-
-        if c == b'\r' as i32 {
-            if guard.i_igncr() {
-                continue;
+            if guard.i_istrip() {
+                c &= 0x7F;
             }
-            if guard.i_icrnl() {
-                c = b'\n' as i32;
+
+            if c == b'\r' as i32 {
+                if guard.i_igncr() {
+                    continue;
+                }
+                if guard.i_icrnl() {
+                    c = b'\n' as i32;
+                }
+            } else if c == b'\n' as i32 {
+                if guard.i_inlcr() {
+                    c = b'\r' as i32;
+                }
             }
-        } else if c == b'\n' as i32 {
-            if guard.i_inlcr() {
-                c = b'\r' as i32;
+
+            // ---------- signal characters ----------
+
+            if guard.l_isig() {
+                // Reading the whole small `c_cc` array by value is a plain
+                // memcpy out of the guarded termios.
+                let cc = guard.termios.c_cc;
+
+                if c == cc[VINTR] as i32 {
+                    drop(guard);
+                    this.signal_fg_pgroup(SIGINT);
+                    guard = this.inner.lock();
+                    if guard.l_echo() {
+                        guard = this.echo_char('^' as i32, guard);
+                        guard = this.echo_char('C' as i32, guard);
+                        guard = this.echo_char('\n' as i32, guard);
+                    }
+                    continue;
+                }
+                if c == cc[VQUIT] as i32 {
+                    drop(guard);
+                    this.signal_fg_pgroup(SIGQUIT);
+                    guard = this.inner.lock();
+                    if guard.l_echo() {
+                        guard = this.echo_char('^' as i32, guard);
+                        guard = this.echo_char('\\' as i32, guard);
+                        guard = this.echo_char('\n' as i32, guard);
+                    }
+                    continue;
+                }
+                if c == cc[VSUSP] as i32 {
+                    drop(guard);
+                    this.signal_fg_pgroup(SIGTSTP);
+                    guard = this.inner.lock();
+                    if guard.l_echo() {
+                        guard = this.echo_char('^' as i32, guard);
+                        guard = this.echo_char('Z' as i32, guard);
+                        guard = this.echo_char('\n' as i32, guard);
+                    }
+                    continue;
+                }
             }
-        }
 
-        // ---------- signal characters ----------
+            // ---------- canonical mode editing ----------
 
-        if guard.l_isig() {
-            // Reading the whole small `c_cc` array by value is a plain
-            // memcpy out of the guarded termios.
-            let cc = guard.termios.c_cc;
+            if guard.l_canon() {
+                let cc = guard.termios.c_cc;
 
-            if c == cc[VINTR] as i32 {
+                // Erase (backspace / DEL).
+                if c == cc[VERASE] as i32 || c == b'\x08' as i32 {
+                    if guard.l_echoe() {
+                        guard = this.echo_char(BACKSPACE, guard);
+                    }
+                    continue;
+                }
+
+                // Kill line (^U).
+                if c == cc[VKILL] as i32 {
+                    if guard.l_echok() {
+                        guard = this.echo_char('\n' as i32, guard);
+                    }
+                    continue;
+                }
+
+                // EOF (^D) -- push a zero-length "line" to unblock readers.
+                if c == cc[VEOF] as i32 {
+                    drop(guard);
+                    let nul: u8 = 0;
+                    // SAFETY: `this` is live; lock dropped above.
+                    unsafe {
+                        Pipe::pipe_write(this.input_pipe, &nul as *const u8 as *const c_char, 0, 0);
+                    }
+                    guard = this.inner.lock();
+                    continue;
+                }
+            }
+
+            // ---------- echo ----------
+
+            if guard.l_echo() {
+                guard = this.echo_char(c, guard);
+            }
+
+            // ---------- push character to consumer ----------
+
+            if !guard.l_canon() {
+                // Raw mode: store in the direct ring buffer and wake any
+                // reader immediately (single-character latency). All accesses
+                // are safe guarded field reads/writes through `guard`.
+                let next = (guard.raw_w + 1) & (TTY_RAW_BUF_SIZE - 1);
+                if next != (guard.raw_r & (TTY_RAW_BUF_SIZE - 1)) {
+                    let idx = (guard.raw_w & (TTY_RAW_BUF_SIZE - 1)) as usize;
+                    guard.raw_buf[idx] = c as u8 as c_char;
+                    guard.raw_w += 1;
+                }
+                // `wakeup_all` is safe under the spinlock (still held via
+                // `guard`); form the raw queue pointer, then wake.
+                let q = &raw mut guard.raw_wait;
+                let _ = TqRef::from_ptr(q).map_or(-EINVAL, |r| r.wakeup_all(0, 0));
+            } else {
+                // Canonical mode: push into input pipe.
+                let ch = c as u8 as c_char;
                 drop(guard);
-                this.signal_fg_pgroup(SIGINT);
-                guard = this.inner.lock();
-                if guard.l_echo() {
-                    guard = this.echo_char('^' as i32, guard);
-                    guard = this.echo_char('C' as i32, guard);
-                    guard = this.echo_char('\n' as i32, guard);
-                }
-                continue;
-            }
-            if c == cc[VQUIT] as i32 {
-                drop(guard);
-                this.signal_fg_pgroup(SIGQUIT);
-                guard = this.inner.lock();
-                if guard.l_echo() {
-                    guard = this.echo_char('^' as i32, guard);
-                    guard = this.echo_char('\\' as i32, guard);
-                    guard = this.echo_char('\n' as i32, guard);
-                }
-                continue;
-            }
-            if c == cc[VSUSP] as i32 {
-                drop(guard);
-                this.signal_fg_pgroup(SIGTSTP);
-                guard = this.inner.lock();
-                if guard.l_echo() {
-                    guard = this.echo_char('^' as i32, guard);
-                    guard = this.echo_char('Z' as i32, guard);
-                    guard = this.echo_char('\n' as i32, guard);
-                }
-                continue;
-            }
-        }
-
-        // ---------- canonical mode editing ----------
-
-        if guard.l_canon() {
-            let cc = guard.termios.c_cc;
-
-            // Erase (backspace / DEL).
-            if c == cc[VERASE] as i32 || c == b'\x08' as i32 {
-                if guard.l_echoe() {
-                    guard = this.echo_char(BACKSPACE, guard);
-                }
-                continue;
-            }
-
-            // Kill line (^U).
-            if c == cc[VKILL] as i32 {
-                if guard.l_echok() {
-                    guard = this.echo_char('\n' as i32, guard);
-                }
-                continue;
-            }
-
-            // EOF (^D) -- push a zero-length "line" to unblock readers.
-            if c == cc[VEOF] as i32 {
-                drop(guard);
-                let nul: u8 = 0;
                 // SAFETY: `this` is live; lock dropped above.
-                unsafe {
-                    Pipe::pipe_write(this.input_pipe, &nul as *const u8 as *const c_char, 0, 0);
-                }
+                unsafe { Pipe::pipe_write(this.input_pipe, &ch as *const c_char, 1, 0) };
                 guard = this.inner.lock();
-                continue;
             }
         }
 
-        // ---------- echo ----------
-
-        if guard.l_echo() {
-            guard = this.echo_char(c, guard);
-        }
-
-        // ---------- push character to consumer ----------
-
-        if !guard.l_canon() {
-            // Raw mode: store in the direct ring buffer and wake any
-            // reader immediately (single-character latency). All accesses
-            // are safe guarded field reads/writes through `guard`.
-            let next = (guard.raw_w + 1) & (TTY_RAW_BUF_SIZE - 1);
-            if next != (guard.raw_r & (TTY_RAW_BUF_SIZE - 1)) {
-                let idx = (guard.raw_w & (TTY_RAW_BUF_SIZE - 1)) as usize;
-                guard.raw_buf[idx] = c as u8 as c_char;
-                guard.raw_w += 1;
-            }
-            // `wakeup_all` is safe under the spinlock (still held via
-            // `guard`); form the raw queue pointer, then wake.
-            let q = &raw mut guard.raw_wait;
-            let _ = TqRef::from_ptr(q).map_or(-EINVAL, |r| r.wakeup_all(0, 0));
-        } else {
-            // Canonical mode: push into input pipe.
-            let ch = c as u8 as c_char;
-            drop(guard);
-            // SAFETY: `this` is live; lock dropped above.
-            unsafe { Pipe::pipe_write(this.input_pipe, &ch as *const c_char, 1, 0) };
-            guard = this.inner.lock();
-        }
+        drop(guard);
+        n as i64
     }
-
-    drop(guard);
-    n as i64
 }
 
 // ===========================================================================
 // Read (user -> input pipe).
 // ===========================================================================
 
-/// Read data from the terminal.
-///
-/// In canonical mode, reads go through the input pipe (blocks until a
-/// full line is available). In raw mode, reads drain the tty's direct
-/// ring buffer -- each character is available as soon as it arrives.
-///
-/// # Safety
-/// `t` must be a live `tty`. `buf` must point to at least `count`
-/// writable bytes if `user == 0`, or be a valid userspace address
-/// range otherwise (checked internally by `either_copyout`).
-pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64 {
-    let canon = {
+// NO-STANDALONE-FN: `tty_read` relocated to `Tty::read`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly.
+impl Tty {
+    /// Read data from the terminal.
+    ///
+    /// In canonical mode, reads go through the input pipe (blocks until a
+    /// full line is available). In raw mode, reads drain the tty's direct
+    /// ring buffer -- each character is available as soon as it arrives.
+    ///
+    /// # Safety
+    /// `t` must be a live `tty`. `buf` must point to at least `count`
+    /// writable bytes if `user == 0`, or be a valid userspace address
+    /// range otherwise (checked internally by `either_copyout`).
+    pub(crate) unsafe extern "C" fn read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64 {
+        let canon = {
+            // SAFETY: `t` is caller-guaranteed live (fn doc).
+            let g = unsafe { (*t).inner.lock() };
+            g.l_canon()
+        };
+
+        if canon {
+            // SAFETY: `t` is live; `pipe_read` validates `buf` itself per
+            // the userspace/kernel split encoded by `user`.
+            return unsafe { Pipe::pipe_read((*t).input_pipe, buf, count, user) };
+        }
+
+        // ---- Raw mode: read from direct ring buffer ----
+        let mut total: i64 = 0;
+        let target = count as i64;
+
         // SAFETY: `t` is caller-guaranteed live (fn doc).
-        let g = unsafe { (*t).inner.lock() };
-        g.l_canon()
-    };
+        let mut guard = unsafe { (*t).inner.lock() };
 
-    if canon {
-        // SAFETY: `t` is live; `pipe_read` validates `buf` itself per
-        // the userspace/kernel split encoded by `user`.
-        return unsafe { Pipe::pipe_read((*t).input_pipe, buf, count, user) };
-    }
+        // The C original wraps this in `while ((size_t)total < count) { ...
+        // break; }` -- the trailing `break` always executes on the first
+        // (only) pass, so the loop is really "run the body once, unless
+        // `count == 0`". Written as an `if` here for clarity; semantics
+        // preserved 1:1 (single batch, `read(2)`-style return).
+        if total < target {
+            // Wait for at least one character. All ring reads/writes are safe
+            // guarded field accesses through `guard`.
+            while guard.raw_r == guard.raw_w {
+                let cur = crate::machine::current_thread_ptr();
+                crate::machine::thread_state_set(cur, crate::bindings::thread_state_THREAD_INTERRUPTIBLE);
+                // Park on the raw wait queue. `wait_on` (`tq_wait`) atomically
+                // releases THIS lock, sleeps, and re-acquires it on wake --
+                // same lost-wakeup-free protocol as the C
+                // `tq_wait(&tty->raw_wait, &tty->lock, NULL)`. Raw queue ptr
+                // formed first (ends the borrow before the `&mut self` call).
+                let q = &raw mut guard.raw_wait;
+                guard.wait_on(q, core::ptr::null_mut());
+                if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) {
+                    drop(guard);
+                    return if total > 0 { total } else { -(EINTR as i64) };
+                }
+            }
 
-    // ---- Raw mode: read from direct ring buffer ----
-    let mut total: i64 = 0;
-    let target = count as i64;
-
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    let mut guard = unsafe { (*t).inner.lock() };
-
-    // The C original wraps this in `while ((size_t)total < count) { ...
-    // break; }` -- the trailing `break` always executes on the first
-    // (only) pass, so the loop is really "run the body once, unless
-    // `count == 0`". Written as an `if` here for clarity; semantics
-    // preserved 1:1 (single batch, `read(2)`-style return).
-    if total < target {
-        // Wait for at least one character. All ring reads/writes are safe
-        // guarded field accesses through `guard`.
-        while guard.raw_r == guard.raw_w {
-            let cur = crate::machine::current_thread_ptr();
-            crate::machine::thread_state_set(cur, crate::bindings::thread_state_THREAD_INTERRUPTIBLE);
-            // Park on the raw wait queue. `wait_on` (`tq_wait`) atomically
-            // releases THIS lock, sleeps, and re-acquires it on wake --
-            // same lost-wakeup-free protocol as the C
-            // `tq_wait(&tty->raw_wait, &tty->lock, NULL)`. Raw queue ptr
-            // formed first (ends the borrow before the `&mut self` call).
-            let q = &raw mut guard.raw_wait;
-            guard.wait_on(q, core::ptr::null_mut());
-            if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) {
+            // Drain available characters, up to count.
+            while total < target && guard.raw_r != guard.raw_w {
+                let idx = (guard.raw_r & (TTY_RAW_BUF_SIZE - 1)) as usize;
+                let ch = guard.raw_buf[idx];
+                guard.raw_r += 1;
                 drop(guard);
-                return if total > 0 { total } else { -(EINTR as i64) };
+
+                if user != 0 {
+                    let r = unsafe {
+                        either_copyout(
+                            1,
+                            (buf as u64).wrapping_add(total as u64),
+                            &ch as *const c_char as *mut c_void,
+                            1,
+                        )
+                    };
+                    if r < 0 {
+                        return if total > 0 { total } else { -(EFAULT as i64) };
+                    }
+                } else {
+                    unsafe {
+                        *buf.add(total as usize) = ch;
+                    }
+                }
+                total += 1;
+                // SAFETY: `t` is live; re-acquire the same lock for the next
+                // iteration / the trailing drop.
+                guard = unsafe { (*t).inner.lock() };
             }
         }
+        drop(guard);
 
-        // Drain available characters, up to count.
-        while total < target && guard.raw_r != guard.raw_w {
-            let idx = (guard.raw_r & (TTY_RAW_BUF_SIZE - 1)) as usize;
-            let ch = guard.raw_buf[idx];
-            guard.raw_r += 1;
-            drop(guard);
-
-            if user != 0 {
-                let r = unsafe {
-                    either_copyout(
-                        1,
-                        (buf as u64).wrapping_add(total as u64),
-                        &ch as *const c_char as *mut c_void,
-                        1,
-                    )
-                };
-                if r < 0 {
-                    return if total > 0 { total } else { -(EFAULT as i64) };
-                }
-            } else {
-                unsafe {
-                    *buf.add(total as usize) = ch;
-                }
-            }
-            total += 1;
-            // SAFETY: `t` is live; re-acquire the same lock for the next
-            // iteration / the trailing drop.
-            guard = unsafe { (*t).inner.lock() };
-        }
+        total
     }
-    drop(guard);
-
-    total
 }
 
 // ===========================================================================
@@ -1206,290 +1238,309 @@ pub(super) unsafe fn load_acquire_u32(p: *const u32) -> u32 {
     unsafe { crate::machine::smp_load_acquire_i32(p as *const c_int) as u32 }
 }
 
-/// Check whether the terminal has data available.
-///
-/// In canonical mode, checks the input pipe for buffered line data. In
-/// raw mode, checks the direct ring buffer. Output (`POLLOUT`) is
-/// always reported ready since UART writes never block the caller.
-///
-/// # Safety
-/// `t` must be a live `tty`.
-pub(crate) unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int {
-    let mut revents: c_short = 0;
+// NO-STANDALONE-FN: `tty_poll` relocated to `Tty::poll`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly.
+impl Tty {
+    /// Check whether the terminal has data available.
+    ///
+    /// In canonical mode, checks the input pipe for buffered line data. In
+    /// raw mode, checks the direct ring buffer. Output (`POLLOUT`) is
+    /// always reported ready since UART writes never block the caller.
+    ///
+    /// # Safety
+    /// `t` must be a live `tty`.
+    pub(crate) unsafe extern "C" fn poll(t: *mut tty, events: c_short) -> c_int {
+        let mut revents: c_short = 0;
 
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    let guard = unsafe { (*t).inner.lock() };
+        // SAFETY: `t` is caller-guaranteed live (fn doc).
+        let guard = unsafe { (*t).inner.lock() };
 
-    if events & (POLLIN | POLLRDNORM) != 0 {
-        if guard.l_canon() {
-            // Canonical mode: data ready if input pipe has bytes.
-            // SAFETY: `t` is live; `input_pipe` is a plain (non-guarded)
-            // field read through the raw pointer.
-            let pi = unsafe { (*t).input_pipe };
-            // SAFETY: `pi` is a live pipe owned by `t` for its lifetime.
-            let nwrite = unsafe { load_acquire_u32(&raw const (*pi).nwrite) };
-            let nread = unsafe { load_acquire_u32(&raw const (*pi).nread) };
-            if nwrite.wrapping_sub(nread) > 0 {
-                revents |= events & (POLLIN | POLLRDNORM);
-            }
-        } else {
-            // Raw mode: data ready if ring buffer is non-empty (safe
-            // guarded field reads through `guard`).
-            if guard.raw_r != guard.raw_w {
-                revents |= events & (POLLIN | POLLRDNORM);
+        if events & (POLLIN | POLLRDNORM) != 0 {
+            if guard.l_canon() {
+                // Canonical mode: data ready if input pipe has bytes.
+                // SAFETY: `t` is live; `input_pipe` is a plain (non-guarded)
+                // field read through the raw pointer.
+                let pi = unsafe { (*t).input_pipe };
+                // SAFETY: `pi` is a live pipe owned by `t` for its lifetime.
+                let nwrite = unsafe { load_acquire_u32(&raw const (*pi).nwrite) };
+                let nread = unsafe { load_acquire_u32(&raw const (*pi).nread) };
+                if nwrite.wrapping_sub(nread) > 0 {
+                    revents |= events & (POLLIN | POLLRDNORM);
+                }
+            } else {
+                // Raw mode: data ready if ring buffer is non-empty (safe
+                // guarded field reads through `guard`).
+                if guard.raw_r != guard.raw_w {
+                    revents |= events & (POLLIN | POLLRDNORM);
+                }
             }
         }
-    }
 
-    if events & (POLLOUT | POLLWRNORM) != 0 {
-        // Output to the driver is always accepted.
-        revents |= events & (POLLOUT | POLLWRNORM);
-    }
+        if events & (POLLOUT | POLLWRNORM) != 0 {
+            // Output to the driver is always accepted.
+            revents |= events & (POLLOUT | POLLWRNORM);
+        }
 
-    revents as c_int
+        revents as c_int
+    }
 }
 
 // ===========================================================================
 // Write (output pipe <- user).
 // ===========================================================================
 
-/// Write data to the terminal.
-///
-/// Applies output post-processing (OPOST / ONLCR) and pushes the
-/// result into the output pipe.
-///
-/// # Safety
-/// `t` must be a live `tty`. `buf` must point to at least `count`
-/// readable bytes if `user == 0`, or be a valid userspace address
-/// range otherwise (checked internally by `either_copyin`).
-pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count: u64, user: c_int) -> i64 {
-    let need_opost = {
-        // SAFETY: `t` is caller-guaranteed live (fn doc).
-        let g = unsafe { (*t).inner.lock() };
-        g.o_opost() && g.o_onlcr()
-    };
+// NO-STANDALONE-FN: `tty_write` relocated to `Tty::write`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly.
+impl Tty {
+    /// Write data to the terminal.
+    ///
+    /// Applies output post-processing (OPOST / ONLCR) and pushes the
+    /// result into the output pipe.
+    ///
+    /// # Safety
+    /// `t` must be a live `tty`. `buf` must point to at least `count`
+    /// readable bytes if `user == 0`, or be a valid userspace address
+    /// range otherwise (checked internally by `either_copyin`).
+    pub(crate) unsafe extern "C" fn write(t: *mut tty, buf: *const c_char, count: u64, user: c_int) -> i64 {
+        let need_opost = {
+            // SAFETY: `t` is caller-guaranteed live (fn doc).
+            let g = unsafe { (*t).inner.lock() };
+            g.o_opost() && g.o_onlcr()
+        };
 
-    if !need_opost {
-        // Fast path -- no post-processing.
-        // SAFETY: `t` is live; `pipe_write` validates `buf` itself.
-        return unsafe { Pipe::pipe_write((*t).output_pipe, buf, count, user) };
-    }
-
-    // Slow path -- scan for '\n' and insert '\r' before it.
-    let mut written: u64 = 0;
-    while written < count {
-        let mut batch = count - written;
-        if batch > 32 {
-            // leave room for \r expansion (kbuf is 64 bytes)
-            batch = 32;
-        }
-        let batch_usize = batch as usize;
-
-        let mut kbuf = [0u8; 64];
-        if user != 0 {
-            let r = unsafe {
-                either_copyin(
-                    kbuf.as_mut_ptr() as *mut c_void,
-                    1,
-                    (buf as u64).wrapping_add(written),
-                    batch,
-                )
-            };
-            if r < 0 {
-                return if written > 0 { written as i64 } else { -(EFAULT as i64) };
-            }
-        } else {
-            // SAFETY: caller guarantees `buf[..count]` is readable
-            // kernel memory when `user == 0` (fn doc); `written + batch
-            // <= count` by construction of `batch` above.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (buf as *const u8).add(written as usize),
-                    kbuf.as_mut_ptr(),
-                    batch_usize,
-                );
-            }
+        if !need_opost {
+            // Fast path -- no post-processing.
+            // SAFETY: `t` is live; `pipe_write` validates `buf` itself.
+            return unsafe { Pipe::pipe_write((*t).output_pipe, buf, count, user) };
         }
 
-        // Expand NL -> CRNL into a second buffer. N-METH (goal #2): the
-        // manual `for j in 0..batch_usize { kbuf[j] }` index walk became a
-        // slice iteration over the filled prefix (bounds checks dropped;
-        // `olen` still tracks the write cursor into `outbuf`).
-        let mut outbuf = [0u8; 128];
-        let mut olen = 0usize;
-        for &byte in &kbuf[..batch_usize] {
-            if byte == b'\n' {
-                outbuf[olen] = b'\r';
+        // Slow path -- scan for '\n' and insert '\r' before it.
+        let mut written: u64 = 0;
+        while written < count {
+            let mut batch = count - written;
+            if batch > 32 {
+                // leave room for \r expansion (kbuf is 64 bytes)
+                batch = 32;
+            }
+            let batch_usize = batch as usize;
+
+            let mut kbuf = [0u8; 64];
+            if user != 0 {
+                let r = unsafe {
+                    either_copyin(
+                        kbuf.as_mut_ptr() as *mut c_void,
+                        1,
+                        (buf as u64).wrapping_add(written),
+                        batch,
+                    )
+                };
+                if r < 0 {
+                    return if written > 0 { written as i64 } else { -(EFAULT as i64) };
+                }
+            } else {
+                // SAFETY: caller guarantees `buf[..count]` is readable
+                // kernel memory when `user == 0` (fn doc); `written + batch
+                // <= count` by construction of `batch` above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (buf as *const u8).add(written as usize),
+                        kbuf.as_mut_ptr(),
+                        batch_usize,
+                    );
+                }
+            }
+
+            // Expand NL -> CRNL into a second buffer. N-METH (goal #2): the
+            // manual `for j in 0..batch_usize { kbuf[j] }` index walk became a
+            // slice iteration over the filled prefix (bounds checks dropped;
+            // `olen` still tracks the write cursor into `outbuf`).
+            let mut outbuf = [0u8; 128];
+            let mut olen = 0usize;
+            for &byte in &kbuf[..batch_usize] {
+                if byte == b'\n' {
+                    outbuf[olen] = b'\r';
+                    olen += 1;
+                }
+                outbuf[olen] = byte;
                 olen += 1;
             }
-            outbuf[olen] = byte;
-            olen += 1;
+
+            let ret = unsafe { Pipe::pipe_write((*t).output_pipe, outbuf.as_ptr() as *const c_char, olen as u64, 0) };
+            if ret < 0 {
+                return if written > 0 { written as i64 } else { ret };
+            }
+
+            written += batch;
         }
 
-        let ret = unsafe { Pipe::pipe_write((*t).output_pipe, outbuf.as_ptr() as *const c_char, olen as u64, 0) };
-        if ret < 0 {
-            return if written > 0 { written as i64 } else { ret };
-        }
-
-        written += batch;
+        written as i64
     }
-
-    written as i64
 }
 
 // ===========================================================================
 // Output drain helper.
 // ===========================================================================
 
-/// Pull data from the output pipe. Drivers call this (or read the
-/// output pipe directly) to obtain post-processed output bytes for
-/// transmission.
-///
-/// # Safety
-/// `t` must be a live `tty`. `buf` must point to at least `count`
-/// writable kernel bytes.
-pub(crate) unsafe extern "C" fn tty_output(t: *mut tty, buf: *mut c_char, count: u64) -> i64 {
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    unsafe { Pipe::pipe_read((*t).output_pipe, buf, count, 0) }
+// NO-STANDALONE-FN: `tty_output` relocated to `Tty::output`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly.
+impl Tty {
+    /// Pull data from the output pipe. Drivers call this (or read the
+    /// output pipe directly) to obtain post-processed output bytes for
+    /// transmission.
+    ///
+    /// # Safety
+    /// `t` must be a live `tty`. `buf` must point to at least `count`
+    /// writable kernel bytes.
+    pub(crate) unsafe extern "C" fn output(t: *mut tty, buf: *mut c_char, count: u64) -> i64 {
+        // SAFETY: `t` is caller-guaranteed live (fn doc).
+        unsafe { Pipe::pipe_read((*t).output_pipe, buf, count, 0) }
+    }
 }
 
 // ===========================================================================
 // Ioctl.
 // ===========================================================================
 
-/// # Safety
-/// `t` must be a live `tty`. `arg`'s required validity depends on
-/// `cmd` (a `termios*`/`winsize*`/`pid_t*`/`int*` writable or readable
-/// pointer as appropriate) -- same contract as the C original.
-pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c_int {
-    match cmd {
-        TCGETS => {
-            let tp = arg as *mut termios;
-            // SAFETY: `t` is live (fn doc); `tp` is a valid writable
-            // `termios*` for this cmd (fn doc). `termios` is `Copy`, read
-            // out of the guarded state under the lock.
-            let g = unsafe { (*t).inner.lock() };
-            unsafe { *tp = g.termios };
-            0
-        }
-        TCSETS | TCSETSW | TCSETSF => {
-            let tp = arg as *mut termios;
-            {
-                // SAFETY: see TCGETS arm.
-                let mut g = unsafe { (*t).inner.lock() };
-                unsafe { g.termios = *tp };
+// NO-STANDALONE-FN: `tty_ioctl` relocated to `Tty::ioctl`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly. (Shares
+// its name with `TtyOps::ioctl`, but the two are never ambiguous: this is
+// an inherent fn on `Tty` called as `Tty::ioctl(t, ..)`, the other a trait
+// method called through a `&dyn TtyOps` receiver.)
+impl Tty {
+    /// # Safety
+    /// `t` must be a live `tty`. `arg`'s required validity depends on
+    /// `cmd` (a `termios*`/`winsize*`/`pid_t*`/`int*` writable or readable
+    /// pointer as appropriate) -- same contract as the C original.
+    pub(crate) unsafe extern "C" fn ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c_int {
+        match cmd {
+            TCGETS => {
+                let tp = arg as *mut termios;
+                // SAFETY: `t` is live (fn doc); `tp` is a valid writable
+                // `termios*` for this cmd (fn doc). `termios` is `Copy`, read
+                // out of the guarded state under the lock.
+                let g = unsafe { (*t).inner.lock() };
+                unsafe { *tp = g.termios };
+                0
             }
-
-            // Notify driver if it cares.
-            // SAFETY: `t` is live; `t->ops`, if present, is a
-            // `&'static` trait object (tty_alloc's contract); `tp` is
-            // a valid `termios*` for this cmd (fn doc).
-            unsafe {
-                if let Some(ops) = (*t).ops {
-                    ops.set_termios(t, tp);
-                }
-            }
-
-            // TCSETSF: also discard pending input.
-            if cmd == TCSETSF {
+            TCSETS | TCSETSW | TCSETSF => {
+                let tp = arg as *mut termios;
                 {
-                    // SAFETY: `t` is live (fn doc).
+                    // SAFETY: see TCGETS arm.
                     let mut g = unsafe { (*t).inner.lock() };
-                    // flush raw ring buffer
-                    g.raw_r = g.raw_w;
+                    unsafe { g.termios = *tp };
                 }
-                // SAFETY: as the `set_termios` dispatch above.
+
+                // Notify driver if it cares.
+                // SAFETY: `t` is live; `t->ops`, if present, is a
+                // `&'static` trait object (`Tty::alloc`'s contract); `tp`
+                // is a valid `termios*` for this cmd (fn doc).
                 unsafe {
                     if let Some(ops) = (*t).ops {
-                        ops.discard_input(t);
+                        ops.set_termios(t, tp);
                     }
                 }
-            }
 
-            0
-        }
-        TIOCGWINSZ => {
-            let wsp = arg as *mut crate::bindings::winsize;
-            // SAFETY: `t` is live (fn doc); `wsp` a valid writable
-            // `winsize*`. `winsize` is `Copy`, read under the lock.
-            let g = unsafe { (*t).inner.lock() };
-            unsafe { *wsp = g.winsize };
-            0
-        }
-        TIOCSWINSZ => {
-            let wsp = arg as *mut crate::bindings::winsize;
-            {
-                // SAFETY: see TIOCGWINSZ arm.
-                let mut g = unsafe { (*t).inner.lock() };
-                unsafe { g.winsize = *wsp };
-            }
-            // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
-            // (tty_alloc's contract); `wsp` is a valid `winsize*` for
-            // this cmd (fn doc).
-            unsafe {
-                if let Some(ops) = (*t).ops {
-                    ops.set_winsize(t, wsp);
+                // TCSETSF: also discard pending input.
+                if cmd == TCSETSF {
+                    {
+                        // SAFETY: `t` is live (fn doc).
+                        let mut g = unsafe { (*t).inner.lock() };
+                        // flush raw ring buffer
+                        g.raw_r = g.raw_w;
+                    }
+                    // SAFETY: as the `set_termios` dispatch above.
+                    unsafe {
+                        if let Some(ops) = (*t).ops {
+                            ops.discard_input(t);
+                        }
+                    }
                 }
+
+                0
             }
-            0
-        }
-        TIOCGPGRP => {
-            // Return the foreground process group from the session.
-            let pgidp = arg as *mut pid_t;
-            unsafe { *pgidp = 0 };
-            // SAFETY: `t` is live (fn doc).
-            let sess = unsafe { (*t).session };
-            if !sess.is_null() {
-                unsafe { *pgidp = Session::get_fg_pgid(sess) };
+            TIOCGWINSZ => {
+                let wsp = arg as *mut crate::bindings::winsize;
+                // SAFETY: `t` is live (fn doc); `wsp` a valid writable
+                // `winsize*`. `winsize` is `Copy`, read under the lock.
+                let g = unsafe { (*t).inner.lock() };
+                unsafe { *wsp = g.winsize };
+                0
             }
-            0
-        }
-        TIOCSPGRP => {
-            // Set the foreground process group.
-            let pgid = unsafe { *(arg as *mut pid_t) };
-            if pgid <= 0 {
-                return -EINVAL;
+            TIOCSWINSZ => {
+                let wsp = arg as *mut crate::bindings::winsize;
+                {
+                    // SAFETY: see TIOCGWINSZ arm.
+                    let mut g = unsafe { (*t).inner.lock() };
+                    unsafe { g.winsize = *wsp };
+                }
+                // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
+                // (`Tty::alloc`'s contract); `wsp` is a valid `winsize*`
+                // for this cmd (fn doc).
+                unsafe {
+                    if let Some(ops) = (*t).ops {
+                        ops.set_winsize(t, wsp);
+                    }
+                }
+                0
             }
-            // Caller must be in the same session as the tty.
-            let sess = unsafe { (*t).session };
-            let cur = crate::machine::current_thread_ptr();
-            let same_session = !sess.is_null() && unsafe { (*sess).sid == (*cur).sid };
-            if !same_session {
-                return -ENOTTY;
+            TIOCGPGRP => {
+                // Return the foreground process group from the session.
+                let pgidp = arg as *mut pid_t;
+                unsafe { *pgidp = 0 };
+                // SAFETY: `t` is live (fn doc).
+                let sess = unsafe { (*t).session };
+                if !sess.is_null() {
+                    unsafe { *pgidp = Session::get_fg_pgid(sess) };
+                }
+                0
             }
-            unsafe { Session::set_fg_pgid(sess, pgid) };
-            0
-        }
-        TIOCSCTTY => {
-            // Set controlling terminal: the calling process must be a
-            // session leader and must not already have a controlling
-            // terminal (enforced by `session_set_ctrl_tty`).
-            let cur = crate::machine::current_thread_ptr();
-            // N-R6d-2a: `thread.session` is a generational `Sid`; resolve it to
-            // a live `*mut session`. `pid_wlock` is held for this path (the
-            // `session_set_ctrl_tty` below asserts it), so `session_lookup` is
-            // race-free; a `NONE`/stale key resolves to null → `EPERM`, exactly
-            // the old "no session leader" outcome.
-            let sess = SessionTable::lookup(unsafe { (*cur).session }).unwrap_or(core::ptr::null_mut());
-            if sess.is_null() {
-                return -EPERM;
+            TIOCSPGRP => {
+                // Set the foreground process group.
+                let pgid = unsafe { *(arg as *mut pid_t) };
+                if pgid <= 0 {
+                    return -EINVAL;
+                }
+                // Caller must be in the same session as the tty.
+                let sess = unsafe { (*t).session };
+                let cur = crate::machine::current_thread_ptr();
+                let same_session = !sess.is_null() && unsafe { (*sess).sid == (*cur).sid };
+                if !same_session {
+                    return -ENOTTY;
+                }
+                unsafe { Session::set_fg_pgid(sess, pgid) };
+                0
             }
-            unsafe { Session::set_ctrl_tty(sess, t) };
-            0
-        }
-        _ => {
-            // Let the driver handle unknown ioctls. The trait default
-            // is `Err(Errno::NotTy)`, so "no ops" and "driver doesn't
-            // override ioctl" both encode to the old `-ENOTTY`.
-            // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
-            // (tty_alloc's contract); `arg` per this fn's contract.
-            unsafe {
-                match (*t).ops {
-                    Some(ops) => match ops.ioctl(t, cmd, arg) {
-                        Ok(v) => v,
-                        Err(e) => e.neg(),
-                    },
-                    None => -ENOTTY,
+            TIOCSCTTY => {
+                // Set controlling terminal: the calling process must be a
+                // session leader and must not already have a controlling
+                // terminal (enforced by `session_set_ctrl_tty`).
+                let cur = crate::machine::current_thread_ptr();
+                // N-R6d-2a: `thread.session` is a generational `Sid`; resolve it to
+                // a live `*mut session`. `pid_wlock` is held for this path (the
+                // `session_set_ctrl_tty` below asserts it), so `session_lookup` is
+                // race-free; a `NONE`/stale key resolves to null → `EPERM`, exactly
+                // the old "no session leader" outcome.
+                let sess = SessionTable::lookup(unsafe { (*cur).session }).unwrap_or(core::ptr::null_mut());
+                if sess.is_null() {
+                    return -EPERM;
+                }
+                unsafe { Session::set_ctrl_tty(sess, t) };
+                0
+            }
+            _ => {
+                // Let the driver handle unknown ioctls. The trait default
+                // is `Err(Errno::NotTy)`, so "no ops" and "driver doesn't
+                // override ioctl" both encode to the old `-ENOTTY`.
+                // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
+                // (`Tty::alloc`'s contract); `arg` per this fn's contract.
+                unsafe {
+                    match (*t).ops {
+                        Some(ops) => match ops.ioctl(t, cmd, arg) {
+                            Ok(v) => v,
+                            Err(e) => e.neg(),
+                        },
+                        None => -ENOTTY,
+                    }
                 }
             }
         }
@@ -1500,49 +1551,61 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
 // Open / close via ops.
 // ===========================================================================
 
-/// # Safety
-/// `t` must be a live `tty` previously returned by [`tty_alloc`].
-pub(crate) unsafe extern "C" fn tty_open(t: *mut tty) -> c_int {
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    unsafe { tty_ref(t) };
-    // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
-    // (tty_alloc's contract). The trait default is `Ok(())`, so "no
-    // ops" and "driver doesn't override open" both encode to the old
-    // fallback 0.
-    unsafe {
-        match (*t).ops {
-            Some(ops) => result_to_neg_errno(ops.open(t)),
-            None => 0,
+// NO-STANDALONE-FN: `tty_open`/`tty_close` relocated to `Tty::open`/
+// `Tty::close`, dropping the `tty_` prefix; `unsafe extern "C"` signatures
+// preserved exactly. (Share their names with `TtyOps::open`/`close`, but --
+// as with `Tty::ioctl` above -- never ambiguous: inherent fns on `Tty`
+// called as `Tty::open(t)`/`Tty::close(t)`, vs. the trait methods called
+// through a `&dyn TtyOps` receiver.)
+impl Tty {
+    /// # Safety
+    /// `t` must be a live `tty` previously returned by [`Tty::alloc`].
+    pub(crate) unsafe extern "C" fn open(t: *mut tty) -> c_int {
+        // SAFETY: `t` is caller-guaranteed live (fn doc).
+        unsafe { Self::ref_(t) };
+        // SAFETY: `t` is live; `t->ops`, if present, is `&'static`
+        // (`Tty::alloc`'s contract). The trait default is `Ok(())`, so "no
+        // ops" and "driver doesn't override open" both encode to the old
+        // fallback 0.
+        unsafe {
+            match (*t).ops {
+                Some(ops) => result_to_neg_errno(ops.open(t)),
+                None => 0,
+            }
         }
     }
-}
 
-/// # Safety
-/// `t` must be a live `tty` previously returned by [`tty_alloc`].
-pub(crate) unsafe extern "C" fn tty_close(t: *mut tty) {
-    // SAFETY: `t` is caller-guaranteed live (fn doc); `t->ops`, if
-    // present, is `&'static` (tty_alloc's contract).
-    unsafe {
-        if let Some(ops) = (*t).ops {
-            ops.close(t);
+    /// # Safety
+    /// `t` must be a live `tty` previously returned by [`Tty::alloc`].
+    pub(crate) unsafe extern "C" fn close(t: *mut tty) {
+        // SAFETY: `t` is caller-guaranteed live (fn doc); `t->ops`, if
+        // present, is `&'static` (`Tty::alloc`'s contract).
+        unsafe {
+            if let Some(ops) = (*t).ops {
+                ops.close(t);
+            }
         }
+        // SAFETY: `t` is caller-guaranteed live (fn doc).
+        unsafe { Self::unref(t) };
     }
-    // SAFETY: `t` is caller-guaranteed live (fn doc).
-    unsafe { tty_unref(t) };
 }
 
 // ===========================================================================
 // Hangup.
 // ===========================================================================
 
-/// # Safety
-/// `t` must be a live `tty`.
-pub(crate) unsafe extern "C" fn tty_hangup(t: *mut tty) {
-    // SAFETY: `t` is caller-guaranteed live (fn doc); `t->ops`, if
-    // present, is `&'static` (tty_alloc's contract).
-    unsafe {
-        if let Some(ops) = (*t).ops {
-            ops.hangup(t);
+// NO-STANDALONE-FN: `tty_hangup` relocated to `Tty::hangup`, dropping the
+// `tty_` prefix; `unsafe extern "C"` signature preserved exactly.
+impl Tty {
+    /// # Safety
+    /// `t` must be a live `tty`.
+    pub(crate) unsafe extern "C" fn hangup(t: *mut tty) {
+        // SAFETY: `t` is caller-guaranteed live (fn doc); `t->ops`, if
+        // present, is `&'static` (`Tty::alloc`'s contract).
+        unsafe {
+            if let Some(ops) = (*t).ops {
+                ops.hangup(t);
+            }
         }
     }
 }

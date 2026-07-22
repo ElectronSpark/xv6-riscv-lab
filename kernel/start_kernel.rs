@@ -110,8 +110,8 @@ use crate::timer::sched_timer::sched_timer_init;
 use crate::console::{consoledevinit, consoleinit};
 use crate::printf::printfinit;
 use crate::tty::ptmx::ptmxinit;
-use crate::tty::tty::tty_init;
-use crate::tty::tty_dev::ttydevinit;
+use crate::tty::tty::Tty;
+use crate::tty::tty_dev::TtyDev;
 use crate::vfs::fs::Vfs;
 use crate::vfs::pipe::Pipe;
 
@@ -285,7 +285,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Rcu::init(); // RCU subsystem initialization
         dev_table_init(); // Initialize the device table
         Thread::proctab_init(); // process table
-        tty_init(); // Initialize TTY subsystem
+        Tty::init(); // Initialize TTY subsystem
         Scheduler::init(); // initialize the scheduler
         Workqueue::init(); // workqueue subsystem initialization
         irq_desc_init(); // IRQ descriptor initialization
@@ -414,7 +414,7 @@ pub(crate) fn start_kernel_post_init() {
     unsafe {
         consoledevinit(); // Initialize and register the console character device
         nullranddevinit(); // Register /dev/null, /dev/random, /dev/zero
-        ttydevinit(); // Register /dev/tty (controlling terminal device)
+        TtyDev::init(); // Register /dev/tty (controlling terminal device)
         ptmxinit(); // Register /dev/ptmx (PTY multiplexer)
         virtio_disk_init(); // emulated hard disk (QEMU)
         ramdisk_init(); // ramdisk from FDT initrd (real hardware)

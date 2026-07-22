@@ -15,6 +15,13 @@
 //! layout verification the porting worker ran).
 
 use crate::bindings::termios;
+// NO-STANDALONE-FN: `termios_init_default` relocated below into `impl
+// Termios`. `Termios` is a type defined in `kernel/tty/tty.rs` (this
+// module's sibling); an inherent impl for it is legal from any module in
+// the crate (only foreign-crate types are restricted, per the orphan
+// rule) -- matches the `kernel/tty/session.rs` wave's `impl Session`/
+// `impl SessionTable` blocks living alongside `Session`'s own definition.
+use crate::tty::tty::Termios;
 
 // ===========================================================================
 // `c_cc` indices (`kernel/inc/uabi/termios.h`).
@@ -59,46 +66,51 @@ const ECHOK: u32 = 0x0020;
 // Speed (baud rate).
 const B115200: u32 = 115200;
 
-/// Fill a `termios` struct with sane defaults.
-///
-/// Sets up canonical mode with echo, CR-to-NL input mapping, NL-to-CRNL
-/// output mapping, standard control characters, and 115200 baud. This
-/// matches the typical Linux console defaults.
-///
-/// # Safety
-/// `t` must point to a valid, writable `termios`.
-pub(crate) unsafe extern "C" fn termios_init_default(t: *mut termios) {
-    // SAFETY: caller guarantees `t` is valid and writable (see fn doc).
-    // `termios` is a plain-old-data struct (no padding-sensitive
-    // invariants), so a field-by-field write fully initializes it.
-    unsafe {
-        // Input: map CR -> NL, enable XON/XOFF.
-        (*t).c_iflag = ICRNL | IXON;
+// NO-STANDALONE-FN: `termios_init_default` relocated to `Termios::init_default`,
+// dropping the `termios_` prefix; `unsafe extern "C"` signature preserved
+// exactly (called from `Tty::alloc`, kernel/tty/tty.rs).
+impl Termios {
+    /// Fill a `termios` struct with sane defaults.
+    ///
+    /// Sets up canonical mode with echo, CR-to-NL input mapping, NL-to-CRNL
+    /// output mapping, standard control characters, and 115200 baud. This
+    /// matches the typical Linux console defaults.
+    ///
+    /// # Safety
+    /// `t` must point to a valid, writable `termios`.
+    pub(crate) unsafe extern "C" fn init_default(t: *mut termios) {
+        // SAFETY: caller guarantees `t` is valid and writable (see fn doc).
+        // `termios` is a plain-old-data struct (no padding-sensitive
+        // invariants), so a field-by-field write fully initializes it.
+        unsafe {
+            // Input: map CR -> NL, enable XON/XOFF.
+            (*t).c_iflag = ICRNL | IXON;
 
-        // Output: post-process, map NL -> CRNL.
-        (*t).c_oflag = OPOST | ONLCR;
+            // Output: post-process, map NL -> CRNL.
+            (*t).c_oflag = OPOST | ONLCR;
 
-        // Control: 8-bit chars, receiver on, local line.
-        (*t).c_cflag = CS8 | CREAD | CLOCAL;
+            // Control: 8-bit chars, receiver on, local line.
+            (*t).c_cflag = CS8 | CREAD | CLOCAL;
 
-        // Local: canonical, echo, signals, erase echo.
-        (*t).c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK;
+            // Local: canonical, echo, signals, erase echo.
+            (*t).c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK;
 
-        // Control characters.
-        (*t).c_cc[VINTR] = 0x03; // ^C
-        (*t).c_cc[VQUIT] = 0x1C; // ^\
-        (*t).c_cc[VERASE] = 0x7F; // DEL
-        (*t).c_cc[VKILL] = 0x15; // ^U
-        (*t).c_cc[VEOF] = 0x04; // ^D
-        (*t).c_cc[VTIME] = 0;
-        (*t).c_cc[VMIN] = 1;
-        (*t).c_cc[VSTART] = 0x11; // ^Q
-        (*t).c_cc[VSTOP] = 0x13; // ^S
-        (*t).c_cc[VSUSP] = 0x1A; // ^Z
-        (*t).c_cc[VEOL] = 0x00;
+            // Control characters.
+            (*t).c_cc[VINTR] = 0x03; // ^C
+            (*t).c_cc[VQUIT] = 0x1C; // ^\
+            (*t).c_cc[VERASE] = 0x7F; // DEL
+            (*t).c_cc[VKILL] = 0x15; // ^U
+            (*t).c_cc[VEOF] = 0x04; // ^D
+            (*t).c_cc[VTIME] = 0;
+            (*t).c_cc[VMIN] = 1;
+            (*t).c_cc[VSTART] = 0x11; // ^Q
+            (*t).c_cc[VSTOP] = 0x13; // ^S
+            (*t).c_cc[VSUSP] = 0x1A; // ^Z
+            (*t).c_cc[VEOL] = 0x00;
 
-        // Default baud rate.
-        (*t).c_ispeed = B115200;
-        (*t).c_ospeed = B115200;
+            // Default baud rate.
+            (*t).c_ispeed = B115200;
+            (*t).c_ospeed = B115200;
+        }
     }
 }

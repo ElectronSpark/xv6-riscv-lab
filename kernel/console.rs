@@ -129,7 +129,7 @@ use crate::irq::irq_core::register_irq_handler;
 // `unsafe extern "C" fn`s -- this file's former mirror declared them
 // `safe`, but every call site here already sits inside a broader
 // `unsafe { }` block (verified per call site), so no behavior changes.
-use crate::tty::tty::{tty_alloc, tty_input, tty_ioctl, tty_output, tty_poll, tty_read};
+use crate::tty::tty::Tty;
 use crate::tty::session::{Session, SessionTable};
 use crate::vfs::pipe::Pipe;
 
@@ -427,7 +427,7 @@ unsafe fn consoleread(
     if !tty_ptr.is_null() {
         // SAFETY: see `consolewrite`.
         return unsafe {
-            tty_read(tty_ptr, buffer as *mut c_char, n as u64, user_dst as c_int)
+            Tty::read(tty_ptr, buffer as *mut c_char, n as u64, user_dst as c_int)
         } as c_int;
     }
 
@@ -576,7 +576,7 @@ impl CdevOps for ConsoleCdevOps {
         // SAFETY: `tty_ptr` is a live, permanently-allocated TTY once
         // published (see `console_tty`); `arg`'s validity is forwarded
         // from the dispatch contract.
-        cint_result(unsafe { tty_ioctl(tty_ptr, cmd, arg) })
+        cint_result(unsafe { Tty::ioctl(tty_ptr, cmd, arg) })
     }
 
     /// Console poll -- check whether console has data ready for
@@ -588,7 +588,7 @@ impl CdevOps for ConsoleCdevOps {
             return Some(0);
         }
         // SAFETY: see `ioctl` above.
-        Some(unsafe { tty_poll(tty_ptr, events) })
+        Some(unsafe { Tty::poll(tty_ptr, events) })
     }
 }
 
@@ -634,7 +634,7 @@ impl crate::dev::dev::DeviceOps for ConsoleDevOps {
         }
         // SAFETY: `tty_ptr` is a live, permanently-allocated TTY once
         // published (see `console_tty`).
-        Some(unsafe { tty_ioctl(tty_ptr, cmd, arg) })
+        Some(unsafe { Tty::ioctl(tty_ptr, cmd, arg) })
     }
 }
 
@@ -854,7 +854,7 @@ extern "C" fn console_tty_input_thread(_arg1: u64, _arg2: u64) {
             // `consoledevinit()`, and this thread is only started
             // after that publication.
             unsafe {
-                tty_input(tty_ptr, &ch as *const u8 as *const c_char, 1);
+                Tty::input(tty_ptr, &ch as *const u8 as *const c_char, 1);
             }
 
             // Re-read w in case more arrived.
@@ -879,7 +879,7 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
     loop {
         // `tty_output` blocks if no data is available.
         // SAFETY: see `console_tty_input_thread`.
-        let n = unsafe { tty_output(tty_ptr, buf.as_mut_ptr() as *mut c_char, buf.len() as u64) };
+        let n = unsafe { Tty::output(tty_ptr, buf.as_mut_ptr() as *mut c_char, buf.len() as u64) };
         if n <= 0 {
             sleep_ms(1);
             continue;
@@ -958,14 +958,14 @@ pub(crate) extern "C" fn consoledevinit() {
         // P3-10d: `None` = no driver ops (previously a null `tty_ops*`
         // — the console tty deliberately has no `TtyOps` hooks; every
         // tty-core dispatcher's `None` fallback is its behavior).
-        let t = tty_alloc(c"console".as_ptr(), None);
+        let t = Tty::alloc(c"console".as_ptr(), None);
         if is_err_or_null(t) {
             __panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/console.rs", line!(), "consoledevinit",
             );
-            crate::kprintln!("consoledevinit: tty_alloc failed");
+            crate::kprintln!("consoledevinit: Tty::alloc failed");
             __panic_end();
         }
         CONSOLE_TTY.store(t, Ordering::Relaxed);

@@ -92,7 +92,7 @@ fn slab_free(obj: *mut c_void) {
 // ordinary same-crate Rust items -- called directly through their
 // module paths below rather than re-declared as `extern "C"`.
 use super::pty::{pty_alloc, pty_master_read, pty_master_write};
-use super::tty::{tty_close, tty_hangup, tty_ioctl, tty_open, tty_poll, tty_read, tty_unref, tty_write};
+use super::tty::Tty;
 
 // ===========================================================================
 // Constants.
@@ -298,7 +298,7 @@ unsafe fn pty_pair_destroy(pair: *mut PtyPair) {
     let slave = unsafe { (*pair).slave };
     if !slave.is_null() {
         unsafe {
-            tty_unref(slave);
+            Tty::unref(slave);
             (*pair).slave = core::ptr::null_mut();
         }
     }
@@ -375,7 +375,7 @@ impl FileOps for PtsSlaveFileOps {
         if pair.is_null() || unsafe { (*pair).slave.is_null() } {
             return Err(Errno::Io);
         }
-        count_result(unsafe { tty_read((*pair).slave, buf, count as u64, user as c_int) as isize })
+        count_result(unsafe { Tty::read((*pair).slave, buf, count as u64, user as c_int) as isize })
     }
 
     unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
@@ -384,7 +384,7 @@ impl FileOps for PtsSlaveFileOps {
         if pair.is_null() || unsafe { (*pair).slave.is_null() } {
             return Err(Errno::Io);
         }
-        count_result(unsafe { tty_write((*pair).slave, buf, count as u64, user as c_int) as isize })
+        count_result(unsafe { Tty::write((*pair).slave, buf, count as u64, user as c_int) as isize })
     }
 
     unsafe fn ioctl(&self, file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> Option<c_int> {
@@ -392,7 +392,7 @@ impl FileOps for PtsSlaveFileOps {
         if pair.is_null() || unsafe { (*pair).slave.is_null() } {
             return Some(-EIO);
         }
-        Some(unsafe { tty_ioctl((*pair).slave, cmd, arg) })
+        Some(unsafe { Tty::ioctl((*pair).slave, cmd, arg) })
     }
 
     unsafe fn poll(&self, file: *mut vfs_file, events: c_short) -> Option<c_int> {
@@ -400,7 +400,7 @@ impl FileOps for PtsSlaveFileOps {
         if pair.is_null() || unsafe { (*pair).slave.is_null() } {
             return Some(0);
         }
-        Some(unsafe { tty_poll((*pair).slave, events) })
+        Some(unsafe { Tty::poll((*pair).slave, events) })
     }
 
     unsafe fn release(&self, _inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
@@ -412,7 +412,7 @@ impl FileOps for PtsSlaveFileOps {
             (*file).private_data = core::ptr::null_mut();
 
             // Drop the tty-level "open" ref taken in `pts_open_file`.
-            tty_close((*pair).slave);
+            Tty::close((*pair).slave);
 
             // Drop the pair ref -- may destroy.
             if pty_pair_put(pair) {
@@ -480,7 +480,7 @@ unsafe fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
     }
 
     // tty-level open (bumps tty refcount).
-    let ret = unsafe { tty_open((*pair).slave) };
+    let ret = unsafe { Tty::open((*pair).slave) };
     if ret != 0 {
         if unsafe { pty_pair_put(pair) } {
             unsafe { pty_pair_destroy(pair) };
@@ -568,7 +568,7 @@ fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_file) {
     // Hang up the slave tty so any blocked readers/writers unblock.
     let slave = unsafe { (*pair).slave };
     if !slave.is_null() {
-        unsafe { tty_hangup(slave) };
+        unsafe { Tty::hangup(slave) };
     }
 
     // Unregister the slave cdev. `device_unregister()` also removes
@@ -603,7 +603,7 @@ fn ptmx_fops_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
     // Forward termios / winsize ioctls to the slave tty.
     let slave = unsafe { (*pair).slave };
     if !slave.is_null() {
-        return unsafe { tty_ioctl(slave, cmd, arg) };
+        return unsafe { Tty::ioctl(slave, cmd, arg) };
     }
     -ENOTTY
 }
@@ -748,7 +748,7 @@ unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
     let ret = unsafe { cdev_register(&raw mut (*pair).slave_cdev) };
     if ret != 0 {
         crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
-        unsafe { tty_unref(slave) };
+        unsafe { Tty::unref(slave) };
         PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
         unsafe { slab_free(pair as *mut c_void) };
         return ret;

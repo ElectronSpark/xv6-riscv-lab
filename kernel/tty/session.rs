@@ -248,7 +248,7 @@ impl Session {
 // `extern "C"` redeclarations to plain crate-path items (identical
 // signatures -- both real `unsafe extern "C" fn`s, every call site
 // already wrapped in `unsafe`).
-use crate::tty::tty::{tty_ref, tty_unref};
+use crate::tty::tty::Tty;
 
 // ===========================================================================
 // Externs -- every cross-module C-ABI symbol this file calls, declared
@@ -1246,7 +1246,7 @@ impl Session {
     /// branch — this session's `ref_cnt` has already reached zero, so the
     /// `&mut self` borrow is exclusive and uncontended. The `ctrl_tty`
     /// read/clear is now a plain safe field access; the raw `tty`
-    /// back-pointer clear + [`tty_unref`] keep their `unsafe`.
+    /// back-pointer clear + [`Tty::unref`] keep their `unsafe`.
     ///
     /// # Safety
     /// Caller must hold `pid_wlock`.
@@ -1259,7 +1259,7 @@ impl Session {
             // is still live here.
             unsafe {
                 (*old_tty).session = ptr::null_mut();
-                tty_unref(old_tty);
+                Tty::unref(old_tty);
             }
         }
     }
@@ -1283,8 +1283,8 @@ impl Session {
     ///   via `session_get_fg_pgid` + `pgroup_kill`, instead of falling back
     ///   to killing `current_thread_ptr()` (dead on the console, since that
     ///   fallback thread is a kernel feeder thread, not the foreground job).
-    /// - Takes a [`tty_ref`] on `new_tty` for as long as `s` designates it
-    ///   as the controlling terminal, and [`tty_unref`]s whatever `old_tty`
+    /// - Takes a [`Tty::ref_`] on `new_tty` for as long as `s` designates it
+    ///   as the controlling terminal, and [`Tty::unref`]s whatever `old_tty`
     ///   this replaces (or is cleared to null) via
     ///   [`Session::detach_ctrl_tty`] -- so the tty can never be freed out
     ///   from under a session that still points to it, and the ref/unref
@@ -1299,8 +1299,8 @@ impl Session {
     ///
     /// # Safety
     /// `s`, if non-null, must be live. `new_tty`, if non-null, must be a
-    /// live `tty` previously returned by `tty_alloc` (mirrors
-    /// [`tty_ref`]/[`tty_unref`]'s own contract). Caller must hold
+    /// live `tty` previously returned by `Tty::alloc` (mirrors
+    /// [`Tty::ref_`]/[`Tty::unref`]'s own contract). Caller must hold
     /// `pid_wlock`.
     pub(crate) unsafe extern "C" fn set_ctrl_tty(s: *mut session, new_tty: *mut tty) {
         ProcTable::assert_wholding();
@@ -1320,7 +1320,7 @@ impl Session {
             (*s).ctrl_tty = new_tty;
             if !new_tty.is_null() {
                 (*new_tty).session = s;
-                tty_ref(new_tty);
+                Tty::ref_(new_tty);
             }
         }
     }

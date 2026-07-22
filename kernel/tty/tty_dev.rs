@@ -51,7 +51,7 @@ use crate::dev::cdev::{cdev_register, CdevOps};
 // body except `ctrl_tty()`'s `session_get_ctrl_tty` call, which gets an
 // explicit `unsafe { }` block below.
 use super::session::{Session, SessionTable};
-use super::tty::{tty_close, tty_ioctl, tty_open, tty_poll, tty_read, tty_write};
+use super::tty::Tty;
 
 /// `S_IFCHR` (`kernel/inc/uabi/stat.h`).
 const S_IFCHR: u32 = 0o020_000;
@@ -76,48 +76,58 @@ const TTY_DEV_MINOR: c_int = 0;
 // Controlling-terminal lookup.
 // ===========================================================================
 
-/// Get the current thread's controlling terminal.
-///
-/// Returns null if the thread has no session or no controlling tty.
-///
-/// # Mandated fix (Wave 22, `RUST_REWRITE.md` Known issues)
-///
-/// `session_get_ctrl_tty()` documents (and, since Wave 12,
-/// `pid_assert_wholding()`-asserts) that the caller must hold
-/// `pid_wlock`. This function previously called it bare, which was
-/// inert only because `/dev/tty` could not be opened at all (the
-/// pre-Wave-21 minor-0 bug) — Wave 21 fixed that bug and made the
-/// contract violation reachable, panicking on `cat /dev/tty`. Fixed by
-/// taking `pid_wlock`/`pid_wunlock` around the call, matching every
-/// other `session_get_ctrl_tty` caller's discipline (see
-/// `kernel/tty/session.rs`).
-#[inline]
-fn ctrl_tty() -> *mut tty {
-    let t = crate::machine::current_thread_ptr();
-    if t.is_null() {
-        return core::ptr::null_mut();
+/// Zero-sized marker hosting `/dev/tty`'s device-level (no live-`tty`-
+/// instance) operations -- `ctrl_tty` doesn't take a `tty` receiver (it
+/// *resolves* one from the current thread), and `ttydevinit` is a global,
+/// once-at-boot registration, so neither fits `impl Tty`. Plays the same
+/// namespacing role `SessionTable` plays for `kernel/tty/session.rs`'s
+/// singleton-registry operations.
+pub(crate) struct TtyDev;
+
+impl TtyDev {
+    /// Get the current thread's controlling terminal.
+    ///
+    /// Returns null if the thread has no session or no controlling tty.
+    ///
+    /// # Mandated fix (Wave 22, `RUST_REWRITE.md` Known issues)
+    ///
+    /// `session_get_ctrl_tty()` documents (and, since Wave 12,
+    /// `pid_assert_wholding()`-asserts) that the caller must hold
+    /// `pid_wlock`. This function previously called it bare, which was
+    /// inert only because `/dev/tty` could not be opened at all (the
+    /// pre-Wave-21 minor-0 bug) — Wave 21 fixed that bug and made the
+    /// contract violation reachable, panicking on `cat /dev/tty`. Fixed by
+    /// taking `pid_wlock`/`pid_wunlock` around the call, matching every
+    /// other `session_get_ctrl_tty` caller's discipline (see
+    /// `kernel/tty/session.rs`).
+    #[inline]
+    fn ctrl_tty() -> *mut tty {
+        let t = crate::machine::current_thread_ptr();
+        if t.is_null() {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: `t` is the live current-thread pointer returned by
+        // `current_thread_ptr()` (the Rust equivalent of the C `current`
+        // macro), just checked non-null; `session` is now a generational `Sid`
+        // (N-R6d-2a) — a plain aligned word read with no further invariants.
+        let sid = unsafe { (*t).session };
+        if sid.is_none() {
+            return core::ptr::null_mut();
+        }
+        ProcTable::wlock();
+        // Resolve the `Sid` to a live session under `pid_wlock` (required by
+        // `session_lookup`); a stale key (session freed) resolves to null → no
+        // controlling tty, the same answer the old null-pointer path gave.
+        let session = SessionTable::lookup(sid).unwrap_or(core::ptr::null_mut());
+        let t = if session.is_null() {
+            core::ptr::null_mut()
+        } else {
+            // SAFETY: `session` is a live session pointer just resolved above.
+            unsafe { Session::get_ctrl_tty(session) }
+        };
+        ProcTable::wunlock();
+        t
     }
-    // SAFETY: `t` is the live current-thread pointer returned by
-    // `current_thread_ptr()` (the Rust equivalent of the C `current`
-    // macro), just checked non-null; `session` is now a generational `Sid`
-    // (N-R6d-2a) — a plain aligned word read with no further invariants.
-    let sid = unsafe { (*t).session };
-    if sid.is_none() {
-        return core::ptr::null_mut();
-    }
-    ProcTable::wlock();
-    // Resolve the `Sid` to a live session under `pid_wlock` (required by
-    // `session_lookup`); a stale key (session freed) resolves to null → no
-    // controlling tty, the same answer the old null-pointer path gave.
-    let session = SessionTable::lookup(sid).unwrap_or(core::ptr::null_mut());
-    let t = if session.is_null() {
-        core::ptr::null_mut()
-    } else {
-        // SAFETY: `session` is a live session pointer just resolved above.
-        unsafe { Session::get_ctrl_tty(session) }
-    };
-    ProcTable::wunlock();
-    t
 }
 
 // ===========================================================================
@@ -137,67 +147,67 @@ static TTY_CDEV_OPS: TtyCdevOps = TtyCdevOps;
 
 impl CdevOps for TtyCdevOps {
     unsafe fn open(&self, _cdev: *mut cdev_t) -> KResult<()> {
-        let t = ctrl_tty();
+        let t = TtyDev::ctrl_tty();
         if t.is_null() {
             return Err(Errno::NxIo);
         }
         // SAFETY: `t` is the live controlling tty just resolved.
-        match unsafe { tty_open(t) } {
+        match unsafe { Tty::open(t) } {
             0 => Ok(()),
             ret => Err(Errno::Raw(ret)),
         }
     }
 
     unsafe fn release(&self, _cdev: *mut cdev_t) -> KResult<()> {
-        let t = ctrl_tty();
+        let t = TtyDev::ctrl_tty();
         if !t.is_null() {
             // SAFETY: `t` is the live controlling tty just resolved.
-            unsafe { tty_close(t) };
+            unsafe { Tty::close(t) };
         }
         Ok(())
     }
 
     unsafe fn read(&self, _cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
         -> KResult<c_int> {
-        let t = ctrl_tty();
+        let t = TtyDev::ctrl_tty();
         if t.is_null() {
             return Err(Errno::NxIo);
         }
-        // SAFETY: forwarded straight to `tty_read`, which validates
+        // SAFETY: forwarded straight to `Tty::read`, which validates
         // `buf` itself per the userspace/kernel split encoded by `user`
         // (dispatch contract).
-        cint_result(unsafe { tty_read(t, buf as *mut c_char, count as u64, user as c_int) as c_int })
+        cint_result(unsafe { Tty::read(t, buf as *mut c_char, count as u64, user as c_int) as c_int })
     }
 
     unsafe fn write(&self, _cdev: *mut cdev_t, user: bool, buf: *const c_void, count: usize)
         -> KResult<c_int> {
-        let t = ctrl_tty();
+        let t = TtyDev::ctrl_tty();
         if t.is_null() {
             return Err(Errno::NxIo);
         }
         // SAFETY: see `read` above.
         cint_result(unsafe {
-            tty_write(t, buf as *const c_char, count as u64, user as c_int) as c_int
+            Tty::write(t, buf as *const c_char, count as u64, user as c_int) as c_int
         })
     }
 
     unsafe fn ioctl(&self, _cdev: *mut cdev_t, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
-        let t = ctrl_tty();
+        let t = TtyDev::ctrl_tty();
         if t.is_null() {
             return Err(Errno::NxIo);
         }
         // SAFETY: `t` live; `arg`'s validity forwarded from the
         // dispatch contract.
-        cint_result(unsafe { tty_ioctl(t, cmd, arg) })
+        cint_result(unsafe { Tty::ioctl(t, cmd, arg) })
     }
 
     unsafe fn poll(&self, _cdev: *mut cdev_t, events: c_short) -> Option<c_int> {
-        let t = ctrl_tty();
+        let t = TtyDev::ctrl_tty();
         if t.is_null() {
             return Some(0);
         }
         // SAFETY: `t` live.
-        Some(unsafe { tty_poll(t, events) })
+        Some(unsafe { Tty::poll(t, events) })
     }
 }
 
@@ -207,31 +217,37 @@ impl CdevOps for TtyCdevOps {
 
 static mut TTY_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
-pub(crate) extern "C" fn ttydevinit() {
-    // SAFETY: `ttydevinit()` runs exactly once, from `start_kernel.c`'s
-    // single-hart init sequence, before any other code can observe
-    // `TTY_CDEV`.
-    unsafe {
-        let cdev = TTY_CDEV.as_mut_ptr();
-        (*cdev).dev.major = TTY_DEV_MAJOR;
-        (*cdev).dev.minor = TTY_DEV_MINOR;
-        (*cdev).dev.devname = c"tty".as_ptr();
-        (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).flags.set_readable(1);
-        (*cdev).flags.set_writable(1);
-        (*cdev).ops = Some(&TTY_CDEV_OPS);
+// NO-STANDALONE-FN: `ttydevinit` relocated to `TtyDev::init`, dropping the
+// implicit `tty` naming prefix (matches `Tty::init`'s own naming for the
+// line-discipline slab cache); `extern "C"` preserved exactly (called once
+// from `start_kernel.rs`).
+impl TtyDev {
+    pub(crate) extern "C" fn init() {
+        // SAFETY: `TtyDev::init()` runs exactly once, from
+        // `start_kernel.c`'s single-hart init sequence, before any other
+        // code can observe `TTY_CDEV`.
+        unsafe {
+            let cdev = TTY_CDEV.as_mut_ptr();
+            (*cdev).dev.major = TTY_DEV_MAJOR;
+            (*cdev).dev.minor = TTY_DEV_MINOR;
+            (*cdev).dev.devname = c"tty".as_ptr();
+            (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
+            (*cdev).flags.set_readable(1);
+            (*cdev).flags.set_writable(1);
+            (*cdev).ops = Some(&TTY_CDEV_OPS);
 
-        let ret = cdev_register(cdev);
-        if ret != 0 {
-            __panic_start();
-            crate::kprintln!(
-                "ASSERTION_FAILURE {}:{}: In function '{}':",
-                "kernel/tty/tty_dev.rs",
-                line!(),
-                "ttydevinit",
-            );
-            crate::kprintln!("ttydevinit: cdev_register failed: {}", ret);
-            __panic_end();
+            let ret = cdev_register(cdev);
+            if ret != 0 {
+                __panic_start();
+                crate::kprintln!(
+                    "ASSERTION_FAILURE {}:{}: In function '{}':",
+                    "kernel/tty/tty_dev.rs",
+                    line!(),
+                    "TtyDev::init",
+                );
+                crate::kprintln!("TtyDev::init: cdev_register failed: {}", ret);
+                __panic_end();
+            }
         }
     }
 }

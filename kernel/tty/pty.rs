@@ -49,7 +49,7 @@ use crate::mm::either_copyin;
 // them `safe`, but both call sites already sit inside an `unsafe fn`
 // body (`pty_alloc`) or an explicit `unsafe { }` block, so no behavior
 // changes.
-use crate::tty::tty::{tty_alloc, tty_input};
+use crate::tty::tty::Tty;
 use crate::vfs::pipe::Pipe;
 
 const EFAULT: i64 = 14;
@@ -168,7 +168,7 @@ pub(crate) unsafe extern "C" fn pty_master_write(
         // Feed through the slave's line discipline.
         // SAFETY: `slave` is caller-guaranteed live (fn doc); `kbuf[..batch]`
         // was just filled above by either path.
-        let ret = unsafe { tty_input(slave, kbuf.as_ptr() as *const c_char, batch as u64) };
+        let ret = unsafe { Tty::input(slave, kbuf.as_ptr() as *const c_char, batch as u64) };
         if ret < 0 {
             return if written > 0 { written as isize } else { ret as isize };
         }
@@ -218,7 +218,7 @@ pub(crate) unsafe extern "C" fn pty_master_read(
 /// # Safety
 /// `slave_out` must be a valid, writable `*mut *mut tty`. `name` must
 /// be a valid, NUL-terminated C string for the duration of this call
-/// (the `tty_alloc` contract).
+/// (the `Tty::alloc` contract).
 pub(crate) unsafe extern "C" fn pty_alloc(
     slave_out: *mut *mut tty,
     name: *const c_char,
@@ -227,7 +227,7 @@ pub(crate) unsafe extern "C" fn pty_alloc(
     // P3-10d: the ops table is a `&'static dyn TtyOps` trait object
     // now (the old `static mut` existed only because `tty_alloc`'s C
     // signature took `*mut tty_ops`).
-    let slave = tty_alloc(name, Some(&PTY_SLAVE_OPS));
+    let slave = Tty::alloc(name, Some(&PTY_SLAVE_OPS));
     if is_err(slave) {
         return ptr_err(slave);
     }
