@@ -455,8 +455,9 @@ fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
     }
 }
 
-// `rcu_read_lock` / `rcu_read_unlock` are static-inline; use the Rust shims.
-use crate::lock::rcu::{rcu_read_lock as rcu_lock, rcu_read_unlock as rcu_unlock};
+// `rcu_read_lock` / `rcu_read_unlock` are static-inline; use the Rust shims
+// (now associated fns on the `Rcu` marker type).
+use crate::lock::rcu::Rcu;
 
 #[inline]
 fn pid_assert_wholding() {
@@ -860,14 +861,14 @@ impl Pgroup {
             return -EINVAL;
         }
 
-        rcu_lock();
+        Rcu::read_lock();
         let target = ProcTable::get_thread(pid);
         if is_err_const(target as *const c_void) {
-            rcu_unlock();
+            Rcu::read_unlock();
             return -ESRCH;
         }
         let pgid = t_pgid(target);
-        rcu_unlock();
+        Rcu::read_unlock();
         pgid
     }
 

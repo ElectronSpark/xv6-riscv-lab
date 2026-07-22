@@ -209,7 +209,7 @@ use crate::mm::Pcache;
 // P3-D3b: lock/rcu.rs's boot entry points are plain `pub(crate) unsafe
 // fn`s now that their `#[no_mangle]` exports are gone; reached by crate
 // path (call sites below already sit in `unsafe` blocks).
-use crate::lock::rcu::{rcu_cpu_init, rcu_init, rcu_kthread_start_cpu};
+use crate::lock::rcu::Rcu;
 // NO-STANDALONE-FN: `idle_thread_init` is now the associated fn
 // `Thread::idle_init` (this file has the only calls).
 // P3-1D mesh sweep: dev/{fdt,dev,netdev,x1_emac,x1_sdhci,nullrand}.rs,
@@ -282,7 +282,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Pipe::pipe_init(); // initialize pipe subsystem
         mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
         crate::kprintln!("mycpu initialized");
-        rcu_init(); // RCU subsystem initialization
+        Rcu::init(); // RCU subsystem initialization
         dev_table_init(); // Initialize the device table
         Thread::proctab_init(); // process table
         tty_init(); // Initialize TTY subsystem
@@ -342,7 +342,7 @@ fn __start_kernel_secondary_hart(hartid: c_int) {
         Thread::idle_init();
         trapinithart(); // install kernel trap vector
         plicinithart(); // ask PLIC for device interrupts
-        rcu_cpu_init(machine::cpuid()); // Initialize RCU for this CPU
+        Rcu::cpu_init(machine::cpuid()); // Initialize RCU for this CPU
     }
 }
 
@@ -381,7 +381,7 @@ pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: b
     // SAFETY: single call per hart, scheduler is up on both the boot-hart
     // and secondary-hart paths by this point.
     unsafe {
-        rcu_kthread_start_cpu(machine::cpuid());
+        Rcu::kthread_start_cpu(machine::cpuid());
     }
 
     // Idle loop

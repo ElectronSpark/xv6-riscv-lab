@@ -265,7 +265,7 @@ use crate::kobject::{kobject_init, kobject_put, kobject_try_get};
 // P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
 // that its `#[no_mangle]` export is gone; reached by crate path (the call
 // site below already sits in an `unsafe` block).
-use crate::lock::rcu::call_rcu;
+use crate::lock::rcu::Rcu;
 
 // P3-D3a: the mm page/slab entry points are genuinely `unsafe fn` in
 // `crate::mm::{page,slab}` now that their `#[no_mangle]` exports are
@@ -748,7 +748,7 @@ fn dev_unregister_from_table(dev: *mut device_t) {
         // it; `call_rcu` defers the actual free until any reader that
         // dereferenced it earlier has finished.
         unsafe {
-            call_rcu(
+            Rcu::call(
                 &raw mut (*to_free).rcu_head,
                 Some(dev_type_rcu_free),
                 to_free as *mut c_void,

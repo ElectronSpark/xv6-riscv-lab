@@ -411,7 +411,7 @@ impl Sys {
         // contract is exactly the `vfs_file*` passed here. (P3-D3b: this
         // file's old extern redeclaration asserted `safe fn`; the real
         // `crate::lock::rcu::call_rcu` is `unsafe fn`.)
-        unsafe { crate::lock::rcu::call_rcu(ptr::null_mut(), Some(vfs_fd_rcucb), file as *mut c_void) };
+        unsafe { crate::lock::rcu::Rcu::call(ptr::null_mut(), Some(vfs_fd_rcucb), file as *mut c_void) };
     }
 }
 

@@ -21,7 +21,7 @@
 //! # Synchronization strategy (hybrid RCU + spinlock, matches the C
 //! original's own header comment)
 //!
-//! * **Readers** ([`vfs_fdtable_get_file`]): `rcu_read_lock()` +
+//! * **Readers** ([`vfs_fdtable_get_file`]): `Rcu::read_lock()` +
 //!   `rcu_dereference` (mirrored below as an `Acquire` load on the
 //!   `files[fd]` slot, matching this crate's established
 //!   `__ATOMIC_CONSUME`-has-no-Rust-equivalent -> `Acquire` mapping, see
@@ -37,7 +37,7 @@
 //!   through `rcu_assign_pointer` (`Release` store below) so concurrent
 //!   RCU readers never observe a torn/partially-initialized pointer.
 //! * **Cloning** ([`vfs_fdtable_clone`]): holds only the *source*
-//!   fdtable's `rcu_read_lock()` while walking `src.files[]` (protects
+//!   fdtable's `Rcu::read_lock()` while walking `src.files[]` (protects
 //!   against a concurrent `close()` freeing a file mid-copy); the
 //!   destination table is not yet published to any other thread, so its
 //!   own fields are touched with plain (non-atomic, non-RCU) reads/writes,
@@ -241,7 +241,7 @@ fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
 
 // P3-D3b: lock/rcu.rs's read-side entry points are plain safe Rust fns
 // now that their `#[no_mangle]` exports are gone; reached by crate path.
-use crate::lock::rcu::{rcu_read_lock, rcu_read_unlock};
+use crate::lock::rcu::Rcu;
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -620,18 +620,18 @@ impl VfsFdtable {
     fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vfs_fdtable>> {
         let src_nn = NonNull::new(src).ok_or(Errno::Inval)?;
 
-        rcu_read_lock();
+        Rcu::read_lock();
         if clone_flags & CLONE_FILES != 0 {
             // Share the fdtable.
             VfsFdtable::refcount_atomic(src).fetch_add(1, Ordering::SeqCst);
-            rcu_read_unlock();
+            Rcu::read_unlock();
             return Ok(src_nn);
         }
 
         let mut dest_nn = match VfsFdtable::fdtable_alloc_init() {
             Ok(nn) => nn,
             Err(e) => {
-                rcu_read_unlock();
+                Rcu::read_unlock();
                 return Err(e); // Allocation failed
             }
         };
@@ -647,7 +647,7 @@ impl VfsFdtable {
     // Duplicate file references while holding the RCU read lock — this
     // protects against a concurrent close() deallocating `src`'s files.
     for i in 0..NOFILE {
-        // SAFETY: `rcu_read_lock()` held; `src` is a live fdtable (every
+        // SAFETY: `Rcu::read_lock()` held; `src` is a live fdtable (every
         // caller holds a reference to it, per this function's contract).
         let src_file = unsafe { rcu_deref_file(ptr::addr_of_mut!((*src).files[i])) };
         if is_fd(src_file) {
@@ -667,7 +667,7 @@ impl VfsFdtable {
             }
         }
     }
-    rcu_read_unlock();
+    Rcu::read_unlock();
     // Ensure all writes are visible before returning (matches the C
     // original's explicit `smp_mb()`).
     fence(Ordering::SeqCst);
@@ -747,16 +747,16 @@ impl VfsFdtable {
     if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
         return ptr::null_mut(); // Invalid arguments
     }
-    rcu_read_lock();
-    // SAFETY: `rcu_read_lock()` held; `fd` in `[0, NOFILE)`; `fdtable`
+    Rcu::read_lock();
+    // SAFETY: `Rcu::read_lock()` held; `fd` in `[0, NOFILE)`; `fdtable`
     // non-null.
     let file = unsafe { rcu_deref_file(ptr::addr_of_mut!((*fdtable).files[fd as usize])) };
     if is_fd(file) {
         let file = VfsFile::vfs_fdup(file);
-        rcu_read_unlock();
+        Rcu::read_unlock();
         return file;
     }
-    rcu_read_unlock();
+    Rcu::read_unlock();
     ptr::null_mut() // File descriptor not allocated
     }
 

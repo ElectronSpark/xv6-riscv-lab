@@ -113,9 +113,10 @@ use crate::proc::proc_shims::{
 // parent). Call sites construct the namespaced path / the handle.
 use crate::proc::access::ThreadAccess;
 
-// P3-D3b: lock/rcu.rs's `rcu_check_callbacks` is a plain safe Rust fn now
-// that its `#[no_mangle]` export is gone; reached by crate path.
-use crate::lock::rcu::rcu_check_callbacks;
+// P3-D3b: lock/rcu.rs's `rcu_check_callbacks` is a plain safe associated
+// fn (`Rcu::check_callbacks`) now that its `#[no_mangle]` export is gone;
+// reached by crate path.
+use crate::lock::rcu::Rcu;
 
 // P3-D3a: `vm_dup`/`vm_copy` (mm/vm.rs) are ordinary (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone. This file's `Vm` is an
@@ -244,7 +245,7 @@ extern "C" fn forkret_entry(prev: *mut Context) {
     Scheduler::context_switch_finish(xv6_thread_from_context(prev), cur, 0);
     xv6_mycpu_clear_noff();
     crate::machine::intr_on();
-    rcu_check_callbacks();
+    Rcu::check_callbacks();
     crate::machine::smp_mb();
     usertrapret();
 }

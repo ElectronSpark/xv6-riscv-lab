@@ -260,7 +260,7 @@ use crate::tty::tty::{tty_ref, tty_unref};
 
 // P3-D3b: lock/rcu.rs's read-side entry points are plain safe Rust fns
 // now that their `#[no_mangle]` exports are gone; reached by crate path.
-use crate::lock::rcu::{rcu_read_lock, rcu_read_unlock};
+use crate::lock::rcu::Rcu;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
@@ -1549,16 +1549,16 @@ pub(crate) extern "C" fn session_getsid(pid: pid_t) -> pid_t {
         return -EINVAL;
     }
 
-    rcu_read_lock();
+    Rcu::read_lock();
     let target = ProcTable::get_thread(pid);
     if is_err(target) {
-        rcu_read_unlock();
+        Rcu::read_unlock();
         return -ESRCH;
     }
     // SAFETY: `target` is a live thread (not an ERR_PTR, checked above)
     // for as long as the RCU read-side critical section is held.
     let sid = unsafe { (*target).sid };
-    rcu_read_unlock();
+    Rcu::read_unlock();
 
     sid
 }
@@ -1569,7 +1569,7 @@ pub(crate) extern "C" fn session_getsid(pid: pid_t) -> pid_t {
 /// `get_pid_thread`, then returns its session pointer.
 ///
 /// Returns the session pointer, or `ERR_PTR(-ESRCH)` if not found. The
-/// caller must be inside an `rcu_read_lock()` section, or hold
+/// caller must be inside an `Rcu::read_lock()` section, or hold
 /// `pid_lock`; the returned pointer is only stable under that same
 /// protection.
 pub(crate) extern "C" fn get_session(sid: pid_t) -> *mut session {

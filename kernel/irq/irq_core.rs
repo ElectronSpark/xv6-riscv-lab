@@ -86,7 +86,7 @@ unsafe extern "C" {
 // safe fns (as the old `safe fn` redeclarations asserted); `call_rcu` is
 // genuinely `unsafe fn` and its single call site below already sits in an
 // `unsafe` block.
-use crate::lock::rcu::{call_rcu, rcu_read_lock, rcu_read_unlock};
+use crate::lock::rcu::Rcu;
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -316,7 +316,7 @@ pub(crate) extern "C" fn unregister_irq_handler(irq_num: c_int) -> c_int {
     // allocator it came from -- non-blocking deferred free, matching the
     // C original.
     unsafe {
-        call_rcu(&raw mut (*old_desc).rcu_head, Some(rcu_free_irq_desc), old_desc as *mut c_void);
+        Rcu::call(&raw mut (*old_desc).rcu_head, Some(rcu_free_irq_desc), old_desc as *mut c_void);
     }
     0
 }
@@ -332,10 +332,10 @@ fn do_plic_irq() -> c_int {
     }
     let irq_full = irq + PLIC_IRQ_OFFSET;
 
-    rcu_read_lock();
+    Rcu::read_lock();
     let desc = IRQ_DESCS[irq_full as usize].load(Ordering::Acquire);
     if desc.is_null() {
-        rcu_read_unlock();
+        Rcu::read_unlock();
         crate::kprintln!("do_irq: no handler for irq_num {}", irq_full);
         plic_complete(irq);
         return neg(crate::bindings::ENODEV);
@@ -352,7 +352,7 @@ fn do_plic_irq() -> c_int {
             h(irq_full, (*desc).data, (*desc).dev as *mut c_void);
         }
     }
-    rcu_read_unlock();
+    Rcu::read_unlock();
     plic_complete(irq);
     irq_full
 }
@@ -382,10 +382,10 @@ pub(crate) unsafe extern "C" fn do_irq(tf: *mut trapframe) -> c_int {
         return do_plic_irq();
     }
 
-    rcu_read_lock();
+    Rcu::read_lock();
     let desc = IRQ_DESCS[irq_num as usize].load(Ordering::Acquire);
     if desc.is_null() {
-        rcu_read_unlock();
+        Rcu::read_unlock();
         crate::kprintln!("do_irq: no handler for irq_num {}", irq_num);
         return neg(crate::bindings::ENODEV);
     }
@@ -397,6 +397,6 @@ pub(crate) unsafe extern "C" fn do_irq(tf: *mut trapframe) -> c_int {
             h(irq_num, (*desc).data, (*desc).dev as *mut c_void);
         }
     }
-    rcu_read_unlock();
+    Rcu::read_unlock();
     irq_num
 }

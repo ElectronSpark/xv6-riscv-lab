@@ -8,10 +8,12 @@
 //!
 //! Two parallel APIs:
 //!
-//! * **Historical names** — `pub(crate) fn rcu_*` thin wrappers
-//!   preserving the original 15 names for their in-crate consumers
-//!   (formerly `#[no_mangle] extern "C"` exports; the C-ABI surface
-//!   is dismantled).
+//! * **Historical names** — `pub(crate)` associated functions on the
+//!   zero-sized [`Rcu`] marker type (`Rcu::init`, `Rcu::read_lock`,
+//!   `Rcu::call`, ...), preserving the original 15 names (minus their
+//!   redundant `rcu_` prefix) for their in-crate consumers (formerly
+//!   `#[no_mangle] extern "C"` exports; the C-ABI surface is
+//!   dismantled).
 //! * **Rust API** — [`KRcuRead`] RAII guard at the module root
 //!   (parallel to [`crate::sync::KSpinlock`] /
 //!   [`crate::machine::PreemptGuard`]) plus free functions under
@@ -24,9 +26,9 @@
 //! ## Safety strategy
 //!
 //! * Every entry point is a one-line dispatcher to a *safe* `*_impl`
-//!   function. All internal cross-calls go through the `_impl` form
-//!   so no business-logic `fn` opens an `unsafe { ... }` block just
-//!   to call another RCU function.
+//!   associated function on [`Rcu`]. All internal cross-calls go
+//!   through the `_impl` form so no business-logic `fn` opens an
+//!   `unsafe { ... }` block just to call another RCU function.
 //! * **Preemption** is bracketed by [`PreemptGuard`] (RAII for
 //!   `push_off` / `pop_off`).
 //! * **Spinlocks** are accessed through [`KSpinlock`], whose
@@ -149,21 +151,23 @@ struct CpuSlot(cpu_local);
 // only through atomic ops on both sides of the FFI boundary.
 unsafe impl Sync for CpuSlot {}
 
-#[inline]
-fn cpu_rcu_ts(i: usize) -> &'static AtomicU64 {
-    // P3-D3c: the per-CPU array is `ipi.rs`'s `pub(crate) static mut
-    // cpus: CpuLocalArray` (a `#[repr(C)]` wrapper whose sole field sits
-    // at offset 0), reached by crate path instead of this file's old
-    // `#[link_name = "cpus"] static CPUS: [CpuSlot; NCPU]` view; the cast
-    // below reproduces that view (`CpuSlot` is `#[repr(transparent)]`
-    // over `cpu_local`).
-    // SAFETY: `AtomicU64` is layout-compatible with `u64`. The C
-    // kernel touches `rcu_timestamp` only via `__atomic_*` builtins
-    // which match the atomic ABI used by `AtomicU64`; `i` is a valid CPU
-    // index (< NCPU), so the offset stays inside the static.
-    unsafe {
-        let slot = (&raw const crate::ipi::cpus).cast::<CpuSlot>().add(i);
-        &*(&(*slot).0.rcu_timestamp as *const u64 as *const AtomicU64)
+impl Rcu {
+    #[inline]
+    fn cpu_rcu_ts(i: usize) -> &'static AtomicU64 {
+        // P3-D3c: the per-CPU array is `ipi.rs`'s `pub(crate) static mut
+        // cpus: CpuLocalArray` (a `#[repr(C)]` wrapper whose sole field sits
+        // at offset 0), reached by crate path instead of this file's old
+        // `#[link_name = "cpus"] static CPUS: [CpuSlot; NCPU]` view; the cast
+        // below reproduces that view (`CpuSlot` is `#[repr(transparent)]`
+        // over `cpu_local`).
+        // SAFETY: `AtomicU64` is layout-compatible with `u64`. The C
+        // kernel touches `rcu_timestamp` only via `__atomic_*` builtins
+        // which match the atomic ABI used by `AtomicU64`; `i` is a valid CPU
+        // index (< NCPU), so the offset stays inside the static.
+        unsafe {
+            let slot = (&raw const crate::ipi::cpus).cast::<CpuSlot>().add(i);
+            &*(&(*slot).0.rcu_timestamp as *const u64 as *const AtomicU64)
+        }
     }
 }
 
@@ -367,79 +371,79 @@ static RCU_GP_LOCK_STORAGE: StaticCell<spinlock_t> = StaticCell::uninit();
 static RCU_GP_WAITQ: StaticCell<tq_t> = StaticCell::uninit();
 static RCU_GP_WAITQ_LOCK_STORAGE: StaticCell<spinlock_t> = StaticCell::uninit();
 
-#[inline]
-fn gp_lock() -> KSpinlock {
-    KSpinlock::from_bindings(RCU_GP_LOCK_STORAGE.as_mut_ptr())
-}
-#[inline]
-fn gp_waitq_lock() -> KSpinlock {
-    KSpinlock::from_bindings(RCU_GP_WAITQ_LOCK_STORAGE.as_mut_ptr())
+// ---------------------------------------------------------------------------
+// `Rcu` — zero-sized marker hosting every singleton-global operation
+//
+// Unlike the sibling lock primitives (`RawMutex`/`RawSemaphore`/
+// `RawCompletion`/...), RCU has no per-object receiver: its state
+// (`RCU_STATE`, `RCU_CPU_DATA`, `RCU_KTHREAD`, ...) lives in file
+// statics, not fields reachable through `self`. `Rcu` plays the role
+// `Self` plays in those `impl RawX` blocks -- a namespace for the
+// public API plus the internal `*_impl` dispatch bodies below.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct Rcu;
+
+impl Rcu {
+    #[inline]
+    fn gp_lock() -> KSpinlock {
+        KSpinlock::from_bindings(RCU_GP_LOCK_STORAGE.as_mut_ptr())
+    }
+    #[inline]
+    fn gp_waitq_lock() -> KSpinlock {
+        KSpinlock::from_bindings(RCU_GP_WAITQ_LOCK_STORAGE.as_mut_ptr())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Print / panic helpers — centralise the variadic-FFI unsafety.
 // ---------------------------------------------------------------------------
 
-#[inline(never)]
-#[cold]
-fn kpanic_msg(msg: &'static CStr) -> ! {
-    // SAFETY: `trigger_panic` is a kernel C symbol with the declared ABI.
-    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
-    unsafe {
-        trigger_panic();
+impl Rcu {
+    #[inline(never)]
+    #[cold]
+    fn kpanic_msg(msg: &'static CStr) -> ! {
+        // SAFETY: `trigger_panic` is a kernel C symbol with the declared ABI.
+        crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
+        unsafe {
+            trigger_panic();
+        }
     }
-}
 
-#[inline]
-fn kwarn_msg(msg: &'static CStr) {
-    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
-}
-
-/// Panic helper for the unbalanced-unlock diagnostic. Centralises
-/// the only formatted printf in the read-side fast path.
-#[inline(never)]
-#[cold]
-fn kpanic_unbalanced_unlock(name_ptr: *const c_char, pid: c_int) -> ! {
-    // SAFETY: `name_ptr` is a NUL-terminated buffer inside the
-    // live current `thread`; `pid` is an `i32`.
-    crate::kprintln!(
-        "PANIC: rcu_read_unlock: unbalanced unlock in thread {} (pid {})",
-        crate::printf::Cs(name_ptr),
-        pid,
-    );
-    unsafe {
-        trigger_panic();
+    #[inline]
+    fn kwarn_msg(msg: &'static CStr) {
+        crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
     }
-}
 
-fn print_kthread_started(cpu: u64) {
-    crate::kprintln!("RCU callback kthread started on CPU {}", cpu);
-}
+    /// Panic helper for the unbalanced-unlock diagnostic. Centralises
+    /// the only formatted printf in the read-side fast path.
+    #[inline(never)]
+    #[cold]
+    fn kpanic_unbalanced_unlock(name_ptr: *const c_char, pid: c_int) -> ! {
+        // SAFETY: `name_ptr` is a NUL-terminated buffer inside the
+        // live current `thread`; `pid` is an `i32`.
+        crate::kprintln!(
+            "PANIC: rcu_read_unlock: unbalanced unlock in thread {} (pid {})",
+            crate::printf::Cs(name_ptr),
+            pid,
+        );
+        unsafe {
+            trigger_panic();
+        }
+    }
 
-fn warn_kthread_create_failed(cpu: c_int) {
-    crate::kprintln!("Failed to create RCU kthread for CPU {}", cpu);
+    fn print_kthread_started(cpu: u64) {
+        crate::kprintln!("RCU callback kthread started on CPU {}", cpu);
+    }
+
+    fn warn_kthread_create_failed(cpu: c_int) {
+        crate::kprintln!("Failed to create RCU kthread for CPU {}", cpu);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // rcu_head_t field helpers (centralised-unsafe pattern)
 // ---------------------------------------------------------------------------
-
-#[inline]
-fn head_set_next(h: *mut RawRcuHead, n: *mut RawRcuHead) {
-    // SAFETY: caller exclusively owns `h` (just allocated, or walking
-    // a list chain it has detached).
-    unsafe { (*h).next = n; }
-}
-#[inline]
-fn head_next(h: *mut RawRcuHead) -> *mut RawRcuHead {
-    // SAFETY: see `head_set_next`.
-    unsafe { (*h).next }
-}
-#[inline]
-fn head_timestamp(h: *mut RawRcuHead) -> u64 {
-    // SAFETY: see `head_set_next`.
-    unsafe { (*h).timestamp }
-}
 
 /// Read all the fields needed to invoke a callback in one unsafe deref.
 struct HeadFields {
@@ -448,36 +452,55 @@ struct HeadFields {
     embedded: bool,
 }
 
-#[inline]
-fn head_read(h: *mut RawRcuHead) -> HeadFields {
-    // SAFETY: caller owns `h` exclusively while reading.
-    unsafe {
-        let r = &*h;
-        HeadFields {
-            func: r.func,
-            data: r.data,
-            embedded: r.embedded_head(),
+impl RawRcuHead {
+    #[inline]
+    fn head_set_next(h: *mut RawRcuHead, n: *mut RawRcuHead) {
+        // SAFETY: caller exclusively owns `h` (just allocated, or walking
+        // a list chain it has detached).
+        unsafe { (*h).next = n; }
+    }
+    #[inline]
+    fn head_next(h: *mut RawRcuHead) -> *mut RawRcuHead {
+        // SAFETY: see `Self::head_set_next`.
+        unsafe { (*h).next }
+    }
+    #[inline]
+    fn head_timestamp(h: *mut RawRcuHead) -> u64 {
+        // SAFETY: see `Self::head_set_next`.
+        unsafe { (*h).timestamp }
+    }
+
+    #[inline]
+    fn head_read(h: *mut RawRcuHead) -> HeadFields {
+        // SAFETY: caller owns `h` exclusively while reading.
+        unsafe {
+            let r = &*h;
+            HeadFields {
+                func: r.func,
+                data: r.data,
+                embedded: r.embedded_head(),
+            }
         }
     }
-}
 
-#[inline]
-fn head_init(
-    h: *mut RawRcuHead,
-    func: rcu_callback_t,
-    data: *mut c_void,
-    ts: u64,
-    embedded: bool,
-) {
-    // SAFETY: caller has just allocated `h` or is reinitialising a
-    // node it owns exclusively.
-    unsafe {
-        let r = &mut *h;
-        r.next = null_mut();
-        r.func = func;
-        r.data = data;
-        r.timestamp = ts;
-        r.set_embedded_head(embedded);
+    #[inline]
+    fn head_init(
+        h: *mut RawRcuHead,
+        func: rcu_callback_t,
+        data: *mut c_void,
+        ts: u64,
+        embedded: bool,
+    ) {
+        // SAFETY: caller has just allocated `h` or is reinitialising a
+        // node it owns exclusively.
+        unsafe {
+            let r = &mut *h;
+            r.next = null_mut();
+            r.func = func;
+            r.data = data;
+            r.timestamp = ts;
+            r.set_embedded_head(embedded);
+        }
     }
 }
 
@@ -507,11 +530,11 @@ impl CbList {
     }
     #[inline]
     fn push(&mut self, h: *mut RawRcuHead) {
-        head_set_next(h, null_mut());
+        RawRcuHead::head_set_next(h, null_mut());
         if self.tail.is_null() {
             self.head = h;
         } else {
-            head_set_next(self.tail, h);
+            RawRcuHead::head_set_next(self.tail, h);
         }
         self.tail = h;
     }
@@ -529,45 +552,47 @@ impl CbList {
 // centralization).
 use crate::kstd::is_err_or_null;
 
-fn min_other_cpu_ts(exclude_cpu: c_int) -> u64 {
-    // Goal #2: read-only min-scan over the per-CPU RCU timestamps ->
-    // iterator fold. Each `.load(Acquire)` remains a distinct atomic
-    // op, so this is behavior-identical to the manual loop. (Atomic
-    // loads carry their own ordering and are never subject to the
-    // Freeze/noalias hoisting that pins the raw lock structs to floor,
-    // so this scan is a clean, sound conversion.)
-    (0..NCPU as usize)
-        .filter(|&i| i as c_int != exclude_cpu)
-        .map(|i| cpu_rcu_ts(i).load(Ordering::Acquire))
-        .filter(|&ts| ts != 0)
-        .fold(RCU_UINT64_MAX, u64::min)
-}
-
-fn gp_completed() -> bool {
-    let gp_start = RCU_STATE.gp_start_timestamp.load(Ordering::Acquire);
-    if gp_start == 0 {
-        return false;
+impl Rcu {
+    fn min_other_cpu_ts(exclude_cpu: c_int) -> u64 {
+        // Goal #2: read-only min-scan over the per-CPU RCU timestamps ->
+        // iterator fold. Each `.load(Acquire)` remains a distinct atomic
+        // op, so this is behavior-identical to the manual loop. (Atomic
+        // loads carry their own ordering and are never subject to the
+        // Freeze/noalias hoisting that pins the raw lock structs to floor,
+        // so this scan is a clean, sound conversion.)
+        (0..NCPU as usize)
+            .filter(|&i| i as c_int != exclude_cpu)
+            .map(|i| Self::cpu_rcu_ts(i).load(Ordering::Acquire))
+            .filter(|&ts| ts != 0)
+            .fold(RCU_UINT64_MAX, u64::min)
     }
-    // Goal #2: read-only all-scan -> iterator. A CPU with ts == 0 has
-    // not recorded a quiescent state yet (skip it); any recorded
-    // ts < gp_start means the grace period has not completed. Behavior-
-    // identical to the early-return loop (distinct atomic loads).
-    (0..NCPU as usize).all(|i| {
-        let ts = cpu_rcu_ts(i).load(Ordering::Acquire);
-        ts == 0 || ts >= gp_start
-    })
-}
 
-fn wakeup_gp_waiters() {
-    let _g = gp_waitq_lock().lock();
-    let _ = TqRef::from_ptr(RCU_GP_WAITQ.as_mut_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
-}
+    fn gp_completed() -> bool {
+        let gp_start = RCU_STATE.gp_start_timestamp.load(Ordering::Acquire);
+        if gp_start == 0 {
+            return false;
+        }
+        // Goal #2: read-only all-scan -> iterator. A CPU with ts == 0 has
+        // not recorded a quiescent state yet (skip it); any recorded
+        // ts < gp_start means the grace period has not completed. Behavior-
+        // identical to the early-return loop (distinct atomic loads).
+        (0..NCPU as usize).all(|i| {
+            let ts = Self::cpu_rcu_ts(i).load(Ordering::Acquire);
+            ts == 0 || ts >= gp_start
+        })
+    }
 
-fn wakeup_all_kthreads() {
-    for slot in RCU_KTHREAD.iter() {
-        let p = slot.kthread.load(Ordering::Acquire);
-        if !p.is_null() {
-            Scheduler::wakeup_interruptible(p);
+    fn wakeup_gp_waiters() {
+        let _g = Self::gp_waitq_lock().lock();
+        let _ = TqRef::from_ptr(RCU_GP_WAITQ.as_mut_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
+    }
+
+    fn wakeup_all_kthreads() {
+        for slot in RCU_KTHREAD.iter() {
+            let p = slot.kthread.load(Ordering::Acquire);
+            if !p.is_null() {
+                Scheduler::wakeup_interruptible(p);
+            }
         }
     }
 }
@@ -579,420 +604,426 @@ fn wakeup_all_kthreads() {
 // wrappers (further down) are trivial dispatchers.
 // ---------------------------------------------------------------------------
 
-fn init_impl() {
-    gp_lock().init(c"rcu_gp_lock".as_ptr());
-    gp_waitq_lock().init(c"rcu_gp_waitq_lock".as_ptr());
+impl Rcu {
+    fn init_impl() {
+        Self::gp_lock().init(c"rcu_gp_lock".as_ptr());
+        Self::gp_waitq_lock().init(c"rcu_gp_waitq_lock".as_ptr());
 
-    if let Some(r) = TqRef::from_ptr(RCU_GP_WAITQ.as_mut_ptr()) {
-        r.init(c"rcu_gp_waitq".as_ptr(), RCU_GP_WAITQ_LOCK_STORAGE.as_mut_ptr());
-    }
-
-    let ret = slab_cache_init(
-        RCU_HEAD_SLAB.as_mut_ptr(),
-        c"rcu_head_cache".as_ptr(),
-        core::mem::size_of::<rcu_head_t>() as u64,
-        SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP,
-    );
-    if ret != 0 {
-        kpanic_msg(c"PANIC: Failed to initialize rcu_head_cache slab cache\n");
-    }
-
-    RCU_STATE.gp_start_timestamp.store(0, Ordering::Release);
-    RCU_STATE.gp_seq_completed.store(0, Ordering::Release);
-    RCU_STATE.gp_in_progress.store(0, Ordering::Release);
-    RCU_STATE.gp_count.store(0, Ordering::Release);
-    RCU_STATE.cb_invoked.store(0, Ordering::Release);
-    RCU_STATE.gp_lazy_start.store(1, Ordering::Release);
-    RCU_STATE.lazy_cb_count.store(0, Ordering::Release);
-    RCU_STATE.expedited_in_progress.store(0, Ordering::Release);
-    RCU_STATE.expedited_seq.store(0, Ordering::Release);
-    RCU_STATE.expedited_count.store(0, Ordering::Release);
-
-    for i in 0..NCPU as i32 {
-        cpu_init_impl(i);
-        cpu_rcu_ts(i as usize).store(0, Ordering::Release);
-    }
-}
-
-fn cpu_init_impl(cpu: c_int) {
-    if cpu < 0 || cpu >= NCPU as c_int {
-        return;
-    }
-    let rcp = &RCU_CPU_DATA[cpu as usize];
-    rcp.pending_head.store(null_mut(), Ordering::Release);
-    rcp.pending_tail.store(null_mut(), Ordering::Release);
-    rcp.cb_count.store(0, Ordering::Release);
-    rcp.qs_count.store(0, Ordering::Release);
-    rcp.cb_invoked.store(0, Ordering::Release);
-}
-
-// --- read side ---
-
-fn read_lock_impl() {
-    machine::push_off();
-    with_current_thread(|t| t.rcu_read_lock_nesting += 1);
-}
-
-fn read_unlock_impl() {
-    if let Some(panic_args) = with_current_thread(|t| {
-        t.rcu_read_lock_nesting -= 1;
-        if t.rcu_read_lock_nesting < 0 {
-            Some((t.name.as_ptr(), t.pid))
-        } else {
-            None
+        if let Some(r) = TqRef::from_ptr(RCU_GP_WAITQ.as_mut_ptr()) {
+            r.init(c"rcu_gp_waitq".as_ptr(), RCU_GP_WAITQ_LOCK_STORAGE.as_mut_ptr());
         }
-    })
-    .flatten()
-    {
-        // Late panic: we've already decremented; the kpanic does not return.
-        kpanic_unbalanced_unlock(panic_args.0, panic_args.1);
-    }
-    machine::pop_off();
-}
 
-fn is_watching_impl() -> bool {
-    with_current_thread(|t| t.rcu_read_lock_nesting > 0).unwrap_or(false)
+        let ret = slab_cache_init(
+            RCU_HEAD_SLAB.as_mut_ptr(),
+            c"rcu_head_cache".as_ptr(),
+            core::mem::size_of::<rcu_head_t>() as u64,
+            SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP,
+        );
+        if ret != 0 {
+            Self::kpanic_msg(c"PANIC: Failed to initialize rcu_head_cache slab cache\n");
+        }
+
+        RCU_STATE.gp_start_timestamp.store(0, Ordering::Release);
+        RCU_STATE.gp_seq_completed.store(0, Ordering::Release);
+        RCU_STATE.gp_in_progress.store(0, Ordering::Release);
+        RCU_STATE.gp_count.store(0, Ordering::Release);
+        RCU_STATE.cb_invoked.store(0, Ordering::Release);
+        RCU_STATE.gp_lazy_start.store(1, Ordering::Release);
+        RCU_STATE.lazy_cb_count.store(0, Ordering::Release);
+        RCU_STATE.expedited_in_progress.store(0, Ordering::Release);
+        RCU_STATE.expedited_seq.store(0, Ordering::Release);
+        RCU_STATE.expedited_count.store(0, Ordering::Release);
+
+        for i in 0..NCPU as i32 {
+            Self::cpu_init_impl(i);
+            Self::cpu_rcu_ts(i as usize).store(0, Ordering::Release);
+        }
+    }
+
+    fn cpu_init_impl(cpu: c_int) {
+        if cpu < 0 || cpu >= NCPU as c_int {
+            return;
+        }
+        let rcp = &RCU_CPU_DATA[cpu as usize];
+        rcp.pending_head.store(null_mut(), Ordering::Release);
+        rcp.pending_tail.store(null_mut(), Ordering::Release);
+        rcp.cb_count.store(0, Ordering::Release);
+        rcp.qs_count.store(0, Ordering::Release);
+        rcp.cb_invoked.store(0, Ordering::Release);
+    }
+
+    // --- read side ---
+
+    fn read_lock_impl() {
+        machine::push_off();
+        with_current_thread(|t| t.rcu_read_lock_nesting += 1);
+    }
+
+    fn read_unlock_impl() {
+        if let Some(panic_args) = with_current_thread(|t| {
+            t.rcu_read_lock_nesting -= 1;
+            if t.rcu_read_lock_nesting < 0 {
+                Some((t.name.as_ptr(), t.pid))
+            } else {
+                None
+            }
+        })
+        .flatten()
+        {
+            // Late panic: we've already decremented; the kpanic does not return.
+            Self::kpanic_unbalanced_unlock(panic_args.0, panic_args.1);
+        }
+        machine::pop_off();
+    }
+
+    fn is_watching_impl() -> bool {
+        with_current_thread(|t| t.rcu_read_lock_nesting > 0).unwrap_or(false)
+    }
 }
 
 // --- per-CPU pending list ---
 
-fn cblist_enqueue(rcp: &RcuCpuData, head: *mut RawRcuHead) {
-    head_set_next(head, null_mut());
-    let tail = rcp.pending_tail.load(Ordering::Acquire);
-    if tail.is_null() {
-        rcp.pending_head.store(head, Ordering::Release);
-        rcp.pending_tail.store(head, Ordering::Release);
-    } else {
-        head_set_next(tail, head);
-        rcp.pending_tail.store(head, Ordering::Release);
-    }
-}
-
-fn drain_pending(rcp: &RcuCpuData) -> *mut RawRcuHead {
-    let _preempt = PreemptGuard::new();
-    let head = rcp.pending_head.swap(null_mut(), Ordering::AcqRel);
-    rcp.pending_tail.store(null_mut(), Ordering::Release);
-    head
-}
-
-fn requeue_notready(rcp: &RcuCpuData, notready: &CbList) {
-    let _preempt = PreemptGuard::new();
-    let old_head = rcp.pending_head.load(Ordering::Acquire);
-    head_set_next(notready.tail, old_head);
-    rcp.pending_head.store(notready.head, Ordering::Release);
-    if old_head.is_null() {
-        rcp.pending_tail.store(notready.tail, Ordering::Release);
-    }
-}
-
-fn partition_pending(mut p: *mut RawRcuHead, min_other: u64) -> (CbList, CbList) {
-    let mut ready = CbList::new();
-    let mut notready = CbList::new();
-    while !p.is_null() {
-        let cur = p;
-        p = head_next(p);
-        head_set_next(cur, null_mut());
-        if head_timestamp(cur) <= min_other {
-            ready.push(cur);
+impl RcuCpuData {
+    fn cblist_enqueue(&self, head: *mut RawRcuHead) {
+        RawRcuHead::head_set_next(head, null_mut());
+        let tail = self.pending_tail.load(Ordering::Acquire);
+        if tail.is_null() {
+            self.pending_head.store(head, Ordering::Release);
+            self.pending_tail.store(head, Ordering::Release);
         } else {
-            notready.push(cur);
+            RawRcuHead::head_set_next(tail, head);
+            self.pending_tail.store(head, Ordering::Release);
         }
     }
-    (ready, notready)
-}
 
-// --- grace-period management ---
-
-fn start_gp() {
-    let _g = gp_lock().lock();
-    if RCU_STATE.gp_in_progress.load(Ordering::Acquire) != 0 {
-        return;
-    }
-    let now = machine::read_time();
-    RCU_STATE.gp_start_timestamp.store(now, Ordering::Release);
-    RCU_STATE.gp_in_progress.store(1, Ordering::Release);
-}
-
-fn advance_gp() {
-    if RCU_STATE.gp_in_progress.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    if !gp_completed() {
-        return;
-    }
-    let _g = gp_lock().lock();
-    // Double-check under the lock.
-    if RCU_STATE.gp_in_progress.load(Ordering::Acquire) == 0 || !gp_completed() {
-        return;
-    }
-    RCU_STATE.gp_seq_completed.fetch_add(1, Ordering::AcqRel);
-    RCU_STATE.gp_in_progress.store(0, Ordering::Release);
-    RCU_STATE.gp_count.fetch_add(1, Ordering::Release);
-}
-
-fn note_context_switch_impl() {
-    let preempt = PreemptGuard::new();
-    let cpu = preempt.cpuid();
-    let now = machine::read_time();
-    cpu_rcu_ts(cpu).store(now, Ordering::Release);
-    RCU_CPU_DATA[cpu].qs_count.fetch_add(1, Ordering::Release);
-    advance_gp();
-}
-
-// --- call_rcu ---
-
-fn call_impl(head: *mut RawRcuHead, func: rcu_callback_t, data: *mut c_void) {
-    let Some(cb) = func else { return; };
-
-    let caller_supplied = !head.is_null();
-    let head = if caller_supplied {
+    fn drain_pending(&self) -> *mut RawRcuHead {
+        let _preempt = PreemptGuard::new();
+        let head = self.pending_head.swap(null_mut(), Ordering::AcqRel);
+        self.pending_tail.store(null_mut(), Ordering::Release);
         head
-    } else {
-        let allocated = slab_alloc(RCU_HEAD_SLAB.as_mut_ptr()) as *mut RawRcuHead;
-        if allocated.is_null() {
-            // Allocation failure → degrade to synchronous behaviour.
-            synchronize_impl();
-            // SAFETY: caller-provided C callback; FFI contract.
-            unsafe { invoke_cb(cb, data); }
+    }
+
+    fn requeue_notready(&self, notready: &CbList) {
+        let _preempt = PreemptGuard::new();
+        let old_head = self.pending_head.load(Ordering::Acquire);
+        RawRcuHead::head_set_next(notready.tail, old_head);
+        self.pending_head.store(notready.head, Ordering::Release);
+        if old_head.is_null() {
+            self.pending_tail.store(notready.tail, Ordering::Release);
+        }
+    }
+}
+
+impl Rcu {
+    fn partition_pending(mut p: *mut RawRcuHead, min_other: u64) -> (CbList, CbList) {
+        let mut ready = CbList::new();
+        let mut notready = CbList::new();
+        while !p.is_null() {
+            let cur = p;
+            p = RawRcuHead::head_next(p);
+            RawRcuHead::head_set_next(cur, null_mut());
+            if RawRcuHead::head_timestamp(cur) <= min_other {
+                ready.push(cur);
+            } else {
+                notready.push(cur);
+            }
+        }
+        (ready, notready)
+    }
+
+    // --- grace-period management ---
+
+    fn start_gp() {
+        let _g = Self::gp_lock().lock();
+        if RCU_STATE.gp_in_progress.load(Ordering::Acquire) != 0 {
             return;
         }
-        allocated
-    };
+        let now = machine::read_time();
+        RCU_STATE.gp_start_timestamp.store(now, Ordering::Release);
+        RCU_STATE.gp_in_progress.store(1, Ordering::Release);
+    }
 
-    head_init(head, func, data, machine::read_time(), caller_supplied);
+    fn advance_gp() {
+        if RCU_STATE.gp_in_progress.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if !Self::gp_completed() {
+            return;
+        }
+        let _g = Self::gp_lock().lock();
+        // Double-check under the lock.
+        if RCU_STATE.gp_in_progress.load(Ordering::Acquire) == 0 || !Self::gp_completed() {
+            return;
+        }
+        RCU_STATE.gp_seq_completed.fetch_add(1, Ordering::AcqRel);
+        RCU_STATE.gp_in_progress.store(0, Ordering::Release);
+        RCU_STATE.gp_count.fetch_add(1, Ordering::Release);
+    }
 
-    // Enqueue under preempt-off so the per-CPU list cannot race with
-    // the local kthread draining it.
-    let lazy_count = {
+    fn note_context_switch_impl() {
         let preempt = PreemptGuard::new();
         let cpu = preempt.cpuid();
-        let rcp = &RCU_CPU_DATA[cpu];
-        cblist_enqueue(rcp, head);
-        rcp.cb_count.fetch_add(1, Ordering::Release);
-        RCU_STATE.lazy_cb_count.fetch_add(1, Ordering::Release)
-    };
+        let now = machine::read_time();
+        Self::cpu_rcu_ts(cpu).store(now, Ordering::Release);
+        RCU_CPU_DATA[cpu].qs_count.fetch_add(1, Ordering::Release);
+        Self::advance_gp();
+    }
 
-    if RCU_STATE.gp_lazy_start.load(Ordering::Acquire) != 0 {
-        if lazy_count >= RCU_LAZY_GP_DELAY {
-            RCU_STATE.lazy_cb_count.store(0, Ordering::Release);
-            start_gp();
+    // --- call_rcu ---
+
+    fn call_impl(head: *mut RawRcuHead, func: rcu_callback_t, data: *mut c_void) {
+        let Some(cb) = func else { return; };
+
+        let caller_supplied = !head.is_null();
+        let head = if caller_supplied {
+            head
+        } else {
+            let allocated = slab_alloc(RCU_HEAD_SLAB.as_mut_ptr()) as *mut RawRcuHead;
+            if allocated.is_null() {
+                // Allocation failure → degrade to synchronous behaviour.
+                Self::synchronize_impl();
+                // SAFETY: caller-provided C callback; FFI contract.
+                unsafe { invoke_cb(cb, data); }
+                return;
+            }
+            allocated
+        };
+
+        RawRcuHead::head_init(head, func, data, machine::read_time(), caller_supplied);
+
+        // Enqueue under preempt-off so the per-CPU list cannot race with
+        // the local kthread draining it.
+        let lazy_count = {
+            let preempt = PreemptGuard::new();
+            let cpu = preempt.cpuid();
+            let rcp = &RCU_CPU_DATA[cpu];
+            rcp.cblist_enqueue(head);
+            rcp.cb_count.fetch_add(1, Ordering::Release);
+            RCU_STATE.lazy_cb_count.fetch_add(1, Ordering::Release)
+        };
+
+        if RCU_STATE.gp_lazy_start.load(Ordering::Acquire) != 0 {
+            if lazy_count >= RCU_LAZY_GP_DELAY {
+                RCU_STATE.lazy_cb_count.store(0, Ordering::Release);
+                Self::start_gp();
+            }
+        } else {
+            Self::start_gp();
         }
-    } else {
-        start_gp();
+
+        Self::kthread_wakeup_impl();
     }
 
-    kthread_wakeup_impl();
-}
+    // --- callback invocation ---
 
-// --- callback invocation ---
-
-fn invoke_ready(list: *mut RawRcuHead) -> c_int {
-    let mut cur = list;
-    let mut count: c_int = 0;
-    while !cur.is_null() {
-        let next = head_next(cur);
-        let f = head_read(cur);
-        head_set_next(cur, null_mut());
-        if let Some(cb) = f.func {
-            // SAFETY: caller-supplied C callback; FFI contract.
-            unsafe { invoke_cb(cb, f.data); }
-            count += 1;
+    fn invoke_ready(list: *mut RawRcuHead) -> c_int {
+        let mut cur = list;
+        let mut count: c_int = 0;
+        while !cur.is_null() {
+            let next = RawRcuHead::head_next(cur);
+            let f = RawRcuHead::head_read(cur);
+            RawRcuHead::head_set_next(cur, null_mut());
+            if let Some(cb) = f.func {
+                // SAFETY: caller-supplied C callback; FFI contract.
+                unsafe { invoke_cb(cb, f.data); }
+                count += 1;
+            }
+            if !f.embedded {
+                slab_free(cur as *mut c_void);
+            }
+            cur = next;
         }
-        if !f.embedded {
-            slab_free(cur as *mut c_void);
-        }
-        cur = next;
-    }
-    RCU_STATE.cb_invoked.fetch_add(count as u64, Ordering::Release);
-    count
-}
-
-fn process_callbacks_for_cpu(cpu: c_int) {
-    let rcp = &RCU_CPU_DATA[cpu as usize];
-    let min_other = min_other_cpu_ts(cpu);
-
-    let pending = drain_pending(rcp);
-    if pending.is_null() {
-        return;
+        RCU_STATE.cb_invoked.fetch_add(count as u64, Ordering::Release);
+        count
     }
 
-    let (ready, notready) = partition_pending(pending, min_other);
+    fn process_callbacks_for_cpu(cpu: c_int) {
+        let rcp = &RCU_CPU_DATA[cpu as usize];
+        let min_other = Self::min_other_cpu_ts(cpu);
 
-    if !ready.is_empty() {
-        let count = invoke_ready(ready.head);
-        rcp.cb_count.fetch_sub(count as u64, Ordering::Release);
-        rcp.cb_invoked.fetch_add(count as u64, Ordering::Release);
-    }
-    if !notready.is_empty() {
-        requeue_notready(rcp, &notready);
-    }
-}
-
-fn process_callbacks_impl() {
-    let cpu = {
-        let g = PreemptGuard::new();
-        g.cpuid() as c_int
-    };
-    process_callbacks_for_cpu(cpu);
-}
-
-// --- synchronize ---
-
-fn synchronize_impl() {
-    let sync_ts = machine::read_time();
-    note_context_switch_impl();
-
-    let max_wait: c_int = 100_000;
-    let mut wait_count: c_int = 0;
-
-    let my_cpu = {
-        let g = PreemptGuard::new();
-        g.cpuid() as c_int
-    };
-
-    while wait_count < max_wait {
-        let min_ts = min_other_cpu_ts(my_cpu);
-        if min_ts >= sync_ts {
-            wakeup_all_kthreads();
+        let pending = rcp.drain_pending();
+        if pending.is_null() {
             return;
         }
-        Scheduler::yield_now();
-        wait_count += 1;
-    }
-    kwarn_msg(c"synchronize_rcu: WARNING - not all CPUs passed quiescent state\n");
-}
 
-fn barrier_impl() {
-    let barrier_ts = machine::read_time();
-    synchronize_impl();
+        let (ready, notready) = Self::partition_pending(pending, min_other);
 
-    let max_wait: c_int = 100_000;
-    let mut wait_count: c_int = 0;
-    let mut all_done = false;
-
-    while !all_done && wait_count < max_wait {
-        wakeup_all_kthreads();
-        process_callbacks_impl();
-
-        all_done = true;
-        'cpus: for rcp in RCU_CPU_DATA.iter() {
-            if rcp.cb_count.load(Ordering::Acquire) == 0 {
-                continue;
-            }
-            let mut cb = rcp.pending_head.load(Ordering::Acquire);
-            while !cb.is_null() {
-                if head_timestamp(cb) <= barrier_ts {
-                    all_done = false;
-                    break 'cpus;
-                }
-                cb = head_next(cb);
-            }
+        if !ready.is_empty() {
+            let count = Self::invoke_ready(ready.head);
+            rcp.cb_count.fetch_sub(count as u64, Ordering::Release);
+            rcp.cb_invoked.fetch_add(count as u64, Ordering::Release);
         }
+        if !notready.is_empty() {
+            rcp.requeue_notready(&notready);
+        }
+    }
 
-        if !all_done {
-            synchronize_impl();
+    fn process_callbacks_impl() {
+        let cpu = {
+            let g = PreemptGuard::new();
+            g.cpuid() as c_int
+        };
+        Self::process_callbacks_for_cpu(cpu);
+    }
+
+    // --- synchronize ---
+
+    fn synchronize_impl() {
+        let sync_ts = machine::read_time();
+        Self::note_context_switch_impl();
+
+        let max_wait: c_int = 100_000;
+        let mut wait_count: c_int = 0;
+
+        let my_cpu = {
+            let g = PreemptGuard::new();
+            g.cpuid() as c_int
+        };
+
+        while wait_count < max_wait {
+            let min_ts = Self::min_other_cpu_ts(my_cpu);
+            if min_ts >= sync_ts {
+                Self::wakeup_all_kthreads();
+                return;
+            }
             Scheduler::yield_now();
             wait_count += 1;
         }
+        Self::kwarn_msg(c"synchronize_rcu: WARNING - not all CPUs passed quiescent state\n");
     }
-    synchronize_impl();
-}
 
-// --- expedited ---
+    fn barrier_impl() {
+        let barrier_ts = machine::read_time();
+        Self::synchronize_impl();
 
-fn expedited_gp() {
-    let exp_start = {
-        let _g = gp_lock().lock();
-        if RCU_STATE.expedited_in_progress.load(Ordering::Acquire) != 0 {
-            return;
-        }
-        RCU_STATE.expedited_in_progress.store(1, Ordering::Release);
-        RCU_STATE.expedited_seq.fetch_add(1, Ordering::AcqRel);
-        machine::read_time()
-    };
+        let max_wait: c_int = 100_000;
+        let mut wait_count: c_int = 0;
+        let mut all_done = false;
 
-    let max_wait: c_int = 10_000;
-    let mut wait_count: c_int = 0;
-    while wait_count < max_wait {
-        let mut all_switched = true;
-        for i in 0..NCPU as usize {
-            let ts = cpu_rcu_ts(i).load(Ordering::Acquire);
-            if ts == 0 {
-                continue;
+        while !all_done && wait_count < max_wait {
+            Self::wakeup_all_kthreads();
+            Self::process_callbacks_impl();
+
+            all_done = true;
+            'cpus: for rcp in RCU_CPU_DATA.iter() {
+                if rcp.cb_count.load(Ordering::Acquire) == 0 {
+                    continue;
+                }
+                let mut cb = rcp.pending_head.load(Ordering::Acquire);
+                while !cb.is_null() {
+                    if RawRcuHead::head_timestamp(cb) <= barrier_ts {
+                        all_done = false;
+                        break 'cpus;
+                    }
+                    cb = RawRcuHead::head_next(cb);
+                }
             }
-            if ts <= exp_start {
-                all_switched = false;
+
+            if !all_done {
+                Self::synchronize_impl();
+                Scheduler::yield_now();
+                wait_count += 1;
+            }
+        }
+        Self::synchronize_impl();
+    }
+
+    // --- expedited ---
+
+    fn expedited_gp() {
+        let exp_start = {
+            let _g = Self::gp_lock().lock();
+            if RCU_STATE.expedited_in_progress.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            RCU_STATE.expedited_in_progress.store(1, Ordering::Release);
+            RCU_STATE.expedited_seq.fetch_add(1, Ordering::AcqRel);
+            machine::read_time()
+        };
+
+        let max_wait: c_int = 10_000;
+        let mut wait_count: c_int = 0;
+        while wait_count < max_wait {
+            let mut all_switched = true;
+            for i in 0..NCPU as usize {
+                let ts = Self::cpu_rcu_ts(i).load(Ordering::Acquire);
+                if ts == 0 {
+                    continue;
+                }
+                if ts <= exp_start {
+                    all_switched = false;
+                    break;
+                }
+            }
+            if all_switched {
                 break;
             }
+            Scheduler::yield_now();
+            wait_count += 1;
         }
-        if all_switched {
-            break;
-        }
-        Scheduler::yield_now();
-        wait_count += 1;
+
+        let _g = Self::gp_lock().lock();
+        RCU_STATE.expedited_in_progress.store(0, Ordering::Release);
+        RCU_STATE.expedited_count.fetch_add(1, Ordering::Release);
     }
 
-    let _g = gp_lock().lock();
-    RCU_STATE.expedited_in_progress.store(0, Ordering::Release);
-    RCU_STATE.expedited_count.fetch_add(1, Ordering::Release);
-}
+    fn synchronize_expedited_impl() {
+        let start_exp = RCU_STATE.expedited_seq.load(Ordering::Acquire);
+        let old_lazy = RCU_STATE.gp_lazy_start.swap(0, Ordering::AcqRel);
 
-fn synchronize_expedited_impl() {
-    let start_exp = RCU_STATE.expedited_seq.load(Ordering::Acquire);
-    let old_lazy = RCU_STATE.gp_lazy_start.swap(0, Ordering::AcqRel);
+        Self::expedited_gp();
+        Self::start_gp();
 
-    expedited_gp();
-    start_gp();
-
-    let max_wait: c_int = 50_000;
-    let mut wait_count: c_int = 0;
-    while wait_count < max_wait {
-        let current_exp = RCU_STATE.expedited_seq.load(Ordering::Acquire);
-        if current_exp > start_exp {
-            RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
-            return;
+        let max_wait: c_int = 50_000;
+        let mut wait_count: c_int = 0;
+        while wait_count < max_wait {
+            let current_exp = RCU_STATE.expedited_seq.load(Ordering::Acquire);
+            if current_exp > start_exp {
+                RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
+                return;
+            }
+            Self::advance_gp();
+            Scheduler::yield_now();
+            wait_count += 1;
         }
-        advance_gp();
-        Scheduler::yield_now();
-        wait_count += 1;
+        RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
+        Self::kwarn_msg(c"synchronize_rcu_expedited: WARNING - expedited GP did not complete\n");
     }
-    RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
-    kwarn_msg(c"synchronize_rcu_expedited: WARNING - expedited GP did not complete\n");
 }
 
 // --- per-CPU drainer kthread ---
 
 extern "C" fn rcu_cb_kthread(cpu_id: u64, _arg2: u64) -> c_int {
     if machine::cpuid() as u64 != cpu_id {
-        kpanic_msg(c"PANIC: RCU kthread started on wrong CPU\n");
+        Rcu::kpanic_msg(c"PANIC: RCU kthread started on wrong CPU\n");
     }
-    print_kthread_started(cpu_id);
+    Rcu::print_kthread_started(cpu_id);
 
     loop {
         if machine::cpuid() as u64 != cpu_id {
-            kpanic_msg(c"PANIC: RCU kthread running on wrong CPU\n");
+            Rcu::kpanic_msg(c"PANIC: RCU kthread running on wrong CPU\n");
         }
 
         let rcp = &RCU_CPU_DATA[cpu_id as usize];
-        advance_gp();
+        Rcu::advance_gp();
 
-        let min_other = min_other_cpu_ts(cpu_id as c_int);
-        let pending = drain_pending(rcp);
-        let (ready, notready) = partition_pending(pending, min_other);
+        let min_other = Rcu::min_other_cpu_ts(cpu_id as c_int);
+        let pending = rcp.drain_pending();
+        let (ready, notready) = Rcu::partition_pending(pending, min_other);
 
         if !ready.is_empty() {
-            let count = invoke_ready(ready.head);
+            let count = Rcu::invoke_ready(ready.head);
             rcp.cb_count.fetch_sub(count as u64, Ordering::Release);
             rcp.cb_invoked.fetch_add(count as u64, Ordering::Release);
         }
 
-        wakeup_gp_waiters();
+        Rcu::wakeup_gp_waiters();
         RCU_KTHREAD[cpu_id as usize]
             .wakeup_pending
             .store(0, Ordering::Release);
 
         if !notready.is_empty() {
-            requeue_notready(rcp, &notready);
+            rcp.requeue_notready(&notready);
             sleep_ms(50);
         } else {
             sleep_ms(5000);
@@ -1000,19 +1031,21 @@ extern "C" fn rcu_cb_kthread(cpu_id: u64, _arg2: u64) -> c_int {
     }
 }
 
-fn kthread_wakeup_impl() {
-    if RCU_KTHREADS_STARTED.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    let cpu = {
-        let g = PreemptGuard::new();
-        g.cpuid()
-    };
-    let slot = &RCU_KTHREAD[cpu];
-    let p = slot.kthread.load(Ordering::Acquire);
-    if !p.is_null() {
-        slot.wakeup_pending.store(1, Ordering::Release);
-        Scheduler::wakeup_interruptible(p);
+impl Rcu {
+    fn kthread_wakeup_impl() {
+        if RCU_KTHREADS_STARTED.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let cpu = {
+            let g = PreemptGuard::new();
+            g.cpuid()
+        };
+        let slot = &RCU_KTHREAD[cpu];
+        let p = slot.kthread.load(Ordering::Acquire);
+        if !p.is_null() {
+            slot.wakeup_pending.store(1, Ordering::Release);
+            Scheduler::wakeup_interruptible(p);
+        }
     }
 }
 
@@ -1028,47 +1061,49 @@ static RCU_NAMES: [&[u8]; NCPU as usize] = [
     b"rcu_cb/7\0",
 ];
 
-fn kthread_start_cpu_impl(cpu: c_int) {
-    if cpu < 0 || cpu >= NCPU as c_int {
-        return;
+impl Rcu {
+    fn kthread_start_cpu_impl(cpu: c_int) {
+        if cpu < 0 || cpu >= NCPU as c_int {
+            return;
+        }
+        let slot = &RCU_KTHREAD[cpu as usize];
+        slot.kthread.store(null_mut(), Ordering::Release);
+        slot.wakeup_pending.store(0, Ordering::Release);
+
+        let name = RCU_NAMES[cpu as usize].as_ptr() as *const c_char;
+        let entry: extern "C" fn(u64, u64) -> c_int = rcu_cb_kthread;
+        let p = crate::proc::thread::Thread::kthread_create(
+            name,
+            entry as *mut c_void,
+            cpu as u64,
+            0,
+            KERNEL_STACK_ORDER,
+        );
+        if is_err_or_null(p) {
+            Self::warn_kthread_create_failed(cpu);
+            return;
+        }
+
+        // Set CPU affinity BEFORE waking the kthread.
+        let mut attr = sched_attr {
+            size: 0,
+            affinity_mask: 0,
+            time_slice: 0,
+            priority: 0,
+            flags: 0,
+        };
+        SchedAttr::init(&mut attr);
+        attr.affinity_mask = 1u64 << cpu;
+        // SAFETY: `p` is a freshly-created thread; `sched_entity` lives
+        // for the thread's lifetime.
+        let se = unsafe { (*p).sched_entity };
+        SchedEntity::set_attr(se, &attr);
+
+        slot.kthread.store(p, Ordering::Release);
+        Scheduler::wakeup(p);
+
+        RCU_KTHREADS_STARTED.store(1, Ordering::Release);
     }
-    let slot = &RCU_KTHREAD[cpu as usize];
-    slot.kthread.store(null_mut(), Ordering::Release);
-    slot.wakeup_pending.store(0, Ordering::Release);
-
-    let name = RCU_NAMES[cpu as usize].as_ptr() as *const c_char;
-    let entry: extern "C" fn(u64, u64) -> c_int = rcu_cb_kthread;
-    let p = crate::proc::thread::Thread::kthread_create(
-        name,
-        entry as *mut c_void,
-        cpu as u64,
-        0,
-        KERNEL_STACK_ORDER,
-    );
-    if is_err_or_null(p) {
-        warn_kthread_create_failed(cpu);
-        return;
-    }
-
-    // Set CPU affinity BEFORE waking the kthread.
-    let mut attr = sched_attr {
-        size: 0,
-        affinity_mask: 0,
-        time_slice: 0,
-        priority: 0,
-        flags: 0,
-    };
-    SchedAttr::init(&mut attr);
-    attr.affinity_mask = 1u64 << cpu;
-    // SAFETY: `p` is a freshly-created thread; `sched_entity` lives
-    // for the thread's lifetime.
-    let se = unsafe { (*p).sched_entity };
-    SchedEntity::set_attr(se, &attr);
-
-    slot.kthread.store(p, Ordering::Release);
-    Scheduler::wakeup(p);
-
-    RCU_KTHREADS_STARTED.store(1, Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,7 +1134,7 @@ pub struct KRcuRead {
 impl KRcuRead {
     #[inline]
     pub fn new() -> Self {
-        read_lock_impl();
+        Rcu::read_lock_impl();
         Self { _not_send: PhantomData }
     }
 
@@ -1134,7 +1169,7 @@ impl Default for KRcuRead {
 impl Drop for KRcuRead {
     #[inline]
     fn drop(&mut self) {
-        read_unlock_impl();
+        Rcu::read_unlock_impl();
     }
 }
 
@@ -1251,34 +1286,34 @@ pub mod api {
     /// `true` iff the calling thread is currently in an RCU
     /// read-side critical section.
     #[inline]
-    pub fn is_watching() -> bool { is_watching_impl() }
+    pub fn is_watching() -> bool { Rcu::is_watching_impl() }
 
     /// Wait for all pre-existing RCU read-side critical sections on
     /// every CPU to complete.
     #[inline]
-    pub fn synchronize() { synchronize_impl() }
+    pub fn synchronize() { Rcu::synchronize_impl() }
 
     /// Like [`synchronize`] but additionally waits for all
     /// already-queued callbacks to execute.
     #[inline]
-    pub fn barrier() { barrier_impl() }
+    pub fn barrier() { Rcu::barrier_impl() }
 
     /// Expedited variant of [`synchronize`] — kicks every CPU
     /// through a quiescent state immediately.
     #[inline]
-    pub fn synchronize_expedited() { synchronize_expedited_impl() }
+    pub fn synchronize_expedited() { Rcu::synchronize_expedited_impl() }
 
     /// Record a quiescent state on the current CPU.
     #[inline]
-    pub fn note_context_switch() { note_context_switch_impl() }
+    pub fn note_context_switch() { Rcu::note_context_switch_impl() }
 
     /// Run the per-CPU callback drainer once on the current CPU.
     #[inline]
-    pub fn process_callbacks() { process_callbacks_impl() }
+    pub fn process_callbacks() { Rcu::process_callbacks_impl() }
 
     /// Wake the current CPU's RCU drainer kthread (no-op if none).
     #[inline]
-    pub fn kthread_wakeup() { kthread_wakeup_impl() }
+    pub fn kthread_wakeup() { Rcu::kthread_wakeup_impl() }
 
     /// Read CPU `cpu`'s last-recorded RCU quiescent-state timestamp
     /// (`cpus[cpu].rcu_timestamp`). Diagnostic use only (e.g. tests
@@ -1286,22 +1321,22 @@ pub mod api {
     /// timestamp recorded yet".
     #[inline]
     pub fn cpu_timestamp(cpu: usize) -> u64 {
-        cpu_rcu_ts(cpu).load(Ordering::Acquire)
+        Rcu::cpu_rcu_ts(cpu).load(Ordering::Acquire)
     }
 
     /// One-shot subsystem init. Call once from CPU 0 during boot.
     #[inline]
-    pub fn init() { init_impl() }
+    pub fn init() { Rcu::init_impl() }
 
     /// Per-CPU subsystem init. Called by [`init`] for each CPU; can
     /// be re-invoked after CPU hotplug-down/up.
     #[inline]
-    pub fn cpu_init(cpu: c_int) { cpu_init_impl(cpu) }
+    pub fn cpu_init(cpu: c_int) { Rcu::cpu_init_impl(cpu) }
 
     /// Spawn the per-CPU RCU drainer kthread on `cpu` and pin its
     /// affinity.
     #[inline]
-    pub fn kthread_start_cpu(cpu: c_int) { kthread_start_cpu_impl(cpu) }
+    pub fn kthread_start_cpu(cpu: c_int) { Rcu::kthread_start_cpu_impl(cpu) }
 
     /// Schedule `func(data)` after a grace period.
     ///
@@ -1323,65 +1358,68 @@ pub mod api {
         // SAFETY: layout equivalence between `rcu_head_t` and the
         // native `RawRcuHead` is proven at compile time (see the
         // assertions next to `RawRcuHead`'s definition).
-        call_impl(head as *mut RawRcuHead, func, data);
+        Rcu::call_impl(head as *mut RawRcuHead, func, data);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Historical-name wrappers — preserve the 15 original `rcu_*` names for
-// their cross-module Rust consumers (the `#[no_mangle] extern "C"`
-// exports are gone; everything reaches these by crate path). Each body
-// is a single-line dispatch into the matching `_impl`. Functions whose
-// contract is genuinely safe (`rcu_read_lock`/`_unlock`/
-// `rcu_check_callbacks` — pure dispatch into safe `_impl`s, mirrored by
-// the safe `api::*` forms above) are plain safe fns, matching the `safe
-// fn` declarations their consumers already relied on; the rest keep
-// `unsafe fn`.
+// Historical-name wrappers — preserve the 15 original `rcu_*` names
+// (minus the redundant `rcu_` prefix) as associated functions on
+// [`Rcu`] for their cross-module Rust consumers (the `#[no_mangle]
+// extern "C"` exports are gone; everything reaches these by crate
+// path). Each body is a single-line dispatch into the matching
+// `_impl`. Functions whose contract is genuinely safe (`read_lock`/
+// `read_unlock`/`check_callbacks` — pure dispatch into safe `_impl`s,
+// mirrored by the safe `api::*` forms above) are plain safe fns,
+// matching the `safe fn` declarations their consumers already relied
+// on; the rest keep `unsafe fn`.
 // ---------------------------------------------------------------------------
 
-pub(crate) unsafe fn rcu_init() { init_impl() }
+impl Rcu {
+    pub(crate) unsafe fn init() { Self::init_impl() }
 
-pub(crate) unsafe fn rcu_cpu_init(cpu: c_int) { cpu_init_impl(cpu) }
+    pub(crate) unsafe fn cpu_init(cpu: c_int) { Self::cpu_init_impl(cpu) }
 
-#[inline]
-pub(crate) fn rcu_read_lock() { read_lock_impl() }
+    #[inline]
+    pub(crate) fn read_lock() { Self::read_lock_impl() }
 
-#[inline]
-pub(crate) fn rcu_read_unlock() { read_unlock_impl() }
+    #[inline]
+    pub(crate) fn read_unlock() { Self::read_unlock_impl() }
 
-pub(crate) unsafe fn rcu_is_watching() -> c_int {
-    if is_watching_impl() { 1 } else { 0 }
-}
+    pub(crate) unsafe fn is_watching() -> c_int {
+        if Self::is_watching_impl() { 1 } else { 0 }
+    }
 
-pub(crate) unsafe fn rcu_note_context_switch() { note_context_switch_impl() }
+    pub(crate) unsafe fn note_context_switch() { Self::note_context_switch_impl() }
 
-#[inline]
-pub(crate) fn rcu_check_callbacks() { note_context_switch_impl() }
+    #[inline]
+    pub(crate) fn check_callbacks() { Self::note_context_switch_impl() }
 
-/// # Safety
-/// Same contract as [`api::call`].
-pub(crate) unsafe fn call_rcu(
-    head: *mut rcu_head_t,
-    func: rcu_callback_t,
-    data: *mut c_void,
-) {
-    // SAFETY: see the identical cast in `api::call`.
-    call_impl(head as *mut RawRcuHead, func, data)
-}
+    /// # Safety
+    /// Same contract as [`api::call`].
+    pub(crate) unsafe fn call(
+        head: *mut rcu_head_t,
+        func: rcu_callback_t,
+        data: *mut c_void,
+    ) {
+        // SAFETY: see the identical cast in `api::call`.
+        Self::call_impl(head as *mut RawRcuHead, func, data)
+    }
 
-pub(crate) unsafe fn rcu_process_callbacks() { process_callbacks_impl() }
+    pub(crate) unsafe fn process_callbacks() { Self::process_callbacks_impl() }
 
-pub(crate) unsafe fn synchronize_rcu() { synchronize_impl() }
+    pub(crate) unsafe fn synchronize() { Self::synchronize_impl() }
 
-pub(crate) unsafe fn rcu_barrier() { barrier_impl() }
+    pub(crate) unsafe fn barrier() { Self::barrier_impl() }
 
-pub(crate) unsafe fn synchronize_rcu_expedited() { synchronize_expedited_impl() }
+    pub(crate) unsafe fn synchronize_expedited() { Self::synchronize_expedited_impl() }
 
-pub(crate) unsafe fn rcu_kthread_wakeup() { kthread_wakeup_impl() }
+    pub(crate) unsafe fn kthread_wakeup() { Self::kthread_wakeup_impl() }
 
-pub(crate) unsafe fn rcu_kthread_start_cpu(cpu: c_int) { kthread_start_cpu_impl(cpu) }
+    pub(crate) unsafe fn kthread_start_cpu(cpu: c_int) { Self::kthread_start_cpu_impl(cpu) }
 
-pub(crate) unsafe fn rcu_kthread_start() {
-    // Kept for ABI compatibility; per-CPU init is done by
-    // `rcu_kthread_start_cpu` from each CPU's idle path.
+    pub(crate) unsafe fn kthread_start() {
+        // Kept for ABI compatibility; per-CPU init is done by
+        // `kthread_start_cpu` from each CPU's idle path.
+    }
 }

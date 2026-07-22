@@ -23,7 +23,7 @@ use crate::bindings::{
     thread_group, thread_signal_t, thread_state, utrapframe, vfs_fdtable, vfs_inode,
     vfs_inode_ref, vm_t, workqueue,
 };
-use crate::lock::rcu::rcu_check_callbacks;
+use crate::lock::rcu::Rcu;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
 use crate::proc::access::{
     is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
@@ -603,11 +603,10 @@ unsafe extern "C" {
 
 }
 
-// P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
-// that its `#[no_mangle]` export is gone; reached by crate path (the call
-// site in `thread_destroy` already sits inside `thread_raw_layout!`'s
-// `unsafe` block).
-use crate::lock::rcu::call_rcu;
+// P3-D3b: lock/rcu.rs's `call_rcu` is now `Rcu::call`, a plain
+// `pub(crate) unsafe fn` associated fn (`Rcu` imported above); reached
+// by crate path (the call site in `thread_destroy` already sits inside
+// `thread_raw_layout!`'s `unsafe` block).
 
 // P3-D3a: `vm_init`/`vm_put` (mm/vm.rs, ordinary safe Rust fns now that
 // their `#[no_mangle]` exports are gone) and `page_alloc` (genuinely
@@ -988,7 +987,7 @@ extern "C" fn kthread_entry(prev: *mut context) {
         // `context_switch_finish`, with interrupts just turned on above
         // and no RCU read-side critical section held — matching every
         // other call site of this function.
-        rcu_check_callbacks();
+        Rcu::check_callbacks();
 
         let cur = Thread::current();
         let cur_ref = ThreadAccess::assume(cur);
@@ -1153,7 +1152,7 @@ impl<'a> ThreadAccess<'a> {
                 self.set_thread_group(ptr::null_mut());
             }
 
-            call_rcu(&mut (*p).rcu_head, Some(thread_destroy_rcu_callback), p as *mut c_void);
+            Rcu::call(&mut (*p).rcu_head, Some(thread_destroy_rcu_callback), p as *mut c_void);
         }
     }
 }

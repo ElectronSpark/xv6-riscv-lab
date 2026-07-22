@@ -19,7 +19,7 @@ use crate::machine::{
     cpu_local_ptr, cpu_relax, cpuid as cpuid_rs, intr_get, intr_off_save, intr_restore, pop_off,
     push_off,
 };
-use crate::lock::rcu::rcu_check_callbacks;
+use crate::lock::rcu::Rcu;
 use crate::proc::proc_shims::xv6_panic;
 use crate::lock::spinlock::RawSpinlock;
 use crate::proc::access::{
@@ -673,7 +673,7 @@ fn scheduler_yield_inner() {
     unsafe { Rq::flush_wake_list(cpuid_rs()); }
     // Plain safe fn as of P3-D3b (its `#[no_mangle] extern "C"` export
     // is gone).
-    rcu_check_callbacks();
+    Rcu::check_callbacks();
 }
 }
 
