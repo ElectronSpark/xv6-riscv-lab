@@ -79,7 +79,8 @@ use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::bindings::{mbuf, netdev, netdev_ops, rx_desc, tx_desc};
+use crate::bindings::{mbuf, netdev, rx_desc, tx_desc};
+use crate::dev::netdev::NetdevOps;
 use crate::irq::irq_core::{IrqCore, IrqDesc};
 use crate::sync::SpinLock;
 
@@ -353,7 +354,7 @@ static mut E1000_NDEV: netdev = netdev {
     speed: 0,
     full_duplex: 0,
     index: 0,
-    ops: ptr::null_mut(),
+    ops: None,
     priv_: ptr::null_mut(),
     next: ptr::null_mut(),
     link_cb: None,
@@ -665,7 +666,7 @@ pub(crate) extern "C" fn init(xregs: *mut u32) {
         E1000_NDEV.link_up = 1;
         E1000_NDEV.speed = 1000;
         E1000_NDEV.full_duplex = 1;
-        E1000_NDEV.ops = &E1000_NETDEV_OPS as *const netdev_ops as *mut netdev_ops;
+        E1000_NDEV.ops = Some(&E1000_NETDEV_OPS);
         E1000_NDEV.priv_ = REGS as *mut c_void;
         Netdev::register(&raw mut E1000_NDEV);
     }
@@ -675,10 +676,10 @@ pub(crate) extern "C" fn init(xregs: *mut u32) {
 /// descriptor ring so the e1000 sends it. Stashes a pointer so it can
 /// be freed after sending. Returns `0` on success, `-1` if the ring is
 /// full (the next descriptor hasn't finished transmitting yet).
-// P3-1D mesh sweep: called by name from `e1000_netdev_transmit` below
-// (the actual address-taken `netdev_ops.transmit` entry -- see that
-// fn's own FLOOR note), so this one is a plain crate-path item, not
-// itself address-taken -- convertible to an `E1000` associated fn.
+// P3-1D mesh sweep: called by name from `E1000NetdevOps::transmit`
+// below (the actual `NetdevOps` trait-object dispatch target -- see
+// that impl's own doc comment), so this one is a plain crate-path item,
+// not itself address-taken -- convertible to an `E1000` associated fn.
 // `extern "C"` (the calling-convention marker) is kept for ABI parity
 // even though nothing takes this particular fn's address directly.
 pub(crate) extern "C" fn transmit(m: *mut mbuf) -> c_int {
@@ -715,7 +716,7 @@ pub(crate) extern "C" fn transmit(m: *mut mbuf) -> c_int {
         unsafe { Mbuf::free(*slot) };
     }
     // Pass packet information into the transmit descriptor.
-    // SAFETY: `m` is caller-owned and live (the `netdev_ops.transmit`
+    // SAFETY: `m` is caller-owned and live (the `NetdevOps::transmit`
     // contract); `desc`/`slot` live as established above.
     unsafe {
         (*desc).addr = (*m).head as u64;
@@ -803,12 +804,17 @@ extern "C" fn e1000_intr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
 // netdev glue.
 // ===========================================================================
 
-/// FLOOR: address-taken `netdev_ops.transmit` table entry
-/// (`Some(e1000_netdev_transmit)` in [`E1000_NETDEV_OPS`] below) -- kept
-/// a free fn per this crate's established floor convention (matches
-/// `dev/netdev.rs`'s ops-table entries).
-extern "C" fn e1000_netdev_transmit(_ndev: *mut netdev, m: *mut mbuf) -> c_int {
-    E1000::transmit(m)
+/// [`NetdevOps`] implementor for the e1000 (fn-pointer-ops-table ->
+/// trait dispatch campaign; was the free fn `e1000_netdev_transmit` +
+/// `netdev_ops { transmit: Some(..) }` table literal, both now folded
+/// into this ZST + trait impl, matching the `CdevOps`/`PcacheOps`
+/// implementor precedent).
+struct E1000NetdevOps;
+
+impl NetdevOps for E1000NetdevOps {
+    unsafe fn transmit(&self, _dev: *mut netdev, m: *mut mbuf) -> c_int {
+        E1000::transmit(m)
+    }
 }
 
-static E1000_NETDEV_OPS: netdev_ops = netdev_ops { transmit: Some(e1000_netdev_transmit) };
+static E1000_NETDEV_OPS: E1000NetdevOps = E1000NetdevOps;

@@ -9,7 +9,7 @@
 //! cache management operations (`cbo.clean`/`cbo.inval`) are used around
 //! DMA transfers -- see [`dma_cache_clean`]/[`dma_cache_inval`] below.
 //!
-//! Key data flow: TX: `net.c` -> `netdev_ops.transmit` ->
+//! Key data flow: TX: `net.rs` -> `NetdevOps::transmit` ->
 //! [`x1_emac_transmit`] -> DMA. RX: IRQ -> [`x1_emac_intr`] ->
 //! [`x1_emac_recv`] -> `Net::net_rx()`.
 //!
@@ -79,7 +79,8 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{fence, AtomicI32, Ordering};
 
-use crate::bindings::{mbuf, netdev, netdev_ops, phy_state, platform_info, spinlock_t, x1_rx_desc, x1_tx_desc};
+use crate::bindings::{mbuf, netdev, phy_state, platform_info, spinlock_t, x1_rx_desc, x1_tx_desc};
+use crate::dev::netdev::NetdevOps;
 use crate::irq::irq_core::{IrqCore, IrqDesc};
 use crate::sync::KSpinlock;
 
@@ -582,17 +583,26 @@ extern "C" fn x1_emac_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
     }
 }
 
-extern "C" fn x1_emac_transmit_op(ndev: *mut netdev, m: *mut mbuf) -> c_int {
-    // SAFETY: `ndev->priv_` is the `X1EmacSoftc*` `x1_emac_init_one`
-    // stashed there before `netdev_register`; `ndev` is caller-provided
-    // and live for the duration of this call (established netdev.rs
-    // contract).
-    let sc = unsafe { (*ndev).priv_ } as *mut X1EmacSoftc;
-    // SAFETY: `sc`/`m` live per caller contract.
-    unsafe { X1EmacSoftc::transmit(sc, m) }
+/// [`NetdevOps`] implementor for the X1 EMAC (fn-pointer-ops-table ->
+/// trait dispatch campaign; was the free fn `x1_emac_transmit_op` +
+/// `netdev_ops { transmit: Some(..) }` table literal, both now folded
+/// into this ZST + trait impl, matching the `CdevOps`/`PcacheOps`
+/// implementor precedent).
+struct X1EmacNetdevOps;
+
+impl NetdevOps for X1EmacNetdevOps {
+    unsafe fn transmit(&self, dev: *mut netdev, m: *mut mbuf) -> c_int {
+        // SAFETY: `dev->priv_` is the `X1EmacSoftc*` `x1_emac_init_one`
+        // stashed there before `netdev_register`; `dev` is caller-provided
+        // and live for the duration of this call (established netdev.rs
+        // contract).
+        let sc = unsafe { (*dev).priv_ } as *mut X1EmacSoftc;
+        // SAFETY: `sc`/`m` live per caller contract.
+        unsafe { X1EmacSoftc::transmit(sc, m) }
+    }
 }
 
-static X1_EMAC_NETDEV_OPS: netdev_ops = netdev_ops { transmit: Some(x1_emac_transmit_op) };
+static X1_EMAC_NETDEV_OPS: X1EmacNetdevOps = X1EmacNetdevOps;
 
 // ===========================================================================
 // `X1EmacSoftc` -- every function below takes this per-instance
@@ -1380,7 +1390,7 @@ impl X1EmacSoftc {
             (*sc).ndev.link_up = (*sc).phy.link_up;
             (*sc).ndev.speed = (*sc).phy.speed;
             (*sc).ndev.full_duplex = (*sc).phy.full_duplex;
-            (*sc).ndev.ops = &X1_EMAC_NETDEV_OPS as *const netdev_ops as *mut netdev_ops;
+            (*sc).ndev.ops = Some(&X1_EMAC_NETDEV_OPS);
             (*sc).ndev.priv_ = sc as *mut c_void;
             Netdev::register(&raw mut (*sc).ndev);
 

@@ -73,7 +73,7 @@ unsafe extern "C" {
 // P3-1D mesh sweep: dev/netdev.rs/sysnet.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
-use crate::dev::netdev::Netdev;
+use crate::dev::netdev::{Netdev, NetdevOps};
 use crate::sysnet::SysNet;
 
 // ===========================================================================
@@ -90,7 +90,7 @@ const MBUF_DEFAULT_HEADROOM: c_uint = 128;
 // blocklists the bindgen emission and re-exports this type as
 // `crate::bindings::mbuf` (facade `pub use`, N2 pattern) — this file's
 // own `mbuf` import above and every other consumer (`sysnet.rs`,
-// `e1000.rs`, `dev/x1_emac.rs`, `dev/netdev.rs`'s `netdev_ops.transmit`
+// `e1000.rs`, `dev/x1_emac.rs`, `dev/netdev.rs`'s `NetdevOps::transmit`
 // signature) resolve right back here.
 //
 // *** DMA-ADJACENT LAYOUT — HANDLE WITH P3-4 SCRUTINY *** `buf` is the
@@ -504,10 +504,13 @@ fn net_tx_eth(m: *mut mbuf, ethtype: u16) {
     let should_free = if ndev.is_null() {
         true
     } else {
-        // SAFETY: `ndev` non-null; `netdev_register` (`dev/netdev.rs`)
-        // guarantees `.ops` non-null and `.ops.transmit` is `Some`
-        // before publishing any netdev.
-        unsafe { ((*(*ndev).ops).transmit.unwrap())(ndev, m) != 0 }
+        // SAFETY: `ndev` non-null; `Netdev::register` (`dev/netdev.rs`)
+        // guarantees `.ops` is `Some` before publishing any netdev, and
+        // `transmit` is a required `NetdevOps` trait method (no `None`
+        // slot possible) -- `.unwrap()` reproduces the old
+        // `.ops.transmit.unwrap()` invariant exactly.
+        let ops = unsafe { (*ndev).ops }.unwrap();
+        unsafe { ops.transmit(ndev, m) != 0 }
     };
     if should_free {
         // SAFETY: `m` still caller-owned here (no netdev, or transmit

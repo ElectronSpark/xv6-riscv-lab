@@ -92,7 +92,9 @@ pub use crate::dev::bio::BioVec as bio_vec;
 pub use crate::dev::bio::Bio as bio;
 pub use crate::bufcache::Buf as buf;
 pub use crate::dev::netdev::Netdev as netdev;
-pub use crate::dev::netdev::NetdevOps as netdev_ops;
+// `netdev_ops` facade alias retired (fn-pointer-ops-table -> trait
+// dispatch campaign): `NetdevOps` is a trait now, reached by crate path
+// at its implementors (`E1000NetdevOps`/`X1EmacNetdevOps`).
 // vfs family (P3-N5, P3-N8)
 pub use crate::vfs::inode::VfsDentry as vfs_dentry;
 pub use crate::vfs::inode::VfsDirIter as vfs_dir_iter;
