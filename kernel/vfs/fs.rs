@@ -745,7 +745,7 @@ unsafe extern "C" {
 // P3-D3b: proc/workqueue.rs's entry points (the deferred-iput workqueue)
 // are plain safe Rust fns now that their `#[no_mangle]` exports are
 // gone; reached via the `crate::proc` glob re-export.
-use crate::proc::{WorkStruct, Workqueue};
+use crate::proc::{WorkHandler, WorkStruct, Workqueue};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -3033,6 +3033,24 @@ impl VfsInode {
 /// is a zero-sized marker, same precedent as `mm/kalloc.rs`'s `Kmem`.
 pub(crate) struct Vfs;
 
+/// ZST `WorkHandler` implementor (TRAIT-OPS): one `'static` instance's
+/// address is taken (`Some(&VFS_IPUT_WORK_HANDLER)`) as the work item's
+/// handler in `Vfs::queue_deferred_iput` below. Body moved verbatim from
+/// the former `Vfs::iput_work_func` associated fn (was the old `func`
+/// slot); this item never populated the old `fault` slot, so
+/// `WorkHandler::fault`'s default (no-op) is used unmodified.
+struct VfsIputWorkHandler;
+impl WorkHandler for VfsIputWorkHandler {
+    unsafe fn run(&self, work: *mut work_struct) {
+        unsafe {
+            let inode = (*work).data as *mut vfs_inode;
+            VfsInode::vfs_iput(inode);
+            WorkStruct::free(work);
+        }
+    }
+}
+static VFS_IPUT_WORK_HANDLER: VfsIputWorkHandler = VfsIputWorkHandler;
+
 impl Vfs {
     /// Mirrors `Vfs::vfs_init()`.
     ///
@@ -3152,14 +3170,6 @@ impl Vfs {
         unsafe { __VFS_DEFERRED_IPUT_WQ }
     }
 
-    unsafe extern "C" fn iput_work_func(work: *mut work_struct) {
-        unsafe {
-            let inode = (*work).data as *mut vfs_inode;
-            VfsInode::vfs_iput(inode);
-            WorkStruct::free(work);
-        }
-    }
-
     /// Mirrors `__vfs_queue_deferred_iput()`.
     unsafe fn queue_deferred_iput(inode: *mut vfs_inode) {
         unsafe {
@@ -3168,7 +3178,7 @@ impl Vfs {
                 VfsInode::vfs_iput(inode);
                 return;
             }
-            let work = WorkStruct::create(Some(Vfs::iput_work_func), inode as u64);
+            let work = WorkStruct::create(Some(&VFS_IPUT_WORK_HANDLER), inode as u64);
             if work.is_null() {
                 crate::kprintln!(
                     "__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput"

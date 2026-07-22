@@ -55,7 +55,7 @@ use crate::proc::proc_shims;
 // callers across lock/mm/vfs/tty are unaffected), so this is purely an
 // internal representation swap.
 use crate::proc::thread_queue::{Tnode, Tq, Ttree};
-use crate::proc::workqueue::WorkStruct;
+use crate::proc::workqueue::{WorkHandler, WorkStruct};
 
 // SAFETY: `($self).raw.as_ptr()` is a live, non-null pointer per this
 // module's `# Safety` note (top of file); the callee (`proc_shims::$fn`)
@@ -2227,17 +2227,11 @@ impl<'a> WorkStructRef<'a> {
     #[inline] pub fn flag_set(&self, f: u32) -> bool { (self.flags() & f) != 0 }
     #[inline] pub fn data(&self) -> u64 { raw_get!(self, data) }
     #[inline] pub fn set_data(&self, v: u64) { raw_set!(self, data, v) }
-    #[inline] pub fn func(&self) -> Option<unsafe extern "C" fn(*mut work_struct)> {
-        raw_get!(self, func)
+    #[inline] pub fn handler(&self) -> Option<&'static dyn WorkHandler> {
+        raw_get!(self, handler)
     }
-    #[inline] pub fn fault(&self) -> Option<unsafe extern "C" fn(*mut work_struct)> {
-        raw_get!(self, fault)
-    }
-    #[inline] pub fn set_func(&self, f: Option<unsafe extern "C" fn(*mut work_struct)>) {
-        raw_set!(self, func, f)
-    }
-    #[inline] pub fn set_fault(&self, f: Option<unsafe extern "C" fn(*mut work_struct)>) {
-        raw_set!(self, fault, f)
+    #[inline] pub fn set_handler(&self, h: Option<&'static dyn WorkHandler>) {
+        raw_set!(self, handler, h)
     }
 }
 

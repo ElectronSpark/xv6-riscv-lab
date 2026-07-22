@@ -83,7 +83,7 @@ use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{work_struct, workqueue, workqueue_callbacks};
-use crate::proc::{WorkStruct, Workqueue};
+use crate::proc::{WorkHandler, WorkStruct, Workqueue};
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
@@ -165,10 +165,24 @@ unsafe extern "C" fn cb_ctor(_wq: *mut workqueue) {
 unsafe extern "C" fn cb_dtor(_wq: *mut workqueue) {
     DTOR_CALLS.fetch_add(1, Ordering::SeqCst);
 }
-unsafe extern "C" fn cb_run_counter(_w: *mut work_struct) {
-    RUN_COUNT.fetch_add(1, Ordering::SeqCst);
+// TRAIT-OPS: `cb_run_counter`/`cb_noop` used to be `func`-slot fn pointers;
+// each is now a ZST `WorkHandler` implementor with one `'static` instance
+// whose address is taken in the test cases below. Neither ever populated
+// the old `fault` slot, so `WorkHandler::fault`'s default (no-op) is used
+// unmodified.
+struct CbRunCounter;
+impl WorkHandler for CbRunCounter {
+    unsafe fn run(&self, _w: *mut work_struct) {
+        RUN_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
 }
-unsafe extern "C" fn cb_noop(_w: *mut work_struct) {}
+static CB_RUN_COUNTER: CbRunCounter = CbRunCounter;
+
+struct CbNoop;
+impl WorkHandler for CbNoop {
+    unsafe fn run(&self, _w: *mut work_struct) {}
+}
+static CB_NOOP: CbNoop = CbNoop;
 
 // ===========================================================================
 // T1: ctor invoked synchronously on create.
@@ -223,7 +237,7 @@ fn t2_dtor_invoked_once_on_kill() {
 // T3: work_struct field integrity + invalid-flags rejection.
 // ===========================================================================
 fn t3_work_struct_field_integrity() {
-    let work = WorkStruct::create_ex(Some(cb_noop), None, 0x5678, WORK_STRUCT_FLAG_RUN_ON_DRAIN);
+    let work = WorkStruct::create_ex(Some(&CB_NOOP), 0x5678, WORK_STRUCT_FLAG_RUN_ON_DRAIN);
     if work.is_null() {
         case_fail();
         return;
@@ -241,7 +255,7 @@ fn t3_work_struct_field_integrity() {
     // allocating and fails closed (returns NULL), unlike
     // `init_work_struct_ex` which panics on the same input — this suite
     // only ever exercises the fail-closed `create_*` entry points.
-    let bad = WorkStruct::create_ex(Some(cb_noop), None, 0, WORK_STRUCT_FLAG_INVALID);
+    let bad = WorkStruct::create_ex(Some(&CB_NOOP), 0, WORK_STRUCT_FLAG_INVALID);
     check!(bad.is_null());
 }
 
@@ -255,7 +269,7 @@ fn t4_queue_work_runs_async() {
         case_fail();
         return;
     }
-    let work = WorkStruct::create(Some(cb_run_counter), 0);
+    let work = WorkStruct::create(Some(&CB_RUN_COUNTER), 0);
     if work.is_null() {
         case_fail();
         Workqueue::kill(wq);
@@ -280,7 +294,7 @@ fn t5_queue_work_fails_when_killed() {
         return;
     }
     check_eq!(Workqueue::kill(wq), 0);
-    let work = WorkStruct::create(Some(cb_run_counter), 0);
+    let work = WorkStruct::create(Some(&CB_RUN_COUNTER), 0);
     if work.is_null() {
         case_fail();
         return;
@@ -303,7 +317,7 @@ fn t6_multi_worker_concurrency() {
     }
     let mut items: [*mut work_struct; T6_ITEMS] = [core::ptr::null_mut(); T6_ITEMS];
     for slot in items.iter_mut() {
-        let w = WorkStruct::create(Some(cb_run_counter), 0);
+        let w = WorkStruct::create(Some(&CB_RUN_COUNTER), 0);
         if w.is_null() {
             case_fail();
             continue;
@@ -338,8 +352,7 @@ fn t7_free_after_run_stress() {
     }
     for _ in 0..T7_ITEMS {
         let w = WorkStruct::create_ex(
-            Some(cb_run_counter),
-            None,
+            Some(&CB_RUN_COUNTER),
             0,
             WORK_STRUCT_FLAG_RUN_ON_DRAIN | WORK_STRUCT_FLAG_FREE_AFTER_RUN,
         );

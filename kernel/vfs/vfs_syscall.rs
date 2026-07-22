@@ -115,7 +115,7 @@ use crate::timer::sched_timer::SchedTimer;
 // RCU grace period) are plain safe Rust fns now that their
 // `#[no_mangle]` exports are gone; reached via the `crate::proc` glob
 // re-export.
-use crate::proc::{WorkStruct, Workqueue};
+use crate::proc::{WorkHandler, WorkStruct, Workqueue};
 
 unsafe extern "C" {
 
@@ -373,13 +373,23 @@ impl Sys {
  * Helper functions (deferred file release, fd allocation)
  ******************************************************************************/
 
-unsafe extern "C" fn vfs_fput_work_func(work: *mut work_struct) {
-    // SAFETY: `work` is a live work item queued by `vfs_fd_rcucb` below,
-    // whose `.data` is the `vfs_file*` to release.
-    let file = unsafe { (*work).data } as *mut vfs_file;
-    VfsFile::vfs_fput(file);
-    WorkStruct::free(work);
+/// ZST `WorkHandler` implementor (TRAIT-OPS): one `'static` instance's
+/// address is taken (`Some(&VFS_FPUT_WORK_HANDLER)`) as the work item's
+/// handler in `vfs_fd_rcucb` below. Body moved verbatim from the former
+/// `vfs_fput_work_func` free fn (was the old `func` slot); this item never
+/// populated the old `fault` slot, so `WorkHandler::fault`'s default
+/// (no-op) is used unmodified.
+struct VfsFputWorkHandler;
+impl WorkHandler for VfsFputWorkHandler {
+    unsafe fn run(&self, work: *mut work_struct) {
+        // SAFETY: `work` is a live work item queued by `vfs_fd_rcucb` below,
+        // whose `.data` is the `vfs_file*` to release.
+        let file = unsafe { (*work).data } as *mut vfs_file;
+        VfsFile::vfs_fput(file);
+        WorkStruct::free(work);
+    }
 }
+static VFS_FPUT_WORK_HANDLER: VfsFputWorkHandler = VfsFputWorkHandler;
 
 unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
     let file = data as *mut vfs_file;
@@ -392,7 +402,7 @@ unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
         return;
     }
 
-    let work = WorkStruct::create(Some(vfs_fput_work_func), file as u64);
+    let work = WorkStruct::create(Some(&VFS_FPUT_WORK_HANDLER), file as u64);
     if work.is_null() {
         crate::kprintln!("__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput");
         VfsFile::vfs_fput(file);

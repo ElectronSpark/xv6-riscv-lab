@@ -39,39 +39,85 @@ use crate::proc::access::{
 // bindgen-emitted (plain `Option<unsafe extern "C" fn(..)>` aliases whose
 // `*mut workqueue` parameter now resolves to the native `Workqueue`).
 //
-// `func`/`fault` deliberately keep the bindgen `*mut work_struct`
-// callback signature (not `*mut WorkStruct`): they are genuine C-ABI
-// function pointers invoked by `invoke_work_cb` and stored by callers
-// across the crate that already pass `*mut work_struct`; only this
-// struct's own field *storage* is native, the callback ABI is
-// untouched.
+// TRAIT-OPS: the `func`/`fault` C-ABI fn-pointer pair -> single vtable
+// dispatch slot. `WorkHandler` is dyn-compatible (both methods take
+// `&self` + a raw pointer, no generics) so `dyn WorkHandler` is a valid
+// trait object.
+//
+// Fault-default semantics: every real installer in this crate
+// (`sched_timer.rs::work_callback`, `pcache.rs::pcache_flush_worker`,
+// `vfs_syscall.rs::vfs_fput_work_func`, `fs.rs::iput_work_func`) only
+// ever populated the old `func` slot and left `fault` at its
+// zero-initialized `None` (grep-confirmed: no in-tree caller ever passed
+// `Some` for the old `fault` parameter). `execute()` below only reaches
+// `fault` when a `RUN_ON_DRAIN` item is executed against an inactive
+// (killed/drained) queue; with `fault: None` that was a silent no-op via
+// `invoke_work_cb`'s `None` arm (still honoring `FREE_AFTER_RUN`
+// afterwards). The default method below reproduces exactly that.
+pub(crate) trait WorkHandler: Sync {
+    /// The item's normal execution body (was the `func` slot).
+    ///
+    /// # Safety
+    /// `w` must point to a live `work_struct` this handler was installed
+    /// on (via [`WorkStruct::init`]/[`WorkStruct::create`] or their `_ex`
+    /// forms), valid for the duration of the call — see the module-level
+    /// `# Safety` note in `crate::proc::access` that every
+    /// `WorkStructRef` method already relies on.
+    unsafe fn run(&self, w: *mut work_struct);
+
+    /// Run instead of `run` when a `RUN_ON_DRAIN` item is executed
+    /// against a drained (killed) queue (was the `fault` slot).
+    ///
+    /// # Safety
+    /// Same contract as `run`.
+    unsafe fn fault(&self, _w: *mut work_struct) {
+        // Default: no-op. Reproduces the historical `fault: None`
+        // behavior -- see the fault-default note above.
+    }
+}
+
+/// `func`/`fault` deliberately keep the bindgen `*mut work_struct`
+/// callback signature (not `*mut WorkStruct`) in [`WorkHandler`]'s
+/// methods: they are genuine C-ABI pointers passed to handlers stored by
+/// callers across the crate that already pass `*mut work_struct`; only
+/// this struct's own field *storage* is native, the callback ABI is
+/// untouched.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct WorkStruct {
     pub(crate) entry: ListNode,
-    pub(crate) func: Option<unsafe extern "C" fn(*mut work_struct)>,
-    pub(crate) fault: Option<unsafe extern "C" fn(*mut work_struct)>,
+    pub(crate) handler: Option<&'static dyn WorkHandler>,
     pub(crate) data: u64,
     pub(crate) flags: u32,
 }
 
-// P3-N3 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
-// work_struct { entry: list_node_t, func: Option<..>, fault:
+// P3-N3 hardcoded layout proof, updated for TRAIT-OPS — values captured
+// from the pre-nativization bindgen output (kernel_bindings.rs: `pub
+// struct work_struct { entry: list_node_t, func: Option<..>, fault:
 // Option<..>, data: uint64, flags: uint32 }`) and independently
 // confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
-// (rv64gc/lp64d) against `kernel/inc/proc/workqueue_types.h`:
-// size 48, align 8, offsets 0/16/24/32/40. Unlike `workqueue` (which
-// gets align(64) from its embedded spinlock_t), work_struct has no
-// embedded lock and stays naturally (8-byte) aligned.
+// (rv64gc/lp64d) against `kernel/inc/proc/workqueue_types.h`: size 48,
+// align 8, offsets 0/16/24/32/40. The two 8-byte `func`/`fault` thin fn
+// pointers (offsets 16/24) collapsed into one 16-byte
+// `Option<&'static dyn WorkHandler>` fat pointer at offset 16 -- LAYOUT
+// IS NET-NEUTRAL (same total size, same trailing field offsets): `data`
+// stays at 32, `flags` at 40. No embedder (`Pcache::flush_work` in
+// `mm/pcache.rs`, `SchedTimerWork::work` in `timer/sched_timer.rs`)
+// needs an offset update. Unlike `workqueue` (which gets align(64) from
+// its embedded spinlock_t), work_struct has no embedded lock and stays
+// naturally (8-byte) aligned.
 const _: () = {
     assert!(core::mem::size_of::<WorkStruct>() == 48, "work_struct size");
     assert!(core::mem::align_of::<WorkStruct>() == 8, "work_struct natural alignment");
     assert!(core::mem::offset_of!(WorkStruct, entry) == 0, "work_struct.entry offset");
-    assert!(core::mem::offset_of!(WorkStruct, func) == 16, "work_struct.func offset");
-    assert!(core::mem::offset_of!(WorkStruct, fault) == 24, "work_struct.fault offset");
+    assert!(core::mem::offset_of!(WorkStruct, handler) == 16, "work_struct.handler offset");
     assert!(core::mem::offset_of!(WorkStruct, data) == 32, "work_struct.data offset");
     assert!(core::mem::offset_of!(WorkStruct, flags) == 40, "work_struct.flags offset");
+    // Honest fat-pointer proof (IrqHandler/RbOps precedent): a `Option<&'static
+    // dyn WorkHandler>` is a 2-word (data ptr, vtable ptr) fat pointer with a
+    // niche in the data-pointer half, so `Option<..>` costs nothing extra.
+    assert!(core::mem::size_of::<Option<&'static dyn WorkHandler>>() == 16, "handler fat-ptr size");
+    assert!(core::mem::align_of::<Option<&'static dyn WorkHandler>>() == 8, "handler fat-ptr align");
 };
 
 /// Native mirror of `struct workqueue_callbacks`
@@ -302,7 +348,11 @@ use crate::proc::Scheduler;
 }
 
 // Callback trampolines: invoking a stored `unsafe extern "C" fn` pointer is
-// inherently unsafe — encapsulated once per arity.
+// inherently unsafe — encapsulated once per arity. (The `work_struct`
+// callback pair used to have its own `invoke_work_cb` trampoline here;
+// TRAIT-OPS replaced it with direct `dyn WorkHandler` dispatch in
+// `WorkStructRef::execute` below, so only the two lifecycle-callback
+// trampolines remain.)
 #[inline] fn invoke_wq_cb(cb: Option<unsafe extern "C" fn(*mut workqueue)>, wq: *mut workqueue) {
     if let Some(f) = cb { unsafe { f(wq); } }
 }
@@ -311,11 +361,6 @@ use crate::proc::Scheduler;
     wq: *mut workqueue, t: *mut thread,
 ) {
     if let Some(f) = cb { unsafe { f(wq, t); } }
-}
-#[inline] fn invoke_work_cb(
-    cb: Option<unsafe extern "C" fn(*mut work_struct)>, w: *mut work_struct,
-) {
-    if let Some(f) = cb { unsafe { f(w); } }
 }
 
 // NO-STANDALONE-FN: the former `thread_killed`/`thread_set_killed` free fns
@@ -366,16 +411,17 @@ static WQP_WORK_STRUCT_CACHE: CacheCell = CacheCell(UnsafeCell::new(MaybeUninit:
 
 // -------- work_struct per-object operations -------------------------------
 impl<'a> WorkStructRef<'a> {
-    /// Valid iff the flags are well-formed and at least one of
-    /// `func`/`fault` is set (was `work_struct_valid`).
+    /// Valid iff the flags are well-formed and a handler is installed
+    /// (was `work_struct_valid`, which required at least one of the old
+    /// `func`/`fault` slots -- both now live behind the one `handler`
+    /// slot, see `WorkHandler`).
     fn is_valid(&self) -> bool {
-        work_flags_valid(self.flags()) && (self.func().is_some() || self.fault().is_some())
+        work_flags_valid(self.flags()) && self.handler().is_some()
     }
     /// Full initializer (`init_work_struct_ex`); panics on invalid flags.
     fn init_ex(
         &self,
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
-        fault: Option<unsafe extern "C" fn(*mut work_struct)>,
+        handler: Option<&'static dyn WorkHandler>,
         data: u64,
         flags: u32,
     ) {
@@ -383,8 +429,7 @@ impl<'a> WorkStructRef<'a> {
             xv6_panic(c"init_work_struct_ex: invalid work flags".as_ptr());
         }
         self.entry_ref().init();
-        self.set_func(func);
-        self.set_fault(fault);
+        self.set_handler(handler);
         self.set_data(data);
         self.set_flags(flags);
     }
@@ -394,10 +439,13 @@ impl<'a> WorkStructRef<'a> {
     fn execute(&self, queue_active: bool) {
         let run = queue_active || self.flag_set(WORK_STRUCT_FLAG_RUN_ON_DRAIN);
         if run {
-            if !queue_active {
-                invoke_work_cb(self.fault(), self.as_ptr());
-            } else {
-                invoke_work_cb(self.func(), self.as_ptr());
+            if let Some(h) = self.handler() {
+                // SAFETY: `self.as_ptr()` is this handle's own live
+                // `work_struct`, exactly the contract `WorkHandler::run`/
+                // `::fault` document.
+                unsafe {
+                    if !queue_active { h.fault(self.as_ptr()); } else { h.run(self.as_ptr()); }
+                }
             }
         }
         if self.flag_set(WORK_STRUCT_FLAG_FREE_AFTER_RUN) { free_ptr(self.as_ptr()); }
@@ -789,46 +837,44 @@ impl WorkStruct {
     /// null-checking delegator to `WorkStructRef::init_ex`.
     fn init_ex(
         work: *mut work_struct,
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
-        fault: Option<unsafe extern "C" fn(*mut work_struct)>,
+        handler: Option<&'static dyn WorkHandler>,
         data: u64,
         flags: u32,
     ) {
-        if let Some(w) = wsr(work) { w.init_ex(func, fault, data, flags); }
+        if let Some(w) = wsr(work) { w.init_ex(handler, data, flags); }
     }
 
     /// Default-flag initializer over a caller-owned item (was
     /// `init_work_struct`). pcache/timer.
     pub(crate) fn init(
         work: *mut work_struct,
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
+        handler: Option<&'static dyn WorkHandler>,
         data: u64,
     ) {
-        Self::init_ex(work, func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
+        Self::init_ex(work, handler, data, WORK_STRUCT_DEFAULT_FLAGS)
     }
 
     /// Allocate + fully initialize a work item (was
     /// `create_work_struct_ex[_impl]`). workqueue_test.
     pub(super) fn create_ex(
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
-        fault: Option<unsafe extern "C" fn(*mut work_struct)>,
+        handler: Option<&'static dyn WorkHandler>,
         data: u64,
         flags: u32,
     ) -> *mut work_struct {
         if !work_flags_valid(flags) { return ptr::null_mut(); }
         let w = Self::alloc();
         if w.is_null() { return ptr::null_mut(); }
-        Self::init_ex(w, func, fault, data, flags);
+        Self::init_ex(w, handler, data, flags);
         w
     }
 
     /// Allocate + default-flag initialize a work item (was
     /// `create_work_struct`). vfs/workqueue_test.
     pub(crate) fn create(
-        func: Option<unsafe extern "C" fn(*mut work_struct)>,
+        handler: Option<&'static dyn WorkHandler>,
         data: u64,
     ) -> *mut work_struct {
-        Self::create_ex(func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
+        Self::create_ex(handler, data, WORK_STRUCT_DEFAULT_FLAGS)
     }
 
     /// Free a slab-allocated work item (was `free_work_struct[_impl]`).

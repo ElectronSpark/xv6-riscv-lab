@@ -44,8 +44,7 @@
 //! directly.
 //!
 //! GENUINE FLOOR (still free fns, documented at each definition below):
-//! `pcache_flush_worker` (address-taken
-//! via `WorkStruct::init`), `flusher_thread` (address-taken via
+//! `flusher_thread` (address-taken via
 //! `kthread_create`), `sys_sync`/`sys_dumppcache` (address-taken in
 //! `irq/syscall.rs`'s dispatch table), the generic `list_node_t`
 //! primitives (`list_init`/`list_detach`/`list_insert`/`list_push_front`/
@@ -79,6 +78,7 @@ use crate::bindings::{
 };
 use crate::bintree::RbOps;
 use crate::machine;
+use crate::proc::workqueue::WorkHandler;
 use crate::mm::mm_safe::{SlabBox, SlabCacheRef};
 
 // ---------------------------------------------------------------------------
@@ -1096,9 +1096,9 @@ impl PcacheHandle {
     }
 
     // -- flush work / workqueue -----------------------------------------
-    fn init_flush_work(self, func: unsafe extern "C" fn(*mut WorkStruct)) {
+    fn init_flush_work(self, handler: &'static dyn WorkHandler) {
         let w = unsafe { addr_of_mut!((*self.raw()).flush_work) };
-        WorkStruct::init(w, Some(func), self.raw() as u64);
+        WorkStruct::init(w, Some(handler), self.raw() as u64);
     }
     fn queue_flush_work(self) -> bool {
         let wq = unsafe { *PCACHE_GLOBAL_FLUSH_WQ.get() };
@@ -1483,8 +1483,8 @@ impl Pcache {
 
 
 
-    fn init_flush_work(p: *mut Pcache, func: unsafe extern "C" fn(*mut WorkStruct)) {
-        unsafe { PcacheHandle::new(p) }.init_flush_work(func);
+    fn init_flush_work(p: *mut Pcache, handler: &'static dyn WorkHandler) {
+        unsafe { PcacheHandle::new(p) }.init_flush_work(handler);
     }
 }
 
@@ -2155,7 +2155,7 @@ impl Pcache {
         if Pcache::flush_requested(p) != 0 {
             return true;
         }
-        Pcache::init_flush_work(p, pcache_flush_worker);
+        Pcache::init_flush_work(p, &PCACHE_FLUSH_WORKER_HANDLER);
         let queued = (unsafe { PcacheHandle::new(p) }.queue_flush_work());
         if queued {
             Pcache::set_flush_requested(p, 1);
@@ -2211,75 +2211,85 @@ impl Pcache {
 // ---------------------------------------------------------------------------
 // Workqueue worker
 // ---------------------------------------------------------------------------
-extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
-    let p = (unsafe { (*work).data }) as *mut Pcache;
-    let start_jiffs = Pcache::get_jiffs();
+/// ZST `WorkHandler` implementor (TRAIT-OPS): one `'static` instance's
+/// address is taken (`&PCACHE_FLUSH_WORKER_HANDLER`) as the flush work's
+/// handler in `Pcache::queue_work` above. Body moved verbatim from the
+/// former `pcache_flush_worker` free fn (was the old `func` slot); this
+/// item never populated the old `fault` slot, so `WorkHandler::fault`'s
+/// default (no-op) is used unmodified.
+struct PcacheFlushWorkerHandler;
+impl WorkHandler for PcacheFlushWorkerHandler {
+    unsafe fn run(&self, work: *mut WorkStruct) {
+        let p = (unsafe { (*work).data }) as *mut Pcache;
+        let start_jiffs = Pcache::get_jiffs();
 
-    if p.is_null() {
-        crate::kprintln!("__pcache_flush_worker: pcache is NULL");
-        return;
-    }
+        if p.is_null() {
+            crate::kprintln!("__pcache_flush_worker: pcache is NULL");
+            return;
+        }
 
-    // `p_guard` spans the whole loop (each iteration's top,
-    // `pcache_pop_dirty`, asserts it is held) and is explicitly
-    // dropped/reacquired around the out-of-lock IO calls below.
-    let mut p_guard = Pcache::lock_local(p);
-    loop {
-        let page = Pcache::pop_dirty(p, start_jiffs);
-        if page.is_null() { break; }
-        // `page` comes back page-locked (ownership handed off by
-        // `pcache_pop_dirty`); adopt it into a guard.
-        let page_guard = Pcache::adopt_page_lock(page);
+        // `p_guard` spans the whole loop (each iteration's top,
+        // `pcache_pop_dirty`, asserts it is held) and is explicitly
+        // dropped/reacquired around the out-of-lock IO calls below.
+        let mut p_guard = Pcache::lock_local(p);
+        loop {
+            let page = Pcache::pop_dirty(p, start_jiffs);
+            if page.is_null() { break; }
+            // `page` comes back page-locked (ownership handed off by
+            // `pcache_pop_dirty`); adopt it into a guard.
+            let page_guard = Pcache::adopt_page_lock(page);
 
-        let mut r = Pcache::page_ref_inc_unlocked(page);
-        assert_msg(r > 1, b"flush_worker: failed to increment page ref\0");
+            let mut r = Pcache::page_ref_inc_unlocked(page);
+            assert_msg(r > 1, b"flush_worker: failed to increment page ref\0");
 
-        r = Pcache::node_io_begin(p, page);
-        assert_msg(r == 0, b"flush_worker: failed to begin IO\0");
+            r = Pcache::node_io_begin(p, page);
+            assert_msg(r == 0, b"flush_worker: failed to begin IO\0");
 
-        drop(page_guard);
+            drop(page_guard);
+            drop(p_guard);
+
+            // Real write outside lock
+            let mut ret = Pcache::ops_call_write_begin(p, page);
+            if ret != 0 {
+                p_guard = Pcache::lock_local(p);
+                Pcache::set_flush_error(p, ret);
+                Pcache::flush_err_continue(p, page);
+                continue;
+            }
+            ret = Pcache::ops_call_write_page(p, page);
+            if ret != 0 {
+                let _ = Pcache::ops_call_write_end(p, page);
+                p_guard = Pcache::lock_local(p);
+                Pcache::set_flush_error(p, ret);
+                Pcache::flush_err_continue(p, page);
+                continue;
+            }
+            ret = Pcache::ops_call_write_end(p, page);
+
+            p_guard = Pcache::lock_local(p);
+            let page_guard = Pcache::lock_page(page);
+            if ret != 0 {
+                Pcache::set_flush_error(p, ret);
+            }
+            let pcnode = Pcache::page_get_node(page);
+            assert_msg(!pcnode.is_null(), b"flush_worker: page missing pcache_node\0");
+            PcacheNode::set_dirty(pcnode, 0);
+            PcacheNode::set_uptodate(pcnode, 1);
+            let r2 = Pcache::node_io_end(p, page);
+            assert_msg(r2 == 0, b"flush_worker: failed to end IO\0");
+            let r3 = Pcache::page_ref_dec_unlocked(page);
+            assert_msg(r3 >= 1, b"flush_worker: page refcount underflow\0");
+            if r3 == 1 && PcacheNode::lru_detached(pcnode) != 0 {
+                Pcache::push_lru(p, page);
+                Pcache::wakeup_on_chan(p as *mut c_void);
+            }
+            drop(page_guard);
+        }
+        Pcache::flush_done(p);
         drop(p_guard);
-
-        // Real write outside lock
-        let mut ret = Pcache::ops_call_write_begin(p, page);
-        if ret != 0 {
-            p_guard = Pcache::lock_local(p);
-            Pcache::set_flush_error(p, ret);
-            Pcache::flush_err_continue(p, page);
-            continue;
-        }
-        ret = Pcache::ops_call_write_page(p, page);
-        if ret != 0 {
-            let _ = Pcache::ops_call_write_end(p, page);
-            p_guard = Pcache::lock_local(p);
-            Pcache::set_flush_error(p, ret);
-            Pcache::flush_err_continue(p, page);
-            continue;
-        }
-        ret = Pcache::ops_call_write_end(p, page);
-
-        p_guard = Pcache::lock_local(p);
-        let page_guard = Pcache::lock_page(page);
-        if ret != 0 {
-            Pcache::set_flush_error(p, ret);
-        }
-        let pcnode = Pcache::page_get_node(page);
-        assert_msg(!pcnode.is_null(), b"flush_worker: page missing pcache_node\0");
-        PcacheNode::set_dirty(pcnode, 0);
-        PcacheNode::set_uptodate(pcnode, 1);
-        let r2 = Pcache::node_io_end(p, page);
-        assert_msg(r2 == 0, b"flush_worker: failed to end IO\0");
-        let r3 = Pcache::page_ref_dec_unlocked(page);
-        assert_msg(r3 >= 1, b"flush_worker: page refcount underflow\0");
-        if r3 == 1 && PcacheNode::lru_detached(pcnode) != 0 {
-            Pcache::push_lru(p, page);
-            Pcache::wakeup_on_chan(p as *mut c_void);
-        }
-        drop(page_guard);
     }
-    Pcache::flush_done(p);
-    drop(p_guard);
 }
+static PCACHE_FLUSH_WORKER_HANDLER: PcacheFlushWorkerHandler = PcacheFlushWorkerHandler;
 
 impl Pcache {
     /// err_continue arm of the flush worker (assumes spinlock held).
