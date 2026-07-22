@@ -1315,9 +1315,7 @@ pub(super) fn xv6_exit_reap_zombie(
 //     Rust below as `priv` helpers.
 // ===========================================================================
 
-use crate::bindings::{
-    hlist_bucket_t, hlist_entry_t, hlist_func_struct, hlist_func_t, hlist_t, ht_hash_t, rwlock,
-};
+use crate::bindings::{hlist_bucket_t, hlist_entry_t, hlist_t, ht_hash_t, rwlock};
 use core::sync::atomic::{AtomicI64, AtomicPtr};
 
 // Mirror of `#define NR_THREAD_HASH_BUCKETS 31` in proc/proc_private.h.
@@ -1331,9 +1329,9 @@ const NR_THREAD: i64 = 10000;
 // their `#[no_mangle]` exports are gone; this file's original extern
 // declarations were plain (non-`safe`) `fn`s, so every call site already
 // sits in an `unsafe` context -- the plain `use` keeps them unchanged
-// (`hlist_t`/`hlist_func_t` are the same bindgen types as hlist.rs's
-// `Hlist`/`HlistFunc` aliases).
-use crate::hlist::Hlist;
+// (`hlist_t` is the same bindgen type as hlist.rs's `Hlist` alias).
+// `HlistOps` (TRAIT-OPS) is the trait `ProctabHlistOps` below implements.
+use crate::hlist::{Hlist, HlistOps};
 
 // Direct crate-path imports (kernel/lock/rwlock.rs) — these used to be
 // C-ABI symbol redeclarations; the `#[no_mangle]` exports are gone. All
@@ -1452,12 +1450,12 @@ static PROC_TABLE: ProcTableCell = ProcTableCell(UnsafeCell::new(ProcTable {
     procs: hlist_t {
         bucket_cnt: 0,
         elem_cnt: 0,
-        func: hlist_func_struct {
-            hash: None,
-            get_node: None,
-            get_entry: None,
-            cmp_node: None,
-        },
+        // TRAIT-OPS: the old all-`None` 4-slot `hlist_func_struct` literal
+        // collapses to a single `None` -- `Hlist::validate`/`init` treat
+        // "any slot missing" and "the whole table missing" identically
+        // (see `HlistOps`'s doc comment in `hlist.rs`); real init happens
+        // in `xv6_proctab_init_storage` below.
+        ops: None,
         // P3-N1: `hlist_t` is native `crate::hlist::RawHlist` now; its
         // flexible-array tail is a zero-length `[ListNode; 0]` instead of
         // bindgen's `__IncompleteArrayField` (both are zero-sized, same
@@ -1492,37 +1490,45 @@ fn pt() -> *mut ProcTable {
     PROC_TABLE.0.get()
 }
 
-// --- Hash function callbacks (extern C, registered with hlist_init) --------
+// --- Hash function ops (TRAIT-OPS: registered with `Hlist::init`) ----------
+//
+// The old `hlist_func_struct` fn-pointer table (`proctab_hash`/
+// `proctab_hash_get_node`/`proctab_hash_get_entry`/`proctab_hash_cmp`) is
+// now `ProctabHlistOps`, a ZST implementing `HlistOps`. Bodies are
+// byte-identical to the old free fns; only the receiver (`&self`) and the
+// `extern "C"` wrapper are gone.
 
-unsafe extern "C" fn proctab_hash(node: *mut c_void) -> ht_hash_t {
-    let p = node as *mut thread;
-    hlist_hash_int(field_get!(p, pid))
+struct ProctabHlistOps;
+
+impl HlistOps for ProctabHlistOps {
+    unsafe fn hash(&self, node: *mut c_void) -> ht_hash_t {
+        let p = node as *mut thread;
+        hlist_hash_int(field_get!(p, pid))
+    }
+
+    unsafe fn cmp_node(&self, _h: *mut hlist_t, a: *mut c_void, b: *mut c_void) -> c_int {
+        let pa = a as *mut thread;
+        let pb = b as *mut thread;
+        // SAFETY: see `field_get!` — `a`/`b` are non-null node pointers
+        // supplied by the `hlist` implementation, which only ever passes
+        // pointers to genuine `thread` objects registered in this proc table
+        // (either lookup keys built by `xv6_proctab_get_*`/`_bt_pid`, or live
+        // entries already stored in the table).
+        u! { (*pa).pid - (*pb).pid }
+    }
+
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut hlist_entry_t {
+        let p = node as *mut thread;
+        field_ptr_mut!(p, proctab_entry)
+    }
+
+    unsafe fn get_node(&self, entry: *mut hlist_entry_t) -> *mut c_void {
+        let off = core::mem::offset_of!(thread, proctab_entry);
+        (entry as *mut u8).wrapping_sub(off) as *mut c_void
+    }
 }
 
-unsafe extern "C" fn proctab_hash_cmp(
-    _h: *mut hlist_t,
-    a: *mut c_void,
-    b: *mut c_void,
-) -> c_int {
-    let pa = a as *mut thread;
-    let pb = b as *mut thread;
-    // SAFETY: see `field_get!` — `a`/`b` are non-null node pointers
-    // supplied by the `hlist` implementation, which only ever passes
-    // pointers to genuine `thread` objects registered in this proc table
-    // (either lookup keys built by `xv6_proctab_get_*`/`_bt_pid`, or live
-    // entries already stored in the table).
-    u! { (*pa).pid - (*pb).pid }
-}
-
-unsafe extern "C" fn proctab_hash_get_entry(node: *mut c_void) -> *mut hlist_entry_t {
-    let p = node as *mut thread;
-    field_ptr_mut!(p, proctab_entry)
-}
-
-unsafe extern "C" fn proctab_hash_get_node(entry: *mut hlist_entry_t) -> *mut c_void {
-    let off = core::mem::offset_of!(thread, proctab_entry);
-    (entry as *mut u8).wrapping_sub(off) as *mut c_void
-}
+static PROCTAB_HLIST_OPS: ProctabHlistOps = ProctabHlistOps;
 
 // --- Crate-internal xv6_* entry points (former C-ABI exports, demoted) -----
 
@@ -1532,16 +1538,10 @@ pub(super) fn xv6_proctab_init_storage() {
     // needed for this one-time initialisation (mirrors the C boot sequence).
     u! {
         let t = &mut *pt();
-        let mut funcs = hlist_func_struct {
-            hash: Some(proctab_hash),
-            get_node: Some(proctab_hash_get_node),
-            get_entry: Some(proctab_hash_get_entry),
-            cmp_node: Some(proctab_hash_cmp),
-        };
         Hlist::init(
             &raw mut t.procs,
             NR_THREAD_HASH_BUCKETS as u64,
-            &raw mut funcs,
+            Some(&PROCTAB_HLIST_OPS),
         );
         RawRwlock::init(&raw mut t.pid_lock, c"pid_lock".as_ptr());
         list_init(&raw mut t.procs_list);
@@ -1817,7 +1817,8 @@ pub(super) fn xv6_proctab_dmplist_del(p: *mut thread) {
 // `hlist_entry_t.list_entry` sits at offset 0 (see kernel/inc/hlist_type.h),
 // so reinterpreting a `*mut list_node_t` as `*mut hlist_entry_t` is exactly
 // what the C `container_of(..., hlist_entry_t, list_entry)` does; recovering
-// the owning `*mut thread` reuses `proctab_hash_get_node` (SECTION 8, above).
+// the owning `*mut thread` reuses `ProctabHlistOps::get_node` (SECTION 8,
+// above) via the shared `PROCTAB_HLIST_OPS` instance.
 
 /// First entry in `bucket` (RCU-safe), or NULL if the bucket is empty.
 ///
@@ -1916,7 +1917,7 @@ impl<'a> Iterator for ProcTableIter<'a> {
                 nxt = hlist_bucket_first_rcu(&raw mut (*pt()).buckets[self.bucket_idx]);
             }
             self.cur = nxt;
-            Some(proctab_hash_get_node(entry) as *mut thread)
+            Some(PROCTAB_HLIST_OPS.get_node(entry) as *mut thread)
         }
     }
 }

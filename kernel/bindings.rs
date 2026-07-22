@@ -40,8 +40,6 @@ pub type list_node_t = crate::list::ListNode;
 pub type hlist_bucket_t = crate::list::ListNode;
 pub type hlist_entry = crate::hlist::RawHlistEntry;
 pub type hlist_entry_t = crate::hlist::RawHlistEntry;
-pub type hlist_func_struct = crate::hlist::RawHlistFunc;
-pub type hlist_func_t = crate::hlist::RawHlistFunc;
 pub type hlist_struct = crate::hlist::RawHlist;
 pub type hlist_t = crate::hlist::RawHlist;
 // kernel/inc/rbtree_type.h -> kernel/bintree.rs

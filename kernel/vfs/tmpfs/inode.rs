@@ -47,10 +47,11 @@ use core::ptr;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
-    bool_, dev_t, hlist_bucket_t, hlist_entry_t, hlist_func_struct, hlist_t, ht_hash_t,
-    list_node_t, loff_t, mode_t, stat, tmpfs_dentry, tmpfs_inode, vfs_dentry, vfs_dir_iter,
-    vfs_inode, vfs_superblock, __IncompleteArrayField, EEXIST, EINVAL, ENOMEM,
+    bool_, dev_t, hlist_bucket_t, hlist_entry_t, hlist_t, ht_hash_t, list_node_t, loff_t, mode_t,
+    stat, tmpfs_dentry, tmpfs_inode, vfs_dentry, vfs_dir_iter, vfs_inode, vfs_superblock,
+    __IncompleteArrayField, EEXIST, EINVAL, ENOMEM,
 };
+use crate::hlist::HlistOps;
 use crate::vfs::inode::InodeOps;
 
 use super::{
@@ -86,8 +87,8 @@ unsafe extern "C" {
 // non-exported `static inline` walk helpers `hlist.h` never turns into
 // real symbols, same precedent as `hlist.rs`'s own module doc.
 /// SAFETY: see [`crate::hlist::Hlist::init`]'s contract.
-fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_struct) -> c_int {
-    unsafe { crate::hlist::Hlist::init(hlist, bucket_cnt, func) }
+fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, ops: Option<&'static dyn HlistOps>) -> c_int {
+    unsafe { crate::hlist::Hlist::init(hlist, bucket_cnt, ops) }
 }
 /// SAFETY: see [`crate::hlist::Hlist::get`]'s contract.
 fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
@@ -246,15 +247,24 @@ pub struct TmpfsDentry {
 // `offset_of!` gate and cross-checked by the gcc probe (see the module
 // note above).
 const _: () = {
-    assert!(core::mem::size_of::<TmpfsDirData>() == 288, "tmpfs dir arm size");
+    // TRAIT-OPS: `hlist_t`'s old `hlist_func_struct` fn-pointer table (32
+    // bytes) is gone, replaced by a 16-byte `Option<&dyn HlistOps>` fat
+    // pointer -- `hlist_t`/`children` shrinks 48 -> 32, so
+    // `children_buckets` (immediately following it) shifts 48 -> 32 and
+    // `TmpfsDirData`/`TmpfsInodeData` shrink 288 -> 272. `TmpfsInode`'s own
+    // size/offsets (below) are UNCHANGED: `u`'s tail alignment padding
+    // (`align(64)`) absorbs the union's 16-byte shrink exactly as it
+    // absorbed the pre-shrink slack (1096 + 272 = 1368, still <= the
+    // existing 1408 = 22 * 64 boundary).
+    assert!(core::mem::size_of::<TmpfsDirData>() == 272, "tmpfs dir arm size");
     assert!(core::mem::align_of::<TmpfsDirData>() == 8, "tmpfs dir arm alignment");
     assert!(core::mem::offset_of!(TmpfsDirData, children) == 0, "dir.children offset");
-    assert!(core::mem::offset_of!(TmpfsDirData, children_buckets) == 48, "dir.children_buckets offset");
+    assert!(core::mem::offset_of!(TmpfsDirData, children_buckets) == 32, "dir.children_buckets offset");
     assert!(core::mem::size_of::<TmpfsSymData>() == 8, "tmpfs sym arm size");
     assert!(core::mem::align_of::<TmpfsSymData>() == 8, "tmpfs sym arm alignment");
     assert!(core::mem::size_of::<TmpfsFileData>() == 0, "tmpfs file arm size");
     assert!(core::mem::align_of::<TmpfsFileData>() == 1, "tmpfs file arm alignment");
-    assert!(core::mem::size_of::<TmpfsInodeData>() == 288, "tmpfs inode union size");
+    assert!(core::mem::size_of::<TmpfsInodeData>() == 272, "tmpfs inode union size");
     assert!(core::mem::align_of::<TmpfsInodeData>() == 8, "tmpfs inode union alignment");
 
     assert!(core::mem::size_of::<TmpfsInode>() == 1408, "tmpfs_inode size");
@@ -521,60 +531,61 @@ unsafe fn hlist_hash_str(s: *const c_char, len: usize) -> ht_hash_t {
     }
 }
 
-extern "C" fn __tmpfs_dir_hash_func(data: *mut c_void) -> ht_hash_t {
-    let dentry = data as *mut tmpfs_dentry;
-    // SAFETY: `data` is a live `tmpfs_dentry*` (hlist callback contract);
-    // `name` points to `name_len` readable bytes.
-    unsafe { hlist_hash_str((*dentry).name, (*dentry).name_len) }
-}
+// TRAIT-OPS: the old `hlist_func_struct` fn-pointer table
+// (`__tmpfs_dir_hash_func`/`__tmpfs_dir_get_node_func`/
+// `__tmpfs_dir_get_entry_func`/`__tmpfs_dir_name_cmp_func`) ->
+// `TmpfsDirHlistOps`, a ZST implementing `HlistOps`. Bodies are
+// byte-identical to the old free fns; only the receiver (`&self`) and the
+// `extern "C"` wrapper are gone.
+struct TmpfsDirHlistOps;
 
-extern "C" fn __tmpfs_dir_name_cmp_func(_hlist: *mut hlist_t, node: *mut c_void, key: *mut c_void) -> c_int {
-    let dentry_node = node as *mut tmpfs_dentry;
-    let dentry_key = key as *mut tmpfs_dentry;
-    // SAFETY: `node`/`key` are live `tmpfs_dentry*` (hlist callback
-    // contract).
-    unsafe {
-        let min_len = core::cmp::min((*dentry_node).name_len, (*dentry_key).name_len);
-        let cmp = strncmp((*dentry_node).name, (*dentry_key).name, min_len);
-        if cmp != 0 {
-            return cmp;
+impl HlistOps for TmpfsDirHlistOps {
+    unsafe fn hash(&self, data: *mut c_void) -> ht_hash_t {
+        let dentry = data as *mut tmpfs_dentry;
+        // SAFETY: `data` is a live `tmpfs_dentry*` (hlist callback contract);
+        // `name` points to `name_len` readable bytes.
+        unsafe { hlist_hash_str((*dentry).name, (*dentry).name_len) }
+    }
+
+    unsafe fn cmp_node(&self, _hlist: *mut hlist_t, node: *mut c_void, key: *mut c_void) -> c_int {
+        let dentry_node = node as *mut tmpfs_dentry;
+        let dentry_key = key as *mut tmpfs_dentry;
+        // SAFETY: `node`/`key` are live `tmpfs_dentry*` (hlist callback
+        // contract).
+        unsafe {
+            let min_len = core::cmp::min((*dentry_node).name_len, (*dentry_key).name_len);
+            let cmp = strncmp((*dentry_node).name, (*dentry_key).name, min_len);
+            if cmp != 0 {
+                return cmp;
+            }
+            if (*dentry_node).name_len > (*dentry_key).name_len {
+                1
+            } else if (*dentry_node).name_len < (*dentry_key).name_len {
+                -1
+            } else {
+                0
+            }
         }
-        if (*dentry_node).name_len > (*dentry_key).name_len {
-            1
-        } else if (*dentry_node).name_len < (*dentry_key).name_len {
-            -1
-        } else {
-            0
+    }
+
+    unsafe fn get_node(&self, entry: *mut hlist_entry_t) -> *mut c_void {
+        if entry.is_null() {
+            return ptr::null_mut();
         }
+        // SAFETY: `hash_entry` is the first field of `tmpfs_dentry` (offset 0).
+        entry as *mut c_void
+    }
+
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut hlist_entry_t {
+        if node.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `hash_entry` is the first field of `tmpfs_dentry` (offset 0).
+        node as *mut hlist_entry_t
     }
 }
 
-extern "C" fn __tmpfs_dir_get_node_func(entry: *mut hlist_entry_t) -> *mut c_void {
-    if entry.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: `hash_entry` is the first field of `tmpfs_dentry` (offset 0).
-    entry as *mut c_void
-}
-
-extern "C" fn __tmpfs_dir_get_entry_func(node: *mut c_void) -> *mut hlist_entry_t {
-    if node.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: `hash_entry` is the first field of `tmpfs_dentry` (offset 0).
-    node as *mut hlist_entry_t
-}
-
-// Immutable: `hlist_init()` only *reads* `*func` (copies it into the
-// hlist's own `func` field) -- never writes through the pointer -- so a
-// plain `static` (not `static mut`) plus a cast-away-const pointer at the
-// one call site avoids `static_mut_refs` entirely.
-static __TMPFS_DIR_HLIST_FUNCS: hlist_func_struct = hlist_func_struct {
-    hash: Some(__tmpfs_dir_hash_func),
-    get_node: Some(__tmpfs_dir_get_node_func),
-    get_entry: Some(__tmpfs_dir_get_entry_func),
-    cmp_node: Some(__tmpfs_dir_name_cmp_func),
-};
+static __TMPFS_DIR_HLIST_OPS: TmpfsDirHlistOps = TmpfsDirHlistOps;
 
 impl TmpfsInode {
     /// Mirrors `tmpfs_make_directory()`. Kept `#[no_mangle]`/exported per
@@ -589,7 +600,7 @@ impl TmpfsInode {
             let ret = hlist_init(
                 TmpfsInode::dir_hlist(ti),
                 TMPFS_HASH_BUCKETS,
-                ptr::addr_of!(__TMPFS_DIR_HLIST_FUNCS) as *mut hlist_func_struct,
+                Some(&__TMPFS_DIR_HLIST_OPS),
             );
             kassert!(
                 ret == 0,

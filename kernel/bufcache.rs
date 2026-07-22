@@ -158,9 +158,10 @@ use core::mem::offset_of;
 use core::sync::atomic::Ordering;
 
 use crate::bindings::{
-    bio, blkdev_t, bool_, buf, completion_t, hlist_entry_t, hlist_func_t, hlist_t, list_node_t,
-    mutex_t, page_t, PGSIZE,
+    bio, blkdev_t, bool_, buf, completion_t, hlist_entry_t, hlist_t, list_node_t, mutex_t, page_t,
+    PGSIZE,
 };
+use crate::hlist::HlistOps;
 use crate::machine;
 use crate::mm::cffi::container_of;
 use crate::sync::SpinLock;
@@ -407,56 +408,61 @@ impl BufCache {
 }
 
 // ---------------------------------------------------------------------------
-// hlist callbacks, registered with `hlist_init` in `binit`. Mirrors
-// `__bcache_hash_func`/`__bcache_hlist_get_node`/`__bcache_hlist_get_entry`/
-// `__bcache_hlist_cmp`.
+// TRAIT-OPS: the old `hlist_func_t` fn-pointer table (`bcache_hash_func`/
+// `bcache_hlist_get_node`/`bcache_hlist_get_entry`/`bcache_hlist_cmp`,
+// registered with `hlist_init` in `binit`) -> `BcacheHlistOps`, a ZST
+// implementing `HlistOps`. Bodies are byte-identical to the old free fns;
+// only the receiver (`&self`) and the `extern "C"`/`unsafe extern "C"`
+// wrapper are gone.
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" fn bcache_hash_func(node: *mut c_void) -> u64 {
-    let bnode = node as *mut buf;
-    // SAFETY: `node` is either `bget`'s stack-local lookup key or a live
-    // registered buffer -- both are valid `buf` pointers whose
-    // `dev`/`blockno` fields are readable.
-    let h = unsafe {
-        hlist_hash_uint64((*bnode).blockno as u64).wrapping_add((*bnode).dev as u64)
-    };
-    hlist_hash_uint64(h)
-}
+struct BcacheHlistOps;
 
-unsafe extern "C" fn bcache_hlist_get_node(entry: *mut hlist_entry_t) -> *mut c_void {
-    container_of::<buf, hlist_entry_t>(entry, offset_of!(buf, hlist_entry)) as *mut c_void
-}
-
-unsafe extern "C" fn bcache_hlist_get_entry(node: *mut c_void) -> *mut hlist_entry_t {
-    let bnode = node as *mut buf;
-    // SAFETY: see `bcache_hash_func`.
-    unsafe { &raw mut (*bnode).hlist_entry }
-}
-
-unsafe extern "C" fn bcache_hlist_cmp(
-    _hlist: *mut hlist_t,
-    node1: *mut c_void,
-    node2: *mut c_void,
-) -> c_int {
-    let b1 = node1 as *mut buf;
-    let b2 = node2 as *mut buf;
-    // SAFETY: see `bcache_hash_func`.
-    unsafe {
-        if (*b1).dev > (*b2).dev {
-            return 1;
-        }
-        if (*b1).dev < (*b2).dev {
-            return -1;
-        }
-        if (*b1).blockno > (*b2).blockno {
-            return 1;
-        }
-        if (*b1).blockno < (*b2).blockno {
-            return -1;
-        }
+impl HlistOps for BcacheHlistOps {
+    unsafe fn hash(&self, node: *mut c_void) -> u64 {
+        let bnode = node as *mut buf;
+        // SAFETY: `node` is either `bget`'s stack-local lookup key or a live
+        // registered buffer -- both are valid `buf` pointers whose
+        // `dev`/`blockno` fields are readable.
+        let h = unsafe {
+            hlist_hash_uint64((*bnode).blockno as u64).wrapping_add((*bnode).dev as u64)
+        };
+        hlist_hash_uint64(h)
     }
-    0
+
+    unsafe fn get_node(&self, entry: *mut hlist_entry_t) -> *mut c_void {
+        container_of::<buf, hlist_entry_t>(entry, offset_of!(buf, hlist_entry)) as *mut c_void
+    }
+
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut hlist_entry_t {
+        let bnode = node as *mut buf;
+        // SAFETY: see `hash`.
+        unsafe { &raw mut (*bnode).hlist_entry }
+    }
+
+    unsafe fn cmp_node(&self, _hlist: *mut hlist_t, node1: *mut c_void, node2: *mut c_void) -> c_int {
+        let b1 = node1 as *mut buf;
+        let b2 = node2 as *mut buf;
+        // SAFETY: see `hash`.
+        unsafe {
+            if (*b1).dev > (*b2).dev {
+                return 1;
+            }
+            if (*b1).dev < (*b2).dev {
+                return -1;
+            }
+            if (*b1).blockno > (*b2).blockno {
+                return 1;
+            }
+            if (*b1).blockno < (*b2).blockno {
+                return -1;
+            }
+        }
+        0
+    }
 }
+
+static BCACHE_HLIST_OPS: BcacheHlistOps = BcacheHlistOps;
 
 impl Buf {
     /// Build a stack-local lookup key with the given `(dev, blockno)` and
@@ -603,23 +609,17 @@ impl BufCache {
         machine::Riscv::list_entry_init(&raw mut bc.dirty_list);
         bc.dirty_count = 0;
 
-        let mut func = hlist_func_t {
-            hash: Some(bcache_hash_func),
-            get_node: Some(bcache_hlist_get_node),
-            get_entry: Some(bcache_hlist_get_entry),
-            cmp_node: Some(bcache_hlist_cmp),
-        };
         // SAFETY: `Hlist::init` is a genuinely unsafe FFI entry point (raw
-        // hash-table-header initialisation); `&raw mut bc.cached`/`&raw mut
-        // func` are live storage reached through the held guard / a live
-        // stack local. The per-buffer loop below is likewise safe only
-        // because `BufCache::init` runs exactly once at boot, before any
-        // other entry point in this file can observe `BCACHE`/`BUF_STORAGE`
-        // -- every `&raw mut (*b).field` is a raw address-of, not an
-        // unchecked read/write, on `'static` storage `i < NBUF` keeps
-        // in-bounds.
+        // hash-table-header initialisation); `&raw mut bc.cached` is live
+        // storage reached through the held guard, `Some(&BCACHE_HLIST_OPS)`
+        // a `'static` trait-object reference. The per-buffer loop below is
+        // likewise safe only because `BufCache::init` runs exactly once at
+        // boot, before any other entry point in this file can observe
+        // `BCACHE`/`BUF_STORAGE` -- every `&raw mut (*b).field` is a raw
+        // address-of, not an unchecked read/write, on `'static` storage
+        // `i < NBUF` keeps in-bounds.
         unsafe {
-            Hlist::init(&raw mut bc.cached, BIO_HASH_BUCKETS as u64, &raw mut func);
+            Hlist::init(&raw mut bc.cached, BIO_HASH_BUCKETS as u64, Some(&BCACHE_HLIST_OPS));
 
             for i in 0..NBUF {
                 let b: *mut buf = Self::at(i);

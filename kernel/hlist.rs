@@ -1,9 +1,11 @@
 //! Intrusive hash list — Rust port of `kernel/hlist.c`.
 //!
-//! `struct hlist_struct` / `hlist_entry` / `hlist_func_struct` are the
-//! real bindgen-generated `crate::bindings::{hlist_struct, hlist_entry,
-//! hlist_func_struct}` types (already allowlisted in `build.rs`) — no
-//! opaque stand-ins. Each bucket (`hlist_bucket_t`) is itself a
+//! `struct hlist_struct` / `hlist_entry` are the real bindgen-generated
+//! `crate::bindings::{hlist_struct, hlist_entry}` types (already
+//! allowlisted in `build.rs`) — no opaque stand-ins. (The historical
+//! `hlist_func_struct` fn-pointer table is gone — TRAIT-OPS replaced it
+//! with the [`HlistOps`] trait below.) Each bucket (`hlist_bucket_t`) is
+//! itself a
 //! `list_node_t` sentinel head; `hlist_entry_t::list_entry` is the
 //! *first* field of the struct, so every `*mut list_node_t` <->
 //! `*mut hlist_entry_t` conversion below is an offset-0 reinterpretation,
@@ -43,12 +45,11 @@ use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::bindings::{hlist_entry, hlist_func_struct, hlist_struct, list_node_t};
+use crate::bindings::{hlist_entry, hlist_struct, list_node_t};
 
 pub type Hlist = hlist_struct;
 pub type HlistEntry = hlist_entry;
 pub type HlistBucket = list_node_t;
-pub type HlistFunc = hlist_func_struct;
 pub type HtHash = u64;
 
 const HLIST_BUCKET_CNT_MAX: u64 = 0xffff;
@@ -56,19 +57,22 @@ const HLIST_BUCKET_CNT_MAX: u64 = 0xffff;
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3C, nativized in Wave P3-N1.
 //
-// `RawHlistBucket`/`RawHlistEntry`/`RawHlistFunc`/`RawHlist` ARE the
-// kernel-wide Rust definitions of `kernel/inc/hlist_type.h`'s
-// `hlist_bucket_t`/`hlist_entry_t`/`hlist_func_t`/`hlist_t` now:
-// `build.rs` blocklists the bindgen-generated versions and injects
-// `pub type hlist_* = crate::hlist::RawHlist*;` raw-line aliases, so
-// every remaining bindgen struct that embeds one (`thread.proctab_entry`,
-// `tmpfs_inode`/`tmpfs_dentry` hash entries, ...) and every
-// `crate::bindings::hlist_*` path across the crate resolves here. The
-// `Hlist`/`HlistEntry`/`HlistBucket`/`HlistFunc` aliases above keep
-// resolving through `crate::bindings`, so the ~10 cross-module call
-// sites (`vfs/fs.rs`, `vfs/tmpfs/{superblock,inode}.rs`,
-// `proc/proc_shims.rs`, `proc/access.rs`, `bufcache.rs`, ...) compile
-// unchanged. Layout is proven by the hardcoded `const _` asserts below.
+// `RawHlistBucket`/`RawHlistEntry`/`RawHlist` ARE the kernel-wide Rust
+// definitions of `kernel/inc/hlist_type.h`'s
+// `hlist_bucket_t`/`hlist_entry_t`/`hlist_t` now: `build.rs` blocklists the
+// bindgen-generated versions and injects `pub type hlist_* =
+// crate::hlist::RawHlist*;` raw-line aliases, so every remaining bindgen
+// struct that embeds one (`thread.proctab_entry`, `tmpfs_inode`/
+// `tmpfs_dentry` hash entries, ...) and every `crate::bindings::hlist_*`
+// path across the crate resolves here. The `Hlist`/`HlistEntry`/
+// `HlistBucket` aliases above keep resolving through `crate::bindings`, so
+// the ~10 cross-module call sites (`vfs/fs.rs`, `vfs/tmpfs/{superblock,
+// inode}.rs`, `proc/proc_shims.rs`, `proc/access.rs`, `bufcache.rs`, ...)
+// compile unchanged. `hlist_func_struct`/`hlist_func_t` (the old
+// `RawHlistFunc` fn-pointer table) are GONE as of the TRAIT-OPS conversion
+// -- replaced by the [`HlistOps`] trait, with `Option<&'static dyn
+// HlistOps>` as the new `RawHlist::ops` storage. Layout is proven by the
+// hardcoded `const _` asserts below.
 //
 // `hlist_bucket_t` is *literally* `list_node_t` (`kernel/inc/
 // hlist_type.h`: `typedef struct list_node hlist_bucket_t;` -- confirmed
@@ -83,13 +87,55 @@ const HLIST_BUCKET_CNT_MAX: u64 = 0xffff;
 // relocate the casting work without an unsafe-reduction payoff.
 pub type RawHlistBucket = crate::list::ListNode;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct RawHlistFunc {
-    pub hash: Option<unsafe extern "C" fn(*mut c_void) -> HtHash>,
-    pub get_node: Option<unsafe extern "C" fn(*mut RawHlistEntry) -> *mut c_void>,
-    pub get_entry: Option<unsafe extern "C" fn(*mut c_void) -> *mut RawHlistEntry>,
-    pub cmp_node: Option<unsafe extern "C" fn(*mut RawHlist, *mut c_void, *mut c_void) -> i32>,
+// ---------------------------------------------------------------------------
+// `HlistOps` — TRAIT-OPS conversion of the old `hlist_func_struct`
+// fn-pointer table (4 raw `Option<unsafe extern "C" fn(...)>` slots) into a
+// single trait, `Cdev`/`Pcache`/`Netdev`/`IrqHandler` precedent.
+//
+// None-semantics: ALL FOUR methods are REQUIRED (no defaulted body), unlike
+// e.g. `PcacheOps`'s optional slots. Evidence from every call site below:
+// `Hlist::validate()` (the sole gate every dispatching entry point
+// -- `get`/`put`/`pop`/`len`/`*_rcu` -- runs before touching `func`) rejected
+// a hlist unless `cmp_node`/`get_node`/`hash`/`get_entry` were ALL `Some`,
+// and `Hlist::init()` refused construction unless all four were supplied
+// together. No table anywhere in the tree (grep-confirmed: bufcache, fdt
+// compat/phandle, proctab, tmpfs dir, vfs sb-inode) ever populated a subset
+// -- it was always "all four or none". So the *whole table* collapses to a
+// single `Option<&'static dyn HlistOps>` on [`RawHlist`]: `None` reproduces
+// the old all-`None` (freshly zeroed, pre-`init`) state exactly, and `Some`
+// reproduces the old all-`Some` (post-`init`) state exactly; the individual
+// `call_*` dispatchers below still each document their own (per-method)
+// contract, matching the original per-slot doc comments.
+pub trait HlistOps: Sync {
+    /// Compute this node's hash. Mirrors the old `func.hash` slot.
+    ///
+    /// # Safety
+    /// `node` must be a live, caller-owned node this hlist knows how to
+    /// hash (a lookup key or a registered node, per the caller's contract).
+    unsafe fn hash(&self, node: *mut c_void) -> HtHash;
+
+    /// Recover the owning node from one of its linked hlist entries.
+    /// Mirrors the old `func.get_node` slot.
+    ///
+    /// # Safety
+    /// `entry` must be a live [`HlistEntry`] currently linked into one of
+    /// this hlist's buckets.
+    unsafe fn get_node(&self, entry: *mut HlistEntry) -> *mut c_void;
+
+    /// Recover a node's embedded hlist entry. Mirrors the old
+    /// `func.get_entry` slot.
+    ///
+    /// # Safety
+    /// `node` must be a live, caller-owned node.
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut HlistEntry;
+
+    /// Compare two nodes for hash-bucket equality (`0` iff equal). Mirrors
+    /// the old `func.cmp_node` slot.
+    ///
+    /// # Safety
+    /// `hlist` must be the live hlist this ops table is installed on;
+    /// `n1`/`n2` must be live nodes as passed by the caller.
+    unsafe fn cmp_node(&self, hlist: *mut Hlist, n1: *mut c_void, n2: *mut c_void) -> i32;
 }
 
 #[repr(C)]
@@ -104,17 +150,31 @@ pub struct RawHlistEntry {
 pub struct RawHlist {
     pub bucket_cnt: u64,
     pub elem_cnt: i64,
-    pub func: RawHlistFunc,
+    /// The hlist's dispatch table -- a real Rust trait object,
+    /// `Option<&'static dyn HlistOps>` (a 16-byte fat pointer; `None` is
+    /// the pre-`Hlist::init` / zeroed placeholder state, matching the old
+    /// all-`None` `func` value bit-for-bit: `Option<&dyn Trait>` niches on
+    /// the data pointer being null, so an all-zero `RawHlist` still reads
+    /// back `ops == None`, exactly like the old all-`None` `RawHlistFunc`
+    /// did under `MaybeUninit::zeroed()` in `bufcache.rs`/`proc_shims.rs`).
+    pub ops: Option<&'static dyn HlistOps>,
     pub buckets: [RawHlistBucket; 0],
 }
 
 // P3-N1 hardcoded layout proof — values captured from the pre-nativization
 // bindgen output (kernel_bindings.rs) for `kernel/inc/hlist_type.h`'s
-// `hlist_bucket_t` (== `struct list_node`), `struct hlist_entry`
-// (list_node_t + pointer), `struct hlist_func_struct` (4 function
-// pointers) and `struct hlist_struct` (u64 + i64 + hlist_func_t +
-// flexible bucket array). All 8-byte members, no padding, on
+// `hlist_bucket_t` (== `struct list_node`) and `struct hlist_entry`
+// (list_node_t + pointer). All 8-byte members, no padding, on
 // riscv64/lp64d.
+//
+// TRAIT-OPS: `struct hlist_func_struct` (4 function pointers, 32 bytes) is
+// GONE -- replaced by the `HlistOps` trait above -- so `hlist_struct`
+// shrinks: `u64 + i64 + 16-byte `Option<&dyn HlistOps>` fat pointer +
+// [bucket; 0]` = 32 bytes (was 48). Every embedder (`BCacheHash.cached`,
+// `ProcTable.procs`, `VfsSuperblock.inodes`, `TmpfsDirData.children`) feels
+// this shrink in its OWN following-field offsets -- each file's own
+// layout-assert block documents its honest new numbers (see
+// `bufcache.rs`/`proc/proc_shims.rs`/`vfs/fs.rs`/`vfs/tmpfs/inode.rs`).
 const _: () = {
     assert!(core::mem::size_of::<RawHlistBucket>() == 16, "hlist_bucket_t == list_node: 2 x 8-byte pointer");
     assert!(core::mem::align_of::<RawHlistBucket>() == 8, "hlist_bucket_t: natural pointer alignment");
@@ -124,19 +184,21 @@ const _: () = {
     assert!(core::mem::offset_of!(RawHlistEntry, list_entry) == 0, "hlist_entry.list_entry offset");
     assert!(core::mem::offset_of!(RawHlistEntry, bucket) == 16, "hlist_entry.bucket offset");
 
-    assert!(core::mem::size_of::<RawHlistFunc>() == 32, "hlist_func_struct: 4 x 8-byte fn pointer");
-    assert!(core::mem::align_of::<RawHlistFunc>() == 8, "hlist_func_struct: natural pointer alignment");
-    assert!(core::mem::offset_of!(RawHlistFunc, hash) == 0, "hlist_func_struct.hash offset");
-    assert!(core::mem::offset_of!(RawHlistFunc, get_node) == 8, "hlist_func_struct.get_node offset");
-    assert!(core::mem::offset_of!(RawHlistFunc, get_entry) == 16, "hlist_func_struct.get_entry offset");
-    assert!(core::mem::offset_of!(RawHlistFunc, cmp_node) == 24, "hlist_func_struct.cmp_node offset");
+    assert!(
+        core::mem::size_of::<Option<&'static dyn HlistOps>>() == 16,
+        "hlist ops fat pointer size"
+    );
+    assert!(
+        core::mem::align_of::<Option<&'static dyn HlistOps>>() == 8,
+        "hlist ops fat pointer alignment"
+    );
 
-    assert!(core::mem::size_of::<RawHlist>() == 48, "hlist_struct: u64 + i64 + 32-byte func struct + [bucket; 0]");
+    assert!(core::mem::size_of::<RawHlist>() == 32, "hlist_struct: u64 + i64 + 16-byte ops fat pointer + [bucket; 0]");
     assert!(core::mem::align_of::<RawHlist>() == 8, "hlist_struct: natural 8-byte alignment");
     assert!(core::mem::offset_of!(RawHlist, bucket_cnt) == 0, "hlist_struct.bucket_cnt offset");
     assert!(core::mem::offset_of!(RawHlist, elem_cnt) == 8, "hlist_struct.elem_cnt offset");
-    assert!(core::mem::offset_of!(RawHlist, func) == 16, "hlist_struct.func offset");
-    assert!(core::mem::offset_of!(RawHlist, buckets) == 48, "hlist_struct.buckets (flexible array) offset");
+    assert!(core::mem::offset_of!(RawHlist, ops) == 16, "hlist_struct.ops offset");
+    assert!(core::mem::offset_of!(RawHlist, buckets) == 32, "hlist_struct.buckets (flexible array) offset");
 };
 
 // ---------------------------------------------------------------------------
@@ -433,32 +495,32 @@ impl HlistEntry {
 
 impl Hlist {
     /// # Safety
-    /// `hlist` must point to a live, `hash`-having `Hlist`; `node` per the
-    /// callback's own contract (non-null, caller-supplied).
+    /// `hlist` must point to a live `Hlist` with `ops` installed; `node`
+    /// per the trait method's own contract (non-null, caller-supplied).
     #[inline(always)]
     unsafe fn call_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
-        unsafe { ((*hlist).func.hash.expect("BUG: hlist: func.hash is None"))(node) }
+        unsafe { (*hlist).ops.expect("BUG: hlist: ops is None").hash(node) }
     }
 
     /// # Safety
-    /// Same contract as [`Hlist::call_hash`], for `func.get_node`.
+    /// Same contract as [`Hlist::call_hash`], for `HlistOps::get_node`.
     #[inline(always)]
     unsafe fn call_get_node(hlist: *mut Hlist, entry: *mut HlistEntry) -> *mut c_void {
-        unsafe { ((*hlist).func.get_node.expect("BUG: hlist: func.get_node is None"))(entry) }
+        unsafe { (*hlist).ops.expect("BUG: hlist: ops is None").get_node(entry) }
     }
 
     /// # Safety
-    /// Same contract as [`Hlist::call_hash`], for `func.get_entry`.
+    /// Same contract as [`Hlist::call_hash`], for `HlistOps::get_entry`.
     #[inline(always)]
     unsafe fn call_get_entry(hlist: *mut Hlist, node: *mut c_void) -> *mut HlistEntry {
-        unsafe { ((*hlist).func.get_entry.expect("BUG: hlist: func.get_entry is None"))(node) }
+        unsafe { (*hlist).ops.expect("BUG: hlist: ops is None").get_entry(node) }
     }
 
     /// # Safety
-    /// Same contract as [`Hlist::call_hash`], for `func.cmp_node`.
+    /// Same contract as [`Hlist::call_hash`], for `HlistOps::cmp_node`.
     #[inline(always)]
     unsafe fn call_cmp_node(hlist: *mut Hlist, n1: *mut c_void, n2: *mut c_void) -> i32 {
-        unsafe { ((*hlist).func.cmp_node.expect("BUG: hlist: func.cmp_node is None"))(hlist, n1, n2) }
+        unsafe { (*hlist).ops.expect("BUG: hlist: ops is None").cmp_node(hlist, n1, n2) }
     }
 
     /// # Safety
@@ -514,8 +576,11 @@ impl Hlist {
             if (*hlist).bucket_cnt == 0 {
                 return false;
             }
-            let f = &(*hlist).func;
-            f.cmp_node.is_some() && f.get_node.is_some() && f.hash.is_some() && f.get_entry.is_some()
+            // TRAIT-OPS: the four old per-slot `is_some()` checks collapse
+            // into one -- every table in the tree was always "all four
+            // slots or none" (see `HlistOps`'s doc comment), so a single
+            // `ops.is_some()` is behaviorally identical.
+            (*hlist).ops.is_some()
         }
     }
 
@@ -685,17 +750,18 @@ impl Hlist {
 
     /// # Safety
     /// `hlist` must be null or point to writable, zero-or-more-buckets-sized
-    /// storage; `func` must be null or point to a live `HlistFunc`.
-    pub(crate) unsafe fn init(hlist: *mut Hlist, bucket_cnt: u64, func: *mut HlistFunc) -> i32 {
+    /// storage.
+    ///
+    /// TRAIT-OPS: `func: *mut HlistFunc` (a pointer to a 4-slot fn-pointer
+    /// struct, copied wholesale into `(*hlist).func`) became `ops:
+    /// Option<&'static dyn HlistOps>` (the value itself -- no indirection
+    /// needed, a trait object reference is already a plain value to copy).
+    /// `func.is_null() || (*func).slot.is_none()` (any of 4) collapses to
+    /// `ops.is_none()` -- see [`HlistOps`]'s doc comment for why that's
+    /// behaviorally identical.
+    pub(crate) unsafe fn init(hlist: *mut Hlist, bucket_cnt: u64, ops: Option<&'static dyn HlistOps>) -> i32 {
         unsafe {
-            if hlist.is_null() || func.is_null() {
-                return -1;
-            }
-            if (*func).get_entry.is_none()
-                || (*func).get_node.is_none()
-                || (*func).hash.is_none()
-                || (*func).cmp_node.is_none()
-            {
+            if hlist.is_null() || ops.is_none() {
                 return -1;
             }
             if bucket_cnt == 0 || bucket_cnt > HLIST_BUCKET_CNT_MAX {
@@ -707,7 +773,7 @@ impl Hlist {
             }
 
             (*hlist).bucket_cnt = bucket_cnt;
-            (*hlist).func = *func;
+            (*hlist).ops = ops;
             (*hlist).elem_cnt = 0;
 
             0
@@ -722,7 +788,7 @@ impl Hlist {
             if hlist.is_null() || node.is_null() {
                 return 0;
             }
-            if (*hlist).func.hash.is_none() {
+            if (*hlist).ops.is_none() {
                 return 0;
             }
             Self::call_hash(hlist, node)

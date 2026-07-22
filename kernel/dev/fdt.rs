@@ -120,7 +120,7 @@ use crate::bindings::{
     list_node_t, mem_region, platform_info, rb_node, rb_root, rb_root_opts, EMAC_MAX, N_VIRTIO,
     PCIE_REG_MAX, SDHCI_MAX,
 };
-use crate::hlist::{Hlist, HlistEntry, HlistFunc, HtHash};
+use crate::hlist::{Hlist, HlistEntry, HlistOps, HtHash};
 use crate::machine;
 
 // ---------------------------------------------------------------------------
@@ -1845,85 +1845,87 @@ unsafe fn hlist_entry_init(entry: *mut HlistEntry) {
 }
 }
 
-extern "C" fn fdt_compat_hash_func(data: *mut c_void) -> HtHash {
-    let node = data as *mut FdtCompatHashNode;
-    // SAFETY: `data` is a live `FdtCompatHashNode*` (hlist callback
-    // contract).
-    unsafe { Fdt::hlist_hash_str((*node).compat, (*node).compat_len) }
-}
+// TRAIT-OPS: the two old `HlistFunc` fn-pointer tables ->
+// `FdtCompatHlistOps`/`FdtPhandleHlistOps`, ZSTs implementing `HlistOps`.
+// Bodies are byte-identical to the old free fns; only the receiver
+// (`&self`) and the `extern "C"` wrapper are gone.
+struct FdtCompatHlistOps;
 
-extern "C" fn fdt_compat_cmp_func(_hlist: *mut Hlist, node: *mut c_void, key: *mut c_void) -> c_int {
-    let a = node as *mut FdtCompatHashNode;
-    let b = key as *mut FdtCompatHashNode;
-    // SAFETY: `node`/`key` are live `FdtCompatHashNode*` (hlist callback
-    // contract).
-    unsafe {
-        let min_len = core::cmp::min((*a).compat_len, (*b).compat_len);
-        let cmp = strncmp((*a).compat, (*b).compat, min_len);
-        if cmp != 0 {
-            return cmp;
+impl HlistOps for FdtCompatHlistOps {
+    unsafe fn hash(&self, data: *mut c_void) -> HtHash {
+        let node = data as *mut FdtCompatHashNode;
+        // SAFETY: `data` is a live `FdtCompatHashNode*` (hlist callback
+        // contract).
+        unsafe { Fdt::hlist_hash_str((*node).compat, (*node).compat_len) }
+    }
+
+    unsafe fn cmp_node(&self, _hlist: *mut Hlist, node: *mut c_void, key: *mut c_void) -> c_int {
+        let a = node as *mut FdtCompatHashNode;
+        let b = key as *mut FdtCompatHashNode;
+        // SAFETY: `node`/`key` are live `FdtCompatHashNode*` (hlist callback
+        // contract).
+        unsafe {
+            let min_len = core::cmp::min((*a).compat_len, (*b).compat_len);
+            let cmp = strncmp((*a).compat, (*b).compat, min_len);
+            if cmp != 0 {
+                return cmp;
+            }
+            if (*a).compat_len > (*b).compat_len {
+                1
+            } else if (*a).compat_len < (*b).compat_len {
+                -1
+            } else {
+                0
+            }
         }
-        if (*a).compat_len > (*b).compat_len {
-            1
-        } else if (*a).compat_len < (*b).compat_len {
-            -1
-        } else {
-            0
-        }
+    }
+
+    unsafe fn get_node(&self, entry: *mut HlistEntry) -> *mut c_void {
+        // `hash_entry` is `FdtCompatHashNode`'s first field: offset-0 cast.
+        entry as *mut c_void
+    }
+
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut HlistEntry {
+        node as *mut HlistEntry
     }
 }
 
-extern "C" fn fdt_compat_get_node_func(entry: *mut HlistEntry) -> *mut c_void {
-    // `hash_entry` is `FdtCompatHashNode`'s first field: offset-0 cast.
-    entry as *mut c_void
-}
+static FDT_COMPAT_HLIST_OPS: FdtCompatHlistOps = FdtCompatHlistOps;
 
-extern "C" fn fdt_compat_get_entry_func(node: *mut c_void) -> *mut HlistEntry {
-    node as *mut HlistEntry
-}
+struct FdtPhandleHlistOps;
 
-static FDT_COMPAT_HLIST_FUNCS: HlistFunc = HlistFunc {
-    hash: Some(fdt_compat_hash_func),
-    get_node: Some(fdt_compat_get_node_func),
-    get_entry: Some(fdt_compat_get_entry_func),
-    cmp_node: Some(fdt_compat_cmp_func),
-};
+impl HlistOps for FdtPhandleHlistOps {
+    unsafe fn hash(&self, data: *mut c_void) -> HtHash {
+        let node = data as *mut FdtPhandleHashNode;
+        // SAFETY: `data` is a live `FdtPhandleHashNode*`.
+        unsafe { (*node).phandle as HtHash }
+    }
 
-extern "C" fn fdt_phandle_hash_func(data: *mut c_void) -> HtHash {
-    let node = data as *mut FdtPhandleHashNode;
-    // SAFETY: `data` is a live `FdtPhandleHashNode*`.
-    unsafe { (*node).phandle as HtHash }
-}
-
-extern "C" fn fdt_phandle_cmp_func(_hlist: *mut Hlist, node: *mut c_void, key: *mut c_void) -> c_int {
-    let a = node as *mut FdtPhandleHashNode;
-    let b = key as *mut FdtPhandleHashNode;
-    // SAFETY: `node`/`key` are live `FdtPhandleHashNode*`.
-    unsafe {
-        if (*a).phandle > (*b).phandle {
-            1
-        } else if (*a).phandle < (*b).phandle {
-            -1
-        } else {
-            0
+    unsafe fn cmp_node(&self, _hlist: *mut Hlist, node: *mut c_void, key: *mut c_void) -> c_int {
+        let a = node as *mut FdtPhandleHashNode;
+        let b = key as *mut FdtPhandleHashNode;
+        // SAFETY: `node`/`key` are live `FdtPhandleHashNode*`.
+        unsafe {
+            if (*a).phandle > (*b).phandle {
+                1
+            } else if (*a).phandle < (*b).phandle {
+                -1
+            } else {
+                0
+            }
         }
+    }
+
+    unsafe fn get_node(&self, entry: *mut HlistEntry) -> *mut c_void {
+        entry as *mut c_void
+    }
+
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut HlistEntry {
+        node as *mut HlistEntry
     }
 }
 
-extern "C" fn fdt_phandle_get_node_func(entry: *mut HlistEntry) -> *mut c_void {
-    entry as *mut c_void
-}
-
-extern "C" fn fdt_phandle_get_entry_func(node: *mut c_void) -> *mut HlistEntry {
-    node as *mut HlistEntry
-}
-
-static FDT_PHANDLE_HLIST_FUNCS: HlistFunc = HlistFunc {
-    hash: Some(fdt_phandle_hash_func),
-    get_node: Some(fdt_phandle_get_node_func),
-    get_entry: Some(fdt_phandle_get_entry_func),
-    cmp_node: Some(fdt_phandle_cmp_func),
-};
+static FDT_PHANDLE_HLIST_OPS: FdtPhandleHlistOps = FdtPhandleHlistOps;
 
 impl FdtCompatHashNode {
 /// Mirrors `__fdt_alloc_compat_hash_node()`.
@@ -2064,7 +2066,7 @@ unsafe fn index_node_phandle(&self, fdt_node: *mut FdtNode) {
 
 impl Fdt {
 /// Mirrors `__fdt_alloc_hlist()`.
-unsafe fn fdt_alloc_hlist(bucket_cnt: u64, func: *const HlistFunc) -> *mut Hlist {
+unsafe fn fdt_alloc_hlist(bucket_cnt: u64, ops: Option<&'static dyn HlistOps>) -> *mut Hlist {
     let header_size = size_of::<Hlist>();
     let size = header_size + bucket_cnt as usize * size_of::<list_node_t>();
     // SAFETY: allocator call.
@@ -2075,9 +2077,9 @@ unsafe fn fdt_alloc_hlist(bucket_cnt: u64, func: *const HlistFunc) -> *mut Hlist
     // SAFETY: freshly allocated.
     unsafe { memset(hlist as *mut c_void, 0, size) };
 
-    // SAFETY: `hlist` sized for `bucket_cnt` buckets above; `func` is a
-    // live 'static.
-    let ret = unsafe { crate::hlist::Hlist::init(hlist, bucket_cnt, func as *mut HlistFunc) };
+    // SAFETY: `hlist` sized for `bucket_cnt` buckets above; `ops` is a
+    // live 'static trait object reference.
+    let ret = unsafe { crate::hlist::Hlist::init(hlist, bucket_cnt, ops) };
     if ret != 0 {
         return ptr::null_mut();
     }
@@ -2092,7 +2094,7 @@ impl FdtBlobInfo {
 unsafe fn build_indexes(&mut self) {
     // SAFETY: `self` live.
     unsafe {
-        self.compat_table = Fdt::fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &raw const FDT_COMPAT_HLIST_FUNCS);
+        self.compat_table = Fdt::fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, Some(&FDT_COMPAT_HLIST_OPS));
     }
     if self.compat_table.is_null() {
         crate::kprintln!("fdt: failed to alloc compat hash table");
@@ -2101,7 +2103,7 @@ unsafe fn build_indexes(&mut self) {
 
     // SAFETY: `self` live.
     unsafe {
-        self.phandle_table = Fdt::fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &raw const FDT_PHANDLE_HLIST_FUNCS);
+        self.phandle_table = Fdt::fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, Some(&FDT_PHANDLE_HLIST_OPS));
     }
     if self.phandle_table.is_null() {
         crate::kprintln!("fdt: failed to alloc phandle hash table");

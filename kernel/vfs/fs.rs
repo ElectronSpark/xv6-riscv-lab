@@ -81,12 +81,13 @@ use core::ptr;
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::bindings::{
-    fs_struct, hlist_bucket_t, hlist_entry_t, hlist_func_t, hlist_t, kobject, list_node_t,
+    fs_struct, hlist_bucket_t, hlist_entry_t, hlist_t, kobject, list_node_t,
     mutex_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
     vfs_inode, vfs_inode_ref, vfs_superblock, work_struct,
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
 };
+use crate::hlist::HlistOps;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-N5 (VFS type family, fs_struct slice).
@@ -630,27 +631,39 @@ const _: () = {
         core::mem::align_of::<VfsSuperblockFlagBits>() == 8,
         "vfs_superblock anon bitfield align"
     );
+    // TRAIT-OPS: `hlist_t`'s old `hlist_func_t` fn-pointer table (32 bytes)
+    // is gone, replaced by a 16-byte `Option<&dyn HlistOps>` fat pointer --
+    // `hlist_t`/`inodes` shrinks 48 -> 32. `inodes` itself stays at offset
+    // 24; every field between it and `lock` (`inodes_buckets` .. `ops`)
+    // shifts -16. `lock: rwsem` is itself `#[repr(align(64))]`
+    // (`lock/rwsem.rs`), so it must start on its OWN 64-byte boundary: the
+    // raw offset right after `ops`/`_pad0` is 1136 (not a multiple of 64),
+    // so the compiler inserts an invisible 16-byte alignment gap and
+    // `lock` lands back at the SAME offset as before the shrink (1152) --
+    // and every field from `lock` onward, plus the struct's own total
+    // size, is therefore completely UNCHANGED (the whole 16-byte shrink is
+    // absorbed by that one alignment gap, not visible past it).
     assert!(core::mem::size_of::<VfsSuperblock>() == 1472, "vfs_superblock size");
     assert!(core::mem::align_of::<VfsSuperblock>() == 64, "vfs_superblock alignment");
     assert!(core::mem::offset_of!(VfsSuperblock, siblings) == 0, "vfs_superblock.siblings offset");
     assert!(core::mem::offset_of!(VfsSuperblock, fs_type) == 16, "vfs_superblock.fs_type offset");
     assert!(core::mem::offset_of!(VfsSuperblock, inodes) == 24, "vfs_superblock.inodes offset");
     assert!(
-        core::mem::offset_of!(VfsSuperblock, inodes_buckets) == 72,
+        core::mem::offset_of!(VfsSuperblock, inodes_buckets) == 56,
         "vfs_superblock.inodes_buckets offset"
     );
-    assert!(core::mem::offset_of!(VfsSuperblock, flags) == 1048, "vfs_superblock anon bitfield offset");
-    assert!(core::mem::offset_of!(VfsSuperblock, parent_sb) == 1056, "vfs_superblock.parent_sb offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, flags) == 1032, "vfs_superblock anon bitfield offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, parent_sb) == 1040, "vfs_superblock.parent_sb offset");
     assert!(
-        core::mem::offset_of!(VfsSuperblock, mountpoint) == 1064,
+        core::mem::offset_of!(VfsSuperblock, mountpoint) == 1048,
         "vfs_superblock.mountpoint offset"
     );
-    assert!(core::mem::offset_of!(VfsSuperblock, device) == 1072, "vfs_superblock.device offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, device) == 1056, "vfs_superblock.device offset");
     assert!(
-        core::mem::offset_of!(VfsSuperblock, root_inode) == 1080,
+        core::mem::offset_of!(VfsSuperblock, root_inode) == 1064,
         "vfs_superblock.root_inode offset"
     );
-    assert!(core::mem::offset_of!(VfsSuperblock, ops) == 1088, "vfs_superblock.ops offset");
+    assert!(core::mem::offset_of!(VfsSuperblock, ops) == 1072, "vfs_superblock.ops offset");
     assert!(core::mem::offset_of!(VfsSuperblock, lock) == 1152, "vfs_superblock.lock offset");
     assert!(core::mem::offset_of!(VfsSuperblock, fs_data) == 1344, "vfs_superblock.fs_data offset");
     assert!(
@@ -722,8 +735,8 @@ unsafe extern "C" {
 // `crate::{hlist,kobject}` now that their `#[no_mangle]` exports are gone;
 // this file's original extern declarations asserted `safe fn` (usual
 // FFI-facade convention). Thin wrappers preserve that safe facade for the
-// unchanged call sites (`hlist_t`/`hlist_func_t`/`kobject` are the same
-// bindgen types as the owners' `Hlist`/`HlistFunc`/`Kobject` aliases).
+// unchanged call sites (`hlist_t`/`kobject` are the same bindgen types as
+// the owners' `Hlist`/`Kobject` aliases).
 // The `static inline` bucket/entry walkers (`hlist_first_entry`,
 // `hlist_next_entry`, `HLIST_FIRST_NODE`, ...) have no external linkage
 // in the C original and are reimplemented below, specialized to
@@ -975,12 +988,55 @@ pub(crate) static mut vfs_root_inode: vfs_inode = unsafe { core::mem::zeroed() }
 // C original — `static`, internal linkage, referenced only by address).
 // ===========================================================================
 
-static SB_INODE_HLIST_FUNCS: hlist_func_t = hlist_func_t {
-    hash: Some(VfsSuperblock::sb_inode_hash_fn),
-    get_node: Some(VfsSuperblock::sb_inode_get_node_fn),
-    get_entry: Some(VfsSuperblock::sb_inode_get_entry_fn),
-    cmp_node: Some(VfsSuperblock::sb_inode_cmp_fn),
-};
+// TRAIT-OPS: the old `hlist_func_t` fn-pointer table (`VfsSuperblock::
+// sb_inode_hash_fn`/`sb_inode_get_node_fn`/`sb_inode_get_entry_fn`/
+// `sb_inode_cmp_fn` -- already associated fns used *as* fn pointers) ->
+// `SbInodeHlistOps`, a ZST implementing `HlistOps`. Bodies absorbed
+// verbatim from those four now-deleted associated fns; only the receiver
+// (`&self`) and the `unsafe extern "C"` wrapper are gone.
+struct SbInodeHlistOps;
+
+impl HlistOps for SbInodeHlistOps {
+    unsafe fn hash(&self, node: *mut c_void) -> u64 {
+        // SAFETY: `node` is always a live `*mut vfs_inode` when the hash
+        // table invokes this (the crate-wide hlist contract).
+        unsafe { hlist_hash_uint64((*(node as *mut vfs_inode)).ino) }
+    }
+
+    unsafe fn cmp_node(&self, _hlist: *mut hlist_t, node: *mut c_void, key: *mut c_void) -> c_int {
+        // SAFETY: same contract as `hash`.
+        unsafe {
+            let a = (*(node as *mut vfs_inode)).ino;
+            let b = (*(key as *mut vfs_inode)).ino;
+            if a > b {
+                1
+            } else if a < b {
+                -1
+            } else {
+                0
+            }
+        }
+    }
+
+    unsafe fn get_node(&self, entry: *mut hlist_entry_t) -> *mut c_void {
+        // `hash_entry` is `vfs_inode`'s first field (offset 0).
+        if entry.is_null() {
+            ptr::null_mut()
+        } else {
+            entry as *mut c_void
+        }
+    }
+
+    unsafe fn get_entry(&self, node: *mut c_void) -> *mut hlist_entry_t {
+        if node.is_null() {
+            ptr::null_mut()
+        } else {
+            node as *mut hlist_entry_t
+        }
+    }
+}
+
+static SB_INODE_HLIST_OPS: SbInodeHlistOps = SbInodeHlistOps;
 
 /// Mirrors `hlist_hash_uint64()` (`kernel/inc/hlist.h`, `static inline`,
 /// no external linkage).
@@ -1461,48 +1517,6 @@ impl VfsSuperblock {
         })
     }
 
-    unsafe extern "C" fn sb_inode_hash_fn(node: *mut c_void) -> u64 {
-        // SAFETY: `node` is always a live `*mut vfs_inode` when the hash
-        // table invokes this (the crate-wide hlist contract).
-        unsafe { hlist_hash_uint64((*(node as *mut vfs_inode)).ino) }
-    }
-
-    unsafe extern "C" fn sb_inode_cmp_fn(
-        _hlist: *mut hlist_t,
-        node: *mut c_void,
-        key: *mut c_void,
-    ) -> c_int {
-        // SAFETY: same contract as `VfsSuperblock::sb_inode_hash_fn`.
-        unsafe {
-            let a = (*(node as *mut vfs_inode)).ino;
-            let b = (*(key as *mut vfs_inode)).ino;
-            if a > b {
-                1
-            } else if a < b {
-                -1
-            } else {
-                0
-            }
-        }
-    }
-
-    unsafe extern "C" fn sb_inode_get_node_fn(entry: *mut hlist_entry_t) -> *mut c_void {
-        // `hash_entry` is `vfs_inode`'s first field (offset 0).
-        if entry.is_null() {
-            ptr::null_mut()
-        } else {
-            entry as *mut c_void
-        }
-    }
-
-    unsafe extern "C" fn sb_inode_get_entry_fn(node: *mut c_void) -> *mut hlist_entry_t {
-        if node.is_null() {
-            ptr::null_mut()
-        } else {
-            node as *mut hlist_entry_t
-        }
-    }
-
     /// # Safety
     /// `sb` must point to a live, aligned `vfs_superblock`.
     #[inline(always)]
@@ -1559,7 +1573,7 @@ impl VfsSuperblock {
             crate::hlist::Hlist::init(
                 &raw mut (*sb).inodes,
                 SB_HASH_BUCKETS as u64,
-                &SB_INODE_HLIST_FUNCS as *const hlist_func_t as *mut hlist_func_t,
+                Some(&SB_INODE_HLIST_OPS),
             );
             (*sb).fs_type = fs_type;
             (*sb).orphan_count = 0;
