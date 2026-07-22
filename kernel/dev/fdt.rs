@@ -470,7 +470,7 @@ const FDT_PHANDLE_HASH_BUCKETS: u64 = 32;
 
 // `fdt_header` field byte offsets (`kernel/inc/dev/fdt.h`'s `__PACKED`
 // struct); read via `read_be32` below rather than a Rust struct
-// definition, matching the C original's own `fdt_get_header(dtb, off)`
+// definition, matching the C original's own `Fdt::fdt_get_header(dtb, off)`
 // macro approach exactly.
 const FDT_HDR_MAGIC: usize = 0;
 const FDT_HDR_TOTALSIZE: usize = 4;
@@ -479,11 +479,27 @@ const FDT_HDR_OFF_DT_STRINGS: usize = 12;
 const FDT_HDR_OFF_MEM_RSVMAP: usize = 16;
 
 // ===========================================================================
+// Fdt -- N-OO wave (KERNEL-OO) marker/namespace type. Zero-sized, never
+// instantiated: it exists purely so the raw-blob-level helpers and the
+// no-receiver orchestration entry points (`fdt_init`,
+// `fdt_early_scan_memory`, `fdt_apply_platform_config`, `fdt_dump`/
+// `fdt_walk`, plus the generic byte-swap/hash/list utilities) become
+// associated functions instead of free-standing top-level fns. Mirrors
+// the `Scheduler`/`sched.rs` marker precedent (`baf650b`): raw pointer
+// params are kept exactly as the C original had them ("keeping raw
+// params -- namespacing only, zero behavior risk"), so every body below
+// is byte-identical to its pre-wave free-fn form modulo the `Type::`
+// qualification at call sites.
+// ===========================================================================
+pub(crate) struct Fdt;
+
+// ===========================================================================
 // Byte-swap + unaligned-read helpers. FDT structure-block tokens/props are
 // only 4-byte aligned (not 8), so every multi-byte read below goes through
 // `ptr::read_unaligned` -- never a direct `*(T*)p` deref.
 // ===========================================================================
 
+impl Fdt {
 /// Mirrors `fdt32_to_cpu`/`bswap32` -- correct in the C original (plain
 /// `|`, well-formed literals); `u32::swap_bytes` is definitionally the
 /// same byte reversal.
@@ -491,7 +507,9 @@ const FDT_HDR_OFF_MEM_RSVMAP: usize = 16;
 fn fdt32_to_cpu(x: u32) -> u32 {
     x.swap_bytes()
 }
+}
 
+impl Fdt {
 /// Mirrors `fdt64_to_cpu`/`bswap64` -- **fixed**, see this module's doc
 /// comment ("Fixed bug: bswap64/fdt64_to_cpu") for the discovered C bug
 /// and why fixing it cannot change the verified boot log.
@@ -499,7 +517,9 @@ fn fdt32_to_cpu(x: u32) -> u32 {
 fn fdt64_to_cpu(x: u64) -> u64 {
     x.swap_bytes()
 }
+}
 
+impl Fdt {
 /// Read a big-endian `u32` at a possibly-unaligned byte offset from `base`.
 ///
 /// # Safety
@@ -507,9 +527,11 @@ fn fdt64_to_cpu(x: u64) -> u64 {
 #[inline(always)]
 unsafe fn read_be32(base: *const u8, off: usize) -> u32 {
     // SAFETY: caller contract.
-    fdt32_to_cpu(unsafe { ptr::read_unaligned(base.add(off) as *const u32) })
+    Fdt::fdt32_to_cpu(unsafe { ptr::read_unaligned(base.add(off) as *const u32) })
+}
 }
 
+impl Fdt {
 /// Read a big-endian `u64` at a possibly-unaligned byte offset from `base`.
 ///
 /// # Safety
@@ -517,10 +539,12 @@ unsafe fn read_be32(base: *const u8, off: usize) -> u32 {
 #[inline(always)]
 unsafe fn read_be64(base: *const u8, off: usize) -> u64 {
     // SAFETY: caller contract.
-    fdt64_to_cpu(unsafe { ptr::read_unaligned(base.add(off) as *const u64) })
+    Fdt::fdt64_to_cpu(unsafe { ptr::read_unaligned(base.add(off) as *const u64) })
+}
 }
 
-/// Mirrors the C `fdt_get_header(dtb, offset)` macro.
+impl Fdt {
+/// Mirrors the C `Fdt::fdt_get_header(dtb, offset)` macro.
 ///
 /// # Safety
 /// `dtb` must be a valid FDT blob pointer with at least `offset + 4`
@@ -528,14 +552,16 @@ unsafe fn read_be64(base: *const u8, off: usize) -> u64 {
 #[inline(always)]
 unsafe fn fdt_get_header(dtb: *const u8, offset: usize) -> u32 {
     // SAFETY: caller contract.
-    unsafe { read_be32(dtb, offset) }
+    unsafe { Fdt::read_be32(dtb, offset) }
+}
 }
 
-/// Mirrors the C `fdt_valid(dtb)` macro. Not `#[no_mangle]`: the C header
-/// declares `int fdt_valid(void *dtb);` as a real function prototype, but
+impl Fdt {
+/// Mirrors the C `Fdt::fdt_valid(dtb)` macro. Not `#[no_mangle]`: the C header
+/// declares `int Fdt::fdt_valid(void *dtb);` as a real function prototype, but
 /// `kernel/dev/fdt.c` only ever defines it as this same-named macro
 /// (shadowing the prototype within that one translation unit) -- grep
-/// confirms no other `.c` file in the tree ever calls `fdt_valid()` as an
+/// confirms no other `.c` file in the tree ever calls `Fdt::fdt_valid()` as an
 /// actual function, so no such symbol was ever linkable, and none needs
 /// to be exported here either.
 ///
@@ -543,10 +569,12 @@ unsafe fn fdt_get_header(dtb: *const u8, offset: usize) -> u32 {
 /// `dtb` must be null or point to at least 4 readable bytes.
 #[inline(always)]
 unsafe fn fdt_valid(dtb: *mut c_void) -> bool {
-    !dtb.is_null() && unsafe { fdt_get_header(dtb as *const u8, FDT_HDR_MAGIC) } == FDT_MAGIC
+    !dtb.is_null() && unsafe { Fdt::fdt_get_header(dtb as *const u8, FDT_HDR_MAGIC) } == FDT_MAGIC
+}
 }
 
-/// Mirrors the C `fdt_totalsize(dtb)` macro (same never-a-real-symbol
+impl Fdt {
+/// Mirrors the C `Fdt::fdt_totalsize(dtb)` macro (same never-a-real-symbol
 /// situation as [`fdt_valid`] above).
 ///
 /// # Safety
@@ -554,7 +582,8 @@ unsafe fn fdt_valid(dtb: *mut c_void) -> bool {
 #[inline(always)]
 unsafe fn fdt_totalsize(dtb: *mut c_void) -> u32 {
     // SAFETY: caller contract.
-    unsafe { fdt_get_header(dtb as *const u8, FDT_HDR_TOTALSIZE) }
+    unsafe { Fdt::fdt_get_header(dtb as *const u8, FDT_HDR_TOTALSIZE) }
+}
 }
 
 /// Mirrors the C `fdt_align(x)` macro: round up to a 4-byte boundary.
@@ -563,22 +592,25 @@ const fn fdt_align(x: usize) -> usize {
     (x + 3) & !3
 }
 
-/// Mirrors `fdt_get_string()`.
+impl Fdt {
+/// Mirrors `Fdt::fdt_get_string()`.
 ///
 /// # Safety
 /// `dtb` must be a valid FDT blob; `offset` must be a valid offset into
 /// its strings block.
 unsafe fn fdt_get_string(dtb: *const u8, offset: u32) -> *const c_char {
     // SAFETY: caller contract.
-    let str_off = unsafe { fdt_get_header(dtb, FDT_HDR_OFF_DT_STRINGS) };
+    let str_off = unsafe { Fdt::fdt_get_header(dtb, FDT_HDR_OFF_DT_STRINGS) };
     unsafe { dtb.add(str_off as usize + offset as usize) as *const c_char }
+}
 }
 
 // ===========================================================================
 // fdt_early_scan_memory -- lightweight linear scan, no allocation, no tree.
 // ===========================================================================
 
-/// Rust port of `fdt_early_scan_memory()`.
+impl Fdt {
+/// Rust port of `Fdt::fdt_early_scan_memory()`.
 ///
 /// # Safety
 /// `dtb` must be null or a valid FDT blob pointer; `base_out`/`size_out`
@@ -591,13 +623,13 @@ pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
     size_out: *mut u64,
 ) -> c_int {
     // SAFETY: caller contract.
-    if !unsafe { fdt_valid(dtb) } || base_out.is_null() || size_out.is_null() {
+    if !unsafe { Fdt::fdt_valid(dtb) } || base_out.is_null() || size_out.is_null() {
         return -1;
     }
 
     let base = dtb as *const u8;
     // SAFETY: `dtb` valid per the check above.
-    let mut p = unsafe { fdt_get_header(base, FDT_HDR_OFF_DT_STRUCT) } as usize;
+    let mut p = unsafe { Fdt::fdt_get_header(base, FDT_HDR_OFF_DT_STRUCT) } as usize;
     let mut depth: i32 = 0;
     let mut in_memory_node = false;
     let mut root_addr_cells: i32 = 2;
@@ -606,7 +638,7 @@ pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
     loop {
         // SAFETY: FDT structure-block tokens are always readable up to
         // `FDT_END`; the original C has no bounds check here either.
-        let token = unsafe { read_be32(base, p) };
+        let token = unsafe { Fdt::read_be32(base, p) };
         p += 4;
 
         match token {
@@ -634,12 +666,12 @@ pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
             }
             FDT_PROP => {
                 // SAFETY: see the token read above.
-                let len = unsafe { read_be32(base, p) };
+                let len = unsafe { Fdt::read_be32(base, p) };
                 p += 4;
-                let nameoff = unsafe { read_be32(base, p) };
+                let nameoff = unsafe { Fdt::read_be32(base, p) };
                 p += 4;
                 // SAFETY: `nameoff` comes from the DTB's own prop header.
-                let propname = unsafe { fdt_get_string(base, nameoff) };
+                let propname = unsafe { Fdt::fdt_get_string(base, nameoff) };
                 let data = unsafe { base.add(p) };
                 p += fdt_align(len as usize);
 
@@ -648,12 +680,12 @@ pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
                     // guard matches the C `len >= 4` check before reading a
                     // cell.
                     if len >= 4 && unsafe { strcmp(propname, c"#address-cells".as_ptr()) } == 0 {
-                        root_addr_cells = unsafe { read_be32(data, 0) } as i32;
+                        root_addr_cells = unsafe { Fdt::read_be32(data, 0) } as i32;
                     } else if len >= 4
                         // SAFETY: see above.
                         && unsafe { strcmp(propname, c"#size-cells".as_ptr()) } == 0
                     {
-                        root_size_cells = unsafe { read_be32(data, 0) } as i32;
+                        root_size_cells = unsafe { Fdt::read_be32(data, 0) } as i32;
                     }
                 }
 
@@ -665,17 +697,17 @@ pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
                     unsafe {
                         if root_addr_cells == 2 {
                             base_val =
-                                ((read_be32(data, 0) as u64) << 32) | read_be32(data, 4) as u64;
+                                ((Fdt::read_be32(data, 0) as u64) << 32) | Fdt::read_be32(data, 4) as u64;
                         } else {
-                            base_val = read_be32(data, 0) as u64;
+                            base_val = Fdt::read_be32(data, 0) as u64;
                         }
 
                         let size_off = root_addr_cells as usize * 4;
                         let size_val: u64 = if root_size_cells == 2 {
-                            ((read_be32(data, size_off) as u64) << 32)
-                                | read_be32(data, size_off + 4) as u64
+                            ((Fdt::read_be32(data, size_off) as u64) << 32)
+                                | Fdt::read_be32(data, size_off + 4) as u64
                         } else {
-                            read_be32(data, size_off) as u64
+                            Fdt::read_be32(data, size_off) as u64
                         };
 
                         *base_out = base_val;
@@ -689,6 +721,7 @@ pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
             _ => return -1,
         }
     }
+}
 }
 
 // ===========================================================================
@@ -725,13 +758,17 @@ struct FdtNode {
     phandle: u32,
 }
 
-/// # Safety
-/// `node` must point to a live `FdtNode` allocated by [`fdt_create_node`]
-/// (i.e. with `data_size` bytes of property data immediately following
-/// the header).
-#[inline(always)]
-unsafe fn fdt_data_ptr(node: *mut FdtNode) -> *mut u8 {
-    (node as *mut u8).wrapping_add(size_of::<FdtNode>())
+impl FdtNode {
+    /// # Safety
+    /// `self` must be a live `FdtNode` allocated by [`FdtNode::fdt_create_node`]
+    /// (i.e. with `data_size` bytes of property data immediately following
+    /// the header). N-OO: true `&self` method (goal #1) -- every call site
+    /// dereferences an already-non-null-checked `*mut FdtNode`, so forming
+    /// `&self` here never derefs a null pointer.
+    #[inline(always)]
+    unsafe fn data_ptr(&self) -> *mut u8 {
+        (self as *const FdtNode as *mut u8).wrapping_add(size_of::<FdtNode>())
+    }
 }
 
 // ===========================================================================
@@ -798,6 +835,7 @@ impl Iterator for FdtStrList {
     }
 }
 
+impl FdtNode {
 /// Iterator over a parent's children sharing `first`'s exact name (the
 /// `fdt_node_first` + `fdt_node_next_same_name` walk used for `/cpus/cpu*`
 /// and `/memory*`). Seeded with `first` (may be null -> empty). Uses
@@ -814,9 +852,10 @@ unsafe fn fdt_same_name_iter(
     core::iter::successors((!first.is_null()).then_some(first), move |&cur| {
         // SAFETY: `cur` is a live node just yielded; `parent` live for the
         // whole walk (caller contract); the tree is immutable at boot.
-        let next = unsafe { fdt_node_next_same_name(parent, cur) };
+        let next = unsafe { FdtNode::fdt_node_next_same_name(parent, cur) };
         (!next.is_null()).then_some(next)
     })
+}
 }
 
 impl FdtNode {
@@ -836,7 +875,7 @@ impl FdtNode {
     fn string_list(&self) -> FdtStrList {
         // SAFETY: `self` is a live `FdtNode`; `data_size` bytes of data
         // immediately follow the header (see [`fdt_data_ptr`]).
-        let base = unsafe { fdt_data_ptr(self as *const FdtNode as *mut FdtNode) } as *const u8;
+        let base = unsafe { self.data_ptr() } as *const u8;
         FdtStrList {
             base,
             len: self.data_size as usize,
@@ -845,7 +884,8 @@ impl FdtNode {
     }
 }
 
-/// Mirrors `strtoul()` (`kernel/inc/string.h`, `static inline`, no
+impl Fdt {
+/// Mirrors `Fdt::strtoul()` (`kernel/inc/string.h`, `static inline`, no
 /// external linkage -- reimplemented locally per this crate's
 /// established convention, e.g. `backtrace.rs`'s own copy). Only ever
 /// called with `base = 16` in this file.
@@ -884,6 +924,7 @@ unsafe fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: i32) -> u
     }
     result
 }
+}
 
 impl FdtNode {
     /// Rust port of `fdt_parse_namestring()` (goal #1 method: the receiver
@@ -909,7 +950,7 @@ impl FdtNode {
 
         self.name_size = len as u32;
         // SAFETY: `namestring` valid; `len` bytes readable.
-        self.hash = unsafe { hlist_hash_str(namestring, len) };
+        self.hash = unsafe { Fdt::hlist_hash_str(namestring, len) };
 
         // SAFETY: `namestring` valid; `len <= full_len`.
         let at_terminator = unsafe { *namestring.add(len) } == 0;
@@ -926,19 +967,20 @@ impl FdtNode {
         // SAFETY: `namestring + len + 1` is in-bounds (there's a '@' at
         // `len`, so at least a NUL follows).
         let addr_str = unsafe { namestring.add(len + 1) };
-        let parsed = unsafe { strtoul(addr_str, &raw mut endptr, 16) };
+        let parsed = unsafe { Fdt::strtoul(addr_str, &raw mut endptr, 16) };
 
         // SAFETY: `addr_str`/`endptr` valid per above.
         if unsafe { endptr as *const c_char == addr_str || *endptr != 0 } {
             // SAFETY: `addr_str` valid; `full_len - len - 1` bytes readable.
-            self.addr = unsafe { hlist_hash_str(addr_str, full_len - len - 1) };
+            self.addr = unsafe { Fdt::hlist_hash_str(addr_str, full_len - len - 1) };
         } else {
             self.addr = parsed;
         }
     }
 }
 
-/// Mirrors `hlist_hash_str()` (`kernel/inc/hlist.h`, `static inline`, no
+impl Fdt {
+/// Mirrors `Fdt::hlist_hash_str()` (`kernel/inc/hlist.h`, `static inline`, no
 /// external linkage) -- reimplemented locally per this crate's
 /// established precedent (`vfs/tmpfs/inode.rs`'s identical copy; see that
 /// file's doc comment for why `ptr::read_unaligned` replaces the C's
@@ -971,6 +1013,7 @@ unsafe fn hlist_hash_str(s: *const c_char, len: usize) -> HtHash {
         }
         ret
     }
+}
 }
 
 // ===========================================================================
@@ -1028,6 +1071,7 @@ static FDT_RB_OPTS: rb_root_opts = rb_root_opts {
     get_key_fun: Some(fdt_rb_get_key),
 };
 
+impl Fdt {
 /// Mirrors `kernel/inc/bintree.h`'s `rb_root_init()` static inline (no
 /// external linkage in C, reimplemented locally -- same precedent as
 /// `timer/timer_core.rs`'s identical helper).
@@ -1041,7 +1085,9 @@ unsafe fn fdt_rb_root_init(root: *mut rb_root) {
         (*root).opts = &raw const FDT_RB_OPTS as *mut rb_root_opts;
     }
 }
+}
 
+impl FdtNode {
 /// Mirrors `__fdt_create_node()`.
 ///
 /// # Safety
@@ -1067,41 +1113,46 @@ unsafe fn fdt_create_node(name_size: u32, data_size: u32) -> *mut FdtNode {
     }
     node
 }
+}
 
-/// Mirrors `fdt_node_lookup()`.
-///
-/// # Safety
-/// `parent` must point to a live, initialized `FdtNode`; `name` must be a
-/// valid NUL-terminated C string; `addr` must be null or point to a
-/// readable `u64`.
-// P3-1D mesh sweep: no live caller anywhere in the tree today, in C or
-// Rust (full-tree grep) -- demoted; `#[allow(dead_code)]` documents the
-// gap rather than deleting still-plausible public API.
-#[allow(dead_code)]
-pub(crate) unsafe extern "C" fn fdt_node_lookup(
-    parent: *mut FdtNode,
-    name: *const c_char,
-    addr: *mut u64,
-) -> *mut FdtNode {
-    // SAFETY: caller contract.
-    if unsafe { (*parent).child_count } == 0 {
-        return ptr::null_mut();
+impl FdtNode {
+    /// Mirrors `fdt_node_lookup()`. N-OO: true `&self` method (goal #1) --
+    /// the C original never null-checks `parent` (doc contract: "must
+    /// point to a live, initialized `FdtNode`"), so `&self` never derefs a
+    /// null pointer here (unlike the nullable-receiver `fdt_get_prop`
+    /// family below, which stay raw-pointer associated fns).
+    ///
+    /// # Safety
+    /// `name` must be a valid NUL-terminated C string; `addr` must be null
+    /// or point to a readable `u64`.
+    // P3-1D mesh sweep: no live caller anywhere in the tree today, in C or
+    // Rust (full-tree grep) -- demoted; `#[allow(dead_code)]` documents the
+    // gap rather than deleting still-plausible public API.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn lookup(&self, name: *const c_char, addr: *mut u64) -> *mut FdtNode {
+        if self.child_count == 0 {
+            return ptr::null_mut();
+        }
+        let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
+        // SAFETY: `dummy` is a local, exclusively owned; `name` valid per
+        // caller contract.
+        unsafe { dummy.parse_namestring(name, !addr.is_null()) };
+        if !addr.is_null() {
+            // SAFETY: `addr` valid per caller contract.
+            dummy.addr = unsafe { *addr };
+        }
+        // SAFETY: `dummy` local and live for the duration of this call;
+        // the `&self.children as *const -> *mut` cast matches the
+        // established `first_child_named`/`children` precedent (lookup
+        // does not mutate the tree).
+        let node = unsafe {
+            crate::bintree::rb_find_key(&self.children as *const rb_root as *mut rb_root, &raw mut dummy as u64)
+        };
+        if node.is_null() {
+            return ptr::null_mut();
+        }
+        node as *mut FdtNode
     }
-    let mut dummy: FdtNode = unsafe { core::mem::zeroed() };
-    // SAFETY: `dummy` is a local, exclusively owned; `name` valid per
-    // caller contract.
-    unsafe { dummy.parse_namestring(name, !addr.is_null()) };
-    if !addr.is_null() {
-        // SAFETY: `addr` valid per caller contract.
-        dummy.addr = unsafe { *addr };
-    }
-    // SAFETY: `parent` live per caller contract; `dummy` local and live
-    // for the duration of this call.
-    let node = unsafe { crate::bintree::rb_find_key(&raw mut (*parent).children, &raw mut dummy as u64) };
-    if node.is_null() {
-        return ptr::null_mut();
-    }
-    node as *mut FdtNode
 }
 
 impl FdtNode {
@@ -1146,6 +1197,7 @@ impl FdtNode {
     }
 }
 
+impl FdtNode {
 /// Mirrors `__fdt_node_next_same_name()`.
 ///
 /// # Safety
@@ -1168,6 +1220,7 @@ unsafe fn fdt_node_next_same_name(parent: *mut FdtNode, current: *mut FdtNode) -
     }
     next_fdt
 }
+}
 
 // ===========================================================================
 // FdtBlobInfo -- parsed FDT tree + reserved-memory list + lookup indexes.
@@ -1183,7 +1236,8 @@ struct FdtBlobInfo {
     phandle_table: *mut Hlist,
 }
 
-/// Mirrors `fdt_path_lookup()`.
+impl FdtBlobInfo {
+/// Mirrors `FdtBlobInfo::fdt_path_lookup()`.
 ///
 /// # Safety
 /// `blob` must be null or point to a live `FdtBlobInfo`; `path` must be
@@ -1239,12 +1293,12 @@ pub(crate) unsafe extern "C" fn fdt_path_lookup(blob: *mut FdtBlobInfo, path: *c
             let child;
             if at < end {
                 let name_len = at.offset_from(p) as usize;
-                let addr = strtoul(at.add(1), ptr::null_mut(), 16);
+                let addr = Fdt::strtoul(at.add(1), ptr::null_mut(), 16);
 
                 let mut dummy: FdtNode = core::mem::zeroed();
                 dummy.name = p;
                 dummy.name_size = name_len as u32;
-                dummy.hash = hlist_hash_str(p, name_len);
+                dummy.hash = Fdt::hlist_hash_str(p, name_len);
                 dummy.has_addr = true;
                 dummy.addr = addr;
 
@@ -1278,30 +1332,38 @@ pub(crate) unsafe extern "C" fn fdt_path_lookup(blob: *mut FdtBlobInfo, path: *c
 
     current
 }
-
-/// Mirrors `__fdt_insert_node()`.
-///
-/// # Safety
-/// `blob`/`parent`/`new_node` must point to live, caller-owned data;
-/// `new_node` must not already be linked into any tree.
-unsafe fn fdt_insert_node(blob: *mut FdtBlobInfo, parent: *mut FdtNode, new_node: *mut FdtNode) -> bool {
-    // SAFETY: `new_node` caller-owned, detached per caller contract.
-    unsafe { machine::rb_node_init(&raw mut (*new_node).rb_entry) };
-    // SAFETY: `parent`/`new_node` live per caller contract.
-    let inserted =
-        unsafe { crate::rbtree::rb_insert_color(&raw mut (*parent).children, &raw mut (*new_node).rb_entry) };
-    if inserted != unsafe { &raw mut (*new_node).rb_entry } {
-        return false;
-    }
-    // SAFETY: `parent`/`blob`/`new_node` live.
-    unsafe {
-        (*parent).child_count += 1;
-        (*blob).n_nodes += 1;
-        list_push_back(&raw mut (*blob).all_nodes, &raw mut (*new_node).list_entry);
-    }
-    true
 }
 
+impl FdtBlobInfo {
+    /// Mirrors `__fdt_insert_node()`. N-OO: true `&mut self` method (goal
+    /// #1) -- `blob` is never null-checked in the C original (caller
+    /// contract: live, caller-owned data), and every write goes through
+    /// `self` (`n_nodes`, `all_nodes`) or the separate `parent`/`new_node`
+    /// raw-pointer params (unaffected by the receiver change).
+    ///
+    /// # Safety
+    /// `parent`/`new_node` must point to live, caller-owned data;
+    /// `new_node` must not already be linked into any tree.
+    unsafe fn insert_node(&mut self, parent: *mut FdtNode, new_node: *mut FdtNode) -> bool {
+        // SAFETY: `new_node` caller-owned, detached per caller contract.
+        unsafe { machine::rb_node_init(&raw mut (*new_node).rb_entry) };
+        // SAFETY: `parent`/`new_node` live per caller contract.
+        let inserted =
+            unsafe { crate::rbtree::rb_insert_color(&raw mut (*parent).children, &raw mut (*new_node).rb_entry) };
+        if inserted != unsafe { &raw mut (*new_node).rb_entry } {
+            return false;
+        }
+        // SAFETY: `parent`/`new_node` live.
+        unsafe {
+            (*parent).child_count += 1;
+            self.n_nodes += 1;
+            Fdt::list_push_back(&raw mut self.all_nodes, &raw mut (*new_node).list_entry);
+        }
+        true
+    }
+}
+
+impl Fdt {
 /// Mirrors `list_entry_push_back()` (`kernel/inc/list.h`, `static
 /// inline`, reimplemented locally on top of `machine::list_entry_*`).
 ///
@@ -1316,7 +1378,9 @@ unsafe fn list_push_back(head: *mut list_node_t, entry: *mut list_node_t) {
         machine::list_entry_insert_after(last, entry);
     }
 }
+}
 
+impl Fdt {
 /// Mirrors `list_entry_push_front()`.
 ///
 /// # Safety
@@ -1326,14 +1390,20 @@ unsafe fn list_push_front(head: *mut list_node_t, entry: *mut list_node_t) {
     // SAFETY: caller contract.
     unsafe { machine::list_entry_insert_after(head, entry) };
 }
+}
 
-/// Mirrors `fdt_build_blob_info()`.
+impl FdtBlobInfo {
+/// Mirrors `fdt_build_blob_info()`. N-OO: associated constructor fn (goal
+/// #1) -- there is no `self` to receive yet (this function builds the
+/// value), so it stays a `Self`-returning associated fn rather than a
+/// method, matching the `first_child_named`/`children` precedent's own
+/// constructor style.
 ///
 /// # Safety
-/// `dtb` must be a valid, [`fdt_valid`] FDT blob pointer.
-unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
+/// `dtb` must be a valid, [`Fdt::fdt_valid`] FDT blob pointer.
+unsafe fn build(dtb: *mut c_void) -> *mut FdtBlobInfo {
     // SAFETY: caller contract.
-    if !unsafe { fdt_valid(dtb) } {
+    if !unsafe { Fdt::fdt_valid(dtb) } {
         crate::kprintln!("fdt: invalid magic");
         return ptr::null_mut();
     }
@@ -1350,13 +1420,13 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
     let base = dtb as *const u8;
     // SAFETY: `dtb` valid per the `fdt_valid` check above.
     unsafe {
-        fdt_rb_root_init(&raw mut (*blob).root);
+        Fdt::fdt_rb_root_init(&raw mut (*blob).root);
         machine::list_entry_init(&raw mut (*blob).all_nodes);
     }
 
     // Parse memory reservation map (`/memreserve/`).
     // SAFETY: `dtb` valid.
-    let rsvmap_off = unsafe { fdt_get_header(base, FDT_HDR_OFF_MEM_RSVMAP) } as usize;
+    let rsvmap_off = unsafe { Fdt::fdt_get_header(base, FDT_HDR_OFF_MEM_RSVMAP) } as usize;
     let mut rsv_count: usize = 0;
     // SAFETY: the DTB's `mem_rsvmap` block is terminated by a {0,0}
     // sentinel entry per the FDT spec; this mirrors the C scan exactly
@@ -1390,33 +1460,33 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
             (*blob).reserved_count = rsv_count as i32;
             for i in 0..rsv_count {
                 let off = rsvmap_off + i * size_of::<mem_region>();
-                (*reserved.add(i)).base = read_be64(base, off);
-                (*reserved.add(i)).size = read_be64(base, off + 8);
+                (*reserved.add(i)).base = Fdt::read_be64(base, off);
+                (*reserved.add(i)).size = Fdt::read_be64(base, off + 8);
             }
         }
     }
 
     // Parse the FDT structure block and build the tree.
     // SAFETY: `dtb` valid.
-    let struct_start = unsafe { fdt_get_header(base, FDT_HDR_OFF_DT_STRUCT) } as usize;
+    let struct_start = unsafe { Fdt::fdt_get_header(base, FDT_HDR_OFF_DT_STRUCT) } as usize;
     let mut p = struct_start;
 
     let mut node_stack: [*mut FdtNode; FDT_MAX_DEPTH] = [ptr::null_mut(); FDT_MAX_DEPTH];
     let mut depth: usize = 0;
 
     // SAFETY: fresh node.
-    let virtual_root = unsafe { fdt_create_node(0, 0) };
+    let virtual_root = unsafe { FdtNode::fdt_create_node(0, 0) };
     if virtual_root.is_null() {
         crate::kprintln!("fdt: alloc virtual root failed");
         return ptr::null_mut();
     }
     // SAFETY: `virtual_root` freshly allocated, exclusively owned.
-    unsafe { fdt_rb_root_init(&raw mut (*virtual_root).children) };
+    unsafe { Fdt::fdt_rb_root_init(&raw mut (*virtual_root).children) };
     node_stack[0] = virtual_root;
 
     loop {
         // SAFETY: see the equivalent read in `fdt_early_scan_memory`.
-        let token = unsafe { read_be32(base, p) };
+        let token = unsafe { Fdt::read_be32(base, p) };
         p += 4;
 
         match token {
@@ -1431,7 +1501,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                 unsafe { dummy.parse_namestring(name, false) };
 
                 // SAFETY: allocator call.
-                let new_node = unsafe { fdt_create_node(dummy.name_size, 0) };
+                let new_node = unsafe { FdtNode::fdt_create_node(dummy.name_size, 0) };
                 if new_node.is_null() {
                     crate::kprintln!("fdt: alloc node '{}' failed", crate::printf::Cs(name));
                     return ptr::null_mut();
@@ -1452,10 +1522,10 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                     (*new_node).addr = dummy.addr;
                     (*new_node).layer = depth as u8;
 
-                    fdt_rb_root_init(&raw mut (*new_node).children);
+                    Fdt::fdt_rb_root_init(&raw mut (*new_node).children);
 
                     let parent = node_stack[depth];
-                    if !fdt_insert_node(blob, parent, new_node) {
+                    if !(*blob).insert_node(parent, new_node) {
                         crate::kprintln!("fdt: insert node '{}' failed (dup?)", crate::printf::Cs(name));
                         return ptr::null_mut();
                     }
@@ -1477,12 +1547,12 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
 
             FDT_PROP => {
                 // SAFETY: see `fdt_early_scan_memory`.
-                let len = unsafe { read_be32(base, p) };
+                let len = unsafe { Fdt::read_be32(base, p) };
                 p += 4;
-                let nameoff = unsafe { read_be32(base, p) };
+                let nameoff = unsafe { Fdt::read_be32(base, p) };
                 p += 4;
                 // SAFETY: `nameoff` from the DTB's own prop header.
-                let propname = unsafe { fdt_get_string(base, nameoff) };
+                let propname = unsafe { Fdt::fdt_get_string(base, nameoff) };
                 let data = unsafe { base.add(p) };
                 p += fdt_align(len as usize);
 
@@ -1498,7 +1568,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                 {
                     // SAFETY: `parent`/`data` live.
                     unsafe {
-                        (*parent).phandle = read_be32(data, 0);
+                        (*parent).phandle = Fdt::read_be32(data, 0);
                         (*parent).has_phandle = true;
                     }
                     continue;
@@ -1516,7 +1586,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                 unsafe { dummy.parse_namestring(propname, true) };
 
                 // SAFETY: allocator call.
-                let prop_node = unsafe { fdt_create_node(dummy.name_size, len) };
+                let prop_node = unsafe { FdtNode::fdt_create_node(dummy.name_size, len) };
                 if prop_node.is_null() {
                     crate::kprintln!("fdt: alloc prop '{}' failed", crate::printf::Cs(propname));
                     return ptr::null_mut();
@@ -1527,7 +1597,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                 // bytes of name storage.
                 unsafe {
                     if len > 0 {
-                        memcpy(fdt_data_ptr(prop_node) as *mut c_void, data as *const c_void, len as usize);
+                        memcpy((*prop_node).data_ptr() as *mut c_void, data as *const c_void, len as usize);
                     }
                     memcpy(
                         (*prop_node).name as *mut c_void,
@@ -1540,9 +1610,9 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                     (*prop_node).has_addr = false;
                     (*prop_node).layer = (depth + 1) as u8;
 
-                    fdt_rb_root_init(&raw mut (*prop_node).children);
+                    Fdt::fdt_rb_root_init(&raw mut (*prop_node).children);
 
-                    if !fdt_insert_node(blob, parent, prop_node) {
+                    if !(*blob).insert_node(parent, prop_node) {
                         crate::kprintln!(
                             "fdt: insert prop '{}' in '{}' failed",
                             crate::printf::Cs(propname),
@@ -1568,11 +1638,13 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
         }
     }
 }
+}
 
 // ===========================================================================
 // Property-value accessors.
 // ===========================================================================
 
+impl FdtNode {
 /// Mirrors `__fdt_get_prop()`.
 ///
 /// # Safety
@@ -1583,9 +1655,11 @@ unsafe fn fdt_get_prop(node: *mut FdtNode, name: *const c_char) -> *mut FdtNode 
         return ptr::null_mut();
     }
     // SAFETY: caller contract.
-    unsafe { fdt_node_lookup(node, name, ptr::null_mut()) }
+    unsafe { (*node).lookup(name, ptr::null_mut()) }
+}
 }
 
+impl FdtNode {
 /// Mirrors `__fdt_prop_u32()`.
 ///
 /// # Safety
@@ -1601,9 +1675,11 @@ unsafe fn fdt_prop_u32(prop: *mut FdtNode, index: i32) -> u32 {
         return 0;
     }
     // SAFETY: bounds-checked above.
-    unsafe { read_be32(fdt_data_ptr(prop), index as usize * 4) }
+    unsafe { Fdt::read_be32((*prop).data_ptr(), index as usize * 4) }
+}
 }
 
+impl FdtNode {
 /// Mirrors `__fdt_prop_u64()`.
 ///
 /// # Safety
@@ -1622,12 +1698,14 @@ unsafe fn fdt_prop_u64(prop: *mut FdtNode, index: i32) -> u64 {
     // use `fdt64_to_cpu`/`bswap64` here -- unaffected by that macro's
     // bug).
     unsafe {
-        let hi = read_be32(fdt_data_ptr(prop), index as usize * 8);
-        let lo = read_be32(fdt_data_ptr(prop), index as usize * 8 + 4);
+        let hi = Fdt::read_be32((*prop).data_ptr(), index as usize * 8);
+        let lo = Fdt::read_be32((*prop).data_ptr(), index as usize * 8 + 4);
         ((hi as u64) << 32) | lo as u64
     }
 }
+}
 
+impl FdtNode {
 /// Mirrors `__fdt_prop_compat()`.
 ///
 /// # Safety
@@ -1657,7 +1735,9 @@ unsafe fn fdt_prop_compat(prop: *mut FdtNode, compat: *const c_char) -> bool {
     }
     false
 }
+}
 
+impl FdtNode {
 /// Mirrors `__fdt_prop_compat_list()`.
 ///
 /// # Safety
@@ -1669,13 +1749,15 @@ unsafe fn fdt_prop_compat_list(prop: *mut FdtNode, compat_list: &[*const c_char]
     }
     for &compat in compat_list {
         // SAFETY: caller contract.
-        if unsafe { fdt_prop_compat(prop, compat) } {
+        if unsafe { FdtNode::fdt_prop_compat(prop, compat) } {
             return true;
         }
     }
     false
 }
+}
 
+impl FdtNode {
 /// Mirrors `__fdt_parse_reg_prop()`.
 ///
 /// # Safety
@@ -1694,21 +1776,22 @@ unsafe fn fdt_parse_reg_prop(
     // SAFETY: caller contract throughout.
     unsafe {
         if addr_cells == 2 {
-            *base_out = fdt_prop_u64(prop, 0);
+            *base_out = FdtNode::fdt_prop_u64(prop, 0);
         } else {
-            *base_out = fdt_prop_u32(prop, 0) as u64;
+            *base_out = FdtNode::fdt_prop_u32(prop, 0) as u64;
         }
 
         if !size_out.is_null() {
             if size_cells == 2 {
-                let hi = fdt_prop_u32(prop, addr_cells);
-                let lo = fdt_prop_u32(prop, addr_cells + 1);
+                let hi = FdtNode::fdt_prop_u32(prop, addr_cells);
+                let lo = FdtNode::fdt_prop_u32(prop, addr_cells + 1);
                 *size_out = ((hi as u64) << 32) | lo as u64;
             } else {
-                *size_out = fdt_prop_u32(prop, addr_cells) as u64;
+                *size_out = FdtNode::fdt_prop_u32(prop, addr_cells) as u64;
             }
         }
     }
+}
 }
 
 // ===========================================================================
@@ -1745,7 +1828,8 @@ struct FdtPhandleHashNode {
     fdt_node: *mut FdtNode,
 }
 
-/// Mirrors `hlist_entry_init()` (`kernel/inc/hlist.h`, `static inline`).
+impl Fdt {
+/// Mirrors `Fdt::hlist_entry_init()` (`kernel/inc/hlist.h`, `static inline`).
 ///
 /// # Safety
 /// `entry` must be null or point to caller-owned, writable storage.
@@ -1759,12 +1843,13 @@ unsafe fn hlist_entry_init(entry: *mut HlistEntry) {
         machine::list_entry_init(&raw mut (*entry).list_entry);
     }
 }
+}
 
 extern "C" fn fdt_compat_hash_func(data: *mut c_void) -> HtHash {
     let node = data as *mut FdtCompatHashNode;
     // SAFETY: `data` is a live `FdtCompatHashNode*` (hlist callback
     // contract).
-    unsafe { hlist_hash_str((*node).compat, (*node).compat_len) }
+    unsafe { Fdt::hlist_hash_str((*node).compat, (*node).compat_len) }
 }
 
 extern "C" fn fdt_compat_cmp_func(_hlist: *mut Hlist, node: *mut c_void, key: *mut c_void) -> c_int {
@@ -1840,6 +1925,7 @@ static FDT_PHANDLE_HLIST_FUNCS: HlistFunc = HlistFunc {
     cmp_node: Some(fdt_phandle_cmp_func),
 };
 
+impl FdtCompatHashNode {
 /// Mirrors `__fdt_alloc_compat_hash_node()`.
 unsafe fn fdt_alloc_compat_hash_node(compat: *const c_char, len: usize) -> *mut FdtCompatHashNode {
     // SAFETY: allocator call.
@@ -1854,11 +1940,13 @@ unsafe fn fdt_alloc_compat_hash_node(compat: *const c_char, len: usize) -> *mut 
         (*node).compat = compat;
         (*node).compat_len = len;
         machine::list_entry_init(&raw mut (*node).nodes);
-        hlist_entry_init(&raw mut (*node).hash_entry);
+        Fdt::hlist_entry_init(&raw mut (*node).hash_entry);
     }
     node
 }
+}
 
+impl FdtCompatLink {
 /// Mirrors `__fdt_alloc_compat_link()`.
 unsafe fn fdt_alloc_compat_link(fdt_node: *mut FdtNode, hash_node: *mut FdtCompatHashNode) -> *mut FdtCompatLink {
     // SAFETY: allocator call.
@@ -1874,7 +1962,9 @@ unsafe fn fdt_alloc_compat_link(fdt_node: *mut FdtNode, hash_node: *mut FdtCompa
     }
     link
 }
+}
 
+impl FdtPhandleHashNode {
 /// Mirrors `__fdt_alloc_phandle_hash_node()`.
 unsafe fn fdt_alloc_phandle_hash_node(phandle: u32, fdt_node: *mut FdtNode) -> *mut FdtPhandleHashNode {
     // SAFETY: allocator call.
@@ -1888,30 +1978,35 @@ unsafe fn fdt_alloc_phandle_hash_node(phandle: u32, fdt_node: *mut FdtNode) -> *
         memset(node as *mut c_void, 0, size_of::<FdtPhandleHashNode>());
         (*node).phandle = phandle;
         (*node).fdt_node = fdt_node;
-        hlist_entry_init(&raw mut (*node).hash_entry);
+        Fdt::hlist_entry_init(&raw mut (*node).hash_entry);
     }
     node
 }
+}
 
-/// Mirrors `__fdt_index_compat_string()`.
-unsafe fn fdt_index_compat_string(blob: *mut FdtBlobInfo, fdt_node: *mut FdtNode, compat: *const c_char, len: usize) -> i32 {
+impl FdtBlobInfo {
+/// Mirrors `__fdt_index_compat_string()`. N-OO: true `&self` method (goal
+/// #1) -- `blob` is never null-checked (live per caller contract) and
+/// only `self.compat_table` (a pointer to a separately-allocated `Hlist`)
+/// is read, never a `self` field written, so `&self` suffices.
+unsafe fn index_compat_string(&self, fdt_node: *mut FdtNode, compat: *const c_char, len: usize) -> i32 {
     let mut key: FdtCompatHashNode = unsafe { core::mem::zeroed() };
     key.compat = compat;
     key.compat_len = len;
-    // SAFETY: `blob` live; `key` local.
+    // SAFETY: `self` live; `key` local.
     let mut hash_node =
-        unsafe { crate::hlist::hlist_get((*blob).compat_table as *mut c_void as *mut Hlist, &raw mut key as *mut c_void) }
+        unsafe { crate::hlist::hlist_get(self.compat_table as *mut c_void as *mut Hlist, &raw mut key as *mut c_void) }
             as *mut FdtCompatHashNode;
 
     if hash_node.is_null() {
         // SAFETY: allocator call.
-        hash_node = unsafe { fdt_alloc_compat_hash_node(compat, len) };
+        hash_node = unsafe { FdtCompatHashNode::fdt_alloc_compat_hash_node(compat, len) };
         if hash_node.is_null() {
             return -1;
         }
-        // SAFETY: `blob`/`hash_node` live.
+        // SAFETY: `self`/`hash_node` live.
         let ret = unsafe {
-            crate::hlist::hlist_put((*blob).compat_table, hash_node as *mut c_void, false)
+            crate::hlist::hlist_put(self.compat_table, hash_node as *mut c_void, false)
         } as *mut FdtCompatHashNode;
         if ret != hash_node && !ret.is_null() {
             hash_node = ret;
@@ -1919,23 +2014,24 @@ unsafe fn fdt_index_compat_string(blob: *mut FdtBlobInfo, fdt_node: *mut FdtNode
     }
 
     // SAFETY: `fdt_node`/`hash_node` live.
-    let link = unsafe { fdt_alloc_compat_link(fdt_node, hash_node) };
+    let link = unsafe { FdtCompatLink::fdt_alloc_compat_link(fdt_node, hash_node) };
     if link.is_null() {
         return -1;
     }
 
     // SAFETY: `hash_node`/`link` live.
     unsafe {
-        list_push_front(&raw mut (*hash_node).nodes, &raw mut (*link).list_entry);
+        Fdt::list_push_front(&raw mut (*hash_node).nodes, &raw mut (*link).list_entry);
         (*hash_node).count += 1;
     }
     0
 }
 
-/// Mirrors `__fdt_index_node_compat()`.
-unsafe fn fdt_index_node_compat(blob: *mut FdtBlobInfo, fdt_node: *mut FdtNode) {
+/// Mirrors `__fdt_index_node_compat()`. N-OO: true `&self` method (goal
+/// #1), same rationale as [`FdtBlobInfo::index_compat_string`].
+unsafe fn index_node_compat(&self, fdt_node: *mut FdtNode) {
     // SAFETY: `fdt_node` live.
-    let compat_prop = unsafe { fdt_node_lookup(fdt_node, c"compatible".as_ptr(), ptr::null_mut()) };
+    let compat_prop = unsafe { (*fdt_node).lookup(c"compatible".as_ptr(), ptr::null_mut()) };
     if compat_prop.is_null() || unsafe { (*compat_prop).data_size } == 0 {
         return;
     }
@@ -1944,26 +2040,29 @@ unsafe fn fdt_index_node_compat(blob: *mut FdtBlobInfo, fdt_node: *mut FdtNode) 
     // `string_list` yields each NUL-terminated string in its data block.
     for (str_ptr, str_len) in unsafe { (*compat_prop).string_list() } {
         if str_len > 0 {
-            unsafe { fdt_index_compat_string(blob, fdt_node, str_ptr, str_len) };
+            unsafe { self.index_compat_string(fdt_node, str_ptr, str_len) };
         }
     }
 }
 
-/// Mirrors `__fdt_index_node_phandle()`.
-unsafe fn fdt_index_node_phandle(blob: *mut FdtBlobInfo, fdt_node: *mut FdtNode) {
+/// Mirrors `__fdt_index_node_phandle()`. N-OO: true `&self` method (goal
+/// #1), same rationale as [`FdtBlobInfo::index_compat_string`].
+unsafe fn index_node_phandle(&self, fdt_node: *mut FdtNode) {
     // SAFETY: `fdt_node` live.
     if !unsafe { (*fdt_node).has_phandle } || unsafe { (*fdt_node).phandle } == 0 {
         return;
     }
     // SAFETY: allocator call.
-    let hash_node = unsafe { fdt_alloc_phandle_hash_node((*fdt_node).phandle, fdt_node) };
+    let hash_node = unsafe { FdtPhandleHashNode::fdt_alloc_phandle_hash_node((*fdt_node).phandle, fdt_node) };
     if hash_node.is_null() {
         return;
     }
-    // SAFETY: `blob`/`hash_node` live.
-    unsafe { crate::hlist::hlist_put((*blob).phandle_table, hash_node as *mut c_void, false) };
+    // SAFETY: `self`/`hash_node` live.
+    unsafe { crate::hlist::hlist_put(self.phandle_table, hash_node as *mut c_void, false) };
+}
 }
 
+impl Fdt {
 /// Mirrors `__fdt_alloc_hlist()`.
 unsafe fn fdt_alloc_hlist(bucket_cnt: u64, func: *const HlistFunc) -> *mut Hlist {
     let header_size = size_of::<Hlist>();
@@ -1984,34 +2083,38 @@ unsafe fn fdt_alloc_hlist(bucket_cnt: u64, func: *const HlistFunc) -> *mut Hlist
     }
     hlist
 }
+}
 
-/// Mirrors `__fdt_build_indexes()`.
-unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
-    // SAFETY: `blob` live.
+impl FdtBlobInfo {
+/// Mirrors `__fdt_build_indexes()`. N-OO: true `&mut self` method (goal
+/// #1) -- `blob` is never null-checked (live per caller contract) and
+/// writes `self.compat_table`/`self.phandle_table` directly.
+unsafe fn build_indexes(&mut self) {
+    // SAFETY: `self` live.
     unsafe {
-        (*blob).compat_table = fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &raw const FDT_COMPAT_HLIST_FUNCS);
+        self.compat_table = Fdt::fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &raw const FDT_COMPAT_HLIST_FUNCS);
     }
-    if unsafe { (*blob).compat_table }.is_null() {
+    if self.compat_table.is_null() {
         crate::kprintln!("fdt: failed to alloc compat hash table");
         return;
     }
 
-    // SAFETY: `blob` live.
+    // SAFETY: `self` live.
     unsafe {
-        (*blob).phandle_table = fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &raw const FDT_PHANDLE_HLIST_FUNCS);
+        self.phandle_table = Fdt::fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &raw const FDT_PHANDLE_HLIST_FUNCS);
     }
-    if unsafe { (*blob).phandle_table }.is_null() {
+    if self.phandle_table.is_null() {
         crate::kprintln!("fdt: failed to alloc phandle hash table");
         return;
     }
 
-    // SAFETY: `blob` live; walks `all_nodes`, a well-formed list per
-    // `fdt_build_blob_info`'s construction. The `successors` iterator
+    // SAFETY: `self` live; walks `all_nodes`, a well-formed list per
+    // `FdtBlobInfo::build`'s construction. The `successors` iterator
     // reproduces the C `pos = next(head); while pos != head { ..; pos =
     // next(pos) }` walk exactly (the established loop->iterator idiom in
     // this crate, cf. `mm/pcache.rs`).
     unsafe {
-        let head = &raw mut (*blob).all_nodes;
+        let head = &raw mut self.all_nodes;
         let all_nodes = core::iter::successors(
             Some(machine::list_entry_next(head)).filter(|&p| p != head),
             move |&p| {
@@ -2024,14 +2127,16 @@ unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
             // Preserved dead branch -- see module doc: `fdt_type` is
             // never `FDT_BEGIN_NODE`, so this never runs.
             if (*node).fdt_type as u32 == FDT_BEGIN_NODE {
-                fdt_index_node_compat(blob, node);
-                fdt_index_node_phandle(blob, node);
+                self.index_node_compat(node);
+                self.index_node_phandle(node);
             }
         }
     }
 }
+}
 
-/// Mirrors `fdt_compat_lookup()`.
+impl FdtBlobInfo {
+/// Mirrors `FdtBlobInfo::fdt_compat_lookup()`.
 ///
 /// # Safety
 /// `blob` must be null or point to a live `FdtBlobInfo`; `compat` must be
@@ -2062,8 +2167,10 @@ pub(crate) unsafe extern "C" fn fdt_compat_lookup(blob: *mut FdtBlobInfo, compat
     let link = unsafe { machine::list_container_of::<FdtCompatLink>(first, offset_of!(FdtCompatLink, list_entry)) };
     unsafe { (*link).fdt_node }
 }
+}
 
-/// Mirrors `fdt_compat_next()`.
+impl FdtBlobInfo {
+/// Mirrors `FdtBlobInfo::fdt_compat_next()`.
 ///
 /// # Safety
 /// `link` must be null or point to a live `*mut FdtCompatLink` (which may
@@ -2090,8 +2197,10 @@ pub(crate) unsafe extern "C" fn fdt_compat_next(link: *mut *mut FdtCompatLink) -
     unsafe { *link = next_link };
     unsafe { (*next_link).fdt_node }
 }
+}
 
-/// Mirrors `fdt_phandle_lookup()`.
+impl FdtBlobInfo {
+/// Mirrors `FdtBlobInfo::fdt_phandle_lookup()`.
 ///
 /// # Safety
 /// `blob` must be null or point to a live `FdtBlobInfo`.
@@ -2113,6 +2222,7 @@ pub(crate) unsafe extern "C" fn fdt_phandle_lookup(blob: *mut FdtBlobInfo, phand
     }
     unsafe { (*hash_node).fdt_node }
 }
+}
 
 // ===========================================================================
 // fdt_init / fdt_extract_platform_info / fdt_apply_platform_config.
@@ -2124,7 +2234,11 @@ pub(crate) unsafe extern "C" fn fdt_phandle_lookup(blob: *mut FdtBlobInfo, phand
 /// comment).
 static mut FDT_BLOB: *mut FdtBlobInfo = ptr::null_mut();
 
-/// Mirrors `fdt_extract_platform_info()`.
+impl FdtBlobInfo {
+/// Mirrors `fdt_extract_platform_info()`. N-OO: true `&self` method (goal
+/// #1) -- `blob` is never null-checked (live per caller contract) and
+/// only reads `self.root`/`self.reserved`/`self.reserved_count`, never
+/// writes a `self` field.
 ///
 /// The root-node lookup below reproduces a convoluted, provably-mostly-
 /// dead C original 1:1 (see module doc's "Preserved pre-existing bugs"):
@@ -2133,10 +2247,10 @@ static mut FDT_BLOB: *mut FdtBlobInfo = ptr::null_mut();
 /// via the `blob->root.node != NULL` fallback for every real DTB.
 ///
 /// # Safety
-/// `blob` must point to a live, fully-built `FdtBlobInfo`.
-unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
+/// `self` must be a live, fully-built `FdtBlobInfo`.
+unsafe fn extract_platform_info(&self) {
     // SAFETY: caller contract.
-    let blob_root_node = unsafe { (*blob).root.node };
+    let blob_root_node = unsafe { self.root.node };
     let mut root: *mut FdtNode = ptr::null_mut();
     if !blob_root_node.is_null() {
         let candidate = blob_root_node as *mut FdtNode;
@@ -2161,27 +2275,27 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
     let mut root_addr_cells: i32 = 2;
     let mut root_size_cells: i32 = 1;
     // SAFETY: `root` live.
-    let mut prop = unsafe { fdt_get_prop(root, c"#address-cells".as_ptr()) };
+    let mut prop = unsafe { FdtNode::fdt_get_prop(root, c"#address-cells".as_ptr()) };
     if !prop.is_null() {
-        root_addr_cells = unsafe { fdt_prop_u32(prop, 0) } as i32;
+        root_addr_cells = unsafe { FdtNode::fdt_prop_u32(prop, 0) } as i32;
     }
-    prop = unsafe { fdt_get_prop(root, c"#size-cells".as_ptr()) };
+    prop = unsafe { FdtNode::fdt_get_prop(root, c"#size-cells".as_ptr()) };
     if !prop.is_null() {
-        root_size_cells = unsafe { fdt_prop_u32(prop, 0) } as i32;
+        root_size_cells = unsafe { FdtNode::fdt_prop_u32(prop, 0) } as i32;
     }
 
     // /cpus
-    let cpus = unsafe { fdt_node_lookup(root, c"cpus".as_ptr(), ptr::null_mut()) };
+    let cpus = unsafe { (*root).lookup(c"cpus".as_ptr(), ptr::null_mut()) };
     if !cpus.is_null() {
-        prop = unsafe { fdt_get_prop(cpus, c"timebase-frequency".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(cpus, c"timebase-frequency".as_ptr()) };
         if !prop.is_null() {
             // SAFETY: `prop` live.
             let data_size = unsafe { (*prop).data_size };
             unsafe {
                 if data_size == 4 {
-                    platform.timebase_freq = fdt_prop_u32(prop, 0) as u64;
+                    platform.timebase_freq = FdtNode::fdt_prop_u32(prop, 0) as u64;
                 } else if data_size == 8 {
-                    platform.timebase_freq = fdt_prop_u64(prop, 0);
+                    platform.timebase_freq = FdtNode::fdt_prop_u64(prop, 0);
                 }
             }
         }
@@ -2189,7 +2303,7 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         // SAFETY: `cpus` live; `first_child_named`/`fdt_same_name_iter`
         // walk its immutable child tree (boot-time, single hart).
         let cpus_iter =
-            unsafe { fdt_same_name_iter(cpus, (*cpus).first_child_named(c"cpu".as_ptr())) };
+            unsafe { FdtNode::fdt_same_name_iter(cpus, (*cpus).first_child_named(c"cpu".as_ptr())) };
         for _cpu in cpus_iter {
             unsafe { platform.ncpu += 1 };
         }
@@ -2202,12 +2316,12 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
     // SAFETY: `root` live; the same-name walk reads its immutable child
     // tree (boot-time, single hart).
     let memory_iter =
-        unsafe { fdt_same_name_iter(root, (*root).first_child_named(c"memory".as_ptr())) };
+        unsafe { FdtNode::fdt_same_name_iter(root, (*root).first_child_named(c"memory".as_ptr())) };
     for memory in memory_iter {
         if unsafe { platform.mem_count } >= platform_info_mem_regions() {
             break;
         }
-        prop = unsafe { fdt_get_prop(memory, c"reg".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(memory, c"reg".as_ptr()) };
         if !prop.is_null() {
             let cells_per_entry = root_addr_cells + root_size_cells;
             // SAFETY: `prop` live.
@@ -2220,17 +2334,17 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 let size_val: u64;
                 unsafe {
                     if root_addr_cells == 2 {
-                        base_val = ((fdt_prop_u32(prop, offset) as u64) << 32)
-                            | fdt_prop_u32(prop, offset + 1) as u64;
+                        base_val = ((FdtNode::fdt_prop_u32(prop, offset) as u64) << 32)
+                            | FdtNode::fdt_prop_u32(prop, offset + 1) as u64;
                     } else {
-                        base_val = fdt_prop_u32(prop, offset) as u64;
+                        base_val = FdtNode::fdt_prop_u32(prop, offset) as u64;
                     }
                     if root_size_cells == 2 {
-                        let hi = fdt_prop_u32(prop, offset + root_addr_cells);
-                        let lo = fdt_prop_u32(prop, offset + root_addr_cells + 1);
+                        let hi = FdtNode::fdt_prop_u32(prop, offset + root_addr_cells);
+                        let lo = FdtNode::fdt_prop_u32(prop, offset + root_addr_cells + 1);
                         size_val = ((hi as u64) << 32) | lo as u64;
                     } else {
-                        size_val = fdt_prop_u32(prop, offset + root_addr_cells) as u64;
+                        size_val = FdtNode::fdt_prop_u32(prop, offset + root_addr_cells) as u64;
                     }
 
                     let idx = platform.mem_count as usize;
@@ -2245,25 +2359,25 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
     }
 
     // /chosen (ramdisk)
-    let chosen = unsafe { fdt_node_lookup(root, c"chosen".as_ptr(), ptr::null_mut()) };
+    let chosen = unsafe { (*root).lookup(c"chosen".as_ptr(), ptr::null_mut()) };
     if !chosen.is_null() {
-        prop = unsafe { fdt_get_prop(chosen, c"linux,initrd-start".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(chosen, c"linux,initrd-start".as_ptr()) };
         if !prop.is_null() {
             unsafe {
                 platform.ramdisk_base = if (*prop).data_size == 8 {
-                    fdt_prop_u64(prop, 0)
+                    FdtNode::fdt_prop_u64(prop, 0)
                 } else {
-                    fdt_prop_u32(prop, 0) as u64
+                    FdtNode::fdt_prop_u32(prop, 0) as u64
                 };
             }
         }
-        prop = unsafe { fdt_get_prop(chosen, c"linux,initrd-end".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(chosen, c"linux,initrd-end".as_ptr()) };
         if !prop.is_null() {
             unsafe {
                 let end = if (*prop).data_size == 8 {
-                    fdt_prop_u64(prop, 0)
+                    FdtNode::fdt_prop_u64(prop, 0)
                 } else {
-                    fdt_prop_u32(prop, 0) as u64
+                    FdtNode::fdt_prop_u32(prop, 0) as u64
                 };
                 if platform.ramdisk_base != 0 && end > platform.ramdisk_base {
                     platform.ramdisk_size = end - platform.ramdisk_base;
@@ -2308,19 +2422,19 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         ptr::null(),
     ];
 
-    let soc = unsafe { fdt_node_lookup(root, c"soc".as_ptr(), ptr::null_mut()) };
+    let soc = unsafe { (*root).lookup(c"soc".as_ptr(), ptr::null_mut()) };
     let device_parent = if soc.is_null() { root } else { soc };
 
     let mut soc_addr_cells = root_addr_cells;
     let mut soc_size_cells = root_size_cells;
     if !soc.is_null() {
-        prop = unsafe { fdt_get_prop(soc, c"#address-cells".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(soc, c"#address-cells".as_ptr()) };
         if !prop.is_null() {
-            soc_addr_cells = unsafe { fdt_prop_u32(prop, 0) } as i32;
+            soc_addr_cells = unsafe { FdtNode::fdt_prop_u32(prop, 0) } as i32;
         }
-        prop = unsafe { fdt_get_prop(soc, c"#size-cells".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(soc, c"#size-cells".as_ptr()) };
         if !prop.is_null() {
-            soc_size_cells = unsafe { fdt_prop_u32(prop, 0) } as i32;
+            soc_size_cells = unsafe { FdtNode::fdt_prop_u32(prop, 0) } as i32;
         }
     }
 
@@ -2328,34 +2442,34 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
     // the walk (boot-time, single hart).
     for node in unsafe { (*device_parent).children() } {
 
-        let compat = unsafe { fdt_get_prop(node, c"compatible".as_ptr()) };
-        let reg = unsafe { fdt_get_prop(node, c"reg".as_ptr()) };
-        let interrupts = unsafe { fdt_get_prop(node, c"interrupts".as_ptr()) };
+        let compat = unsafe { FdtNode::fdt_get_prop(node, c"compatible".as_ptr()) };
+        let reg = unsafe { FdtNode::fdt_get_prop(node, c"reg".as_ptr()) };
+        let interrupts = unsafe { FdtNode::fdt_get_prop(node, c"interrupts".as_ptr()) };
 
         // UART detection.
-        if unsafe { platform.uart_base } == 0 && unsafe { fdt_prop_compat_list(compat, &uart_compat) } {
+        if unsafe { platform.uart_base } == 0 && unsafe { FdtNode::fdt_prop_compat_list(compat, &uart_compat) } {
             let mut uart_addr: u64 = 0;
             if !reg.is_null() {
-                unsafe { fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells, &raw mut uart_addr, ptr::null_mut()) };
+                unsafe { FdtNode::fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells, &raw mut uart_addr, ptr::null_mut()) };
             }
             unsafe {
                 platform.uart_base = uart_addr;
                 if !interrupts.is_null() {
-                    platform.uart_irq = fdt_prop_u32(interrupts, 0);
+                    platform.uart_irq = FdtNode::fdt_prop_u32(interrupts, 0);
                 }
-                let clock_freq = fdt_get_prop(node, c"clock-frequency".as_ptr());
+                let clock_freq = FdtNode::fdt_get_prop(node, c"clock-frequency".as_ptr());
                 if !clock_freq.is_null() {
-                    platform.uart_clock = fdt_prop_u32(clock_freq, 0);
+                    platform.uart_clock = FdtNode::fdt_prop_u32(clock_freq, 0);
                 }
-                let baud = fdt_get_prop(node, c"current-speed".as_ptr());
+                let baud = FdtNode::fdt_get_prop(node, c"current-speed".as_ptr());
                 if !baud.is_null() {
-                    platform.uart_baud = fdt_prop_u32(baud, 0);
+                    platform.uart_baud = FdtNode::fdt_prop_u32(baud, 0);
                 }
-                let reg_shift = fdt_get_prop(node, c"reg-shift".as_ptr());
-                platform.uart_reg_shift = if !reg_shift.is_null() { fdt_prop_u32(reg_shift, 0) } else { 0 };
-                let reg_io_width = fdt_get_prop(node, c"reg-io-width".as_ptr());
+                let reg_shift = FdtNode::fdt_get_prop(node, c"reg-shift".as_ptr());
+                platform.uart_reg_shift = if !reg_shift.is_null() { FdtNode::fdt_prop_u32(reg_shift, 0) } else { 0 };
+                let reg_io_width = FdtNode::fdt_get_prop(node, c"reg-io-width".as_ptr());
                 platform.uart_reg_io_width =
-                    if !reg_io_width.is_null() { fdt_prop_u32(reg_io_width, 0) } else { 1 };
+                    if !reg_io_width.is_null() { FdtNode::fdt_prop_u32(reg_io_width, 0) } else { 1 };
                 crate::kprintln!(
                     "fdt: found UART at 0x{:x}, IRQ {}, clock {} Hz, baud {}, reg-shift {}, io-width {}",
                     (platform.uart_base as i64) as u64,
@@ -2369,16 +2483,16 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         }
 
         // PLIC detection.
-        if unsafe { platform.plic_base } == 0 && unsafe { fdt_prop_compat_list(compat, &plic_compat) } {
+        if unsafe { platform.plic_base } == 0 && unsafe { FdtNode::fdt_prop_compat_list(compat, &plic_compat) } {
             if !reg.is_null() {
                 unsafe {
-                    fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells, &raw mut platform.plic_base, &raw mut platform.plic_size);
+                    FdtNode::fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells, &raw mut platform.plic_base, &raw mut platform.plic_size);
                 }
             }
         }
 
         // PCIe detection -- parse all reg entries.
-        if unsafe { platform.has_pcie } == 0 && unsafe { fdt_prop_compat_list(compat, &pcie_compat) } {
+        if unsafe { platform.has_pcie } == 0 && unsafe { FdtNode::fdt_prop_compat_list(compat, &pcie_compat) } {
             if !reg.is_null() {
                 unsafe { platform.has_pcie = 1 };
                 let entry_size = (soc_addr_cells + soc_size_cells) as u32 * size_of::<u32>() as u32;
@@ -2388,9 +2502,9 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                     num_entries = PCIE_REG_MAX as i32;
                 }
 
-                let reg_names = unsafe { fdt_get_prop(node, c"reg-names".as_ptr()) };
+                let reg_names = unsafe { FdtNode::fdt_get_prop(node, c"reg-names".as_ptr()) };
                 let (names_data, names_len): (*const c_char, usize) = if !reg_names.is_null() {
-                    (unsafe { fdt_data_ptr(reg_names) as *const c_char }, unsafe { (*reg_names).data_size } as usize)
+                    (unsafe { (*reg_names).data_ptr() as *const c_char }, unsafe { (*reg_names).data_size } as usize)
                 } else {
                     (ptr::null(), 0)
                 };
@@ -2402,16 +2516,16 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                     unsafe {
                         let idx = i as usize;
                         if soc_addr_cells == 2 {
-                            platform.pcie_reg[idx].base = fdt_prop_u64(reg, offset);
+                            platform.pcie_reg[idx].base = FdtNode::fdt_prop_u64(reg, offset);
                         } else {
-                            platform.pcie_reg[idx].base = fdt_prop_u32(reg, offset) as u64;
+                            platform.pcie_reg[idx].base = FdtNode::fdt_prop_u32(reg, offset) as u64;
                         }
                         if soc_size_cells == 2 {
-                            let hi = fdt_prop_u32(reg, offset + soc_addr_cells);
-                            let lo = fdt_prop_u32(reg, offset + soc_addr_cells + 1);
+                            let hi = FdtNode::fdt_prop_u32(reg, offset + soc_addr_cells);
+                            let lo = FdtNode::fdt_prop_u32(reg, offset + soc_addr_cells + 1);
                             platform.pcie_reg[idx].size = ((hi as u64) << 32) | lo as u64;
                         } else {
-                            platform.pcie_reg[idx].size = fdt_prop_u32(reg, offset + soc_addr_cells) as u64;
+                            platform.pcie_reg[idx].size = FdtNode::fdt_prop_u32(reg, offset + soc_addr_cells) as u64;
                         }
 
                         if !names_data.is_null() && name_pos < names_len {
@@ -2428,30 +2542,30 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         }
 
         // VirtIO detection.
-        if unsafe { fdt_prop_compat_list(compat, &virtio_compat) } && unsafe { platform.virtio_count } < 8 {
+        if unsafe { FdtNode::fdt_prop_compat_list(compat, &virtio_compat) } && unsafe { platform.virtio_count } < 8 {
             unsafe { platform.has_virtio = 1 };
             if !reg.is_null() {
                 unsafe {
                     let idx = platform.virtio_count as usize;
-                    fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells, &raw mut platform.virtio_base[idx], ptr::null_mut());
+                    FdtNode::fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells, &raw mut platform.virtio_base[idx], ptr::null_mut());
                 }
             }
             if !interrupts.is_null() {
                 unsafe {
                     let idx = platform.virtio_count as usize;
-                    platform.virtio_irq[idx] = fdt_prop_u32(interrupts, 0);
+                    platform.virtio_irq[idx] = FdtNode::fdt_prop_u32(interrupts, 0);
                 }
             }
             unsafe { platform.virtio_count += 1 };
         }
 
         // EMAC detection.
-        if unsafe { fdt_prop_compat_list(compat, &emac_compat) } && unsafe { platform.emac_count } < EMAC_MAX as i32 {
+        if unsafe { FdtNode::fdt_prop_compat_list(compat, &emac_compat) } && unsafe { platform.emac_count } < EMAC_MAX as i32 {
             let idx = unsafe { platform.emac_count } as usize;
             unsafe { platform.has_emac = 1 };
             if !reg.is_null() {
                 unsafe {
-                    fdt_parse_reg_prop(
+                    FdtNode::fdt_parse_reg_prop(
                         reg,
                         soc_addr_cells,
                         soc_size_cells,
@@ -2461,22 +2575,22 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 }
             }
             if !interrupts.is_null() {
-                unsafe { platform.emac[idx].irq = fdt_prop_u32(interrupts, 0) };
+                unsafe { platform.emac[idx].irq = FdtNode::fdt_prop_u32(interrupts, 0) };
             }
             unsafe {
-                let p = fdt_get_prop(node, c"x1,apmu-base-reg".as_ptr());
-                platform.emac[idx].apmu_base = if !p.is_null() { fdt_prop_u32(p, 0) } else { 0xD428_2800 };
-                let p = fdt_get_prop(node, c"ctrl-reg".as_ptr());
-                platform.emac[idx].ctrl_reg = if !p.is_null() { fdt_prop_u32(p, 0) } else { 0 };
-                let p = fdt_get_prop(node, c"dline-reg".as_ptr());
-                platform.emac[idx].dline_reg = if !p.is_null() { fdt_prop_u32(p, 0) } else { 0 };
-                let p = fdt_get_prop(node, c"tx-phase".as_ptr());
-                platform.emac[idx].tx_phase = if !p.is_null() { fdt_prop_u32(p, 0) } else { 0 };
-                let p = fdt_get_prop(node, c"rx-phase".as_ptr());
-                platform.emac[idx].rx_phase = if !p.is_null() { fdt_prop_u32(p, 0) } else { 0 };
-                let p = fdt_get_prop(node, c"emac,reset-gpio".as_ptr());
+                let p = FdtNode::fdt_get_prop(node, c"x1,apmu-base-reg".as_ptr());
+                platform.emac[idx].apmu_base = if !p.is_null() { FdtNode::fdt_prop_u32(p, 0) } else { 0xD428_2800 };
+                let p = FdtNode::fdt_get_prop(node, c"ctrl-reg".as_ptr());
+                platform.emac[idx].ctrl_reg = if !p.is_null() { FdtNode::fdt_prop_u32(p, 0) } else { 0 };
+                let p = FdtNode::fdt_get_prop(node, c"dline-reg".as_ptr());
+                platform.emac[idx].dline_reg = if !p.is_null() { FdtNode::fdt_prop_u32(p, 0) } else { 0 };
+                let p = FdtNode::fdt_get_prop(node, c"tx-phase".as_ptr());
+                platform.emac[idx].tx_phase = if !p.is_null() { FdtNode::fdt_prop_u32(p, 0) } else { 0 };
+                let p = FdtNode::fdt_get_prop(node, c"rx-phase".as_ptr());
+                platform.emac[idx].rx_phase = if !p.is_null() { FdtNode::fdt_prop_u32(p, 0) } else { 0 };
+                let p = FdtNode::fdt_get_prop(node, c"emac,reset-gpio".as_ptr());
                 if !p.is_null() && (*p).data_size >= 8 {
-                    platform.emac[idx].reset_gpio = fdt_prop_u32(p, 1);
+                    platform.emac[idx].reset_gpio = FdtNode::fdt_prop_u32(p, 1);
                 }
                 crate::kprintln!(
                     "fdt: found EMAC{} at 0x{:x} size 0x{:x} IRQ {} gpio {} tx-phase {} rx-phase {}",
@@ -2493,12 +2607,12 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         }
 
         // SDHCI detection.
-        if unsafe { fdt_prop_compat_list(compat, &sdhci_compat) } && unsafe { platform.sdhci_count } < SDHCI_MAX as i32 {
+        if unsafe { FdtNode::fdt_prop_compat_list(compat, &sdhci_compat) } && unsafe { platform.sdhci_count } < SDHCI_MAX as i32 {
             let idx = unsafe { platform.sdhci_count } as usize;
             unsafe { platform.has_sdhci = 1 };
             if !reg.is_null() {
                 unsafe {
-                    fdt_parse_reg_prop(
+                    FdtNode::fdt_parse_reg_prop(
                         reg,
                         soc_addr_cells,
                         soc_size_cells,
@@ -2508,22 +2622,22 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 }
             }
             if !interrupts.is_null() {
-                unsafe { platform.sdhci[idx].irq = fdt_prop_u32(interrupts, 0) };
+                unsafe { platform.sdhci[idx].irq = FdtNode::fdt_prop_u32(interrupts, 0) };
             }
 
-            let clks = unsafe { fdt_get_prop(node, c"clocks".as_ptr()) };
+            let clks = unsafe { FdtNode::fdt_get_prop(node, c"clocks".as_ptr()) };
             if !clks.is_null() && unsafe { (*clks).data_size } >= 4 {
-                let clk_phandle = unsafe { fdt_prop_u32(clks, 0) };
-                let clk_ctrl = unsafe { fdt_phandle_lookup(blob, clk_phandle) };
+                let clk_phandle = unsafe { FdtNode::fdt_prop_u32(clks, 0) };
+                let clk_ctrl = unsafe { FdtBlobInfo::fdt_phandle_lookup(self as *const FdtBlobInfo as *mut FdtBlobInfo, clk_phandle) };
                 if !clk_ctrl.is_null() {
-                    let cc_reg = unsafe { fdt_get_prop(clk_ctrl, c"reg".as_ptr()) };
-                    let cc_names = unsafe { fdt_get_prop(clk_ctrl, c"reg-names".as_ptr()) };
+                    let cc_reg = unsafe { FdtNode::fdt_get_prop(clk_ctrl, c"reg".as_ptr()) };
+                    let cc_names = unsafe { FdtNode::fdt_get_prop(clk_ctrl, c"reg-names".as_ptr()) };
                     if !cc_reg.is_null() && !cc_names.is_null() {
                         let entry_cells = soc_addr_cells + soc_size_cells;
                         // SAFETY: `cc_reg` live.
                         let n_entries =
                             unsafe { (*cc_reg).data_size } as i32 / (entry_cells * size_of::<u32>() as i32);
-                        let ndata = unsafe { fdt_data_ptr(cc_names) as *const c_char };
+                        let ndata = unsafe { (*cc_names).data_ptr() as *const c_char };
                         let nlen = unsafe { (*cc_names).data_size } as usize;
                         let mut npos = 0usize;
                         let mut e = 0;
@@ -2534,9 +2648,9 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                             let rbase: u64;
                             unsafe {
                                 if soc_addr_cells == 2 {
-                                    rbase = ((fdt_prop_u32(cc_reg, off) as u64) << 32) | fdt_prop_u32(cc_reg, off + 1) as u64;
+                                    rbase = ((FdtNode::fdt_prop_u32(cc_reg, off) as u64) << 32) | FdtNode::fdt_prop_u32(cc_reg, off + 1) as u64;
                                 } else {
-                                    rbase = fdt_prop_u32(cc_reg, off) as u64;
+                                    rbase = FdtNode::fdt_prop_u32(cc_reg, off) as u64;
                                 }
 
                                 if !rn.is_null() && strncmp(rn, c"apmu".as_ptr(), 5) == 0 {
@@ -2565,14 +2679,14 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 }
                 platform.sdhci[idx].apmu_axi_offset = 0x54;
 
-                let bw = fdt_get_prop(node, c"bus-width".as_ptr());
-                platform.sdhci[idx].bus_width = if !bw.is_null() { fdt_prop_u32(bw, 0) as i32 } else { 4 };
+                let bw = FdtNode::fdt_get_prop(node, c"bus-width".as_ptr());
+                platform.sdhci[idx].bus_width = if !bw.is_null() { FdtNode::fdt_prop_u32(bw, 0) as i32 } else { 4 };
 
-                let hs400 = fdt_get_prop(node, c"mmc-hs400-1_8v".as_ptr());
+                let hs400 = FdtNode::fdt_get_prop(node, c"mmc-hs400-1_8v".as_ptr());
                 if !hs400.is_null() || platform.sdhci[idx].bus_width == 8 {
                     platform.sdhci[idx].is_emmc = 1;
                 }
-                let nr = fdt_get_prop(node, c"non-removable".as_ptr());
+                let nr = FdtNode::fdt_get_prop(node, c"non-removable".as_ptr());
                 if !nr.is_null() && platform.sdhci[idx].is_emmc == 0 && platform.sdhci[idx].bus_width == 4 {
                     platform.sdhci[idx].is_sdio = 1;
                 }
@@ -2598,28 +2712,28 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
     // Reserved memory: copy `blob->reserved` (memreserve block), then
     // augment with the `/reserved-memory` node's children (if any).
     unsafe {
-        platform.reserved = (*blob).reserved;
-        platform.reserved_count = (*blob).reserved_count;
+        platform.reserved = self.reserved;
+        platform.reserved_count = self.reserved_count;
     }
 
-    let rsvmem = unsafe { fdt_node_lookup(root, c"reserved-memory".as_ptr(), ptr::null_mut()) };
+    let rsvmem = unsafe { (*root).lookup(c"reserved-memory".as_ptr(), ptr::null_mut()) };
     if !rsvmem.is_null() {
         let mut rsv_addr_cells = root_addr_cells;
         let mut rsv_size_cells = root_size_cells;
-        prop = unsafe { fdt_get_prop(rsvmem, c"#address-cells".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(rsvmem, c"#address-cells".as_ptr()) };
         if !prop.is_null() {
-            rsv_addr_cells = unsafe { fdt_prop_u32(prop, 0) } as i32;
+            rsv_addr_cells = unsafe { FdtNode::fdt_prop_u32(prop, 0) } as i32;
         }
-        prop = unsafe { fdt_get_prop(rsvmem, c"#size-cells".as_ptr()) };
+        prop = unsafe { FdtNode::fdt_get_prop(rsvmem, c"#size-cells".as_ptr()) };
         if !prop.is_null() {
-            rsv_size_cells = unsafe { fdt_prop_u32(prop, 0) } as i32;
+            rsv_size_cells = unsafe { FdtNode::fdt_prop_u32(prop, 0) } as i32;
         }
 
         let mut rsv_child_count = 0i32;
         // SAFETY: `rsvmem` live; its child tree is immutable during the
         // walk (boot-time, single hart).
         for rsv_node in unsafe { (*rsvmem).children() } {
-            if !unsafe { fdt_get_prop(rsv_node, c"reg".as_ptr()) }.is_null() {
+            if !unsafe { FdtNode::fdt_get_prop(rsv_node, c"reg".as_ptr()) }.is_null() {
                 rsv_child_count += 1;
             }
         }
@@ -2642,19 +2756,19 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                     if idx >= total_count {
                         break;
                     }
-                    prop = unsafe { fdt_get_prop(rsv_node, c"reg".as_ptr()) };
+                    prop = unsafe { FdtNode::fdt_get_prop(rsv_node, c"reg".as_ptr()) };
                     if !prop.is_null() {
                         unsafe {
                             let base_val: u64 = if rsv_addr_cells == 2 {
-                                ((fdt_prop_u32(prop, 0) as u64) << 32) | fdt_prop_u32(prop, 1) as u64
+                                ((FdtNode::fdt_prop_u32(prop, 0) as u64) << 32) | FdtNode::fdt_prop_u32(prop, 1) as u64
                             } else {
-                                fdt_prop_u32(prop, 0) as u64
+                                FdtNode::fdt_prop_u32(prop, 0) as u64
                             };
                             let size_val: u64 = if rsv_size_cells == 2 {
-                                ((fdt_prop_u32(prop, rsv_addr_cells) as u64) << 32)
-                                    | fdt_prop_u32(prop, rsv_addr_cells + 1) as u64
+                                ((FdtNode::fdt_prop_u32(prop, rsv_addr_cells) as u64) << 32)
+                                    | FdtNode::fdt_prop_u32(prop, rsv_addr_cells + 1) as u64
                             } else {
-                                fdt_prop_u32(prop, rsv_addr_cells) as u64
+                                FdtNode::fdt_prop_u32(prop, rsv_addr_cells) as u64
                             };
                             (*new_reserved.add(idx as usize)).base = base_val;
                             (*new_reserved.add(idx as usize)).size = size_val;
@@ -2670,6 +2784,7 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
         }
     }
 }
+}
 
 /// `MAX_MEM_REGIONS` (`kernel/inc/dev/fdt.h`) -- matches
 /// `platform_info::mem`'s bindgen array length exactly (both derive from
@@ -2679,7 +2794,8 @@ const fn platform_info_mem_regions() -> i32 {
     8
 }
 
-/// Rust port of `fdt_init()`.
+impl Fdt {
+/// Rust port of `Fdt::fdt_init()`.
 ///
 /// # Safety
 /// `dtb` must be null or a valid FDT blob pointer.
@@ -2689,20 +2805,20 @@ pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
     crate::kprintln!("fdt: checking DTB at {}", crate::printf::Ptr(dtb as u64));
 
     // SAFETY: caller contract.
-    if !unsafe { fdt_valid(dtb) } {
+    if !unsafe { Fdt::fdt_valid(dtb) } {
         crate::kprintln!("fdt: no valid DTB found!");
         return -1;
     }
 
     // SAFETY: `dtb` valid per the check above.
-    crate::kprintln!("fdt: using DTB at {} (size {} bytes)", crate::printf::Ptr(dtb as u64), unsafe { fdt_totalsize(dtb) } as c_int);
+    crate::kprintln!("fdt: using DTB at {} (size {} bytes)", crate::printf::Ptr(dtb as u64), unsafe { Fdt::fdt_totalsize(dtb) } as c_int);
 
     // SAFETY: `platform` is exclusively written here at single-threaded
     // boot, before any other hart or interrupt is live (see module doc).
     unsafe { memset(&raw mut platform as *mut c_void, 0, size_of::<platform_info>()) };
 
     // SAFETY: `dtb` valid.
-    let blob = unsafe { fdt_build_blob_info(dtb) };
+    let blob = unsafe { FdtBlobInfo::build(dtb) };
     if blob.is_null() {
         crate::kprintln!("fdt: failed to build blob info!");
         return -1;
@@ -2712,8 +2828,8 @@ pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
     crate::kprintln!("fdt: parsed {} nodes", unsafe { (*blob).n_nodes });
 
     // SAFETY: `blob` live.
-    unsafe { fdt_build_indexes(blob) };
-    unsafe { fdt_extract_platform_info(blob) };
+    unsafe { (*blob).build_indexes() };
+    unsafe { (*blob).extract_platform_info() };
 
     crate::kprintln!("fdt: probed platform info:");
     unsafe {
@@ -2801,14 +2917,16 @@ pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
 
     0
 }
+}
 
 // ===========================================================================
 // Debug dump/walk -- never called from `start_kernel.c` (the one call
-// site, `fdt_walk(fdt_base)`, is commented out there), kept for ABI
+// site, `Fdt::fdt_walk(fdt_base)`, is commented out there), kept for ABI
 // parity with `kernel/inc/dev/fdt.h`.
 // ===========================================================================
 
-/// Rust port of `fdt_dump()`.
+impl Fdt {
+/// Rust port of `Fdt::fdt_dump()`.
 ///
 /// # Safety
 /// `dtb` must be null or a valid FDT blob pointer.
@@ -2818,7 +2936,7 @@ pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
 #[allow(dead_code)]
 pub(crate) unsafe extern "C" fn fdt_dump(dtb: *mut c_void) {
     // SAFETY: caller contract.
-    if !unsafe { fdt_valid(dtb) } {
+    if !unsafe { Fdt::fdt_valid(dtb) } {
         crate::kprintln!("fdt_dump: invalid DTB");
         return;
     }
@@ -2826,21 +2944,25 @@ pub(crate) unsafe extern "C" fn fdt_dump(dtb: *mut c_void) {
     crate::kprintln!("FDT at {}:", crate::printf::Ptr(dtb as u64));
     // SAFETY: `dtb` valid per the check above.
     unsafe {
-        crate::kprintln!("  magic: 0x{:x}", ((read_be32(base, FDT_HDR_MAGIC) as c_int) as i32 as i64) as u64);
-        crate::kprintln!("  totalsize: {}", read_be32(base, FDT_HDR_TOTALSIZE) as c_int);
-        crate::kprintln!("  off_dt_struct: 0x{:x}", ((read_be32(base, FDT_HDR_OFF_DT_STRUCT) as c_int) as i32 as i64) as u64);
-        crate::kprintln!("  off_dt_strings: 0x{:x}", ((read_be32(base, FDT_HDR_OFF_DT_STRINGS) as c_int) as i32 as i64) as u64);
-        crate::kprintln!("  version: {}", read_be32(base, 20) as c_int);
+        crate::kprintln!("  magic: 0x{:x}", ((Fdt::read_be32(base, FDT_HDR_MAGIC) as c_int) as i32 as i64) as u64);
+        crate::kprintln!("  totalsize: {}", Fdt::read_be32(base, FDT_HDR_TOTALSIZE) as c_int);
+        crate::kprintln!("  off_dt_struct: 0x{:x}", ((Fdt::read_be32(base, FDT_HDR_OFF_DT_STRUCT) as c_int) as i32 as i64) as u64);
+        crate::kprintln!("  off_dt_strings: 0x{:x}", ((Fdt::read_be32(base, FDT_HDR_OFF_DT_STRINGS) as c_int) as i32 as i64) as u64);
+        crate::kprintln!("  version: {}", Fdt::read_be32(base, 20) as c_int);
     }
 }
+}
 
+impl Fdt {
 fn fdt_print_indent(depth: i32) {
     for _ in 0..depth {
         crate::kprint!("  ");
     }
 }
+}
 
-/// Mirrors `fdt_print_prop_value()`.
+impl Fdt {
+/// Mirrors `Fdt::fdt_print_prop_value()`.
 ///
 /// # Safety
 /// `data` must point to at least `len` readable bytes.
@@ -2893,7 +3015,7 @@ unsafe fn fdt_print_prop_value(data: *const u8, len: u32) {
         let ncells = len / 4;
         for i in 0..ncells {
             // SAFETY: caller contract; `i*4+4 <= len`.
-            let cell = unsafe { read_be32(data, i as usize * 4) };
+            let cell = unsafe { Fdt::read_be32(data, i as usize * 4) };
             crate::kprint!("0x{:x}", ((cell as c_int) as i32 as i64) as u64);
             if i < ncells - 1 {
                 crate::kprint!(" ");
@@ -2921,7 +3043,9 @@ unsafe fn fdt_print_prop_value(data: *const u8, len: u32) {
     }
     crate::kprintln!("]");
 }
+}
 
+impl FdtNode {
 /// Mirrors `__fdt_walk_node()`.
 ///
 /// # Safety
@@ -2930,13 +3054,13 @@ unsafe fn fdt_walk_node(node: *mut FdtNode, depth: i32) {
     if node.is_null() {
         return;
     }
-    fdt_print_indent(depth);
+    Fdt::fdt_print_indent(depth);
 
     // SAFETY: caller contract.
     let data_size = unsafe { (*node).data_size };
     if data_size > 0 {
         unsafe { crate::kprint!("{} = ", crate::printf::Cs((*node).name)) };
-        unsafe { fdt_print_prop_value(fdt_data_ptr(node), data_size) };
+        unsafe { Fdt::fdt_print_prop_value((*node).data_ptr(), data_size) };
     } else {
         unsafe {
             if *(*node).name == 0 {
@@ -2948,18 +3072,20 @@ unsafe fn fdt_walk_node(node: *mut FdtNode, depth: i32) {
             }
 
             if (*node).has_phandle {
-                fdt_print_indent(depth + 1);
+                Fdt::fdt_print_indent(depth + 1);
                 crate::kprintln!("phandle = <0x{:x}>", (((*node).phandle as c_int) as i32 as i64) as u64);
             }
 
             for child in (*node).children() {
-                fdt_walk_node(child, depth + 1);
+                FdtNode::fdt_walk_node(child, depth + 1);
             }
         }
     }
 }
+}
 
-/// Rust port of `fdt_walk()`.
+impl Fdt {
+/// Rust port of `Fdt::fdt_walk()`.
 ///
 /// # Safety
 /// No preconditions on `dtb` (unused -- matches the C original, which
@@ -2984,13 +3110,15 @@ pub(crate) unsafe extern "C" fn fdt_walk(_dtb: *mut c_void) {
     // SAFETY: `blob` live.
     let root_rb = unsafe { (*blob).root.node };
     if !root_rb.is_null() {
-        unsafe { fdt_walk_node(root_rb as *mut FdtNode, 0) };
+        unsafe { FdtNode::fdt_walk_node(root_rb as *mut FdtNode, 0) };
     }
 
     crate::kprintln!("\n=== End of FDT ===");
 }
+}
 
-/// Rust port of `fdt_apply_platform_config()`.
+impl Fdt {
+/// Rust port of `Fdt::fdt_apply_platform_config()`.
 ///
 /// # Safety
 /// Must run exactly once, on the boot hart, after [`fdt_init`] and before
@@ -3064,4 +3192,5 @@ pub(crate) unsafe extern "C" fn fdt_apply_platform_config() {
             crate::timer::timer_core::__jiff_ticks = platform.timebase_freq / HZ;
         }
     }
+}
 }

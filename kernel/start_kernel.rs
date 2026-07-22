@@ -218,7 +218,7 @@ use crate::lock::rcu::{rcu_cpu_init, rcu_init, rcu_kthread_start_cpu};
 // instead of `extern "C"` redeclarations (identical signatures).
 use crate::backtrace::ksymbols_init;
 use crate::dev::dev::dev_table_init;
-use crate::dev::fdt::{fdt_apply_platform_config, fdt_early_scan_memory, fdt_init};
+use crate::dev::fdt::Fdt;
 use crate::dev::netdev::netdev_init;
 use crate::dev::nullrand::nullranddevinit;
 use crate::dev::x1_emac::x1_emac_init;
@@ -249,7 +249,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         // Early memory detection from FDT (lightweight scan, no allocations)
         let mut mem_base: u64 = 0x8000_0000; // Default for QEMU
         let mut mem_size: u64 = 128 * 1024 * 1024;
-        if fdt_early_scan_memory(fdt_base, &mut mem_base, &mut mem_size) == 0 {
+        if Fdt::fdt_early_scan_memory(fdt_base, &mut mem_base, &mut mem_size) == 0 {
             // Successfully found memory from FDT
         }
 
@@ -266,11 +266,11 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
             "\nxv6 kernel booting (hart {})\n",
             hartid,
         );
-        fdt_init(fdt_base);
-        // fdt_walk(fdt_base);
+        Fdt::fdt_init(fdt_base);
+        // Fdt::fdt_walk(fdt_base);
 
         // Apply platform configuration from FDT to kernel globals
-        fdt_apply_platform_config();
+        Fdt::fdt_apply_platform_config();
 
         sbi_probe_extensions();
         ksymbols_init(); // Initialize kernel symbols
