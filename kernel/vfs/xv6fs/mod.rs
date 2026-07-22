@@ -86,6 +86,19 @@
 //! computed from the real `dinode` type (native since P3-4a, reached via
 //! its unchanged `crate::bindings` facade path) via `core::mem::size_of`,
 //! not a hand-copied number, so it tracks the struct layout automatically.
+//!
+//! # Wave B free-fn -> associated-fn sweep
+//!
+//! The mode/type scalar helpers (`s_isdir`/`s_isreg`/`s_islnk`/`s_ischr`/
+//! `s_isblk`/`xv6fs_type_to_mode`/`xv6fs_mode_to_type`/`xv6fs_iblock`)
+//! are now `impl Xv6fs` associated fns (dropping the `xv6fs_` prefix on
+//! the last three), reached by every sibling submodule as
+//! `super::Xv6fs::*`. `Xv6fs` here is a ZST at this file's own path
+//! (`crate::vfs::xv6fs::Xv6fs`) -- distinct from the per-submodule
+//! `Xv6fs` ZSTs `truncate.rs`/`log.rs`/`block_cache.rs`/`inode.rs`/
+//! `superblock.rs` each declare privately for their own small helpers
+//! (module-private, so same name / different type, no collision). Every
+//! relocated body is byte-identical to its old free-fn form.
 pub mod block_cache;
 pub mod file;
 pub mod inode;
@@ -170,69 +183,82 @@ pub(crate) const S_IFBLK: u32 = 0o060000;
 pub(crate) const S_IFREG: u32 = 0o100000;
 pub(crate) const S_IFLNK: u32 = 0o120000;
 
-#[inline(always)]
-pub(crate) fn s_isdir(mode: u32) -> bool {
-    mode & S_IFMT == S_IFDIR
-}
-#[inline(always)]
-pub(crate) fn s_isreg(mode: u32) -> bool {
-    mode & S_IFMT == S_IFREG
-}
-#[inline(always)]
-pub(crate) fn s_islnk(mode: u32) -> bool {
-    mode & S_IFMT == S_IFLNK
-}
-#[inline(always)]
-pub(crate) fn s_ischr(mode: u32) -> bool {
-    mode & S_IFMT == S_IFCHR
-}
-#[inline(always)]
-pub(crate) fn s_isblk(mode: u32) -> bool {
-    mode & S_IFMT == S_IFBLK
-}
+/// ZST marker (Wave B free-fn -> associated-fn sweep, this file only) --
+/// holds the mode/type scalar helpers with no natural shared-type home
+/// (they take/return bare `u32`/`i16`, not a pointer to any xv6fs
+/// struct). Distinct from the per-submodule `Xv6fs` ZSTs in
+/// `truncate.rs`/`log.rs`/`block_cache.rs`/`inode.rs`/`superblock.rs`
+/// (each is module-private, so the same name in different files is a
+/// different type -- no collision); this one lives at the crate path
+/// `crate::vfs::xv6fs::Xv6fs`, reached by every sibling submodule as
+/// `super::Xv6fs::*`.
+pub(crate) struct Xv6fs;
 
-/// Mirrors `xv6fs_type_to_mode()` (`xv6fs_private.h`, `static inline`).
-#[inline(always)]
-pub(crate) fn xv6fs_type_to_mode(type_: i16) -> u32 {
-    match type_ {
-        XV6FS_T_DIR => S_IFDIR | 0o755,
-        XV6FS_T_FILE => S_IFREG | 0o644,
-        XV6FS_T_CDEVICE => S_IFCHR | 0o666,
-        XV6FS_T_BLKDEVICE => S_IFBLK | 0o660,
-        XV6FS_T_SYMLINK => S_IFLNK | 0o777,
-        _ => 0,
+impl Xv6fs {
+    #[inline(always)]
+    pub(crate) fn s_isdir(mode: u32) -> bool {
+        mode & S_IFMT == S_IFDIR
     }
-}
+    #[inline(always)]
+    pub(crate) fn s_isreg(mode: u32) -> bool {
+        mode & S_IFMT == S_IFREG
+    }
+    #[inline(always)]
+    pub(crate) fn s_islnk(mode: u32) -> bool {
+        mode & S_IFMT == S_IFLNK
+    }
+    #[inline(always)]
+    pub(crate) fn s_ischr(mode: u32) -> bool {
+        mode & S_IFMT == S_IFCHR
+    }
+    #[inline(always)]
+    pub(crate) fn s_isblk(mode: u32) -> bool {
+        mode & S_IFMT == S_IFBLK
+    }
 
-/// Mirrors `xv6fs_mode_to_type()` (`xv6fs_private.h`, `static inline`).
-#[inline(always)]
-pub(crate) fn xv6fs_mode_to_type(mode: u32) -> i16 {
-    if s_isdir(mode) {
-        return XV6FS_T_DIR;
+    /// Mirrors `xv6fs_type_to_mode()` (`xv6fs_private.h`, `static inline`).
+    #[inline(always)]
+    pub(crate) fn type_to_mode(type_: i16) -> u32 {
+        match type_ {
+            XV6FS_T_DIR => S_IFDIR | 0o755,
+            XV6FS_T_FILE => S_IFREG | 0o644,
+            XV6FS_T_CDEVICE => S_IFCHR | 0o666,
+            XV6FS_T_BLKDEVICE => S_IFBLK | 0o660,
+            XV6FS_T_SYMLINK => S_IFLNK | 0o777,
+            _ => 0,
+        }
     }
-    if s_isreg(mode) {
-        return XV6FS_T_FILE;
-    }
-    if s_ischr(mode) {
-        return XV6FS_T_CDEVICE;
-    }
-    if s_isblk(mode) {
-        return XV6FS_T_BLKDEVICE;
-    }
-    if s_islnk(mode) {
-        return XV6FS_T_SYMLINK;
-    }
-    0
-}
 
-/// `XV6FS_IBLOCK(ino, sb)` (`xv6fs_private.h`) — the disk block number
-/// containing inode `ino`'s `struct dinode`.
-///
-/// `inodestart` is `uint` (`u32`) on the real `superblock` type;
-/// widened to `u64` before the divide/add to match the C macro's
-/// (unsigned, but effectively infinite-precision for realistic disk
-/// sizes) arithmetic without a wraparound hazard.
-#[inline(always)]
-pub(crate) fn xv6fs_iblock(ino: u64, inodestart: u32) -> u32 {
-    ((ino / IPB) + inodestart as u64) as u32
+    /// Mirrors `xv6fs_mode_to_type()` (`xv6fs_private.h`, `static inline`).
+    #[inline(always)]
+    pub(crate) fn mode_to_type(mode: u32) -> i16 {
+        if Xv6fs::s_isdir(mode) {
+            return XV6FS_T_DIR;
+        }
+        if Xv6fs::s_isreg(mode) {
+            return XV6FS_T_FILE;
+        }
+        if Xv6fs::s_ischr(mode) {
+            return XV6FS_T_CDEVICE;
+        }
+        if Xv6fs::s_isblk(mode) {
+            return XV6FS_T_BLKDEVICE;
+        }
+        if Xv6fs::s_islnk(mode) {
+            return XV6FS_T_SYMLINK;
+        }
+        0
+    }
+
+    /// `XV6FS_IBLOCK(ino, sb)` (`xv6fs_private.h`) — the disk block number
+    /// containing inode `ino`'s `struct dinode`.
+    ///
+    /// `inodestart` is `uint` (`u32`) on the real `superblock` type;
+    /// widened to `u64` before the divide/add to match the C macro's
+    /// (unsigned, but effectively infinite-precision for realistic disk
+    /// sizes) arithmetic without a wraparound hazard.
+    #[inline(always)]
+    pub(crate) fn iblock(ino: u64, inodestart: u32) -> u32 {
+        ((ino / IPB) + inodestart as u64) as u32
+    }
 }

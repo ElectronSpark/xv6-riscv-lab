@@ -84,7 +84,7 @@ use crate::bindings::{
 };
 use crate::vfs::inode::InodeOps;
 
-use super::{xv6fs_mode_to_type, DIRSIZ};
+use super::DIRSIZ;
 
 // ===========================================================================
 // Native `xv6fs_inode` — P3-N8 nativization (user directive: remove the
@@ -262,7 +262,9 @@ unsafe impl crate::kstd::AsBytes for Dirent {}
 // tmpfs_make_directory` call).
 use crate::proc::proc_shims::xv6_panic;
 
-use super::log::xv6fs_log_write;
+// Wave B free-fn -> associated-fn sweep (log.rs): `xv6fs_log_write` is now
+// `Xv6fsSuperblock::log_write` (see `log.rs`'s own module doc).
+use super::superblock::Xv6fsSuperblock;
 // Wave A: `xv6fs_bmap`/`xv6fs_bmap_read`/`xv6fs_itrunc` are now
 // `Xv6fsInode` associated fns (see `truncate.rs`'s own sweep);
 // `Xv6fsInode` is already in scope (this file defines it), so no new
@@ -395,7 +397,7 @@ impl Xv6fsInode {
             }
             let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
 
-            let bp = bread((*ip).dev, super::xv6fs_iblock((*ip).vfs_inode.ino, (*disk_sb).inodestart));
+            let bp = bread((*ip).dev, super::Xv6fs::iblock((*ip).vfs_inode.ino, (*disk_sb).inodestart));
             if bp.is_null() {
                 // C original does not NULL-check here either -- but an
                 // unconditional deref of a NULL `bp` below would be
@@ -410,14 +412,14 @@ impl Xv6fsInode {
             let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
             let dip = view.nth_mut::<dinode>(((*ip).vfs_inode.ino % super::IPB) as usize);
 
-            dip.type_ = xv6fs_mode_to_type((*ip).vfs_inode.mode);
+            dip.type_ = super::Xv6fs::mode_to_type((*ip).vfs_inode.mode);
             dip.major = (*ip).major;
             dip.minor = (*ip).minor;
             dip.nlink = (*ip).vfs_inode.n_links as i16;
             dip.size = (*ip).vfs_inode.size as u32;
             dip.addrs = (*ip).addrs;
 
-            xv6fs_log_write(xv6_sb, bp);
+            Xv6fsSuperblock::log_write(xv6_sb, bp);
             brelse(bp);
         }
     }
@@ -496,7 +498,7 @@ impl Xv6fs {
             return Err(Errno::Inval);
         }
         // SAFETY: `dir` is live (caller's contract).
-        if !super::s_isdir(unsafe { (*dir).mode }) {
+        if !super::Xv6fs::s_isdir(unsafe { (*dir).mode }) {
             return Err(Errno::NotDir);
         }
         if name_len > DIRSIZ {
@@ -541,7 +543,7 @@ impl Xv6fs {
             return Err(Errno::Inval);
         }
         // SAFETY: `dir` is live.
-        if !super::s_isdir(unsafe { (*dir).mode }) {
+        if !super::Xv6fs::s_isdir(unsafe { (*dir).mode }) {
             return Err(Errno::NotDir);
         }
 
@@ -692,7 +694,7 @@ impl Xv6fsInode {
             *de = core::mem::zeroed();
             strncpy(de.name.as_mut_ptr(), name, DIRSIZ);
             de.inum = inum as u16;
-            xv6fs_log_write(xv6_sb, bp);
+            Xv6fsSuperblock::log_write(xv6_sb, bp);
             brelse(bp);
 
             if off as i64 >= (*dp).vfs_inode.size {
@@ -869,7 +871,7 @@ impl Xv6fs {
                             let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
                             *view.get_mut::<dirent>(block_off) = core::mem::zeroed();
                             let xv6_sb = (*dentry).sb as *mut xv6fs_superblock;
-                            xv6fs_log_write(xv6_sb, bp);
+                            Xv6fsSuperblock::log_write(xv6_sb, bp);
                             brelse(bp);
 
                             // inode is already locked by vfs_get_inode.
@@ -916,7 +918,7 @@ impl Xv6fs {
             return Err(Errno::Inval);
         }
         // SAFETY: `old` is live.
-        if super::s_isdir(unsafe { (*old).mode }) {
+        if super::Xv6fs::s_isdir(unsafe { (*old).mode }) {
             return Err(Errno::Perm); // Can't hard link directories.
         }
 
@@ -958,7 +960,7 @@ impl Xv6fs {
             return Err(Errno::Inval);
         }
         // SAFETY: `inode` is live.
-        if !super::s_islnk(unsafe { (*inode).mode }) {
+        if !super::Xv6fs::s_islnk(unsafe { (*inode).mode }) {
             return Err(Errno::Inval);
         }
 
@@ -1078,7 +1080,7 @@ impl Xv6fs {
                     n as usize,
                 );
             }
-            xv6fs_log_write(xv6_sb, bp);
+            Xv6fsSuperblock::log_write(xv6_sb, bp);
             brelse(bp);
 
             bytes_written += n as usize;
@@ -1110,7 +1112,7 @@ impl Xv6fs {
             return Err(Errno::Inval);
         }
         // xv6 only supports character and block devices.
-        if !super::s_isblk(mode) && !super::s_ischr(mode) {
+        if !super::Xv6fs::s_isblk(mode) && !super::Xv6fs::s_ischr(mode) {
             return Err(Errno::Inval);
         }
 
@@ -1132,9 +1134,9 @@ impl Xv6fs {
 
             (*ip).major = Xv6fs::major(dev);
             (*ip).minor = Xv6fs::minor(dev);
-            if super::s_ischr(mode) {
+            if super::Xv6fs::s_ischr(mode) {
                 (*new_inode).dev_mnt.cdev = dev;
-            } else if super::s_isblk(mode) {
+            } else if super::Xv6fs::s_isblk(mode) {
                 (*new_inode).dev_mnt.bdev = dev;
             }
         }
@@ -1186,7 +1188,7 @@ impl Xv6fs {
             Xv6fsInode::itrunc(ip);
 
             // Mark inode as free on disk.
-            let bp = bread((*ip).dev, super::xv6fs_iblock((*inode).ino, (*xv6_sb).disk_sb.inodestart));
+            let bp = bread((*ip).dev, super::Xv6fs::iblock((*inode).ino, (*xv6_sb).disk_sb.inodestart));
             if bp.is_null() {
                 // See the module doc's "Fidelity note": the C original does
                 // not NULL-check here either, but an unconditional deref
@@ -1198,7 +1200,7 @@ impl Xv6fs {
             // page-aligned, initialized bytes borrowed only here until `brelse`.
             let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
             view.nth_mut::<dinode>(((*inode).ino % super::IPB) as usize).type_ = 0;
-            xv6fs_log_write(xv6_sb, bp);
+            Xv6fsSuperblock::log_write(xv6_sb, bp);
             brelse(bp);
         }
     }
@@ -1240,7 +1242,7 @@ impl Xv6fs {
         // SAFETY: `inode` is live.
         let mode = unsafe { (*inode).mode };
 
-        if super::s_isreg(mode) {
+        if super::Xv6fs::s_isreg(mode) {
             // SAFETY: `file` is live.
             unsafe {
                 (*file).ops = Some(&super::file::XV6FS_FILE_OPS);
@@ -1253,14 +1255,14 @@ impl Xv6fs {
             return Ok(());
         }
 
-        if super::s_isdir(mode) {
+        if super::Xv6fs::s_isdir(mode) {
             // Directories use dir_iter for reading.
             // SAFETY: `file` is live.
             unsafe { (*file).ops = Some(&super::file::XV6FS_FILE_OPS) };
             return Ok(());
         }
 
-        if super::s_islnk(mode) {
+        if super::Xv6fs::s_islnk(mode) {
             // FIX (preserved from C): allow opening symlinks with O_NOFOLLOW
             // flag. POSIX requires that symlinks can be opened with
             // O_NOFOLLOW to allow fstat() on the symlink itself (not its
@@ -1272,7 +1274,7 @@ impl Xv6fs {
         }
 
         // Character/block devices are handled by VFS core.
-        if super::s_ischr(mode) || super::s_isblk(mode) {
+        if super::Xv6fs::s_ischr(mode) || super::Xv6fs::s_isblk(mode) {
             return Err(Errno::Inval); // Should be handled by VFS.
         }
 

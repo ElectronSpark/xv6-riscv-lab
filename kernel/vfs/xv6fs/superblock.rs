@@ -68,9 +68,10 @@ use crate::vfs::fs::{FsTypeOps, SuperblockOps};
 use super::inode::{Xv6fsInode, XV6FS_INODE_OPS};
 // Sub-wave B siblings -- plain Rust-path imports, not `extern "C"`; see
 // `truncate.rs`'s module doc ("Intra-driver calls") for the convention.
-use super::block_cache::{xv6fs_bcache_destroy, xv6fs_bcache_init};
-use super::log::{xv6fs_begin_op, xv6fs_end_op, xv6fs_initlog, xv6fs_log_write};
-use super::{xv6fs_iblock, xv6fs_type_to_mode, FSMAGIC, IPB, ROOTINO};
+// Wave B free-fn -> associated-fn sweep: the block_cache/log public API is
+// now `impl Xv6fsSuperblock` (this file's own type, so no `use` needed for
+// those calls -- see `block_cache.rs`'s/`log.rs`'s own module docs).
+use super::{FSMAGIC, IPB, ROOTINO};
 
 // ===========================================================================
 // Native on-disk `superblock` — P3-4a nativization (user directive:
@@ -546,7 +547,7 @@ impl Xv6fs {
     pub(crate) extern "C" fn inode_pcache_init(inode: *mut vfs_inode) {
         // SAFETY: `inode` is live (caller's contract).
         unsafe {
-            if !super::s_isreg((*inode).mode) {
+            if !super::Xv6fs::s_isreg((*inode).mode) {
                 return;
             }
             let pc = ptr::addr_of_mut!((*inode).i_data);
@@ -722,7 +723,7 @@ impl Xv6fs {
             let ninodes = (*disk_sb).ninodes as u64;
             let inodestart = (*disk_sb).inodestart;
             for inum in 1..ninodes {
-                let bp = bread(dev, xv6fs_iblock(inum, inodestart));
+                let bp = bread(dev, super::Xv6fs::iblock(inum, inodestart));
                 if bp.is_null() {
                     return Err(Errno::Io);
                 }
@@ -731,7 +732,7 @@ impl Xv6fs {
                     // Found a free inode.
                     ptr::write_bytes(dip as *mut u8, 0, core::mem::size_of::<dinode>());
                     // Mark as allocated but type will be set by caller.
-                    xv6fs_log_write(xv6_sb, bp);
+                    Xv6fsSuperblock::log_write(xv6_sb, bp);
                     brelse(bp);
 
                     let xi = Xv6fsInode::alloc_structure();
@@ -776,7 +777,7 @@ impl Xv6fs {
                 return Err(Errno::NoEnt);
             }
 
-            let bp = bread(dev, xv6fs_iblock(ino, (*disk_sb).inodestart));
+            let bp = bread(dev, super::Xv6fs::iblock(ino, (*disk_sb).inodestart));
             if bp.is_null() {
                 return Err(Errno::Io);
             }
@@ -798,7 +799,7 @@ impl Xv6fs {
             // Note: Do NOT set vfs_inode.sb here -- VFS will set it when
             // adding to hash.
             (*xi).vfs_inode.ref_count = 1;
-            (*xi).vfs_inode.mode = xv6fs_type_to_mode((*dip).type_);
+            (*xi).vfs_inode.mode = super::Xv6fs::type_to_mode((*dip).type_);
             (*xi).vfs_inode.n_links = (*dip).nlink as u32;
             (*xi).vfs_inode.size = (*dip).size as i64;
 
@@ -872,7 +873,7 @@ impl FsTypeOps for Xv6fsFsTypeOps {
     // inode is provided, xv6fs does not support that (unlike tmpfs).
     // SAFETY: `device` checked non-null before deref.
     let dev_num = unsafe {
-        if device.is_null() || !super::s_isblk((*device).mode) {
+        if device.is_null() || !super::Xv6fs::s_isblk((*device).mode) {
             return Err(Errno::Inval); // xv6fs does not support block device inode
         }
         (*device).dev_mnt.bdev
@@ -906,10 +907,10 @@ impl FsTypeOps for Xv6fsFsTypeOps {
         (*xv6_sb).dirty = 0;
 
         // Initialize logging layer.
-        xv6fs_initlog(xv6_sb);
+        Xv6fsSuperblock::initlog(xv6_sb);
 
         // Initialize block allocation cache.
-        let ret = xv6fs_bcache_init(xv6_sb);
+        let ret = Xv6fsSuperblock::bcache_init(xv6_sb);
         if ret != 0 {
             crate::kprintln!(
                 "xv6fs: warning: block cache init failed ({}), using fallback",
@@ -951,7 +952,7 @@ impl FsTypeOps for Xv6fsFsTypeOps {
         let xv6_sb = sb as *mut xv6fs_superblock;
         // SAFETY: `xv6_sb` is live and being torn down (caller's contract).
         unsafe {
-            xv6fs_bcache_destroy(xv6_sb);
+            Xv6fsSuperblock::bcache_destroy(xv6_sb);
             if !(*xv6_sb).blkdev.is_null() {
                 blkdev_put((*xv6_sb).blkdev);
             }
@@ -1020,12 +1021,12 @@ impl SuperblockOps for Xv6fsSuperblockOps {
     }
     unsafe fn begin_transaction(&self, sb: *mut vfs_superblock) -> KResult<()> {
         let xv6_sb = sb as *mut xv6fs_superblock;
-        let ret = xv6fs_begin_op(xv6_sb);
+        let ret = Xv6fsSuperblock::begin_op(xv6_sb);
         if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
     }
     unsafe fn end_transaction(&self, sb: *mut vfs_superblock) -> KResult<()> {
         let xv6_sb = sb as *mut xv6fs_superblock;
-        xv6fs_end_op(xv6_sb);
+        Xv6fsSuperblock::end_op(xv6_sb);
         Ok(())
     }
 }

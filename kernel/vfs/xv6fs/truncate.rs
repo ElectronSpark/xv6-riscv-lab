@@ -61,9 +61,11 @@ use crate::bindings::{buf, loff_t, vfs_inode, xv6fs_inode, xv6fs_superblock};
 use crate::kstd::{Errno, KResult};
 use crate::proc::proc_shims::xv6_panic;
 
-use super::block_cache::{xv6fs_bcache_find_free_block, xv6fs_bcache_find_free_block_near, xv6fs_bcache_mark_free};
+// Wave B free-fn -> associated-fn sweep: the block_cache/log public API is
+// now `impl Xv6fsSuperblock` (see `block_cache.rs`'s/`log.rs`'s own module
+// docs), reached below as `Xv6fsSuperblock::mark_free`/`find_free_block`/
+// `find_free_block_near`/`begin_op`/`begin_op_nointr`/`end_op`/`log_write`.
 use super::inode::Xv6fsInode;
-use super::log::{xv6fs_begin_op, xv6fs_begin_op_nointr, xv6fs_end_op, xv6fs_log_write};
 use super::superblock::Xv6fsSuperblock;
 
 // ===========================================================================
@@ -124,9 +126,9 @@ impl Xv6fsSuperblock {
             // Try to find a free block using the cache.
             if (*xv6_sb).block_cache.initialized != 0 {
                 let rc = if hint != 0 {
-                    xv6fs_bcache_find_free_block_near(xv6_sb, hint, ptr::addr_of_mut!(blockno))
+                    Xv6fsSuperblock::find_free_block_near(xv6_sb, hint, ptr::addr_of_mut!(blockno))
                 } else {
-                    xv6fs_bcache_find_free_block(xv6_sb, ptr::addr_of_mut!(blockno))
+                    Xv6fsSuperblock::find_free_block(xv6_sb, ptr::addr_of_mut!(blockno))
                 };
 
                 if rc == 0 {
@@ -136,14 +138,14 @@ impl Xv6fsSuperblock {
                     let bp = bread(dev, Xv6fs::bblock_ptr(blockno, (*disk_sb).bmapstart));
                     if bp.is_null() {
                         // Revert cache state on error.
-                        xv6fs_bcache_mark_free(xv6_sb, blockno);
+                        Xv6fsSuperblock::mark_free(xv6_sb, blockno);
                         return 0;
                     }
 
                     let bi = (blockno % super::BPB) as usize;
                     let m: u8 = 1 << (bi % 8);
                     *(*bp).data.add(bi / 8) |= m;
-                    xv6fs_log_write(xv6_sb, bp);
+                    Xv6fsSuperblock::log_write(xv6_sb, bp);
                     brelse(bp);
 
                     // Zero the block.
@@ -152,7 +154,7 @@ impl Xv6fsSuperblock {
                         return 0;
                     }
                     memset((*zbp).data as *mut c_void, 0, super::BSIZE as usize);
-                    xv6fs_log_write(xv6_sb, zbp);
+                    Xv6fsSuperblock::log_write(xv6_sb, zbp);
                     brelse(zbp);
 
                     return blockno;
@@ -207,7 +209,7 @@ impl Xv6fsSuperblock {
                 }
 
                 *a.add(bn as usize) = addr;
-                xv6fs_log_write(xv6_sb, bp);
+                Xv6fsSuperblock::log_write(xv6_sb, bp);
             }
 
             brelse(bp);
@@ -345,7 +347,7 @@ impl Xv6fsInode {
 
                 let addr = Xv6fsSuperblock::bmap_ind(xv6_sb, a.add(l1_idx as usize), dev, l2_idx, (*ip).addrs[super::NDIRECT as usize + 1]);
                 if *a.add(l1_idx as usize) != 0 {
-                    xv6fs_log_write(xv6_sb, bp);
+                    Xv6fsSuperblock::log_write(xv6_sb, bp);
                 }
                 brelse(bp);
                 return addr;
@@ -382,11 +384,11 @@ impl Xv6fsSuperblock {
                 xv6_panic(c"xv6fs_bfree: freeing free block".as_ptr());
             }
             *(*bp).data.add(bi / 8) &= !m;
-            xv6fs_log_write(xv6_sb, bp);
+            Xv6fsSuperblock::log_write(xv6_sb, bp);
             brelse(bp);
 
             // Update the block cache.
-            xv6fs_bcache_mark_free(xv6_sb, b);
+            Xv6fsSuperblock::mark_free(xv6_sb, b);
         }
     }
 
@@ -421,7 +423,7 @@ impl Xv6fsSuperblock {
             }
 
             if freed > 0 {
-                xv6fs_log_write(xv6_sb, bp);
+                Xv6fsSuperblock::log_write(xv6_sb, bp);
             }
             brelse(bp);
 
@@ -478,8 +480,8 @@ impl Xv6fsInode {
                     if freed_this_batch >= ITRUNC_BATCH_SIZE {
                         // Commit current batch and start new transaction.
                         Xv6fsInode::iupdate(ip);
-                        xv6fs_end_op(xv6_sb);
-                        xv6fs_begin_op_nointr(xv6_sb);
+                        Xv6fsSuperblock::end_op(xv6_sb);
+                        Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                         freed_this_batch = 0;
                     }
                 }
@@ -503,11 +505,11 @@ impl Xv6fsInode {
                         freed_this_batch += 1;
 
                         if freed_this_batch >= ITRUNC_BATCH_SIZE {
-                            xv6fs_log_write(xv6_sb, bp);
+                            Xv6fsSuperblock::log_write(xv6_sb, bp);
                             brelse(bp);
                             Xv6fsInode::iupdate(ip);
-                            xv6fs_end_op(xv6_sb);
-                            xv6fs_begin_op_nointr(xv6_sb);
+                            Xv6fsSuperblock::end_op(xv6_sb);
+                            Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                             freed_this_batch = 0;
                             bp = bread(dev, (*ip).addrs[super::NDIRECT as usize]);
                             if bp.is_null() {
@@ -517,7 +519,7 @@ impl Xv6fsInode {
                         }
                     }
                 }
-                xv6fs_log_write(xv6_sb, bp);
+                Xv6fsSuperblock::log_write(xv6_sb, bp);
                 brelse(bp);
                 Xv6fsSuperblock::bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize]);
                 (*ip).addrs[super::NDIRECT as usize] = 0;
@@ -525,8 +527,8 @@ impl Xv6fsInode {
 
                 if freed_this_batch >= ITRUNC_BATCH_SIZE {
                     Xv6fsInode::iupdate(ip);
-                    xv6fs_end_op(xv6_sb);
-                    xv6fs_begin_op_nointr(xv6_sb);
+                    Xv6fsSuperblock::end_op(xv6_sb);
+                    Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                     freed_this_batch = 0;
                 }
             }
@@ -559,13 +561,13 @@ impl Xv6fsInode {
                                 freed_this_batch += 1;
 
                                 if freed_this_batch >= ITRUNC_BATCH_SIZE {
-                                    xv6fs_log_write(xv6_sb, bp);
+                                    Xv6fsSuperblock::log_write(xv6_sb, bp);
                                     brelse(bp);
-                                    xv6fs_log_write(xv6_sb, dbp);
+                                    Xv6fsSuperblock::log_write(xv6_sb, dbp);
                                     brelse(dbp);
                                     Xv6fsInode::iupdate(ip);
-                                    xv6fs_end_op(xv6_sb);
-                                    xv6fs_begin_op_nointr(xv6_sb);
+                                    Xv6fsSuperblock::end_op(xv6_sb);
+                                    Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                                     freed_this_batch = 0;
                                     dbp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                                     if dbp.is_null() {
@@ -580,18 +582,18 @@ impl Xv6fsInode {
                                 }
                             }
                         }
-                        xv6fs_log_write(xv6_sb, bp);
+                        Xv6fsSuperblock::log_write(xv6_sb, bp);
                         brelse(bp);
                         Xv6fsSuperblock::bfree(xv6_sb, dev, *da.add(j as usize));
                         *da.add(j as usize) = 0;
                         freed_this_batch += 1;
 
                         if freed_this_batch >= ITRUNC_BATCH_SIZE {
-                            xv6fs_log_write(xv6_sb, dbp);
+                            Xv6fsSuperblock::log_write(xv6_sb, dbp);
                             brelse(dbp);
                             Xv6fsInode::iupdate(ip);
-                            xv6fs_end_op(xv6_sb);
-                            xv6fs_begin_op_nointr(xv6_sb);
+                            Xv6fsSuperblock::end_op(xv6_sb);
+                            Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                             freed_this_batch = 0;
                             dbp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                             if dbp.is_null() {
@@ -601,7 +603,7 @@ impl Xv6fsInode {
                         }
                     }
                 }
-                xv6fs_log_write(xv6_sb, dbp);
+                Xv6fsSuperblock::log_write(xv6_sb, dbp);
                 brelse(dbp);
                 Xv6fsSuperblock::bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                 (*ip).addrs[super::NDIRECT as usize + 1] = 0;
@@ -696,7 +698,7 @@ impl Xv6fsInode {
                     }
 
                     if modified {
-                        xv6fs_log_write(xv6_sb, bp);
+                        Xv6fsSuperblock::log_write(xv6_sb, bp);
                     }
                     brelse(bp);
 
@@ -752,12 +754,12 @@ impl Xv6fs {
 
         if new_size == 0 {
             // Full truncation -- use the optimized path.
-            let ret = xv6fs_begin_op(xv6_sb);
+            let ret = Xv6fsSuperblock::begin_op(xv6_sb);
             if ret != 0 {
                 return Err(Errno::Raw(ret));
             }
             Xv6fsInode::itrunc(ip);
-            xv6fs_end_op(xv6_sb);
+            Xv6fsSuperblock::end_op(xv6_sb);
             return Ok(());
         }
 
@@ -769,7 +771,7 @@ impl Xv6fs {
             // block.
             let first_block = (new_size as u32 + super::BSIZE - 1) / super::BSIZE;
 
-            let ret = xv6fs_begin_op(xv6_sb);
+            let ret = Xv6fsSuperblock::begin_op(xv6_sb);
             if ret != 0 {
                 return Err(Errno::Raw(ret));
             }
@@ -779,7 +781,7 @@ impl Xv6fs {
                 (*inode).size = new_size;
             }
             Xv6fsInode::iupdate(ip);
-            xv6fs_end_op(xv6_sb);
+            Xv6fsSuperblock::end_op(xv6_sb);
             return Ok(());
         }
 
@@ -787,21 +789,21 @@ impl Xv6fs {
         let old_blocks = (old_size as u32 + super::BSIZE - 1) / super::BSIZE;
         let new_blocks = (new_size as u32 + super::BSIZE - 1) / super::BSIZE;
 
-        let ret = xv6fs_begin_op(xv6_sb);
+        let ret = Xv6fsSuperblock::begin_op(xv6_sb);
         if ret != 0 {
             return Err(Errno::Raw(ret));
         }
         // (Goal #2) block-extend walk -> range iterator.
         for bn in old_blocks..new_blocks {
             if Xv6fsInode::bmap(ip, bn) == 0 {
-                xv6fs_end_op(xv6_sb);
+                Xv6fsSuperblock::end_op(xv6_sb);
                 return Err(Errno::NoSpc);
             }
         }
         // SAFETY: `inode` is live.
         unsafe { (*inode).size = new_size };
         Xv6fsInode::iupdate(ip);
-        xv6fs_end_op(xv6_sb);
+        Xv6fsSuperblock::end_op(xv6_sb);
 
         Ok(())
     }

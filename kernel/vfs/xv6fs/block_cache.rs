@@ -32,6 +32,32 @@
 //! This means [`extent_keys_cmp`]/[`extent_get_key`] genuinely are wired
 //! into `xv6fs_block_cache.tree_opts` and exercised by every insert; they
 //! are not dead ABI ceremony.
+//!
+//! # Wave B free-fn -> associated-fn sweep
+//!
+//! Every free fn that used to live in this file is now an associated fn:
+//! `impl FreeExtent` for the slab-backed `alloc`/`free` pair (was
+//! `bcache_alloc_extent`/`bcache_free_extent`), `impl Xv6fsSuperblock` for
+//! the `xv6_sb: *mut xv6fs_superblock` public API (`mark_free`/
+//! `find_free_block`/`find_free_block_near`/`free_count`/`bcache_init`/
+//! `bcache_destroy`, dropping the `xv6fs_bcache_` prefix -- `bcache_`
+//! itself is kept on `init`/`destroy` to stay unambiguous on a shared
+//! type), or an `impl Xv6fs` method (a ZST private to this file, same
+//! convention as `truncate.rs`/`log.rs`) for the small `neg`/`mkdev`/
+//! `sb_dev`/`bblock_ptr` helpers with no shared-type home -- `sb_dev` is
+//! this file's own hardcoded-locally copy, kept private rather than
+//! merged into `Xv6fsSuperblock` because `superblock.rs` already has its
+//! own same-named `Xv6fsSuperblock::sb_dev` (a second inherent method of
+//! that name would collide). The intrusive rb-tree wrappers
+//! (`rb_first_node`/`rb_last_node`/`rb_next_node`/`rb_insert_color`/
+//! `rb_delete_node_color`), the slab facade (`slab_cache_init`/
+//! `slab_alloc`/`slab_free`), and the `extern "C"` rb-tree comparator
+//! callbacks (`extent_keys_cmp`/`extent_get_key`, wired into
+//! `tree_opts.keys_cmp_fun`/`get_key_fun` as raw fn pointers) stay FLOOR
+//! free fns -- addr-taken/fn-pointer-table entries and thin C-ABI
+//! facades, matching this crate's established precedent for both
+//! classes. Every relocated body is byte-identical to its old free-fn
+//! form; no raw-pointer first param became `&self`/`&T`.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -47,6 +73,13 @@ use crate::bindings::{
 // inside the `SpinLock`, and the internal helpers operate on
 // `*mut BlockCacheInner`.
 use crate::sync::SpinLock;
+
+// Wave B free-fn -> associated-fn sweep pulls in the superblock type: the
+// `xv6fs_bcache_*` public-API family (first param `*mut xv6fs_superblock`)
+// becomes `impl Xv6fsSuperblock` methods, following the same cross-file
+// inherent-impl convention `truncate.rs`/`log.rs` already established for
+// `Xv6fsSuperblock::balloc`/`Xv6fsSuperblock::begin_op` etc.
+use super::superblock::Xv6fsSuperblock;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-N6 (mm type family, allocator-POD slice).
@@ -132,7 +165,7 @@ const _: () = {
 /// next/prev — the separate list keystone) still run on a raw
 /// `*mut BlockCacheInner` **derived from the held guard**, so they are left
 /// raw exactly as before (out of scope). The single-threaded mount-time
-/// build ([`xv6fs_bcache_init`]) reaches this struct via
+/// build ([`Xv6fsSuperblock::bcache_init`]) reaches this struct via
 /// [`SpinLock::data_ptr`] instead of the guard, because it streams the
 /// on-disk bitmap across sleeping `bread`/`brelse` and so cannot hold the
 /// spinlock — the block-cache analogue of the log's single-threaded
@@ -291,32 +324,45 @@ fn slab_free(obj: *mut c_void) {
     unsafe { crate::mm::slab_free(obj) };
 }
 
-#[inline(always)]
-const fn neg(e: u32) -> c_int {
-    -(e as c_int)
-}
+/// ZST marker (Wave B free-fn -> associated-fn sweep, this file only) --
+/// see the module doc. Holds the small helpers with no natural shared-type
+/// home: `mkdev`/`sb_dev`/`bblock_ptr` are this file's own hardcoded-
+/// locally copies (same rationale/precedent as `log.rs`'s and
+/// `superblock.rs`'s own copies -- each file keeps a private duplicate
+/// rather than sharing one `Xv6fsSuperblock::sb_dev`, since the scalar
+/// helpers collide across files by name/signature otherwise, per
+/// `truncate.rs`'s module doc).
+struct Xv6fs;
 
-/// Mirrors `mkdev(m, n)`/`xv6fs_sb_dev()` -- hardcoded locally, same
-/// rationale/precedent as `superblock.rs`'s own copy.
-#[inline(always)]
-const fn mkdev(major: i32, minor: i32) -> u32 {
-    ((major << 20) | minor) as u32
-}
-/// # Safety
-/// `xv6_sb` must point to a live `xv6fs_superblock` with a non-null
-/// `blkdev`.
-#[inline(always)]
-unsafe fn xv6fs_sb_dev(xv6_sb: *mut xv6fs_superblock) -> u32 {
-    unsafe {
-        let bdev = (*xv6_sb).blkdev;
-        mkdev((*bdev).dev.major, (*bdev).dev.minor)
+impl Xv6fs {
+    #[inline(always)]
+    const fn neg(e: u32) -> c_int {
+        -(e as c_int)
     }
-}
 
-/// Mirrors `BBLOCK_PTR(b, sbp)` (`block_cache.c`, macro).
-#[inline(always)]
-fn bblock_ptr(b: u32, bmapstart: u32) -> u32 {
-    b / super::BPB + bmapstart
+    /// Mirrors `mkdev(m, n)`/`xv6fs_sb_dev()` -- hardcoded locally, same
+    /// rationale/precedent as `superblock.rs`'s own copy.
+    #[inline(always)]
+    const fn mkdev(major: i32, minor: i32) -> u32 {
+        ((major << 20) | minor) as u32
+    }
+
+    /// # Safety
+    /// `xv6_sb` must point to a live `xv6fs_superblock` with a non-null
+    /// `blkdev`.
+    #[inline(always)]
+    unsafe fn sb_dev(xv6_sb: *mut xv6fs_superblock) -> u32 {
+        unsafe {
+            let bdev = (*xv6_sb).blkdev;
+            Xv6fs::mkdev((*bdev).dev.major, (*bdev).dev.minor)
+        }
+    }
+
+    /// Mirrors `BBLOCK_PTR(b, sbp)` (`block_cache.c`, macro).
+    #[inline(always)]
+    fn bblock_ptr(b: u32, bmapstart: u32) -> u32 {
+        b / super::BPB + bmapstart
+    }
 }
 
 // ===========================================================================
@@ -362,23 +408,25 @@ extern "C" fn extent_get_key(node: *mut rb_node) -> u64 {
 // Extent allocation helpers
 // ===========================================================================
 
-/// # Safety
-/// `bc` must point to a live `BlockCacheInner`.
-unsafe fn bcache_alloc_extent(extent_cache: *mut slab_cache_t) -> *mut free_extent {
-    // SAFETY: `extent_cache` originates from `slab_cache_init` (its own
-    // internal lock synchronises the allocation).
-    let ext = slab_alloc(extent_cache) as *mut free_extent;
-    if !ext.is_null() {
-        // SAFETY: `ext` is a freshly allocated, exclusively-owned block.
-        unsafe { ptr::write_bytes(ext as *mut u8, 0, core::mem::size_of::<free_extent>()) };
+impl FreeExtent {
+    /// # Safety
+    /// `bc` must point to a live `BlockCacheInner`.
+    unsafe fn alloc(extent_cache: *mut slab_cache_t) -> *mut free_extent {
+        // SAFETY: `extent_cache` originates from `slab_cache_init` (its own
+        // internal lock synchronises the allocation).
+        let ext = slab_alloc(extent_cache) as *mut free_extent;
+        if !ext.is_null() {
+            // SAFETY: `ext` is a freshly allocated, exclusively-owned block.
+            unsafe { ptr::write_bytes(ext as *mut u8, 0, core::mem::size_of::<free_extent>()) };
+        }
+        ext
     }
-    ext
-}
 
-fn bcache_free_extent(ext: *mut free_extent) {
-    // `slab_free` recovers the owning cache from the object header, so no
-    // `extent_cache` handle is needed here.
-    slab_free(ext as *mut c_void);
+    fn free(ext: *mut free_extent) {
+        // `slab_free` recovers the owning cache from the object header, so no
+        // `extent_cache` handle is needed here.
+        slab_free(ext as *mut c_void);
+    }
 }
 
 // ===========================================================================
@@ -478,7 +526,7 @@ impl BlockCacheInner {
                         // Merge all three into prev.
                         (*prev).length += (*next).length;
                         rb_delete_node_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*next).rb_node));
-                        bcache_free_extent(next);
+                        FreeExtent::free(next);
                         self.extent_count -= 1;
                     }
                 }
@@ -499,7 +547,7 @@ impl BlockCacheInner {
             }
 
             // No merge possible, create new extent.
-            let ext = bcache_alloc_extent(extent_cache);
+            let ext = FreeExtent::alloc(extent_cache);
             if ext.is_null() {
                 // Out of memory -- silently fail (cache is optimization only).
                 return;
@@ -529,7 +577,7 @@ impl BlockCacheInner {
             if (*ext).length == 1 {
                 // Remove entire extent.
                 rb_delete_node_color(ptr::addr_of_mut!(self.extent_tree), ptr::addr_of_mut!((*ext).rb_node));
-                bcache_free_extent(ext);
+                FreeExtent::free(ext);
                 self.extent_count -= 1;
             } else {
                 // Simply shrink from the end -- no key change, O(1).
@@ -546,314 +594,316 @@ impl BlockCacheInner {
 // Public API
 // ===========================================================================
 
-/// Mark a block as free in the cache.
-///
-/// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
-/// declaration.
-pub(crate) extern "C" fn xv6fs_bcache_mark_free(xv6_sb: *mut xv6fs_superblock, blockno: u32) {
-    // SAFETY: `xv6_sb` is live (caller's contract).
-    unsafe {
-        // `initialized` is the lock-free lifecycle flag (see
-        // `Xv6fsBlockCache`); reading it without the lock matches the C
-        // original and `__xv6fs_balloc`.
-        if (*xv6_sb).block_cache.initialized == 0 {
-            return;
-        }
-        let extent_cache = ptr::addr_of_mut!((*xv6_sb).block_cache.extent_cache);
-        let mut cache = (*xv6_sb).block_cache.cache.lock();
-        if blockno < cache.data_start {
-            return; // guard drops -> release
-        }
-        // Insert through the guard (`DerefMut` -> `&mut BlockCacheInner`); the
-        // sibling extent slab (computed before locking) rides in as a param.
-        cache.insert_extent(extent_cache, blockno, 1);
-    } // guard drops -> release
-}
-
-/// Find a free block using rb-tree search with wear leveling. O(log n)
-/// search starting from the allocation cursor.
-///
-/// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
-/// declaration.
-pub(crate) extern "C" fn xv6fs_bcache_find_free_block(xv6_sb: *mut xv6fs_superblock, blockno_out: *mut u32) -> c_int {
-    // SAFETY: `xv6_sb`/`blockno_out` are live (caller's contract).
-    unsafe {
-        if (*xv6_sb).block_cache.initialized == 0 {
-            return neg(EINVAL);
-        }
-
-        let mut cache = (*xv6_sb).block_cache.cache.lock();
-
-        if cache.free_count == 0 || cache.extent_tree.node.is_null() {
-            return neg(ENOSPC); // guard drops -> release
-        }
-
-        // Find extent at or after cursor for wear leveling (methods run
-        // through the guard; rb_first_node stays the raw list keystone).
-        let cursor = cache.alloc_cursor;
-        let mut ext = cache.find_extent_ge(cursor);
-
-        // Wrap around if no extent found after cursor.
-        if ext.is_null() {
-            ext = rb_first_node(ptr::addr_of_mut!(cache.extent_tree)) as *mut free_extent;
-        }
-        // `ext` is guaranteed non-null since we checked the tree is not
-        // empty above.
-
-        *blockno_out = cache.alloc_from_extent(ext);
-        cache.alloc_cursor = *blockno_out + 1;
-        if cache.alloc_cursor >= cache.data_start + cache.nblocks {
-            cache.alloc_cursor = cache.data_start;
-        }
-
-        0
-    } // guard drops -> release
-}
-
-/// Find a free block near a hint block for better locality. Uses O(log n)
-/// rb-tree search -- no linear fallback paths.
-///
-/// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
-/// declaration.
-pub(crate) extern "C" fn xv6fs_bcache_find_free_block_near(xv6_sb: *mut xv6fs_superblock, hint: u32, blockno_out: *mut u32) -> c_int {
-    // SAFETY: `xv6_sb`/`blockno_out` are live (caller's contract).
-    unsafe {
-        if (*xv6_sb).block_cache.initialized == 0 {
-            return neg(EINVAL);
-        }
-
-        let mut cache = (*xv6_sb).block_cache.cache.lock();
-
-        if cache.free_count == 0 || cache.extent_tree.node.is_null() {
-            return neg(ENOSPC); // guard drops -> release
-        }
-
-        // Tree search/alloc run through the guard (methods); rb_last_node
-        // stays the raw list keystone. Every early `return` below drops the
-        // guard (== the old `spin_unlock`).
-
-        // Clamp hint to valid range.
-        let mut hint = hint;
-        if hint < cache.data_start {
-            hint = cache.data_start;
-        } else if hint >= cache.data_start + cache.nblocks {
-            hint = cache.data_start + cache.nblocks - 1;
-        }
-
-        // Try to find extent containing the hint -- O(log n).
-        let ext = cache.find_extent_containing(hint);
-        if !ext.is_null() {
-            *blockno_out = cache.alloc_from_extent(ext);
-            return 0;
-        }
-
-        // Find extent at or after hint -- O(log n).
-        let ext = cache.find_extent_ge(hint);
-        if !ext.is_null() {
-            *blockno_out = cache.alloc_from_extent(ext);
-            return 0;
-        }
-
-        // No extent at/after hint means all extents are before hint. The
-        // last (largest key) extent is closest to hint -- O(log n).
-        let ext = rb_last_node(ptr::addr_of_mut!(cache.extent_tree)) as *mut free_extent;
-        *blockno_out = cache.alloc_from_extent(ext);
-        0
-    } // guard drops -> release
-}
-
-/// Get the number of free blocks.
-///
-/// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
-/// declaration.
-pub(crate) extern "C" fn xv6fs_bcache_free_count(xv6_sb: *mut xv6fs_superblock) -> u32 {
-    // SAFETY: `xv6_sb` is live (caller's contract).
-    unsafe {
-        if (*xv6_sb).block_cache.initialized == 0 {
-            return 0;
-        }
-        let cache = (*xv6_sb).block_cache.cache.lock();
-        cache.free_count
-    } // guard drops -> release
-}
-
-/// Initialize the block cache from the on-disk bitmap.
-///
-/// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
-/// declaration.
-pub(crate) extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_int {
-    // SAFETY: `xv6_sb` is live (caller's contract, mount-time setup with
-    // no concurrent access yet).
-    unsafe {
-        let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
-        let dev = xv6fs_sb_dev(xv6_sb);
-
-        // Re-init guard: the lock-free lifecycle flag (mount zero-initialised
-        // it to 0). Single-threaded here.
-        if (*xv6_sb).block_cache.initialized != 0 {
-            return 0;
-        }
-
-        // Calculate data blocks.
-        let data_start = (*disk_sb).bmapstart + ((*disk_sb).size + super::BPB - 1) / super::BPB;
-        if data_start > (*disk_sb).size {
-            return neg(EINVAL);
-        }
-        let nblocks = (*disk_sb).size - data_start;
-
-        // Establish the *named* lock around a zeroed inner (console/log pilot
-        // pattern). The mount path zero-initialised the whole superblock, so
-        // the slot is an unnamed, unlocked `SpinLock` over a zeroed
-        // `BlockCacheInner`; overwrite it with a properly *named* lock (the
-        // name a deadlock panic prints). `SpinLock`/`BlockCacheInner` hold no
-        // `Drop` types, so `ptr::write` correctly does not drop the previous
-        // all-zero bytes.
-        let cache_slot = ptr::addr_of_mut!((*xv6_sb).block_cache.cache);
-        ptr::write(cache_slot, SpinLock::new(c"bcache", core::mem::zeroed::<BlockCacheInner>()));
-
-        // Build the tree LOCK-FREE via `data_ptr()`: the bitmap scan streams
-        // the disk across sleeping `bread`/`brelse`, so it cannot hold the
-        // spinlock; mount is single-threaded (the superblock is not published
-        // to the VFS until mount returns), so there is no concurrent accessor
-        // -- the block-cache analogue of the log's single-threaded recovery.
-        let bc: *mut BlockCacheInner = (*cache_slot).data_ptr();
-        (*bc).nblocks = nblocks;
-        (*bc).data_start = data_start;
-        (*bc).alloc_cursor = data_start;
-        (*bc).free_count = 0;
-        (*bc).extent_count = 0;
-
-        // Initialize the extent slab (the lock-free sibling object, not part
-        // of the lock-owned inner).
-        let extent_cache = ptr::addr_of_mut!((*xv6_sb).block_cache.extent_cache);
-        slab_cache_init(
-            extent_cache,
-            c"bcache_extent".as_ptr(),
-            core::mem::size_of::<free_extent>(),
-            0,
-        );
-
-        // Initialize rb-tree.
-        (*bc).tree_opts.keys_cmp_fun = Some(extent_keys_cmp);
-        (*bc).tree_opts.get_key_fun = Some(extent_get_key);
-        (*bc).extent_tree.node = ptr::null_mut();
-        (*bc).extent_tree.opts = ptr::addr_of_mut!((*bc).tree_opts);
-
-        // Scan on-disk bitmap and build extent tree.
-        let mut last_bitmap_block: u32 = u32::MAX;
-        let mut bp: *mut buf = ptr::null_mut();
-
-        let mut run_start: u32 = 0;
-        let mut run_length: u32 = 0;
-        let mut in_run = false;
-
-        // `nblocks` is fixed (computed once above) -> range walk. Loop
-        // STRUCTURE only: the bitmap streaming across sleeping bread/brelse
-        // and every bit-test byte are unchanged. `insert_extent` is called
-        // via a transient `&mut *bc` (from the single-threaded mount
-        // `data_ptr()`; it does not sleep, so the reference never spans a
-        // yield).
-        for b in 0..nblocks {
-            let blockno = data_start + b;
-            let bitmap_block = bblock_ptr(blockno, (*disk_sb).bmapstart);
-
-            if bitmap_block != last_bitmap_block {
-                if !bp.is_null() {
-                    brelse(bp);
-                }
-                bp = bread(dev, bitmap_block);
-                if bp.is_null() {
-                    last_bitmap_block = u32::MAX;
-                    // Treat read errors as used blocks.
-                    if in_run {
-                        (*bc).insert_extent(extent_cache, run_start, run_length);
-                        in_run = false;
-                    }
-                    continue;
-                }
-                last_bitmap_block = bitmap_block;
+impl Xv6fsSuperblock {
+    /// Mark a block as free in the cache.
+    ///
+    /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
+    /// declaration.
+    pub(crate) extern "C" fn mark_free(xv6_sb: *mut xv6fs_superblock, blockno: u32) {
+        // SAFETY: `xv6_sb` is live (caller's contract).
+        unsafe {
+            // `initialized` is the lock-free lifecycle flag (see
+            // `Xv6fsBlockCache`); reading it without the lock matches the C
+            // original and `__xv6fs_balloc`.
+            if (*xv6_sb).block_cache.initialized == 0 {
+                return;
             }
-
-            let bi = (blockno % super::BPB) as usize;
-            let m: u8 = 1 << (bi % 8);
-            let used = (*(*bp).data.add(bi / 8) & m) != 0;
-
-            if !used {
-                // Block is free.
-                if in_run {
-                    run_length += 1;
-                } else {
-                    run_start = blockno;
-                    run_length = 1;
-                    in_run = true;
-                }
-            } else if in_run {
-                // Block is used.
-                (*bc).insert_extent(extent_cache, run_start, run_length);
-                in_run = false;
-            }
-        }
-
-        // Flush any remaining run.
-        if in_run {
-            (*bc).insert_extent(extent_cache, run_start, run_length);
-        }
-
-        if !bp.is_null() {
-            brelse(bp);
-        }
-
-        // Publish: set the lock-free lifecycle flag last (after the tree is
-        // fully built), so any later `initialized`-guarded reader sees a
-        // complete cache. `initialized` is the outer sibling field, not part
-        // of the guarded inner.
-        (*xv6_sb).block_cache.initialized = 1;
-        crate::kprintln!(
-            "xv6fs: block cache initialized: {} data blocks, {} free in {} extents",
-            nblocks as c_int,
-            (*bc).free_count as c_int,
-            (*bc).extent_count as c_int,
-        );
-
-        0
-    }
-}
-
-/// Destroy the block cache and free memory.
-///
-/// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
-/// declaration.
-pub(crate) extern "C" fn xv6fs_bcache_destroy(xv6_sb: *mut xv6fs_superblock) {
-    // SAFETY: `xv6_sb` is live (caller's contract).
-    unsafe {
-        if (*xv6_sb).block_cache.initialized == 0 {
-            return;
-        }
-
-        {
+            let extent_cache = ptr::addr_of_mut!((*xv6_sb).block_cache.extent_cache);
             let mut cache = (*xv6_sb).block_cache.cache.lock();
-            let bc = &raw mut *cache;
+            if blockno < cache.data_start {
+                return; // guard drops -> release
+            }
+            // Insert through the guard (`DerefMut` -> `&mut BlockCacheInner`); the
+            // sibling extent slab (computed before locking) rides in as a param.
+            cache.insert_extent(extent_cache, blockno, 1);
+        } // guard drops -> release
+    }
 
-            // Free all extents (raw intrusive-rbtree teardown; `slab_free`
-            // does not sleep, so it is fine under the spinlock).
-            let mut node = rb_first_node(ptr::addr_of_mut!((*bc).extent_tree));
-            while !node.is_null() {
-                let ext = node as *mut free_extent;
-                node = rb_next_node(node);
-                rb_delete_node_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*ext).rb_node));
-                bcache_free_extent(ext);
+    /// Find a free block using rb-tree search with wear leveling. O(log n)
+    /// search starting from the allocation cursor.
+    ///
+    /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
+    /// declaration.
+    pub(crate) extern "C" fn find_free_block(xv6_sb: *mut xv6fs_superblock, blockno_out: *mut u32) -> c_int {
+        // SAFETY: `xv6_sb`/`blockno_out` are live (caller's contract).
+        unsafe {
+            if (*xv6_sb).block_cache.initialized == 0 {
+                return Xv6fs::neg(EINVAL);
             }
 
+            let mut cache = (*xv6_sb).block_cache.cache.lock();
+
+            if cache.free_count == 0 || cache.extent_tree.node.is_null() {
+                return Xv6fs::neg(ENOSPC); // guard drops -> release
+            }
+
+            // Find extent at or after cursor for wear leveling (methods run
+            // through the guard; rb_first_node stays the raw list keystone).
+            let cursor = cache.alloc_cursor;
+            let mut ext = cache.find_extent_ge(cursor);
+
+            // Wrap around if no extent found after cursor.
+            if ext.is_null() {
+                ext = rb_first_node(ptr::addr_of_mut!(cache.extent_tree)) as *mut free_extent;
+            }
+            // `ext` is guaranteed non-null since we checked the tree is not
+            // empty above.
+
+            *blockno_out = cache.alloc_from_extent(ext);
+            cache.alloc_cursor = *blockno_out + 1;
+            if cache.alloc_cursor >= cache.data_start + cache.nblocks {
+                cache.alloc_cursor = cache.data_start;
+            }
+
+            0
+        } // guard drops -> release
+    }
+
+    /// Find a free block near a hint block for better locality. Uses O(log n)
+    /// rb-tree search -- no linear fallback paths.
+    ///
+    /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
+    /// declaration.
+    pub(crate) extern "C" fn find_free_block_near(xv6_sb: *mut xv6fs_superblock, hint: u32, blockno_out: *mut u32) -> c_int {
+        // SAFETY: `xv6_sb`/`blockno_out` are live (caller's contract).
+        unsafe {
+            if (*xv6_sb).block_cache.initialized == 0 {
+                return Xv6fs::neg(EINVAL);
+            }
+
+            let mut cache = (*xv6_sb).block_cache.cache.lock();
+
+            if cache.free_count == 0 || cache.extent_tree.node.is_null() {
+                return Xv6fs::neg(ENOSPC); // guard drops -> release
+            }
+
+            // Tree search/alloc run through the guard (methods); rb_last_node
+            // stays the raw list keystone. Every early `return` below drops the
+            // guard (== the old `spin_unlock`).
+
+            // Clamp hint to valid range.
+            let mut hint = hint;
+            if hint < cache.data_start {
+                hint = cache.data_start;
+            } else if hint >= cache.data_start + cache.nblocks {
+                hint = cache.data_start + cache.nblocks - 1;
+            }
+
+            // Try to find extent containing the hint -- O(log n).
+            let ext = cache.find_extent_containing(hint);
+            if !ext.is_null() {
+                *blockno_out = cache.alloc_from_extent(ext);
+                return 0;
+            }
+
+            // Find extent at or after hint -- O(log n).
+            let ext = cache.find_extent_ge(hint);
+            if !ext.is_null() {
+                *blockno_out = cache.alloc_from_extent(ext);
+                return 0;
+            }
+
+            // No extent at/after hint means all extents are before hint. The
+            // last (largest key) extent is closest to hint -- O(log n).
+            let ext = rb_last_node(ptr::addr_of_mut!(cache.extent_tree)) as *mut free_extent;
+            *blockno_out = cache.alloc_from_extent(ext);
+            0
+        } // guard drops -> release
+    }
+
+    /// Get the number of free blocks.
+    ///
+    /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
+    /// declaration.
+    pub(crate) extern "C" fn free_count(xv6_sb: *mut xv6fs_superblock) -> u32 {
+        // SAFETY: `xv6_sb` is live (caller's contract).
+        unsafe {
+            if (*xv6_sb).block_cache.initialized == 0 {
+                return 0;
+            }
+            let cache = (*xv6_sb).block_cache.cache.lock();
+            cache.free_count
+        } // guard drops -> release
+    }
+
+    /// Initialize the block cache from the on-disk bitmap.
+    ///
+    /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
+    /// declaration.
+    pub(crate) extern "C" fn bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_int {
+        // SAFETY: `xv6_sb` is live (caller's contract, mount-time setup with
+        // no concurrent access yet).
+        unsafe {
+            let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
+            let dev = Xv6fs::sb_dev(xv6_sb);
+
+            // Re-init guard: the lock-free lifecycle flag (mount zero-initialised
+            // it to 0). Single-threaded here.
+            if (*xv6_sb).block_cache.initialized != 0 {
+                return 0;
+            }
+
+            // Calculate data blocks.
+            let data_start = (*disk_sb).bmapstart + ((*disk_sb).size + super::BPB - 1) / super::BPB;
+            if data_start > (*disk_sb).size {
+                return Xv6fs::neg(EINVAL);
+            }
+            let nblocks = (*disk_sb).size - data_start;
+
+            // Establish the *named* lock around a zeroed inner (console/log pilot
+            // pattern). The mount path zero-initialised the whole superblock, so
+            // the slot is an unnamed, unlocked `SpinLock` over a zeroed
+            // `BlockCacheInner`; overwrite it with a properly *named* lock (the
+            // name a deadlock panic prints). `SpinLock`/`BlockCacheInner` hold no
+            // `Drop` types, so `ptr::write` correctly does not drop the previous
+            // all-zero bytes.
+            let cache_slot = ptr::addr_of_mut!((*xv6_sb).block_cache.cache);
+            ptr::write(cache_slot, SpinLock::new(c"bcache", core::mem::zeroed::<BlockCacheInner>()));
+
+            // Build the tree LOCK-FREE via `data_ptr()`: the bitmap scan streams
+            // the disk across sleeping `bread`/`brelse`, so it cannot hold the
+            // spinlock; mount is single-threaded (the superblock is not published
+            // to the VFS until mount returns), so there is no concurrent accessor
+            // -- the block-cache analogue of the log's single-threaded recovery.
+            let bc: *mut BlockCacheInner = (*cache_slot).data_ptr();
+            (*bc).nblocks = nblocks;
+            (*bc).data_start = data_start;
+            (*bc).alloc_cursor = data_start;
             (*bc).free_count = 0;
             (*bc).extent_count = 0;
-        } // guard drops -> release
 
-        // Clear the lock-free lifecycle flag after the tree teardown (and
-        // after releasing the lock, matching the "publish last" ordering of
-        // init); a racing `initialized`-guarded reader either bails or finds
-        // an empty tree under the lock.
-        (*xv6_sb).block_cache.initialized = 0;
+            // Initialize the extent slab (the lock-free sibling object, not part
+            // of the lock-owned inner).
+            let extent_cache = ptr::addr_of_mut!((*xv6_sb).block_cache.extent_cache);
+            slab_cache_init(
+                extent_cache,
+                c"bcache_extent".as_ptr(),
+                core::mem::size_of::<free_extent>(),
+                0,
+            );
 
-        // Note: slab cache memory will be reclaimed automatically.
+            // Initialize rb-tree.
+            (*bc).tree_opts.keys_cmp_fun = Some(extent_keys_cmp);
+            (*bc).tree_opts.get_key_fun = Some(extent_get_key);
+            (*bc).extent_tree.node = ptr::null_mut();
+            (*bc).extent_tree.opts = ptr::addr_of_mut!((*bc).tree_opts);
+
+            // Scan on-disk bitmap and build extent tree.
+            let mut last_bitmap_block: u32 = u32::MAX;
+            let mut bp: *mut buf = ptr::null_mut();
+
+            let mut run_start: u32 = 0;
+            let mut run_length: u32 = 0;
+            let mut in_run = false;
+
+            // `nblocks` is fixed (computed once above) -> range walk. Loop
+            // STRUCTURE only: the bitmap streaming across sleeping bread/brelse
+            // and every bit-test byte are unchanged. `insert_extent` is called
+            // via a transient `&mut *bc` (from the single-threaded mount
+            // `data_ptr()`; it does not sleep, so the reference never spans a
+            // yield).
+            for b in 0..nblocks {
+                let blockno = data_start + b;
+                let bitmap_block = Xv6fs::bblock_ptr(blockno, (*disk_sb).bmapstart);
+
+                if bitmap_block != last_bitmap_block {
+                    if !bp.is_null() {
+                        brelse(bp);
+                    }
+                    bp = bread(dev, bitmap_block);
+                    if bp.is_null() {
+                        last_bitmap_block = u32::MAX;
+                        // Treat read errors as used blocks.
+                        if in_run {
+                            (*bc).insert_extent(extent_cache, run_start, run_length);
+                            in_run = false;
+                        }
+                        continue;
+                    }
+                    last_bitmap_block = bitmap_block;
+                }
+
+                let bi = (blockno % super::BPB) as usize;
+                let m: u8 = 1 << (bi % 8);
+                let used = (*(*bp).data.add(bi / 8) & m) != 0;
+
+                if !used {
+                    // Block is free.
+                    if in_run {
+                        run_length += 1;
+                    } else {
+                        run_start = blockno;
+                        run_length = 1;
+                        in_run = true;
+                    }
+                } else if in_run {
+                    // Block is used.
+                    (*bc).insert_extent(extent_cache, run_start, run_length);
+                    in_run = false;
+                }
+            }
+
+            // Flush any remaining run.
+            if in_run {
+                (*bc).insert_extent(extent_cache, run_start, run_length);
+            }
+
+            if !bp.is_null() {
+                brelse(bp);
+            }
+
+            // Publish: set the lock-free lifecycle flag last (after the tree is
+            // fully built), so any later `initialized`-guarded reader sees a
+            // complete cache. `initialized` is the outer sibling field, not part
+            // of the guarded inner.
+            (*xv6_sb).block_cache.initialized = 1;
+            crate::kprintln!(
+                "xv6fs: block cache initialized: {} data blocks, {} free in {} extents",
+                nblocks as c_int,
+                (*bc).free_count as c_int,
+                (*bc).extent_count as c_int,
+            );
+
+            0
+        }
     }
-}
+
+    /// Destroy the block cache and free memory.
+    ///
+    /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
+    /// declaration.
+    pub(crate) extern "C" fn bcache_destroy(xv6_sb: *mut xv6fs_superblock) {
+        // SAFETY: `xv6_sb` is live (caller's contract).
+        unsafe {
+            if (*xv6_sb).block_cache.initialized == 0 {
+                return;
+            }
+
+            {
+                let mut cache = (*xv6_sb).block_cache.cache.lock();
+                let bc = &raw mut *cache;
+
+                // Free all extents (raw intrusive-rbtree teardown; `slab_free`
+                // does not sleep, so it is fine under the spinlock).
+                let mut node = rb_first_node(ptr::addr_of_mut!((*bc).extent_tree));
+                while !node.is_null() {
+                    let ext = node as *mut free_extent;
+                    node = rb_next_node(node);
+                    rb_delete_node_color(ptr::addr_of_mut!((*bc).extent_tree), ptr::addr_of_mut!((*ext).rb_node));
+                    FreeExtent::free(ext);
+                }
+
+                (*bc).free_count = 0;
+                (*bc).extent_count = 0;
+            } // guard drops -> release
+
+            // Clear the lock-free lifecycle flag after the tree teardown (and
+            // after releasing the lock, matching the "publish last" ordering of
+            // init); a racing `initialized`-guarded reader either bails or finds
+            // an empty tree under the lock.
+            (*xv6_sb).block_cache.initialized = 0;
+
+            // Note: slab cache memory will be reclaimed automatically.
+        }
+    }
+} // impl Xv6fsSuperblock
