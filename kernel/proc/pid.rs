@@ -52,8 +52,7 @@ use crate::proc::proc_shims::{
     xv6_proctab_get_rcu, xv6_proctab_init_storage, xv6_proctab_initproc_load,
     xv6_proctab_initproc_raw, xv6_proctab_initproc_store, xv6_proctab_nextpid_get,
     xv6_proctab_nextpid_set, xv6_proctab_pop_rcu, xv6_proctab_put_rcu,
-    xv6_proctab_registered_dec, xv6_proctab_registered_inc, xv6_rcu_read_lock,
-    xv6_rcu_read_unlock,
+    xv6_proctab_registered_dec, xv6_proctab_registered_inc,
 };
 
 // P3-D3c: `irq/syscall.rs`'s `argint` is a plain (safe) Rust fn now that

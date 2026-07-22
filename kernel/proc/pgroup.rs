@@ -456,7 +456,7 @@ fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
 }
 
 // `rcu_read_lock` / `rcu_read_unlock` are static-inline; use the Rust shims.
-use crate::proc::proc_shims::{xv6_rcu_read_lock as rcu_lock, xv6_rcu_read_unlock as rcu_unlock};
+use crate::lock::rcu::{rcu_read_lock as rcu_lock, rcu_read_unlock as rcu_unlock};
 
 #[inline]
 fn pid_assert_wholding() {

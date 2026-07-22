@@ -198,10 +198,11 @@ macro_rules! atomic_fetch_sub_i32_field {
 // `xv6_thport_*` C-ABI alias layers (`extern "C"` redeclarations); now
 // direct crate-path calls to the real, already-Rust definitions in
 // `thread_group.rs`/`thread.rs`.
-// NO-STANDALONE-FN: `tcb_lock`/`tcb_unlock` are now handle methods on
-// `ThreadAccess`; the `xv6_tcb_lock`/`xv6_tcb_unlock` shims construct the
-// handle below instead of calling a free fn. Likewise the former
-// `tg_signal_send`/`thread_is_group_leader` free fns are now the
+// NO-STANDALONE-FN: the handle is still used by the key-resolving accessors
+// (`t_pgroup`/`t_session`), the reparent/reap paths, and the procdump
+// helpers. `tcb_lock`/`tcb_unlock` are `ThreadAccess` methods (their former
+// `xv6_tcb_lock`/`xv6_tcb_unlock` shims are deleted -- callers use the method
+// directly); likewise `tg_signal_send`/`thread_is_group_leader` are the
 // `ThreadGroupAccess::signal_send` / `ThreadAccess::is_group_leader` methods.
 use crate::proc::access::{ThreadAccess, ThreadGroupAccess};
 
@@ -299,35 +300,14 @@ pub(super) fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
 }
 
 // ===========================================================================
-// SECTION 9: RCU read-side and tcb_lock thin wrappers. The xv6_* names
-// existed only to give Rust a fixed symbol when the underlying primitives
-// were macros / inline functions. With bindgen exposing `rcu_read_lock` and
-// `tcb_lock`/`tcb_unlock` (kernel/proc/thread.rs) being plain Rust fns, the
-// wrappers are still useful as the documented Rust-facing names.
+// SECTION 9 (NO-STANDALONE-FN finale): the former `xv6_rcu_read_lock`/
+// `xv6_rcu_read_unlock` and `xv6_tcb_lock`/`xv6_tcb_unlock` thin wrappers
+// were deleted -- they only forwarded to already-Rust primitives, so their
+// in-proc callers now reach those directly: RCU via
+// `crate::lock::rcu::rcu_read_{lock,unlock}` (plain safe fns), and the
+// per-thread control-block lock via the `ThreadAccess::{tcb_lock,tcb_unlock}`
+// handle methods (kernel/proc/thread.rs).
 // ===========================================================================
-
-pub(super) fn xv6_rcu_read_lock() {
-    // `rcu_read_lock` is a plain safe fn (P3-D3b): it just bumps a
-    // per-thread depth counter and disables preemption.
-    rcu_read_lock()
-}
-
-pub(super) fn xv6_rcu_read_unlock() {
-    // Must be balanced with a prior xv6_rcu_read_lock; caller's
-    // responsibility, same as the C wrapper this replaces.
-    rcu_read_unlock()
-}
-
-pub(super) fn xv6_tcb_lock(p: *mut crate::bindings::thread) {
-    // SAFETY: `p` is a live `*mut thread` (shim contract, documented on the
-    // section header); the handle only takes/releases its own control-block lock.
-    unsafe { ThreadAccess::assume(p) }.tcb_lock()
-}
-
-pub(super) fn xv6_tcb_unlock(p: *mut crate::bindings::thread) {
-    // SAFETY: as above.
-    unsafe { ThreadAccess::assume(p) }.tcb_unlock()
-}
 
 // SECTION 1 leftover: xv6_current_thread — replaces the `current` macro,
 // which expands to an interrupt-safe load of `mycpu()->proc`. We replicate
@@ -505,12 +485,6 @@ pub(super) fn session_fg_pgrp(s: *mut session) -> *mut pgroup {
     crate::proc::pgroup::Pgroup::lookup(pgid).unwrap_or(core::ptr::null_mut())
 }
 
-// silence unused warnings during incremental porting
-#[allow(dead_code)]
-fn _ptr_unused() -> *mut () {
-    ptr::null_mut()
-}
-
 // ===========================================================================
 // LIST PRIMITIVES — Rust reimplementations of the kernel's `static inline`
 // `list_entry_*` helpers and `list_node_*` macros from kernel/inc/list.h.
@@ -619,8 +593,6 @@ unsafe fn list_foreach_safe<T>(
 // equivalent.
 // ===========================================================================
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use crate::lock::rcu::rcu_read_lock;
-use crate::lock::rcu::rcu_read_unlock;
 use crate::mm::either_copyout;
 
 /// SAFETY (caller): `p` must be a valid, non-null, 4-byte-aligned pointer to
@@ -1042,20 +1014,13 @@ pub(super) fn session_for_each_all(
 }
 
 // ===========================================================================
-// SECTION 11/12 trivial wrappers (cpu_relax, intr_on, smp_mb, either_copyout_int).
+// SECTION 11/12 trivial wrappers (either_copyout_int, mycpu_clear_noff).
+// NO-STANDALONE-FN finale: the pure one-line `xv6_cpu_relax`/`xv6_smp_mb`/
+// `xv6_intr_on` forwarders were deleted -- their callers now call
+// `crate::machine::{cpu_relax,smp_mb,intr_on}` directly. `xv6_mycpu_clear_noff`
+// stays: it encapsulates a compound `CpuLocal::current()` + `set_noff(0)`
+// operation, not a bare re-export.
 // ===========================================================================
-
-fn xv6_cpu_relax() {
-    crate::machine::cpu_relax();
-}
-
-pub(super) fn xv6_smp_mb() {
-    crate::machine::smp_mb();
-}
-
-pub(super) fn xv6_intr_on() {
-    crate::machine::intr_on();
-}
 
 pub(super) fn xv6_mycpu_clear_noff() {
     let mut cpu = crate::machine::CpuLocal::current();
@@ -1265,7 +1230,7 @@ pub(super) fn xv6_exit_reap_zombie(
             if on_cpu == 0 {
                 break;
             }
-            xv6_cpu_relax();
+            crate::machine::cpu_relax();
             spin_count += 1;
             if spin_count > 1000 {
                 xv6_thread_state_set(parent, THREAD_STATE_RUNNING);

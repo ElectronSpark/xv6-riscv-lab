@@ -104,7 +104,7 @@ mod raw {
         xv6_t_fs, xv6_t_set_fdtable, xv6_t_set_fs, xv6_t_set_self_reap, xv6_t_set_sigacts,
         xv6_t_set_thread_group, xv6_t_set_vfork_parent, xv6_t_set_vm, xv6_t_set_xstate,
         xv6_t_sigacts, xv6_t_signal_esignal, xv6_t_signal_stop_signal, xv6_t_vfork_parent,
-        xv6_t_vm, xv6_tcb_lock, xv6_tcb_unlock, xv6_tg_group_exit_code,
+        xv6_t_vm, xv6_tg_group_exit_code,
         xv6_tg_group_exit_task_is, xv6_tg_group_leader, xv6_tg_is_exiting, xv6_thread_is_stopped,
         xv6_thread_is_zombie,
     };
@@ -244,8 +244,12 @@ mod ffi {
     pub fn pid_wunlock()      { raw::xv6_pid_wunlock() }
     pub fn pid_rlock()        { raw::xv6_pid_rlock() }
     pub fn pid_runlock()      { raw::xv6_pid_runlock() }
-    pub fn tcb_lock(t: *mut Thread)   { raw::xv6_tcb_lock(t) }
-    pub fn tcb_unlock(t: *mut Thread) { raw::xv6_tcb_unlock(t) }
+    // NO-STANDALONE-FN finale: the `xv6_tcb_lock`/`xv6_tcb_unlock` shims were
+    // deleted; forward straight to the `ThreadAccess` control-block-lock
+    // methods. `from_ptr` no-ops on a null `t` (callers always pass a live
+    // thread), strictly safer than the old shim's `assume`.
+    pub fn tcb_lock(t: *mut Thread)   { if let Some(ta) = ThreadAccess::from_ptr(t) { ta.tcb_lock() } }
+    pub fn tcb_unlock(t: *mut Thread) { if let Some(ta) = ThreadAccess::from_ptr(t) { ta.tcb_unlock() } }
 
     // sched ops ---------------------------------------------------------------
     pub fn sched_yield()                                       { raw::Scheduler::yield_now() }

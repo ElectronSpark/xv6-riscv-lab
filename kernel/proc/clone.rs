@@ -90,13 +90,13 @@ use crate::proc::proc_shims::{
     t_parent as xv6_t_parent, t_pgroup as xv6_t_pgroup, t_pid as xv6_t_pid,
     t_session as xv6_t_session, t_tgid as xv6_t_tgid, t_thread_group as xv6_t_thread_group,
     t_user_space as xv6_t_user_space, xv6_current_thread, xv6_err_ptr, xv6_forkret_assert_user,
-    xv6_intr_on, xv6_is_err, xv6_mycpu_clear_noff, xv6_panic, xv6_pid_wlock, xv6_pid_wunlock,
-    xv6_ptr_err, xv6_smp_mb, xv6_t_copy_name, xv6_t_copy_trapframe, xv6_t_fdtable, xv6_t_fs,
+    xv6_is_err, xv6_mycpu_clear_noff, xv6_panic, xv6_pid_wlock, xv6_pid_wunlock,
+    xv6_ptr_err, xv6_t_copy_name, xv6_t_copy_trapframe, xv6_t_fdtable, xv6_t_fs,
     xv6_t_kstack_order, xv6_t_sched_entity, xv6_t_set_clone_flags, xv6_t_set_fdtable,
     xv6_t_set_fs, xv6_t_set_parent, xv6_t_set_sigacts, xv6_t_set_tgid, xv6_t_set_user_space,
     xv6_t_set_vfork_parent, xv6_t_set_vm, xv6_t_sigacts, xv6_t_signal_ptr,
     xv6_t_trapframe_set_a0, xv6_t_trapframe_set_sepc, xv6_t_trapframe_set_sp, xv6_t_vm,
-    xv6_tcb_lock, xv6_tcb_unlock, xv6_thread_from_context, xv6_thread_state_set,
+    xv6_thread_from_context, xv6_thread_state_set,
 };
 
 // P3-D3b: `thread_create`/`thread_destroy`/`attach_child`
@@ -243,9 +243,9 @@ extern "C" fn forkret_entry(prev: *mut Context) {
 
     Scheduler::context_switch_finish(xv6_thread_from_context(prev), cur, 0);
     xv6_mycpu_clear_noff();
-    xv6_intr_on();
+    crate::machine::intr_on();
     rcu_check_callbacks();
-    xv6_smp_mb();
+    crate::machine::smp_mb();
     usertrapret();
 }
 
@@ -393,7 +393,10 @@ impl CloneArgs {
     xv6_t_trapframe_set_a0(child, 0);
     xv6_t_copy_name(child, p);
 
-    xv6_tcb_lock(child);
+    // SAFETY: `child` is the freshly-allocated, live `*mut thread` this
+    // function is constructing; the handle only takes/releases its own
+    // control-block lock (former `xv6_tcb_lock` shim, now the method).
+    unsafe { ThreadAccess::assume(child) }.tcb_lock();
     xv6_t_set_user_space(child);
     xv6_thread_state_set(child, THREAD_UNINTERRUPTIBLE);
     Rq::task_fork(xv6_t_sched_entity(child) as *mut crate::bindings::sched_entity);
@@ -403,7 +406,8 @@ impl CloneArgs {
     } else {
         xv6_t_set_vfork_parent(child, ptr::null_mut());
     }
-    xv6_tcb_unlock(child);
+    // SAFETY: as the matching `tcb_lock` above.
+    unsafe { ThreadAccess::assume(child) }.tcb_unlock();
 
     // Attach to parent + add to pid table
     xv6_pid_wlock();
