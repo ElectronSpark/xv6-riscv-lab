@@ -727,22 +727,25 @@ pub(super) fn pg_tg_list_entry_is_detached(tg: *mut thread_group) -> c_int {
     list_is_detached_field!(tg, list_entry)
 }
 
-pub(super) fn pg_for_each_tg(
-    pg: *mut pgroup,
-    fn_cb: Option<unsafe extern "C" fn(*mut thread_group, *mut c_void)>,
-    arg: *mut c_void,
-) {
-    let Some(cb) = fn_cb else { return };
+// CLOSURE: `fn_cb`/`arg` was an `Option<unsafe extern "C" fn(*mut thread_group,
+// *mut c_void)>` + `*mut c_void` ctx pair; zero callers remain in-tree (the
+// `pg_for_each_tg!` macro in `pgroup.rs` walks `list_for_each!` directly and
+// never reaches this fn -- confirmed by whole-tree grep, not address-taken).
+// Converted to a generic closure for interface consistency with the other
+// iterator APIs in this wave; `None`'s old meaning ("don't iterate at all")
+// has no equivalent for a required `impl FnMut` -- callers that want a no-op
+// pass a closure with an empty body instead.
+pub(super) fn pg_for_each_tg(pg: *mut pgroup, mut cb: impl FnMut(*mut thread_group)) {
     let off = core::mem::offset_of!(thread_group, list_entry);
     // SAFETY: `pg` is a caller-supplied, live `*mut pgroup`; `off` is a
     // genuine `offset_of!` constant for `thread_group::list_entry`,
-    // matching `list_foreach_safe`'s contract. `cb` is an opaque C
-    // callback that may detach the *current* node (that's what the
-    // "safe"/next-snapshotting walk tolerates) but per that same contract
-    // must not relink nodes further ahead in the list.
+    // matching `list_foreach_safe`'s contract. `cb` may detach the
+    // *current* node (that's what the "safe"/next-snapshotting walk
+    // tolerates) but per that same contract must not relink nodes further
+    // ahead in the list.
     u! {
         list_foreach_safe::<thread_group>(&raw mut (*pg).thread_groups, off, |tg| {
-            cb(tg, arg);
+            cb(tg);
         })
     }
 }
@@ -755,18 +758,16 @@ pub(super) fn tg_list_entry_init(tg: *mut thread_group) {
     list_init_field!(tg, list_entry)
 }
 
-pub(super) fn tg_for_each_thread(
-    tg: *mut thread_group,
-    fn_cb: Option<unsafe extern "C" fn(*mut thread, *mut c_void)>,
-    arg: *mut c_void,
-) {
-    let Some(cb) = fn_cb else { return };
+// CLOSURE: same conversion/rationale as `pg_for_each_tg` above -- zero
+// callers remain (`tg_for_each_thread!` macro in `pgroup.rs` uses
+// `list_for_each!` directly and never reaches this fn; not address-taken).
+pub(super) fn tg_for_each_thread(tg: *mut thread_group, mut cb: impl FnMut(*mut thread)) {
     let off = core::mem::offset_of!(thread, tg_entry);
     // SAFETY: see `pg_for_each_tg`; `tg` is caller-supplied and live,
     // `off` is a genuine `offset_of!` for `thread::tg_entry`.
     u! {
         list_foreach_safe::<thread>(&raw mut (*tg).thread_list, off, |t| {
-            cb(t, arg);
+            cb(t);
         })
     }
 }
@@ -999,17 +1000,17 @@ pub(super) fn xv6_ptr_err(p: *const c_void) -> i64 {
 // in `kernel/tty/session.rs`, not the retired `session_list` intrusive
 // `list_node_t`. Walk it via that module's `session_for_each` scan, which
 // yields each live session's stable pointer (generation-checked occupancy).
-pub(super) fn session_for_each_all(
-    fn_cb: Option<unsafe extern "C" fn(*mut session, *mut c_void)>,
-    arg: *mut c_void,
-) {
-    let Some(cb) = fn_cb else { return };
+// CLOSURE: `fn_cb`/`arg` was an `Option<unsafe extern "C" fn(*mut session,
+// *mut c_void)>` + `*mut c_void` ctx pair (not address-taken -- its sole
+// caller, `pid.rs::procdump_sessions`, always passed `Some(..)`, so the
+// "`None` means skip" case had no live user; a required `impl FnMut` drops
+// it, matching `SessionTable::for_each`'s own already-closure-based
+// signature it wraps).
+pub(super) fn session_for_each_all(mut cb: impl FnMut(*mut session)) {
     // SAFETY: called under `pid_rlock` (see `pid.rs::procdump_sessions*`),
     // which `session_for_each` requires (it excludes every `pid_wlock`
-    // writer, so the registry scan is race-free); `cb` is the caller's
-    // C-ABI dump callback, invoked once per live session pointer exactly as
-    // the old `session_list` walk did.
-    crate::tty::session::SessionTable::for_each(|s| unsafe { cb(s, arg) });
+    // writer, so the registry scan is race-free).
+    crate::tty::session::SessionTable::for_each(|s| cb(s));
 }
 
 // ===========================================================================

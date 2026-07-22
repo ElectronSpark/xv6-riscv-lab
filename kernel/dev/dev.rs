@@ -694,10 +694,14 @@ impl DevTable {
     /// the C original.
     // P3-1D mesh sweep: caller (`vfs/devtmpfs/superblock.rs`) now imports this
     // via crate-path `use` instead of an `extern` redeclaration -- demoted.
-    pub(crate) extern "C" fn for_each_device(
-        cb: extern "C" fn(*mut device_t, *mut c_void) -> c_int,
-        ctx: *mut c_void,
-    ) -> c_int {
+    //
+    // CLOSURE: `cb` was an `extern "C" fn(*mut device_t, *mut c_void) -> c_int`
+    // fn-pointer plus a `ctx: *mut c_void` (never address-taken itself --
+    // verified no C or Rust caller takes `for_each_device`'s own address, so
+    // monomorphizing it behind `impl FnMut` is safe). Now a generic closure
+    // capturing its context directly; the nonzero-stops-iteration contract is
+    // unchanged.
+    pub(crate) fn for_each_device(mut cb: impl FnMut(*mut device_t) -> c_int) -> c_int {
         let mut ret: c_int = 0;
         let mut guard = Some(KRcuRead::new());
 
@@ -725,7 +729,7 @@ impl DevTable {
                 };
                 // Release RCU so the callback can sleep if needed.
                 drop(guard.take());
-                ret = cb(KArc::as_ptr(&dev_arc), ctx);
+                ret = cb(KArc::as_ptr(&dev_arc));
                 // `dev_arc` owns the reference `try_from_raw` acquired above;
                 // dropping it here runs the equivalent of the old manual
                 // `kobject_put` automatically -- no separate call needed (and

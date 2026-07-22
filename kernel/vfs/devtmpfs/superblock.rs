@@ -858,9 +858,11 @@ pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
 
 /// Callback for [`DevTable::for_each_device`]: create a devtmpfs registry entry
 /// for each device that has a devname set but hasn't been registered yet.
-/// Only ever reached through `DevTable::for_each_device`'s callback function
-/// pointer, so this stays private -- same precedent as [`devtmpfs_mount`].
-extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_void) -> c_int {
+/// Only ever reached from [`devtmpfs_populate_devices`] (as a closure
+/// argument, `for_each_device` now takes `impl FnMut` rather than a C
+/// fn-pointer + ctx), so this stays private -- same precedent as
+/// [`devtmpfs_mount`].
+fn __devtmpfs_register_one_device(dev: *mut device_t) -> c_int {
     // SAFETY: `dev` is a live `device_t*` (caller contract:
     // `DevTable::for_each_device`'s callback convention, `kernel/inc/dev/dev.h`).
     let devname = unsafe { (*dev).devname };
@@ -905,7 +907,7 @@ pub(crate) extern "C" fn devtmpfs_populate_devices() {
 
     // Use the DevTable::for_each_device iterator to find all devices that were
     // registered before devtmpfs was initialised.
-    DevTable::for_each_device(__devtmpfs_register_one_device, ptr::null_mut());
+    DevTable::for_each_device(__devtmpfs_register_one_device);
 
     // Count how many nodes are now in the registry.
     // SAFETY: registry access guarded by `__DEVTMPFS_NODES`'s lock

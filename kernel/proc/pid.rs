@@ -20,7 +20,6 @@
 #![allow(dead_code)]
 
 use core::ffi::c_void;
-use core::ptr;
 
 use crate::proc::proc_shims;
 
@@ -273,14 +272,12 @@ fn procdump_tree_pid(target_pid: i32) {
     xv6_pid_runlock();
 }
 
-unsafe extern "C" fn dump_session_cb(s: *mut Session, _arg: *mut c_void) {
-    xv6_dump_session(s);
-}
-
 fn procdump_sessions() {
     crate::kprintln!("\n=== Process Hierarchy (Session / PGroup / Process / Thread) ===");
     xv6_pid_rlock();
-    session_for_each_all(Some(dump_session_cb), ptr::null_mut());
+    session_for_each_all(|s| {
+        xv6_dump_session(s);
+    });
     xv6_pid_runlock();
     crate::kprintln!("\n=== End Hierarchy ===");
 }
