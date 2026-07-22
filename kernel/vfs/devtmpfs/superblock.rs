@@ -111,7 +111,7 @@
 //!
 //! # Deliberate fix
 //!
-//! [`__devtmpfs_walk_parent`]'s successful `VfsInode::vfs_ilookup()` branches
+//! [`Devtmpfs::walk_parent`]'s successful `VfsInode::vfs_ilookup()` branches
 //! (matching `.`/`..`-less intermediate path components) populate a
 //! `vfs_dentry` whose `name` field `vfs_ilookup` heap-allocates via
 //! `strndup` — the C original never released it (every other
@@ -119,6 +119,24 @@
 //! `vfs_release_dentry`; this one didn't). Fixed here as a pure cleanup
 //! addition with zero control-flow/return-value change, same category of
 //! fix as Wave 18's tmpfs move-UAF fix and Wave-11-era map_pages leak fix.
+//!
+//! # Wave B free-fn -> associated-fn sweep
+//!
+//! Every relocatable free fn that used to live in this file is now an
+//! associated fn: `impl Devtmpfs` (a ZST private to this file) for the
+//! scalar/registry-global helper bodies with no `DevtmpfsNode`-typed
+//! subject -- `neg`/`mkdev`/`__devtmpfs_ensure_init` -> `ensure_init`/
+//! `__devtmpfs_get_root` -> `get_root`/`__devtmpfs_walk_parent` ->
+//! `walk_parent`/`__devtmpfs_mknod_relative` -> `mknod_relative`/
+//! `__devtmpfs_unlink_relative` -> `unlink_relative` -- or `impl
+//! DevtmpfsNode` for [`DevtmpfsNode::iter`] (was `devtmpfs_node_iter`),
+//! whose subject *is* a `*mut list_node_t` == `*mut DevtmpfsNode`
+//! pointer. Every relocated body is byte-identical to its old free-fn
+//! form; no raw-pointer first param became `&self`/`&T`. The
+//! `list_first`/`list_next`/`list_push_front`/`list_detach` intrusive-
+//! list primitives stay FLOOR free fns (generic `*mut list_node_t` ops,
+//! refify-ceiling floor, same precedent as this crate's other intrusive-
+//! list helpers).
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -180,15 +198,26 @@ use crate::kassert;
 // P3-10b: the ERR_PTR helper imports are gone — every VFS-core call
 // this file makes is `KResult`-native now.
 
-#[inline(always)]
-const fn neg(e: u32) -> c_int {
-    -(e as c_int)
-}
+/// ZST marker (Wave B free-fn -> associated-fn sweep, this file only) --
+/// see the module doc. Holds the scalar/registry-global helper bodies
+/// with no `DevtmpfsNode`-typed subject (`neg`/`mkdev`/`ensure_init`/
+/// `get_root`/`walk_parent`/`mknod_relative`/`unlink_relative`).
+/// Distinct from [`DevtmpfsNode`] (which owns [`DevtmpfsNode::iter`],
+/// whose subject *is* a node-typed pointer) -- same subject-vs-scalar
+/// split this crate's other Wave A/B sweeps use.
+struct Devtmpfs;
 
-/// `mkdev(major, minor)` (`kernel/inc/defs.h`: `((uint)((m) << 20 | (n)))`).
-#[inline(always)]
-fn mkdev(major: c_int, minor: c_int) -> dev_t {
-    ((major << 20) | minor) as dev_t
+impl Devtmpfs {
+    #[inline(always)]
+    const fn neg(e: u32) -> c_int {
+        -(e as c_int)
+    }
+
+    /// `mkdev(major, minor)` (`kernel/inc/defs.h`: `((uint)((m) << 20 | (n)))`).
+    #[inline(always)]
+    fn mkdev(major: c_int, minor: c_int) -> dev_t {
+        ((major << 20) | minor) as dev_t
+    }
 }
 
 // ===========================================================================
@@ -234,23 +263,25 @@ static mut __DEVTMPFS_INITIALIZED: bool = false;
 /// section for the `AtomicPtr`/`Relaxed` rationale.
 static __DEVTMPFS_SB: AtomicPtr<vfs_superblock> = AtomicPtr::new(ptr::null_mut());
 
-fn __devtmpfs_ensure_init() {
-    // SAFETY: `__DEVTMPFS_INITIALIZED` is written here under the same
-    // non-atomic check-then-set discipline as the C original (see the
-    // module doc's "Locking / concurrency" section for why this is not
-    // upgraded to a CAS-guarded once-init). The list-head self-reference
-    // fixup itself now goes through `__DEVTMPFS_NODES`'s lock (Wave
-    // P3-8d) rather than a direct write to a separate static, since the
-    // lock owns the data -- this briefly takes the lock where the C/
-    // pre-P3-8d Rust never did, which is a strict improvement (was
-    // entirely unlocked before), not a new hazard.
-    unsafe {
-        if !__DEVTMPFS_INITIALIZED {
-            let mut head = __DEVTMPFS_NODES.lock();
-            let addr: *mut list_node_t = &raw mut *head;
-            (*addr).next = addr;
-            (*addr).prev = addr;
-            __DEVTMPFS_INITIALIZED = true;
+impl Devtmpfs {
+    fn ensure_init() {
+        // SAFETY: `__DEVTMPFS_INITIALIZED` is written here under the same
+        // non-atomic check-then-set discipline as the C original (see the
+        // module doc's "Locking / concurrency" section for why this is not
+        // upgraded to a CAS-guarded once-init). The list-head self-reference
+        // fixup itself now goes through `__DEVTMPFS_NODES`'s lock (Wave
+        // P3-8d) rather than a direct write to a separate static, since the
+        // lock owns the data -- this briefly takes the lock where the C/
+        // pre-P3-8d Rust never did, which is a strict improvement (was
+        // entirely unlocked before), not a new hazard.
+        unsafe {
+            if !__DEVTMPFS_INITIALIZED {
+                let mut head = __DEVTMPFS_NODES.lock();
+                let addr: *mut list_node_t = &raw mut *head;
+                (*addr).next = addr;
+                (*addr).prev = addr;
+                __DEVTMPFS_INITIALIZED = true;
+            }
         }
     }
 }
@@ -347,188 +378,192 @@ unsafe fn list_detach(node: *mut list_node_t) {
 /// # Safety
 /// `head` must point to a live, initialized `list_node_t` ring head that
 /// stays locked (unmutated) for the lifetime of the returned iterator.
-unsafe fn devtmpfs_node_iter(head: *mut list_node_t) -> impl Iterator<Item = *mut list_node_t> {
-    let first = unsafe { list_first(head) };
-    core::iter::successors((!first.is_null()).then_some(first), move |&cur| {
-        let n = unsafe { list_next(head, cur) };
-        (!n.is_null()).then_some(n)
-    })
+impl DevtmpfsNode {
+    unsafe fn iter(head: *mut list_node_t) -> impl Iterator<Item = *mut list_node_t> {
+        let first = unsafe { list_first(head) };
+        core::iter::successors((!first.is_null()).then_some(first), move |&cur| {
+            let n = unsafe { list_next(head, cur) };
+            (!n.is_null()).then_some(n)
+        })
+    }
 }
 
 // ------------------------------------------------------------------ */
 //  Mount-point-agnostic helpers (use root inode, not "/dev/")
 // ------------------------------------------------------------------ */
 
-/// `__devtmpfs_get_root` — return the devtmpfs root inode (no extra ref).
-/// Returns null if devtmpfs is not mounted. See the module doc's
-/// "Locking / concurrency" section: reads `__DEVTMPFS_SB` without any
-/// lock, matching the C original's exact (documented) race.
-fn __devtmpfs_get_root() -> *mut vfs_inode {
-    let sb = __DEVTMPFS_SB.load(Ordering::Relaxed);
-    if sb.is_null() {
-        return ptr::null_mut();
+impl Devtmpfs {
+    /// `__devtmpfs_get_root` — return the devtmpfs root inode (no extra ref).
+    /// Returns null if devtmpfs is not mounted. See the module doc's
+    /// "Locking / concurrency" section: reads `__DEVTMPFS_SB` without any
+    /// lock, matching the C original's exact (documented) race.
+    fn get_root() -> *mut vfs_inode {
+        let sb = __DEVTMPFS_SB.load(Ordering::Relaxed);
+        if sb.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: a non-null `__DEVTMPFS_SB` is only ever a live
+        // `vfs_superblock` written by `devtmpfs_mount` (cleared by
+        // `devtmpfs_umount_free` before the superblock is freed); reading
+        // `root_inode` is a plain field load.
+        unsafe { (*sb).root_inode }
     }
-    // SAFETY: a non-null `__DEVTMPFS_SB` is only ever a live
-    // `vfs_superblock` written by `devtmpfs_mount` (cleared by
-    // `devtmpfs_umount_free` before the superblock is freed); reading
-    // `root_inode` is a plain field load.
-    unsafe { (*sb).root_inode }
-}
 
-/// `__devtmpfs_walk_parent` — given a relative path like `"pts/0"`, walk
-/// from `root` through intermediate directories, creating them if needed.
-/// Returns the parent directory inode (with an extra iref) and writes the
-/// leaf name into `*leaf`/`*leaf_len`.
-///
-/// On failure returns null.
-///
-/// # Safety
-/// `root` must be a live, referenced `vfs_inode`; `name` must point to at
-/// least `name_len` readable bytes.
-unsafe fn __devtmpfs_walk_parent(
-    root: *mut vfs_inode,
-    name: *const c_char,
-    name_len: usize,
-    leaf: &mut *const c_char,
-    leaf_len: &mut usize,
-) -> *mut vfs_inode {
-    // SAFETY: caller's contract.
-    let name_bytes = unsafe { core::slice::from_raw_parts(name as *const u8, name_len) };
+    /// `__devtmpfs_walk_parent` — given a relative path like `"pts/0"`, walk
+    /// from `root` through intermediate directories, creating them if needed.
+    /// Returns the parent directory inode (with an extra iref) and writes the
+    /// leaf name into `*leaf`/`*leaf_len`.
+    ///
+    /// On failure returns null.
+    ///
+    /// # Safety
+    /// `root` must be a live, referenced `vfs_inode`; `name` must point to at
+    /// least `name_len` readable bytes.
+    unsafe fn walk_parent(
+        root: *mut vfs_inode,
+        name: *const c_char,
+        name_len: usize,
+        leaf: &mut *const c_char,
+        leaf_len: &mut usize,
+    ) -> *mut vfs_inode {
+        // SAFETY: caller's contract.
+        let name_bytes = unsafe { core::slice::from_raw_parts(name as *const u8, name_len) };
 
-    // Find the last '/' -- everything before it is a directory path.
-    let last_slash: isize = name_bytes
-        .iter()
-        .rposition(|&b| b == b'/')
-        .map(|i| i as isize)
-        .unwrap_or(-1);
+        // Find the last '/' -- everything before it is a directory path.
+        let last_slash: isize = name_bytes
+            .iter()
+            .rposition(|&b| b == b'/')
+            .map(|i| i as isize)
+            .unwrap_or(-1);
 
-    let mut dir = root;
-    VfsInode::vfs_idup(dir); // take a ref so caller can always iput the result
+        let mut dir = root;
+        VfsInode::vfs_idup(dir); // take a ref so caller can always iput the result
 
-    if last_slash > 0 {
-        let last_slash = last_slash as usize;
-        // Path-component tokenizer -> `split('/')` iterator. Empty tokens
-        // (leading/consecutive slashes) are skipped exactly like the C's
-        // `end == start` continue; each token subslices `name_bytes`, so
-        // `token.as_ptr()`/`len()` reproduce the old `name.add(start)`/
-        // `end - start` byte-for-byte.
-        for token in name_bytes[..last_slash].split(|&b| b == b'/') {
-            if token.is_empty() {
-                continue;
-            }
-            let comp = token.as_ptr() as *const c_char;
-            let comp_len = token.len();
+        if last_slash > 0 {
+            let last_slash = last_slash as usize;
+            // Path-component tokenizer -> `split('/')` iterator. Empty tokens
+            // (leading/consecutive slashes) are skipped exactly like the C's
+            // `end == start` continue; each token subslices `name_bytes`, so
+            // `token.as_ptr()`/`len()` reproduce the old `name.add(start)`/
+            // `end - start` byte-for-byte.
+            for token in name_bytes[..last_slash].split(|&b| b == b'/') {
+                if token.is_empty() {
+                    continue;
+                }
+                let comp = token.as_ptr() as *const c_char;
+                let comp_len = token.len();
 
-            let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
-            let ret = VfsInode::vfs_ilookup(dir, &mut dentry, comp, comp_len);
-            if ret == 0 && dentry.ino != 0 {
-                // Found -- get the inode.
-                // SAFETY: `dir` is non-null (loop invariant); `sb`/`ops`
-                // are set by the generic VFS mount machinery before any
-                // directory op can run. Mirrors the C's direct
-                // `dir->sb->ops->get_inode(dir->sb, dentry.ino)` vtable
-                // dispatch (deliberately not the generic
-                // `vfs_get_inode()` cache-lookup wrapper -- ported
-                // faithfully, see the Wave 20 report).
-                let sb = unsafe { (*dir).sb };
-                // SAFETY: `sb`/`ops` live per the comment above; the
-                // trait method is a driver callback with exactly this
-                // contract (P3-10b: `KResult`-native dyn dispatch, no
-                // ERR_PTR decode).
-                let child = unsafe { crate::vfs::fs::VfsSuperblock::sb_ops(sb).get_inode(sb, dentry.ino) };
-                // Deliberate fix (see module doc): release the dentry's
-                // heap-allocated name now that `.ino` has been consumed.
-                vfs_release_dentry(&mut dentry);
-                VfsInode::vfs_iput(dir);
-                let Ok(child) = child else {
-                    return ptr::null_mut();
-                };
-                dir = child;
-            } else {
-                // Not found -- create the directory. (P3-10b:
-                // `KResult`-native, no ERR_PTR decode.)
-                let sub = crate::vfs::inode::VfsInode::vfs_mkdir_inner(dir, 0o755, comp, comp_len);
-                VfsInode::vfs_iput(dir);
-                let Ok(sub) = sub else {
-                    return ptr::null_mut();
-                };
-                dir = sub;
+                let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
+                let ret = VfsInode::vfs_ilookup(dir, &mut dentry, comp, comp_len);
+                if ret == 0 && dentry.ino != 0 {
+                    // Found -- get the inode.
+                    // SAFETY: `dir` is non-null (loop invariant); `sb`/`ops`
+                    // are set by the generic VFS mount machinery before any
+                    // directory op can run. Mirrors the C's direct
+                    // `dir->sb->ops->get_inode(dir->sb, dentry.ino)` vtable
+                    // dispatch (deliberately not the generic
+                    // `vfs_get_inode()` cache-lookup wrapper -- ported
+                    // faithfully, see the Wave 20 report).
+                    let sb = unsafe { (*dir).sb };
+                    // SAFETY: `sb`/`ops` live per the comment above; the
+                    // trait method is a driver callback with exactly this
+                    // contract (P3-10b: `KResult`-native dyn dispatch, no
+                    // ERR_PTR decode).
+                    let child = unsafe { crate::vfs::fs::VfsSuperblock::sb_ops(sb).get_inode(sb, dentry.ino) };
+                    // Deliberate fix (see module doc): release the dentry's
+                    // heap-allocated name now that `.ino` has been consumed.
+                    vfs_release_dentry(&mut dentry);
+                    VfsInode::vfs_iput(dir);
+                    let Ok(child) = child else {
+                        return ptr::null_mut();
+                    };
+                    dir = child;
+                } else {
+                    // Not found -- create the directory. (P3-10b:
+                    // `KResult`-native, no ERR_PTR decode.)
+                    let sub = crate::vfs::inode::VfsInode::vfs_mkdir_inner(dir, 0o755, comp, comp_len);
+                    VfsInode::vfs_iput(dir);
+                    let Ok(sub) = sub else {
+                        return ptr::null_mut();
+                    };
+                    dir = sub;
+                }
             }
         }
+
+        // Leaf is the part after the last '/' (or the whole name).
+        if last_slash >= 0 {
+            let last_slash = last_slash as usize;
+            // SAFETY: `last_slash < name_len` (found within `name_bytes`).
+            *leaf = unsafe { name.add(last_slash + 1) };
+            *leaf_len = name_len - (last_slash + 1);
+        } else {
+            *leaf = name;
+            *leaf_len = name_len;
+        }
+        dir // caller must VfsInode::vfs_iput()
     }
 
-    // Leaf is the part after the last '/' (or the whole name).
-    if last_slash >= 0 {
-        let last_slash = last_slash as usize;
-        // SAFETY: `last_slash < name_len` (found within `name_bytes`).
-        *leaf = unsafe { name.add(last_slash + 1) };
-        *leaf_len = name_len - (last_slash + 1);
-    } else {
-        *leaf = name;
-        *leaf_len = name_len;
-    }
-    dir // caller must VfsInode::vfs_iput()
-}
+    /// `__devtmpfs_mknod_relative` — create a device node under the devtmpfs
+    /// root inode using the relative name (e.g. `"console"`, `"pts/0"`).
+    /// Creates intermediate directories as needed.
+    ///
+    /// # Safety
+    /// `root` must be a live, referenced `vfs_inode`; `name` must point to at
+    /// least `name_len` readable bytes.
+    unsafe fn mknod_relative(
+        root: *mut vfs_inode,
+        name: *const c_char,
+        name_len: usize,
+        mode: mode_t,
+        dev: dev_t,
+    ) -> c_int {
+        let mut leaf: *const c_char = ptr::null();
+        let mut leaf_len: usize = 0;
+        // SAFETY: caller's contract, forwarded.
+        let parent = unsafe { Devtmpfs::walk_parent(root, name, name_len, &mut leaf, &mut leaf_len) };
+        if parent.is_null() {
+            return Devtmpfs::neg(ENOENT);
+        }
 
-/// `__devtmpfs_mknod_relative` — create a device node under the devtmpfs
-/// root inode using the relative name (e.g. `"console"`, `"pts/0"`).
-/// Creates intermediate directories as needed.
-///
-/// # Safety
-/// `root` must be a live, referenced `vfs_inode`; `name` must point to at
-/// least `name_len` readable bytes.
-unsafe fn __devtmpfs_mknod_relative(
-    root: *mut vfs_inode,
-    name: *const c_char,
-    name_len: usize,
-    mode: mode_t,
-    dev: dev_t,
-) -> c_int {
-    let mut leaf: *const c_char = ptr::null();
-    let mut leaf_len: usize = 0;
-    // SAFETY: caller's contract, forwarded.
-    let parent = unsafe { __devtmpfs_walk_parent(root, name, name_len, &mut leaf, &mut leaf_len) };
-    if parent.is_null() {
-        return neg(ENOENT);
-    }
-
-    // P3-10b: `KResult`-native, no ERR_PTR decode.
-    let mut ret = 0;
-    match crate::vfs::inode::VfsInode::vfs_mknod_inner(parent, mode, dev, leaf, leaf_len) {
-        Ok(inode) => VfsInode::vfs_iput(inode),
-        Err(e) => {
-            ret = e.neg();
-            if ret == neg(EEXIST) {
-                ret = 0; // idempotent
+        // P3-10b: `KResult`-native, no ERR_PTR decode.
+        let mut ret = 0;
+        match crate::vfs::inode::VfsInode::vfs_mknod_inner(parent, mode, dev, leaf, leaf_len) {
+            Ok(inode) => VfsInode::vfs_iput(inode),
+            Err(e) => {
+                ret = e.neg();
+                if ret == Devtmpfs::neg(EEXIST) {
+                    ret = 0; // idempotent
+                }
             }
         }
-    }
-    VfsInode::vfs_iput(parent);
-    ret
-}
-
-/// `__devtmpfs_unlink_relative` — remove a device node from under the
-/// devtmpfs root inode using the relative name (e.g. `"pts/0"`).
-///
-/// # Safety
-/// `root` must be a live, referenced `vfs_inode`; `name` must point to at
-/// least `name_len` readable bytes.
-unsafe fn __devtmpfs_unlink_relative(
-    root: *mut vfs_inode,
-    name: *const c_char,
-    name_len: usize,
-) -> c_int {
-    let mut leaf: *const c_char = ptr::null();
-    let mut leaf_len: usize = 0;
-    // SAFETY: caller's contract, forwarded.
-    let parent = unsafe { __devtmpfs_walk_parent(root, name, name_len, &mut leaf, &mut leaf_len) };
-    if parent.is_null() {
-        return neg(ENOENT);
+        VfsInode::vfs_iput(parent);
+        ret
     }
 
-    let ret = VfsInode::vfs_unlink(parent, leaf, leaf_len);
-    VfsInode::vfs_iput(parent);
-    ret
+    /// `__devtmpfs_unlink_relative` — remove a device node from under the
+    /// devtmpfs root inode using the relative name (e.g. `"pts/0"`).
+    ///
+    /// # Safety
+    /// `root` must be a live, referenced `vfs_inode`; `name` must point to at
+    /// least `name_len` readable bytes.
+    unsafe fn unlink_relative(
+        root: *mut vfs_inode,
+        name: *const c_char,
+        name_len: usize,
+    ) -> c_int {
+        let mut leaf: *const c_char = ptr::null();
+        let mut leaf_len: usize = 0;
+        // SAFETY: caller's contract, forwarded.
+        let parent = unsafe { Devtmpfs::walk_parent(root, name, name_len, &mut leaf, &mut leaf_len) };
+        if parent.is_null() {
+            return Devtmpfs::neg(ENOENT);
+        }
+
+        let ret = VfsInode::vfs_unlink(parent, leaf, leaf_len);
+        VfsInode::vfs_iput(parent);
+        ret
+    }
 }
 
 // ------------------------------------------------------------------ */
@@ -542,10 +577,10 @@ unsafe fn __devtmpfs_unlink_relative(
 /// Called from `kernel/vfs/fs.rs`'s `vfs_init()` -- kept `#[no_mangle]`
 /// per that extern declaration.
 pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
-    let root = __devtmpfs_get_root();
+    let root = Devtmpfs::get_root();
     if root.is_null() {
         crate::kprintln!("devtmpfs: post_mount_populate called but no sb");
-        return neg(ENODEV);
+        return Devtmpfs::neg(ENODEV);
     }
 
     // See the module doc's "Locking / concurrency" section for the
@@ -567,10 +602,10 @@ pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
         let next = unsafe { list_next(&raw mut *guard, cur) };
         drop(guard);
 
-        // SAFETY: `root`/`n`/`nl` satisfy `__devtmpfs_mknod_relative`'s
+        // SAFETY: `root`/`n`/`nl` satisfy `Devtmpfs::mknod_relative`'s
         // contract.
-        let ret = unsafe { __devtmpfs_mknod_relative(root, n, nl, m, d) };
-        if ret != 0 && ret != neg(EEXIST) {
+        let ret = unsafe { Devtmpfs::mknod_relative(root, n, nl, m, d) };
+        if ret != 0 && ret != Devtmpfs::neg(EEXIST) {
             crate::kprintln!("devtmpfs: mknod '{}' failed: {}", crate::printf::Cs(n), ret);
         }
 
@@ -706,21 +741,21 @@ static DEVTMPFS_FS_TYPE_OPS: DevtmpfsFsTypeOps = DevtmpfsFsTypeOps;
 /// Wave 21). Kept `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern`
 /// declaration -- see the module doc's "C-ABI surface kept" section.
 pub(crate) extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
-    __devtmpfs_ensure_init();
+    Devtmpfs::ensure_init();
 
     if name.is_null() {
-        return neg(EINVAL);
+        return Devtmpfs::neg(EINVAL);
     }
     let name_len = strlen(name);
     if name_len == 0 {
-        return neg(EINVAL);
+        return Devtmpfs::neg(EINVAL);
     }
 
     // Allocate a registry entry (node struct + name string in one block).
     let alloc_size = core::mem::size_of::<DevtmpfsNode>() + name_len + 1;
     let raw = kmm_alloc(alloc_size);
     if raw.is_null() {
-        return neg(ENOMEM);
+        return Devtmpfs::neg(ENOMEM);
     }
     let node = raw as *mut DevtmpfsNode;
 
@@ -747,12 +782,12 @@ pub(crate) extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t,
     // If devtmpfs is already mounted, create the node live using the
     // stored superblock root inode (mount-point independent). This is
     // needed for devices registered after boot (e.g. PTYs).
-    let root = __devtmpfs_get_root();
+    let root = Devtmpfs::get_root();
     if !root.is_null() {
         // SAFETY: `root`/`name`/`name_len` all satisfy
-        // `__devtmpfs_mknod_relative`'s contract.
+        // `Devtmpfs::mknod_relative`'s contract.
         unsafe {
-            __devtmpfs_mknod_relative(root, name, name_len, mode, dev);
+            Devtmpfs::mknod_relative(root, name, name_len, mode, dev);
         }
     }
 
@@ -764,14 +799,14 @@ pub(crate) extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t,
 /// Kept `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern` declaration
 /// -- see the module doc's "C-ABI surface kept" section.
 pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
-    __devtmpfs_ensure_init();
+    Devtmpfs::ensure_init();
 
     if name.is_null() {
-        return neg(EINVAL);
+        return Devtmpfs::neg(EINVAL);
     }
     let name_len = strlen(name);
     if name_len == 0 {
-        return neg(EINVAL);
+        return Devtmpfs::neg(EINVAL);
     }
 
     // Remove from the registry list.
@@ -785,7 +820,7 @@ pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
         // during the read-only `.find()`. `find` stops at the match, so the
         // subsequent `list_detach` is NOT a mutation-during-walk.
         if let Some(cur) = unsafe {
-            devtmpfs_node_iter(head).find(|&cur| {
+            DevtmpfsNode::iter(head).find(|&cur| {
                 let node = cur as *mut DevtmpfsNode;
                 unsafe { (*node).name_len == name_len && strncmp((*node).name, name, name_len) == 0 }
             })
@@ -801,17 +836,17 @@ pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
 
     // Also unlink the live filesystem node if devtmpfs is mounted. Uses
     // the stored root inode so we don't depend on mount path.
-    let root = __devtmpfs_get_root();
+    let root = Devtmpfs::get_root();
     if !root.is_null() {
         // SAFETY: `root`/`name`/`name_len` all satisfy
-        // `__devtmpfs_unlink_relative`'s contract.
+        // `Devtmpfs::unlink_relative`'s contract.
         unsafe {
-            __devtmpfs_unlink_relative(root, name, name_len);
+            Devtmpfs::unlink_relative(root, name, name_len);
         }
     }
 
     if found_node.is_null() {
-        neg(ENOENT)
+        Devtmpfs::neg(ENOENT)
     } else {
         0
     }
@@ -843,7 +878,7 @@ extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_vo
         let mut guard = __DEVTMPFS_NODES.lock();
         let head = &raw mut *guard;
         unsafe {
-            devtmpfs_node_iter(head).any(|cur| {
+            DevtmpfsNode::iter(head).any(|cur| {
                 let node = cur as *mut DevtmpfsNode;
                 unsafe {
                     (*node).name_len == name_len && strncmp((*node).name, devname, name_len) == 0
@@ -855,7 +890,7 @@ extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_vo
     if !found {
         // SAFETY: `dev` live per this function's own contract above.
         let (major, minor, devmode) = unsafe { ((*dev).major, (*dev).minor, (*dev).devmode) };
-        devtmpfs_create_node(devname, devmode, mkdev(major, minor));
+        devtmpfs_create_node(devname, devmode, Devtmpfs::mkdev(major, minor));
     }
     0
 }
@@ -866,7 +901,7 @@ extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_vo
 /// `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern` declaration --
 /// see the module doc's "C-ABI surface kept" section.
 pub(crate) extern "C" fn devtmpfs_populate_devices() {
-    __devtmpfs_ensure_init();
+    Devtmpfs::ensure_init();
 
     // Use the dev_for_each_device iterator to find all devices that were
     // registered before devtmpfs was initialised.
@@ -878,7 +913,7 @@ pub(crate) extern "C" fn devtmpfs_populate_devices() {
     let count = {
         let mut guard = __DEVTMPFS_NODES.lock();
         let head = &raw mut *guard;
-        unsafe { devtmpfs_node_iter(head).count() as c_int }
+        unsafe { DevtmpfsNode::iter(head).count() as c_int }
     };
 
     crate::kprintln!("devtmpfs: populated {} device nodes from device table", count);
@@ -892,7 +927,7 @@ pub(crate) extern "C" fn devtmpfs_populate_devices() {
 /// from `kernel/vfs/fs.rs`'s `vfs_init()` -- kept `#[no_mangle]` per that
 /// extern declaration.
 pub(crate) extern "C" fn devtmpfs_init() {
-    __devtmpfs_ensure_init();
+    Devtmpfs::ensure_init();
 
     // Register the devtmpfs filesystem type.
     let fs_type = VfsFsType::vfs_fs_type_allocate();

@@ -54,7 +54,7 @@ use crate::bindings::{
 use crate::vfs::inode::InodeOps;
 
 use super::{
-    s_isblk, s_ischr, S_IFBLK, S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG, TMPFS_HASH_BUCKETS,
+    S_IFBLK, S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG, TMPFS_HASH_BUCKETS,
     VFS_DENTRY_COOKIE_END, VFS_DENTRY_COOKIE_PARENT,
 };
 
@@ -1042,7 +1042,7 @@ impl Tmpfs {
 impl Tmpfs {
     fn mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *const c_char, name_len: usize) -> KResult<*mut vfs_inode> {
         let tmpfs_dir = dir as *mut tmpfs_inode;
-        if !s_isblk(mode) && !s_ischr(mode) {
+        if !super::Tmpfs::s_isblk(mode) && !super::Tmpfs::s_ischr(mode) {
             // TODO: Support FIFO, socket, and other special files.
             return Err(Errno::Inval); // Mknod can only create block/char device files
         }
@@ -1053,9 +1053,9 @@ impl Tmpfs {
                 // `&mut` is exclusive. One hoist covers the safe device-node init
                 // methods and both former `addr_of_mut` raw derefs (N-S1).
                 let ti = unsafe { &mut *ti };
-                if s_isblk(mode) {
+                if super::Tmpfs::s_isblk(mode) {
                     ti.make_bdev(dev);
-                } else if s_ischr(mode) {
+                } else if super::Tmpfs::s_ischr(mode) {
                     ti.make_cdev(dev);
                 }
                 let vi = ptr::addr_of_mut!(ti.vfs_inode);
@@ -1204,11 +1204,11 @@ impl Tmpfs {
         // SAFETY: `inode` is live (caller's contract).
         unsafe {
             let mode = (*inode).mode;
-            if super::s_isreg(mode) {
+            if super::Tmpfs::s_isreg(mode) {
                 // For regular files, teardown pcache (frees all cached
                 // pages). Embedded files have no pcache, so this is a no-op.
                 super::file::tmpfs_inode_pcache_teardown(inode);
-            } else if super::s_islnk(mode) {
+            } else if super::Tmpfs::s_islnk(mode) {
                 // For symlinks, free the target string if allocated externally.
                 TmpfsInode::free_symlink_target(inode as *mut tmpfs_inode);
             }
@@ -1298,7 +1298,7 @@ impl InodeOps for TmpfsInodeOps {
         super::superblock::TmpfsSuperblock::free_inode(inode);
     }
     unsafe fn open(&self, inode: *mut vfs_inode, file: *mut crate::bindings::vfs_file, f_flags: c_int) -> KResult<()> {
-        super::file::tmpfs_open(inode, file, f_flags)
+        super::file::TmpfsFile::open(inode, file, f_flags)
     }
 }
 

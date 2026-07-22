@@ -11,6 +11,19 @@
 //! plain Rust `static` values (see [`inode::TMPFS_INODE_OPS`],
 //! [`file::TMPFS_FILE_OPS`], [`superblock::TMPFS_SUPERBLOCK_OPS`]).
 //!
+//! # Wave B free-fn -> associated-fn sweep
+//!
+//! The mode/type scalar predicates (`s_isdir`/`s_isreg`/`s_islnk`/
+//! `s_ischr`/`s_isblk`/`s_isfifo`) are now `impl Tmpfs` associated fns,
+//! reached by every sibling submodule as `super::Tmpfs::*`. `Tmpfs` here
+//! is a ZST at this file's own path (`crate::vfs::tmpfs::Tmpfs`) --
+//! distinct from the per-submodule `Tmpfs` ZSTs `inode.rs`/
+//! `superblock.rs`/`truncate.rs`/`file.rs` each declare privately for
+//! their own small helpers (module-private, so same name / different
+//! type, no collision). Exactly mirrors `xv6fs/mod.rs`'s `impl Xv6fs`
+//! sweep. Every relocated body is byte-identical to its old free-fn
+//! form.
+//!
 //! `kernel/vfs/tmpfs/tmpfs_private.h` is deliberately **not** deleted or
 //! moved: `kernel/vfs/devtmpfs/superblock.c` (still C, Wave 20) `#include`s
 //! it directly to reuse tmpfs's inode/superblock allocation and directory
@@ -113,27 +126,40 @@ pub(crate) const S_IFBLK: u32 = 0o060000;
 pub(crate) const S_IFREG: u32 = 0o100000;
 pub(crate) const S_IFLNK: u32 = 0o120000;
 
-#[inline(always)]
-pub(crate) fn s_isdir(mode: u32) -> bool {
-    mode & S_IFMT == S_IFDIR
-}
-#[inline(always)]
-pub(crate) fn s_isreg(mode: u32) -> bool {
-    mode & S_IFMT == S_IFREG
-}
-#[inline(always)]
-pub(crate) fn s_islnk(mode: u32) -> bool {
-    mode & S_IFMT == S_IFLNK
-}
-#[inline(always)]
-pub(crate) fn s_ischr(mode: u32) -> bool {
-    mode & S_IFMT == S_IFCHR
-}
-#[inline(always)]
-pub(crate) fn s_isblk(mode: u32) -> bool {
-    mode & S_IFMT == S_IFBLK
-}
-#[inline(always)]
-pub(crate) fn s_isfifo(mode: u32) -> bool {
-    mode & S_IFMT == S_IFIFO
+/// ZST marker (Wave B free-fn -> associated-fn sweep, this file only) --
+/// holds the mode/type scalar predicate helpers with no natural shared-
+/// type home (they take/return bare `u32`, not a pointer to any tmpfs
+/// struct). Lives at the crate path `crate::vfs::tmpfs::Tmpfs`, reached
+/// by every sibling submodule as `super::Tmpfs::*`. Distinct from the
+/// per-submodule `Tmpfs` ZSTs in `inode.rs`/`superblock.rs`/
+/// `truncate.rs`/`file.rs` (each module-private, so the same name in a
+/// different file is a different type -- no collision), and from
+/// `crate::vfs::xv6fs::Xv6fs`'s exact mirror of this same pattern.
+pub(crate) struct Tmpfs;
+
+impl Tmpfs {
+    #[inline(always)]
+    pub(crate) fn s_isdir(mode: u32) -> bool {
+        mode & S_IFMT == S_IFDIR
+    }
+    #[inline(always)]
+    pub(crate) fn s_isreg(mode: u32) -> bool {
+        mode & S_IFMT == S_IFREG
+    }
+    #[inline(always)]
+    pub(crate) fn s_islnk(mode: u32) -> bool {
+        mode & S_IFMT == S_IFLNK
+    }
+    #[inline(always)]
+    pub(crate) fn s_ischr(mode: u32) -> bool {
+        mode & S_IFMT == S_IFCHR
+    }
+    #[inline(always)]
+    pub(crate) fn s_isblk(mode: u32) -> bool {
+        mode & S_IFMT == S_IFBLK
+    }
+    #[inline(always)]
+    pub(crate) fn s_isfifo(mode: u32) -> bool {
+        mode & S_IFMT == S_IFIFO
+    }
 }
