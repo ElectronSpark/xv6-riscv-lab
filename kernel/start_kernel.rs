@@ -205,7 +205,7 @@ use crate::timer::sched_timer::sleep_ms;
 // `unsafe fn` in `crate::mm::kalloc`; its call site already sits in an
 // `unsafe` context) are reached as crate-path items instead of the
 // `extern "C"` redeclarations that used to sit in the block above.
-use crate::mm::{kinit, pcache_global_init};
+use crate::mm::{kinit, Pcache};
 // P3-D3b: lock/rcu.rs's boot entry points are plain `pub(crate) unsafe
 // fn`s now that their `#[no_mangle]` exports are gone; reached by crate
 // path (call sites below already sit in `unsafe` blocks).
@@ -419,7 +419,7 @@ pub(crate) fn start_kernel_post_init() {
         virtio_disk_init(); // emulated hard disk (QEMU)
         ramdisk_init(); // ramdisk from FDT initrd (real hardware)
         sockinit();
-        pcache_global_init(); // page cache subsystem initialization
+        Pcache::global_init(); // page cache subsystem initialization
 
         // File system initialization must be run in the context of a
         // regular thread (e.g., because it calls sleep), and thus cannot
@@ -451,7 +451,7 @@ pub(crate) fn start_kernel_post_init() {
 
     // Phase 4 (docs/rustify/test_port_plan.md) in-kernel suite:
     // mm/pcache_test.rs. Same Wave-27 mechanism as the two gates above --
-    // `pcache_global_init()` has already run (see above), so the real
+    // `Pcache::global_init()` has already run (see above), so the real
     // pcache subsystem is up before this launches.
     #[cfg(feature = "pcache_test")]
     // SAFETY: single call, thread context, same point in boot order as the

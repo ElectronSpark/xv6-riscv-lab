@@ -20,18 +20,39 @@
 //!
 //! The former `xv6_pcache_*` C-ABI accessor surface (~180 one-line
 //! `#[no_mangle]` shims, none of which had any C caller — verified by
-//! grepping every `.c`/`.h` file in the tree) is kept as a set of
-//! *private*, non-`#[no_mangle]` functions with the same names and
-//! signatures so the ~1200-line algorithm body below (untouched by this
-//! refactor) keeps compiling unchanged; each one now either delegates to
-//! a `PcacheHandle`/`NodeHandle` method or performs the direct field
-//! access itself. This mirrors the pattern `vm.rs` already established
-//! for its own `xv6_vm_*` shims. Accessors that had zero call sites in
-//! this file (getters whose value nothing reads, raw-storage accessors
-//! only used internally, …) were deleted outright rather than ported.
+//! grepping every `.c`/`.h` file in the tree) is gone. KERNEL-OO further
+//! collapsed what was left of it: the `mod ffi` block's thin
+//! `spin_lock`/`rwlock_*`/`rb_*`/`slab_*`/`page_*` safe-wrapper facades
+//! (each just forwarding its args unchanged to the real `unsafe fn` in
+//! its owning module) were deleted and every call site now calls straight
+//! through in its own `unsafe {}` block (`slab_alloc` had zero callers
+//! left and was deleted outright — the node-alloc path moved to the
+//! `SlabCacheRef`/`SlabBox` API in `Pcache::page_alloc`). The
+//! `xv6_pcache_*`/`xv6_pcache_node_*`/`xv6_page_*` accessor/mutator
+//! forwarders, the global-state helpers, and the whole ~1700-line
+//! algorithm body (register/teardown/get_page/flush coordination/LRU
+//! eviction/…) are now namespaced as `impl Pcache` / `impl PcacheNode`
+//! associated fns (the 8283168 "namespacing only" strategy: byte-identical
+//! bodies, still taking the raw `*mut Pcache`/`*mut PcacheNode` pointer as
+//! the first param rather than `&self` — forming a reference to either
+//! Freeze type is the frozen-noalias hazard `PcacheHandle`/`NodeHandle`
+//! above already avoid, see `git show ab4404f`). Public entry points
+//! (`Pcache::init`/`get_page`/`put_page`/`read_page`/`teardown`/…, called
+//! from `vfs`/`xv6fs`/`tmpfs`) keep their old free-fn names minus the
+//! `pcache_` prefix, now reached as `Pcache::name(...)`. The 8 `xv6_e*`
+//! errno forwarders are gone; call sites use `crate::bindings::E*`
+//! directly.
 //!
-//! The 8 `xv6_e*` errno forwarders are gone; call sites use
-//! `crate::bindings::E*` directly.
+//! GENUINE FLOOR (still free fns, documented at each definition below):
+//! `pcache_rb_compare`/`pcache_rb_get_key` (address-taken in the
+//! `PCACHE_RB_OPTS` fn-ptr table), `pcache_flush_worker` (address-taken
+//! via `WorkStruct::init`), `flusher_thread` (address-taken via
+//! `kthread_create`), `sys_sync`/`sys_dumppcache` (address-taken in
+//! `irq/syscall.rs`'s dispatch table), the generic `list_node_t`
+//! primitives (`list_init`/`list_detach`/`list_insert`/`list_push_front`/
+//! `list_is_empty`/`list_entry_is_detached`, not pcache/node-specific),
+//! and the generic panic/assert helpers (`pcache_assert`/`assert_msg`/
+//! `xv6_pcache_panic`/`ops_call_optional`).
 //!
 //! Locking order (matches C):
 //!   1. global pcache spinlock
@@ -295,32 +316,31 @@ pub type Thread = thread;
 pub type Workqueue = workqueue;
 
 // ---------------------------------------------------------------------------
-// Real C-ABI surface this file depends on. Locks/rbtree/slab/page-level
-// primitives are declared here with whichever pointer type is locally
-// convenient (`page_t`, `slab_cache_t`, …) — the same "redeclare the
-// extern with a locally-typed view" pattern `vm.rs` and the old
-// `pcache_shims.rs` both already use for symbols shared across modules.
-// Thread/scheduling/workqueue/tq primitives that are pure-Rust and
-// already re-exported at the crate root (`kthread_create`, `wakeup`,
-// `sleep_on_chan*`, `tq_*`, `workqueue_create`, `queue_work`,
-// `init_work_struct`, `rwlock_r_{sleep,wake}_cb`) are called directly as
-// `crate::xxx(...)` below instead of being re-declared.
+// Real C-ABI surface this file depends on. KERNEL-OO: the spinlock/rwlock/
+// rbtree/slab/page-level primitives this file needs (`spin_lock`,
+// `rwlock_rlock`, `rb_find_key`, `slab_alloc`, `page_lock_acquire`, …) used
+// to be re-declared here as thin `pub fn` safe facades, each one just
+// forwarding its args unchanged into the real `unsafe fn` in its owning
+// module (`crate::lock::spinlock::spin_lock`, `crate::mm::page::
+// page_lock_acquire`, …). Per the wrapper-removal directive every call site
+// (all of them inside `impl PcacheHandle`/`impl NodeHandle` methods, plus a
+// handful of `impl Pcache` assoc fns below) now calls straight through to
+// the real path in its own `unsafe {}` block; `slab_alloc` had zero callers
+// left in this file (superseded by the `SlabCacheRef`/`SlabBox` API used in
+// `Pcache::page_alloc`) and was deleted outright. Thread/scheduling/
+// workqueue/tq primitives that are pure-Rust and already re-exported at the
+// crate root (`kthread_create`, `wakeup`, `sleep_on_chan*`, `tq_*`,
+// `workqueue_create`, `queue_work`, `init_work_struct`,
+// `rwlock_r_{sleep,wake}_cb`) are called directly as `crate::xxx(...)`
+// below instead of being re-declared.
 // ---------------------------------------------------------------------------
 mod ffi {
     use super::*;
     unsafe extern "C" {
-        // Spinlock / rwlock (kernel/lock/spinlock.rs, kernel/lock/rwlock.rs).
-
-
-        // Completion (kernel/lock/completion.rs).
-
-        // RB tree (kernel/rbtree.c — not yet ported to Rust).
-
-        // Slab (kernel/mm/slab.rs; redeclared with the bindgen
-        // `slab_cache_t` view rather than slab.rs's own `SlabCache`).
-
-        // Page-level primitives (kernel/mm/page.rs; redeclared with the
-        // bindgen `page_t` view rather than page.rs's own `Page`).
+        // No genuine C-ABI imports remain (RB tree is Rust now too, see
+        // `crate::bintree`/`crate::rbtree`); kept as an explicit empty
+        // block documenting that this file has no real `extern "C"` import
+        // surface left.
     }
 // P3-D3c: timer (`timer/{timer_core,sched_timer}.rs`) and panic plumbing
 // (`printf.rs`) are plain safe Rust fns now that their `#[no_mangle]`
@@ -343,169 +363,6 @@ pub(crate) use crate::proc::{sleep_on_chan, sleep_on_chan_interruptible, Schedul
 // delegators were deleted; the sites below build a `TqRef` handle via
 // `from_ptr` and invoke the corresponding inherent method.
 pub(crate) use crate::proc::access::TqRef;
-
-// The functions below (spinlock/rwlock/rbtree primitives) are all
-// genuinely `unsafe fn`/`unsafe extern "C" fn` in their canonical
-// modules; this file's original extern declaration asserted `pub safe
-// fn` for every one of them (this crate's usual FFI-facade convention).
-// Thin safe wrappers preserve that facade instead of pushing `unsafe {}`
-// onto the ~10 call sites below.
-/// SAFETY: see [`crate::lock::spinlock::spin_holding`]'s contract.
-#[inline]
-pub fn spin_holding(l: *mut spinlock_t) -> c_int {
-    unsafe { crate::lock::spinlock::spin_holding(l) }
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
-#[inline]
-pub fn spin_lock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(l) };
-}
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
-#[inline]
-pub fn spin_unlock(l: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(l) };
-}
-/// SAFETY: see [`crate::lock::rwlock::rwlock_init`]'s contract.
-#[inline]
-pub fn rwlock_init(rw: *mut rwlock, name: *const c_char) {
-    unsafe { crate::lock::rwlock::rwlock_init(rw, name) };
-}
-/// SAFETY: see [`crate::lock::rwlock::rwlock_rlock`]'s contract.
-#[inline]
-pub fn rwlock_rlock(rw: *mut rwlock) {
-    unsafe { crate::lock::rwlock::rwlock_rlock(rw) };
-}
-/// SAFETY: see [`crate::lock::rwlock::rwlock_runlock`]'s contract.
-#[inline]
-pub fn rwlock_runlock(rw: *mut rwlock) {
-    unsafe { crate::lock::rwlock::rwlock_runlock(rw) };
-}
-/// SAFETY: see [`crate::lock::rwlock::rwlock_wlock`]'s contract.
-#[inline]
-pub fn rwlock_wlock(rw: *mut rwlock) {
-    unsafe { crate::lock::rwlock::rwlock_wlock(rw) };
-}
-/// SAFETY: see [`crate::lock::rwlock::rwlock_wunlock`]'s contract.
-#[inline]
-pub fn rwlock_wunlock(rw: *mut rwlock) {
-    unsafe { crate::lock::rwlock::rwlock_wunlock(rw) };
-}
-/// SAFETY: see [`crate::bintree::rb_find_key`]'s contract.
-#[inline]
-pub fn rb_find_key(root: *mut rb_root, key: u64) -> *mut rb_node {
-    unsafe { crate::bintree::rb_find_key(root, key) }
-}
-/// SAFETY: see [`crate::bintree::rb_first_node`]'s contract.
-#[inline]
-pub fn rb_first_node(root: *mut rb_root) -> *mut rb_node {
-    unsafe { crate::bintree::rb_first_node(root) }
-}
-/// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
-#[inline]
-pub fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
-    unsafe { crate::rbtree::rb_insert_color(root, node) }
-}
-/// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
-#[inline]
-pub fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
-    unsafe { crate::rbtree::rb_delete_node_color(root, node) }
-}
-
-    /// `crate::lock::spinlock::spin_init` takes `name: *mut c_char`; this
-    /// file's original extern declaration typed it `*const c_char` (same
-    /// note as every other lock-module consumer of `spin_init`).
-    #[inline]
-    pub fn spin_init(l: *mut spinlock_t, name: *const c_char) {
-        // SAFETY: `name` is only read by the callee despite the `*mut`
-        // parameter; this file's call sites pass `'static` string literals.
-        unsafe { crate::lock::spinlock::spin_init(l, name as *mut c_char) };
-    }
-
-    // `slab_alloc`/`slab_free`/`slab_cache_init`/`slab_cache_shrink`:
-    // this file's original extern declaration typed the cache pointer as
-    // the bindgen `slab_cache_t` rather than `crate::mm::slab::SlabCache`
-    // (same "locally convenient pointer type" idiom as everywhere else),
-    // and `slab_cache_init`'s `name`/`flags` as `*const c_char`/`c_uint`
-    // rather than `*mut c_char`/`u64`.
-    /// SAFETY: see [`crate::mm::slab::slab_alloc`]'s contract.
-    #[inline]
-    pub fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
-        unsafe { crate::mm::slab::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
-    }
-    /// SAFETY: `p` must originate from `slab_alloc` above.
-    #[inline]
-    pub fn slab_free(p: *mut c_void) {
-        unsafe { crate::mm::slab::slab_free(p) };
-    }
-    /// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract; `name`
-    /// is only read by the callee despite the `*mut` parameter.
-    #[inline]
-    pub fn slab_cache_init(
-        cache: *mut slab_cache_t, name: *const c_char, sz: usize, flags: c_uint,
-    ) -> c_int {
-        unsafe {
-            crate::mm::slab::slab_cache_init(
-                cache as *mut crate::mm::slab::SlabCache,
-                name as *mut c_char,
-                sz,
-                flags as u64,
-            )
-        }
-    }
-    /// SAFETY: `cache` must originate from `slab_cache_init` above.
-    #[inline]
-    pub fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
-        unsafe { crate::mm::slab::slab_cache_shrink(cache as *mut crate::mm::slab::SlabCache, nums) }
-    }
-
-    // Page-level primitives (kernel/mm/page.rs; this file's original
-    // extern declaration used the bindgen `page_t` view rather than
-    // page.rs's own `Page` struct — same layout, different Rust name).
-    /// SAFETY: see [`crate::mm::page::page_lock_acquire`]'s contract.
-    #[inline]
-    pub fn page_lock_acquire(p: *mut page_t) {
-        unsafe { crate::mm::page::page_lock_acquire(p as *mut crate::mm::page::Page) };
-    }
-    /// SAFETY: see [`crate::mm::page::page_lock_release`]'s contract.
-    #[inline]
-    pub fn page_lock_release(p: *mut page_t) {
-        unsafe { crate::mm::page::page_lock_release(p as *mut crate::mm::page::Page) };
-    }
-    /// SAFETY: see [`crate::mm::page::page_lock_assert_holding`]'s contract.
-    #[inline]
-    pub fn page_lock_assert_holding(p: *mut page_t) {
-        unsafe { crate::mm::page::page_lock_assert_holding(p as *mut crate::mm::page::Page) };
-    }
-    /// SAFETY: see [`crate::mm::page::page_ref_inc_unlocked`]'s contract.
-    #[inline]
-    pub fn page_ref_inc_unlocked(p: *mut page_t) -> c_int {
-        unsafe { crate::mm::page::page_ref_inc_unlocked(p as *mut crate::mm::page::Page) }
-    }
-    /// SAFETY: see [`crate::mm::page::page_ref_dec_unlocked`]'s contract.
-    #[inline]
-    pub fn page_ref_dec_unlocked(p: *mut page_t) -> c_int {
-        unsafe { crate::mm::page::page_ref_dec_unlocked(p as *mut crate::mm::page::Page) }
-    }
-    /// SAFETY: see [`crate::mm::page::page_ref_count`]'s contract.
-    #[inline]
-    pub fn page_ref_count(p: *mut page_t) -> c_int {
-        unsafe { crate::mm::page::page_ref_count(p as *mut crate::mm::page::Page) }
-    }
-    /// SAFETY: see [`crate::mm::page::__page_ref_dec`]'s contract.
-    #[inline]
-    pub fn __page_ref_dec(p: *mut page_t) -> c_int {
-        unsafe { crate::mm::page::__page_ref_dec(p as *mut crate::mm::page::Page) }
-    }
-    /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
-    #[inline]
-    pub fn __page_alloc(order: u64, flags: u64) -> *mut page_t {
-        unsafe { crate::mm::page::__page_alloc(order, flags) as *mut page_t }
-    }
-    /// SAFETY: `p` must originate from `__page_alloc` above.
-    #[inline]
-    pub fn __page_to_pa(p: *mut page_t) -> u64 {
-        unsafe { crate::mm::page::__page_to_pa(p as *mut crate::mm::page::Page) }
-    }
 }
 use ffi::*;
 
@@ -523,23 +380,35 @@ const WORKQUEUE_DEFAULT_MAX_ACTIVE: c_int = 8;
 const PAGE_TYPE_PCACHE: c_int = 4; // enum page_type
 const PAGE_FLAG_TYPE_MASK: u64 = 0xFF;
 
-fn xv6_pcache_blks_per_page() -> usize {
-    PGSIZE >> BLK_SIZE_SHIFT
-}
-fn xv6_pcache_align_blkno(blkno: u64) -> u64 {
-    blkno & !((PGSIZE as u64 >> BLK_SIZE_SHIFT) - 1)
-}
-fn xv6_pcache_pgsize() -> usize {
-    PGSIZE
-}
-fn xv6_pcache_flush_interval_jiffs() -> u64 {
-    PCACHE_FLUSH_INTERVAL_JIFFS
-}
-fn xv6_hz() -> u64 {
-    HZ
-}
-fn xv6_kernel_stack_order() -> c_int {
-    KERNEL_STACK_ORDER
+impl Pcache {
+    fn blks_per_page() -> usize {
+        PGSIZE >> BLK_SIZE_SHIFT
+    }
+
+
+    fn align_blkno(blkno: u64) -> u64 {
+        blkno & !((PGSIZE as u64 >> BLK_SIZE_SHIFT) - 1)
+    }
+
+
+    fn pgsize() -> usize {
+        PGSIZE
+    }
+
+
+    fn flush_interval_jiffs() -> u64 {
+        PCACHE_FLUSH_INTERVAL_JIFFS
+    }
+
+
+    fn hz() -> u64 {
+        HZ
+    }
+
+
+    fn kernel_stack_order() -> c_int {
+        KERNEL_STACK_ORDER
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +420,7 @@ fn xv6_kernel_stack_order() -> c_int {
 // SAFETY: `SyncCell<T>` is used only for this module's file-scope
 // globals below (list head, counters, spinlock/slab-cache/completion
 // storage, workqueue/thread pointers, running flag). Every one is
-// either mutated exclusively under `global_spinlock()`'s lock or
+// either mutated exclusively under `Pcache::global_spinlock()`'s lock or
 // initialised once by `xv6_pcache_globals_init`/`pcache_global_init`
 // before any other pcache entry point runs (documented per-static
 // above), matching the same pattern as `kobject.rs`'s `SyncCell`.
@@ -587,58 +456,78 @@ static PCACHE_GLOBAL_FLUSHER_COMPLETION: SyncCell<MaybeUninit<completion_t>> =
 static PCACHE_FLUSHER_THREAD_PCB: SyncCell<*mut Thread> = SyncCell::new(ptr::null_mut());
 static PCACHE_GLOBAL_FLUSHER_RUNNING: SyncCell<bool> = SyncCell::new(false);
 
-#[inline]
-fn global_list_head() -> *mut list_node_t {
-    PCACHE_GLOBAL_LIST.get()
-}
-#[inline]
-fn global_spinlock() -> *mut spinlock_t {
-    // SAFETY: `PCACHE_GLOBAL_SPINLOCK` is initialised once by
-    // `xv6_pcache_globals_init` before any other pcache entry point runs.
-    unsafe { (*PCACHE_GLOBAL_SPINLOCK.get()).as_mut_ptr() }
-}
-#[inline]
-fn global_completion() -> *mut completion_t {
-    // SAFETY: initialised by `xv6_pcache_global_flusher_completion_init`
-    // before `pcache_global_init` returns.
-    unsafe { (*PCACHE_GLOBAL_FLUSHER_COMPLETION.get()).as_mut_ptr() }
-}
-#[inline]
-fn node_slab() -> *mut slab_cache_t {
-    // SAFETY: initialised by `xv6_pcache_node_slab_init` before any
-    // pcache_node allocation is attempted.
-    unsafe { (*PCACHE_NODE_SLAB.get()).as_mut_ptr() }
-}
+impl Pcache {
+    #[inline]
+    fn global_list_head() -> *mut list_node_t {
+        PCACHE_GLOBAL_LIST.get()
+    }
 
-fn xv6_pcache_set_flusher_thread(t: *mut Thread) {
-    unsafe {
-        *PCACHE_FLUSHER_THREAD_PCB.get() = t;
+
+    #[inline]
+    fn global_spinlock() -> *mut spinlock_t {
+        // SAFETY: `PCACHE_GLOBAL_SPINLOCK` is initialised once by
+        // `xv6_pcache_globals_init` before any other pcache entry point runs.
+        unsafe { (*PCACHE_GLOBAL_SPINLOCK.get()).as_mut_ptr() }
     }
-}
-fn xv6_pcache_set_flush_wq(wq: *mut Workqueue) {
-    unsafe {
-        *PCACHE_GLOBAL_FLUSH_WQ.get() = wq;
+
+
+    #[inline]
+    fn global_completion() -> *mut completion_t {
+        // SAFETY: initialised by `xv6_pcache_global_flusher_completion_init`
+        // before `pcache_global_init` returns.
+        unsafe { (*PCACHE_GLOBAL_FLUSHER_COMPLETION.get()).as_mut_ptr() }
     }
-}
-fn xv6_pcache_inc_global_count() {
-    unsafe {
-        *PCACHE_GLOBAL_COUNT.get() += 1;
+
+
+    #[inline]
+    fn node_slab() -> *mut slab_cache_t {
+        // SAFETY: initialised by `xv6_pcache_node_slab_init` before any
+        // pcache_node allocation is attempted.
+        unsafe { (*PCACHE_NODE_SLAB.get()).as_mut_ptr() }
     }
-}
-fn xv6_pcache_dec_global_count() {
-    unsafe {
-        let c = PCACHE_GLOBAL_COUNT.get();
-        if *c > 0 {
-            *c -= 1;
+
+
+
+    fn set_flusher_thread(t: *mut Thread) {
+        unsafe {
+            *PCACHE_FLUSHER_THREAD_PCB.get() = t;
         }
     }
-}
-fn xv6_pcache_get_flusher_running() -> bool {
-    unsafe { *PCACHE_GLOBAL_FLUSHER_RUNNING.get() }
-}
-fn xv6_pcache_set_flusher_running(v: bool) {
-    unsafe {
-        *PCACHE_GLOBAL_FLUSHER_RUNNING.get() = v;
+
+
+    fn set_flush_wq(wq: *mut Workqueue) {
+        unsafe {
+            *PCACHE_GLOBAL_FLUSH_WQ.get() = wq;
+        }
+    }
+
+
+    fn inc_global_count() {
+        unsafe {
+            *PCACHE_GLOBAL_COUNT.get() += 1;
+        }
+    }
+
+
+    fn dec_global_count() {
+        unsafe {
+            let c = PCACHE_GLOBAL_COUNT.get();
+            if *c > 0 {
+                *c -= 1;
+            }
+        }
+    }
+
+
+    fn get_flusher_running() -> bool {
+        unsafe { *PCACHE_GLOBAL_FLUSHER_RUNNING.get() }
+    }
+
+
+    fn set_flusher_running(v: bool) {
+        unsafe {
+            *PCACHE_GLOBAL_FLUSHER_RUNNING.get() = v;
+        }
     }
 }
 
@@ -649,10 +538,12 @@ static PCACHE_IO_NAME: &[u8] = b"pcache_io\0";
 static PCACHE_NODE_NAME: &[u8] = b"pcache_node\0";
 static PCACHE_FLUSH_WQ_NAME: &[u8] = b"pcache_flush_wq\0";
 
-/// One-shot global initialization invoked from `pcache_global_init`.
-fn xv6_pcache_globals_init() {
-    list_init(global_list_head());
-    spin_init(global_spinlock(), SPINLOCK_NAME.as_ptr() as *const c_char);
+impl Pcache {
+    /// One-shot global initialization invoked from `pcache_global_init`.
+    fn globals_init() {
+        list_init(Pcache::global_list_head());
+        unsafe { crate::lock::spinlock::spin_init(Pcache::global_spinlock(), SPINLOCK_NAME.as_ptr() as *const c_char as *mut c_char) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -702,21 +593,27 @@ fn list_entry_is_detached(e: *mut list_node_t) -> bool {
     unsafe { (*e).next == e }
 }
 
-// container_of-style helpers, in terms of the one canonical
-// `crate::mm::cffi::container_of` (pure pointer arithmetic, itself safe;
-// only the eventual dereference at the call site is unsafe and documented
-// there).
-#[inline]
-fn pcache_from_list_entry(node: *mut list_node_t) -> *mut Pcache {
-    crate::mm::cffi::container_of(node, offset_of!(Pcache, list_entry))
+impl Pcache {
+    // container_of-style helpers, in terms of the one canonical
+    // `crate::mm::cffi::container_of` (pure pointer arithmetic, itself safe;
+    // only the eventual dereference at the call site is unsafe and documented
+    // there).
+    #[inline]
+    fn from_list_entry(node: *mut list_node_t) -> *mut Pcache {
+        crate::mm::cffi::container_of(node, offset_of!(Pcache, list_entry))
+    }
 }
-#[inline]
-fn node_from_lru_entry(node: *mut list_node_t) -> *mut PcacheNode {
-    crate::mm::cffi::container_of(node, offset_of!(PcacheNode, lru_entry))
-}
-#[inline]
-fn node_from_tree_entry(node: *mut rb_node) -> *mut PcacheNode {
-    crate::mm::cffi::container_of(node, offset_of!(PcacheNode, tree_entry))
+impl PcacheNode {
+    #[inline]
+    fn from_lru_entry(node: *mut list_node_t) -> *mut PcacheNode {
+        crate::mm::cffi::container_of(node, offset_of!(PcacheNode, lru_entry))
+    }
+
+
+    #[inline]
+    fn from_tree_entry(node: *mut rb_node) -> *mut PcacheNode {
+        crate::mm::cffi::container_of(node, offset_of!(PcacheNode, tree_entry))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -754,7 +651,7 @@ extern "C" fn pcache_rb_compare(k1: u64, k2: u64) -> c_int {
     }
 }
 extern "C" fn pcache_rb_get_key(node: *mut rb_node) -> u64 {
-    let pcnode = node_from_tree_entry(node);
+    let pcnode = PcacheNode::from_tree_entry(node);
     // SAFETY: `node` is a live `tree_entry` embedded in a valid, still
     // rb-tree-linked `PcacheNode`.
     unsafe { (*pcnode).blkno }
@@ -795,20 +692,20 @@ impl PcacheHandle {
     }
     #[inline]
     fn spin_init(self) {
-        spin_init(self.spinlock_ptr(), PCACHE_LOCK_NAME.as_ptr() as *const c_char);
+        unsafe { crate::lock::spinlock::spin_init(self.spinlock_ptr(), PCACHE_LOCK_NAME.as_ptr() as *const c_char as *mut c_char) };
     }
     #[inline]
     fn spin_lock(self) {
-        spin_lock(self.spinlock_ptr());
+        unsafe { crate::lock::spinlock::spin_lock(self.spinlock_ptr()) };
     }
     #[inline]
     fn spin_unlock(self) {
-        spin_unlock(self.spinlock_ptr());
+        unsafe { crate::lock::spinlock::spin_unlock(self.spinlock_ptr()) };
     }
     #[inline]
     fn spin_assert_holding(self) {
         pcache_assert(
-            spin_holding(self.spinlock_ptr()) != 0,
+            unsafe { crate::lock::spinlock::spin_holding(self.spinlock_ptr()) } != 0,
             b"pcache_spin_assert_holding: pcache spinlock not held\0",
         );
     }
@@ -819,23 +716,23 @@ impl PcacheHandle {
     }
     #[inline]
     fn tree_lock_init(self) {
-        rwlock_init(self.tree_lock_ptr(), PCACHE_TREE_LOCK_NAME.as_ptr() as *const c_char);
+        unsafe { crate::lock::rwlock::rwlock_init(self.tree_lock_ptr(), PCACHE_TREE_LOCK_NAME.as_ptr() as *const c_char) };
     }
     #[inline]
     fn tree_rlock(self) {
-        rwlock_rlock(self.tree_lock_ptr());
+        unsafe { crate::lock::rwlock::rwlock_rlock(self.tree_lock_ptr()) };
     }
     #[inline]
     fn tree_runlock(self) {
-        rwlock_runlock(self.tree_lock_ptr());
+        unsafe { crate::lock::rwlock::rwlock_runlock(self.tree_lock_ptr()) };
     }
     #[inline]
     fn tree_wlock(self) {
-        rwlock_wlock(self.tree_lock_ptr());
+        unsafe { crate::lock::rwlock::rwlock_wlock(self.tree_lock_ptr()) };
     }
     #[inline]
     fn tree_wunlock(self) {
-        rwlock_wunlock(self.tree_lock_ptr());
+        unsafe { crate::lock::rwlock::rwlock_wunlock(self.tree_lock_ptr()) };
     }
 
     #[inline]
@@ -852,7 +749,7 @@ impl PcacheHandle {
     }
     #[inline]
     fn push_global(self) {
-        unsafe { list_push_front(global_list_head(), addr_of_mut!((*self.raw()).list_entry)) };
+        unsafe { list_push_front(Pcache::global_list_head(), addr_of_mut!((*self.raw()).list_entry)) };
     }
     #[inline]
     fn detach_global(self) {
@@ -860,13 +757,13 @@ impl PcacheHandle {
     }
     #[inline]
     fn next_in_global_list(self) -> *mut Pcache {
-        let head = global_list_head();
+        let head = Pcache::global_list_head();
         // SAFETY: `self` is linked into the global list.
         let next = unsafe { (*self.raw()).list_entry.next };
         if next == head {
             ptr::null_mut()
         } else {
-            pcache_from_list_entry(next)
+            Pcache::from_list_entry(next)
         }
     }
 
@@ -1068,33 +965,33 @@ impl PcacheHandle {
         }
     }
     fn rb_find(self, blkno: u64) -> *mut PcacheNode {
-        let node = rb_find_key(self.page_map_ptr(), blkno);
+        let node = unsafe { crate::bintree::rb_find_key(self.page_map_ptr(), blkno) };
         if node.is_null() {
             ptr::null_mut()
         } else {
-            node_from_tree_entry(node)
+            PcacheNode::from_tree_entry(node)
         }
     }
     fn rb_insert(self, pcnode: *mut PcacheNode) -> *mut PcacheNode {
         let entry = unsafe { addr_of_mut!((*pcnode).tree_entry) };
-        let node = rb_insert_color(self.page_map_ptr(), entry);
+        let node = unsafe { crate::rbtree::rb_insert_color(self.page_map_ptr(), entry) };
         if node.is_null() {
             ptr::null_mut()
         } else {
-            node_from_tree_entry(node)
+            PcacheNode::from_tree_entry(node)
         }
     }
     fn rb_delete(self, pcnode: *mut PcacheNode) {
         let entry = unsafe { addr_of_mut!((*pcnode).tree_entry) };
-        let removed = rb_delete_node_color(self.page_map_ptr(), entry);
+        let removed = unsafe { crate::rbtree::rb_delete_node_color(self.page_map_ptr(), entry) };
         pcache_assert(removed == entry, b"xv6_pcache_rb_delete: removed mismatch\0");
     }
     fn rb_first(self) -> *mut PcacheNode {
-        let node = rb_first_node(self.page_map_ptr());
+        let node = unsafe { crate::bintree::rb_first_node(self.page_map_ptr()) };
         if node.is_null() {
             ptr::null_mut()
         } else {
-            node_from_tree_entry(node)
+            PcacheNode::from_tree_entry(node)
         }
     }
 
@@ -1112,7 +1009,7 @@ impl PcacheHandle {
         if list_is_empty(head) {
             ptr::null_mut()
         } else {
-            node_from_lru_entry(unsafe { (*head).prev })
+            PcacheNode::from_lru_entry(unsafe { (*head).prev })
         }
     }
     fn dirty_last(self) -> *mut PcacheNode {
@@ -1120,7 +1017,7 @@ impl PcacheHandle {
         if list_is_empty(head) {
             ptr::null_mut()
         } else {
-            node_from_lru_entry(unsafe { (*head).prev })
+            PcacheNode::from_lru_entry(unsafe { (*head).prev })
         }
     }
     #[inline]
@@ -1328,250 +1225,366 @@ impl NodeHandle {
     }
 }
 
-// ===========================================================================
-// `xv6_pcache_*` / `xv6_page_*` delegators — kept under their original
-// names/signatures so the algorithm body below is untouched call-site;
-// each is now a direct call into `PcacheHandle`/`NodeHandle` or a small
-// self-contained implementation (no more C-ABI round trip).
-// ===========================================================================
-fn xv6_pcache_spinlock(p: *mut Pcache) -> *mut spinlock_t {
-    unsafe { PcacheHandle::new(p) }.spinlock_ptr()
-}
-fn xv6_pcache_spin_assert_holding(p: *mut Pcache) {
-    unsafe { PcacheHandle::new(p) }.spin_assert_holding();
-}
-fn xv6_pcache_global_spin_assert_holding() {
-    pcache_assert(
-        spin_holding(global_spinlock()) != 0,
-        b"pcache_global_spin_assert_holding: not held\0",
-    );
-}
-fn xv6_pcache_list_entry_is_detached(p: *mut Pcache) -> c_int {
-    if unsafe { PcacheHandle::new(p) }.list_entry_is_detached() { 1 } else { 0 }
-}
-fn xv6_pcache_global_first() -> *mut Pcache {
-    let head = global_list_head();
-    if list_is_empty(head) {
-        ptr::null_mut()
-    } else {
-        pcache_from_list_entry(unsafe { (*head).next })
+impl Pcache {
+    // ===========================================================================
+    // `xv6_pcache_*` / `xv6_page_*` delegators — kept under their original
+    // names/signatures so the algorithm body below is untouched call-site;
+    // each is now a direct call into `PcacheHandle`/`NodeHandle` or a small
+    // self-contained implementation (no more C-ABI round trip).
+    // ===========================================================================
+    fn spinlock(p: *mut Pcache) -> *mut spinlock_t {
+        unsafe { PcacheHandle::new(p) }.spinlock_ptr()
+    }
+
+
+    fn spin_assert_holding(p: *mut Pcache) {
+        unsafe { PcacheHandle::new(p) }.spin_assert_holding();
+    }
+
+
+    fn global_spin_assert_holding() {
+        pcache_assert(
+            unsafe { crate::lock::spinlock::spin_holding(Pcache::global_spinlock()) } != 0,
+            b"pcache_global_spin_assert_holding: not held\0",
+        );
+    }
+
+
+    fn list_entry_is_detached(p: *mut Pcache) -> c_int {
+        if unsafe { PcacheHandle::new(p) }.list_entry_is_detached() { 1 } else { 0 }
+    }
+
+
+    fn global_first() -> *mut Pcache {
+        let head = Pcache::global_list_head();
+        if list_is_empty(head) {
+            ptr::null_mut()
+        } else {
+            Pcache::from_list_entry(unsafe { (*head).next })
+        }
+    }
+
+
+    fn global_next(cur: *mut Pcache) -> *mut Pcache {
+        unsafe { PcacheHandle::new(cur) }.next_in_global_list()
+    }
+
+
+
+    /// Front-to-back iterator over the registered pcaches on the global list,
+    /// yielding each live `*mut Pcache`.
+    ///
+    /// The caller MUST hold the global pcache spinlock for the whole walk
+    /// (every call site below either asserts it via
+    /// `xv6_pcache_global_spin_assert_holding` or holds a `PcGlobalGuard`), so
+    /// the list linkage — and therefore each lazily-computed successor — is
+    /// stable across the iteration: no loop body here detaches `cur` from the
+    /// global list, and per-`pcache` spinlocks taken inside a body guard only
+    /// that pcache's own fields, never the global linkage. Replaces the three
+    /// hand-rolled `let mut cur = global_first(); while !cur.is_null() { let
+    /// next = global_next(cur); …; cur = next; }` walks (mirrors the
+    /// `core::iter::successors` list-scan idiom already used in vfs/file.rs).
+    fn global_iter() -> impl Iterator<Item = *mut Pcache> {
+        let first = Pcache::global_first();
+        core::iter::successors(
+            if first.is_null() { None } else { Some(first) },
+            |&cur| {
+                let next = Pcache::global_next(cur);
+                if next.is_null() { None } else { Some(next) }
+            },
+        )
+    }
+
+
+
+    fn blk_count(p: *mut Pcache) -> u64 {
+        unsafe { PcacheHandle::new(p) }.blk_count()
+    }
+
+
+    fn page_count(p: *mut Pcache) -> i64 {
+        unsafe { PcacheHandle::new(p) }.page_count()
+    }
+
+
+    fn set_page_count(p: *mut Pcache, v: i64) {
+        unsafe { PcacheHandle::new(p) }.set_page_count(v);
+    }
+
+
+    fn add_page_count(p: *mut Pcache, d: i64) {
+        unsafe { PcacheHandle::new(p) }.add_page_count(d);
+    }
+
+
+    fn lru_count(p: *mut Pcache) -> i64 {
+        unsafe { PcacheHandle::new(p) }.lru_count()
+    }
+
+
+    fn set_lru_count(p: *mut Pcache, v: i64) {
+        unsafe { PcacheHandle::new(p) }.set_lru_count(v);
+    }
+
+
+    fn dec_lru_count(p: *mut Pcache) {
+        unsafe { PcacheHandle::new(p) }.dec_lru_count();
+    }
+
+
+    fn dirty_count(p: *mut Pcache) -> i64 {
+        unsafe { PcacheHandle::new(p) }.dirty_count()
+    }
+
+
+    fn set_dirty_count(p: *mut Pcache, v: i64) {
+        unsafe { PcacheHandle::new(p) }.set_dirty_count(v);
+    }
+
+
+    fn dec_dirty_count(p: *mut Pcache) {
+        unsafe { PcacheHandle::new(p) }.dec_dirty_count();
+    }
+
+
+    fn max_pages(p: *mut Pcache) -> u64 {
+        unsafe { PcacheHandle::new(p) }.max_pages()
+    }
+
+
+    fn dirty_rate(p: *mut Pcache) -> u8 {
+        unsafe { PcacheHandle::new(p) }.dirty_rate()
+    }
+
+
+    fn set_last_request(p: *mut Pcache, v: u64) {
+        unsafe { PcacheHandle::new(p) }.set_last_request(v);
+    }
+
+
+    fn set_last_flushed(p: *mut Pcache, v: u64) {
+        unsafe { PcacheHandle::new(p) }.set_last_flushed(v);
+    }
+
+
+    fn active(p: *mut Pcache) -> c_int {
+        if unsafe { PcacheHandle::new(p) }.active() { 1 } else { 0 }
+    }
+
+
+    fn set_active(p: *mut Pcache, v: c_int) {
+        unsafe { PcacheHandle::new(p) }.set_active(v != 0);
+    }
+
+
+    fn flush_requested(p: *mut Pcache) -> c_int {
+        if unsafe { PcacheHandle::new(p) }.flush_requested() { 1 } else { 0 }
+    }
+
+
+    fn set_flush_requested(p: *mut Pcache, v: c_int) {
+        unsafe { PcacheHandle::new(p) }.set_flush_requested(v != 0);
+    }
+
+
+    fn flush_error(p: *mut Pcache) -> c_int {
+        unsafe { PcacheHandle::new(p) }.flush_error()
+    }
+
+
+    fn set_flush_error(p: *mut Pcache, v: c_int) {
+        unsafe { PcacheHandle::new(p) }.set_flush_error(v);
+    }
+
+
+
+    fn flush_completion_complete_all(p: *mut Pcache) {
+        unsafe { PcacheHandle::new(p) }.flush_completion_complete_all();
+    }
+
+
+    fn global_flusher_complete_all() {
+        complete_all(Pcache::global_completion());
+    }
+
+
+
+
+    fn rb_delete(p: *mut Pcache, n: *mut PcacheNode) {
+        unsafe { PcacheHandle::new(p) }.rb_delete(n);
+    }
+
+
+
+
+    fn init_flush_work(p: *mut Pcache, func: unsafe extern "C" fn(*mut WorkStruct)) {
+        unsafe { PcacheHandle::new(p) }.init_flush_work(func);
     }
 }
-fn xv6_pcache_global_next(cur: *mut Pcache) -> *mut Pcache {
-    unsafe { PcacheHandle::new(cur) }.next_in_global_list()
-}
 
-/// Front-to-back iterator over the registered pcaches on the global list,
-/// yielding each live `*mut Pcache`.
-///
-/// The caller MUST hold the global pcache spinlock for the whole walk
-/// (every call site below either asserts it via
-/// `xv6_pcache_global_spin_assert_holding` or holds a `PcGlobalGuard`), so
-/// the list linkage — and therefore each lazily-computed successor — is
-/// stable across the iteration: no loop body here detaches `cur` from the
-/// global list, and per-`pcache` spinlocks taken inside a body guard only
-/// that pcache's own fields, never the global linkage. Replaces the three
-/// hand-rolled `let mut cur = global_first(); while !cur.is_null() { let
-/// next = global_next(cur); …; cur = next; }` walks (mirrors the
-/// `core::iter::successors` list-scan idiom already used in vfs/file.rs).
-fn global_pcache_iter() -> impl Iterator<Item = *mut Pcache> {
-    let first = xv6_pcache_global_first();
-    core::iter::successors(
-        if first.is_null() { None } else { Some(first) },
-        |&cur| {
-            let next = xv6_pcache_global_next(cur);
-            if next.is_null() { None } else { Some(next) }
-        },
-    )
-}
-
-fn xv6_pcache_blk_count(p: *mut Pcache) -> u64 {
-    unsafe { PcacheHandle::new(p) }.blk_count()
-}
-fn xv6_pcache_page_count(p: *mut Pcache) -> i64 {
-    unsafe { PcacheHandle::new(p) }.page_count()
-}
-fn xv6_pcache_set_page_count(p: *mut Pcache, v: i64) {
-    unsafe { PcacheHandle::new(p) }.set_page_count(v);
-}
-fn xv6_pcache_add_page_count(p: *mut Pcache, d: i64) {
-    unsafe { PcacheHandle::new(p) }.add_page_count(d);
-}
-fn xv6_pcache_lru_count(p: *mut Pcache) -> i64 {
-    unsafe { PcacheHandle::new(p) }.lru_count()
-}
-fn xv6_pcache_set_lru_count(p: *mut Pcache, v: i64) {
-    unsafe { PcacheHandle::new(p) }.set_lru_count(v);
-}
-fn xv6_pcache_dec_lru_count(p: *mut Pcache) {
-    unsafe { PcacheHandle::new(p) }.dec_lru_count();
-}
-fn xv6_pcache_dirty_count(p: *mut Pcache) -> i64 {
-    unsafe { PcacheHandle::new(p) }.dirty_count()
-}
-fn xv6_pcache_set_dirty_count(p: *mut Pcache, v: i64) {
-    unsafe { PcacheHandle::new(p) }.set_dirty_count(v);
-}
-fn xv6_pcache_dec_dirty_count(p: *mut Pcache) {
-    unsafe { PcacheHandle::new(p) }.dec_dirty_count();
-}
-fn xv6_pcache_max_pages(p: *mut Pcache) -> u64 {
-    unsafe { PcacheHandle::new(p) }.max_pages()
-}
-fn xv6_pcache_dirty_rate(p: *mut Pcache) -> u8 {
-    unsafe { PcacheHandle::new(p) }.dirty_rate()
-}
-fn xv6_pcache_set_last_request(p: *mut Pcache, v: u64) {
-    unsafe { PcacheHandle::new(p) }.set_last_request(v);
-}
-fn xv6_pcache_set_last_flushed(p: *mut Pcache, v: u64) {
-    unsafe { PcacheHandle::new(p) }.set_last_flushed(v);
-}
-fn xv6_pcache_active(p: *mut Pcache) -> c_int {
-    if unsafe { PcacheHandle::new(p) }.active() { 1 } else { 0 }
-}
-fn xv6_pcache_set_active(p: *mut Pcache, v: c_int) {
-    unsafe { PcacheHandle::new(p) }.set_active(v != 0);
-}
-fn xv6_pcache_flush_requested(p: *mut Pcache) -> c_int {
-    if unsafe { PcacheHandle::new(p) }.flush_requested() { 1 } else { 0 }
-}
-fn xv6_pcache_set_flush_requested(p: *mut Pcache, v: c_int) {
-    unsafe { PcacheHandle::new(p) }.set_flush_requested(v != 0);
-}
-fn xv6_pcache_flush_error(p: *mut Pcache) -> c_int {
-    unsafe { PcacheHandle::new(p) }.flush_error()
-}
-fn xv6_pcache_set_flush_error(p: *mut Pcache, v: c_int) {
-    unsafe { PcacheHandle::new(p) }.set_flush_error(v);
-}
-
-fn xv6_pcache_flush_completion_complete_all(p: *mut Pcache) {
-    unsafe { PcacheHandle::new(p) }.flush_completion_complete_all();
-}
-fn xv6_pcache_global_flusher_complete_all() {
-    complete_all(global_completion());
-}
+impl PcacheNode {
+    // -- pcache_node accessors --------------------------------------------------
+    fn pcache(n: *mut PcacheNode) -> *mut Pcache {
+        unsafe { NodeHandle::new(n) }.pcache()
+    }
 
 
-fn xv6_pcache_rb_delete(p: *mut Pcache, n: *mut PcacheNode) {
-    unsafe { PcacheHandle::new(p) }.rb_delete(n);
-}
+    fn set_pcache(n: *mut PcacheNode, p: *mut Pcache) {
+        unsafe { NodeHandle::new(n) }.set_pcache(p);
+    }
 
 
-fn xv6_pcache_init_flush_work(p: *mut Pcache, func: unsafe extern "C" fn(*mut WorkStruct)) {
-    unsafe { PcacheHandle::new(p) }.init_flush_work(func);
-}
+    fn page(n: *mut PcacheNode) -> *mut Page {
+        unsafe { NodeHandle::new(n) }.page()
+    }
 
-// -- pcache_node accessors --------------------------------------------------
-fn xv6_pcache_node_pcache(n: *mut PcacheNode) -> *mut Pcache {
-    unsafe { NodeHandle::new(n) }.pcache()
-}
-fn xv6_pcache_node_set_pcache(n: *mut PcacheNode, p: *mut Pcache) {
-    unsafe { NodeHandle::new(n) }.set_pcache(p);
-}
-fn xv6_pcache_node_page(n: *mut PcacheNode) -> *mut Page {
-    unsafe { NodeHandle::new(n) }.page()
-}
-fn xv6_pcache_node_set_page(n: *mut PcacheNode, page: *mut Page) {
-    unsafe { NodeHandle::new(n) }.set_page(page);
-}
-/// C-ABI export: `vm.rs`'s `xv6_vm_call_vma_fault` calls this through its
-/// own `extern "C"` declaration. Pre-existing regression from the WP2
-/// pcache-shim collapse -- this getter was dropped as a "pure accessor"
-/// without checking `vm.rs`'s extern reference; restored here (paired
-/// with the existing `set_data`/`NodeHandle::set_data`) so the kernel
-/// links. Out of scope for the WP3 mm/page/slab/vm_pgtab refactor this
-/// file is otherwise part of.
-pub(crate) fn xv6_pcache_node_data(n: *mut PcacheNode) -> *mut c_void {
-    unsafe { NodeHandle::new(n) }.data()
-}
-fn xv6_pcache_node_set_page_count(n: *mut PcacheNode, c: i64) {
-    unsafe { NodeHandle::new(n) }.set_page_count(c);
-}
-fn xv6_pcache_node_blkno(n: *mut PcacheNode) -> u64 {
-    unsafe { NodeHandle::new(n) }.blkno()
-}
-fn xv6_pcache_node_set_size(n: *mut PcacheNode, v: usize) {
-    unsafe { NodeHandle::new(n) }.set_size(v);
-}
-fn xv6_pcache_node_dirty(n: *mut PcacheNode) -> c_int {
-    if unsafe { NodeHandle::new(n) }.dirty() { 1 } else { 0 }
-}
-fn xv6_pcache_node_set_dirty(n: *mut PcacheNode, v: c_int) {
-    unsafe { NodeHandle::new(n) }.set_dirty(v != 0);
-}
-fn xv6_pcache_node_uptodate(n: *mut PcacheNode) -> c_int {
-    if unsafe { NodeHandle::new(n) }.uptodate() { 1 } else { 0 }
-}
-fn xv6_pcache_node_set_uptodate(n: *mut PcacheNode, v: c_int) {
-    unsafe { NodeHandle::new(n) }.set_uptodate(v != 0);
-}
-fn xv6_pcache_node_io_in_progress(n: *mut PcacheNode) -> c_int {
-    if unsafe { NodeHandle::new(n) }.io_in_progress() { 1 } else { 0 }
-}
-fn xv6_pcache_node_set_io_in_progress(n: *mut PcacheNode, v: c_int) {
-    unsafe { NodeHandle::new(n) }.set_io_in_progress(v != 0);
-}
-fn xv6_pcache_node_lru_detached(n: *mut PcacheNode) -> c_int {
-    if unsafe { NodeHandle::new(n) }.lru_detached() { 1 } else { 0 }
-}
-fn xv6_pcache_node_detach_lru(n: *mut PcacheNode) {
-    unsafe { NodeHandle::new(n) }.detach_lru();
+
+    fn set_page(n: *mut PcacheNode, page: *mut Page) {
+        unsafe { NodeHandle::new(n) }.set_page(page);
+    }
+
+
+    /// C-ABI export: `vm.rs`'s `xv6_vm_call_vma_fault` calls this through its
+    /// own `extern "C"` declaration. Pre-existing regression from the WP2
+    /// pcache-shim collapse -- this getter was dropped as a "pure accessor"
+    /// without checking `vm.rs`'s extern reference; restored here (paired
+    /// with the existing `set_data`/`NodeHandle::set_data`) so the kernel
+    /// links. Out of scope for the WP3 mm/page/slab/vm_pgtab refactor this
+    /// file is otherwise part of.
+    pub(crate) fn data(n: *mut PcacheNode) -> *mut c_void {
+        unsafe { NodeHandle::new(n) }.data()
+    }
+
+
+    fn set_page_count(n: *mut PcacheNode, c: i64) {
+        unsafe { NodeHandle::new(n) }.set_page_count(c);
+    }
+
+
+    fn blkno(n: *mut PcacheNode) -> u64 {
+        unsafe { NodeHandle::new(n) }.blkno()
+    }
+
+
+    fn set_size(n: *mut PcacheNode, v: usize) {
+        unsafe { NodeHandle::new(n) }.set_size(v);
+    }
+
+
+    fn dirty(n: *mut PcacheNode) -> c_int {
+        if unsafe { NodeHandle::new(n) }.dirty() { 1 } else { 0 }
+    }
+
+
+    fn set_dirty(n: *mut PcacheNode, v: c_int) {
+        unsafe { NodeHandle::new(n) }.set_dirty(v != 0);
+    }
+
+
+    fn uptodate(n: *mut PcacheNode) -> c_int {
+        if unsafe { NodeHandle::new(n) }.uptodate() { 1 } else { 0 }
+    }
+
+
+    fn set_uptodate(n: *mut PcacheNode, v: c_int) {
+        unsafe { NodeHandle::new(n) }.set_uptodate(v != 0);
+    }
+
+
+    fn io_in_progress(n: *mut PcacheNode) -> c_int {
+        if unsafe { NodeHandle::new(n) }.io_in_progress() { 1 } else { 0 }
+    }
+
+
+    fn set_io_in_progress(n: *mut PcacheNode, v: c_int) {
+        unsafe { NodeHandle::new(n) }.set_io_in_progress(v != 0);
+    }
+
+
+    fn lru_detached(n: *mut PcacheNode) -> c_int {
+        if unsafe { NodeHandle::new(n) }.lru_detached() { 1 } else { 0 }
+    }
+
+
+    fn detach_lru(n: *mut PcacheNode) {
+        unsafe { NodeHandle::new(n) }.detach_lru();
+    }
 }
 
 // ---------------------------------------------------------------------------
 // `page_t` <-> pcache union accessors (the `pcache`/`pcache_node` arm of
 // `page_t`'s type-tagged union — see `kernel/inc/mm/page_type.h`).
 // ---------------------------------------------------------------------------
-fn xv6_page_pcache_get_pcache(page: *mut Page) -> *mut Pcache {
-    unsafe { (*page).type_data.pcache.pcache }
-}
-fn xv6_page_pcache_set_pcache(page: *mut Page, p: *mut Pcache) {
-    unsafe { (*page).type_data.pcache.pcache = p };
-}
-/// C-ABI export: `vm.rs`'s `xv6_vm_call_vma_fault` calls this through its
-/// own `extern "C"` declaration. Pre-existing regression from the WP2
-/// pcache-shim collapse (`pcache_shims.rs` used to export this under the
-/// same name; the replacement below was accidentally left private) —
-/// fixed here as a minimal, behavior-preserving re-export so the kernel
-/// links. `vm.rs`/`pcache.rs` are otherwise out of scope for the WP3
-/// mm/page/slab/vm_pgtab refactor this file is part of.
-pub(crate) fn xv6_page_pcache_get_node(page: *mut Page) -> *mut PcacheNode {
-    unsafe { (*page).type_data.pcache.pcache_node }
-}
-fn xv6_page_pcache_set_node(page: *mut Page, n: *mut PcacheNode) {
-    unsafe { (*page).type_data.pcache.pcache_node = n };
-}
-fn xv6_page_is_pcache_type(page: *mut Page) -> c_int {
-    if page.is_null() {
-        return 0;
+impl Pcache {
+    fn page_get_pcache(page: *mut Page) -> *mut Pcache {
+        unsafe { (*page).type_data.pcache.pcache }
     }
-    let flags = unsafe { (*page).flags };
-    if (flags & PAGE_FLAG_TYPE_MASK) == PAGE_TYPE_PCACHE as u64 { 1 } else { 0 }
+
+
+    fn page_set_pcache(page: *mut Page, p: *mut Pcache) {
+        unsafe { (*page).type_data.pcache.pcache = p };
+    }
+
+
+    /// C-ABI export: `vm.rs`'s `xv6_vm_call_vma_fault` calls this through its
+    /// own `extern "C"` declaration. Pre-existing regression from the WP2
+    /// pcache-shim collapse (`pcache_shims.rs` used to export this under the
+    /// same name; the replacement below was accidentally left private) —
+    /// fixed here as a minimal, behavior-preserving re-export so the kernel
+    /// links. `vm.rs`/`pcache.rs` are otherwise out of scope for the WP3
+    /// mm/page/slab/vm_pgtab refactor this file is part of.
+    pub(crate) fn page_get_node(page: *mut Page) -> *mut PcacheNode {
+        unsafe { (*page).type_data.pcache.pcache_node }
+    }
+
+
+    fn page_set_node(page: *mut Page, n: *mut PcacheNode) {
+        unsafe { (*page).type_data.pcache.pcache_node = n };
+    }
+
+
+    fn page_is_type(page: *mut Page) -> c_int {
+        if page.is_null() {
+            return 0;
+        }
+        let flags = unsafe { (*page).flags };
+        if (flags & PAGE_FLAG_TYPE_MASK) == PAGE_TYPE_PCACHE as u64 { 1 } else { 0 }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Page-level primitives (lock / refcount / alloc), redeclared over the
 // bindgen `page_t` view (see the `mod ffi` doc comment above).
 // ---------------------------------------------------------------------------
-fn xv6_pcache_page_lock_release(p: *mut Page) {
-    page_lock_release(p);
-}
-fn xv6_pcache_page_lock_assert_holding(p: *mut Page) {
-    page_lock_assert_holding(p);
-}
-fn xv6_pcache_page_ref_inc_unlocked(p: *mut Page) -> c_int {
-    page_ref_inc_unlocked(p)
-}
-fn xv6_pcache_page_ref_dec_unlocked(p: *mut Page) -> c_int {
-    page_ref_dec_unlocked(p)
-}
-fn xv6_pcache_page_ref_count_fn(p: *mut Page) -> c_int {
-    page_ref_count(p)
-}
-fn xv6_pcache_page_ref_dec(p: *mut Page) -> c_int {
-    __page_ref_dec(p)
+impl Pcache {
+    fn page_lock_release(p: *mut Page) {
+        unsafe { crate::mm::page::page_lock_release(p as *mut crate::mm::page::Page) };
+    }
+
+
+    fn page_lock_assert_holding(p: *mut Page) {
+        unsafe { crate::mm::page::page_lock_assert_holding(p as *mut crate::mm::page::Page) };
+    }
+
+
+    fn page_ref_inc_unlocked(p: *mut Page) -> c_int {
+        unsafe { crate::mm::page::page_ref_inc_unlocked(p as *mut crate::mm::page::Page) }
+    }
+
+
+    fn page_ref_dec_unlocked(p: *mut Page) -> c_int {
+        unsafe { crate::mm::page::page_ref_dec_unlocked(p as *mut crate::mm::page::Page) }
+    }
+
+
+    fn page_ref_count(p: *mut Page) -> c_int {
+        unsafe { crate::mm::page::page_ref_count(p as *mut crate::mm::page::Page) }
+    }
+
+
+    fn page_ref_dec(p: *mut Page) -> c_int {
+        unsafe { crate::mm::page::__page_ref_dec(p as *mut crate::mm::page::Page) }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,16 +1593,20 @@ fn xv6_pcache_page_ref_dec(p: *mut Page) -> c_int {
 // before a pcache is ever registered; write_begin/write_end/mark_dirty
 // are optional and share one generic caller).
 // ---------------------------------------------------------------------------
-fn xv6_pcache_ops_call_read_page(p: *mut Pcache, page: *mut Page) -> c_int {
-    let f = unsafe { PcacheHandle::new(p) }.ops_read_page();
-    // SAFETY: `pcache_init_validate` rejects any pcache whose
-    // `ops->read_page` is null before the pcache is registered.
-    unsafe { (f.unwrap_unchecked())(p, page) }
-}
-fn xv6_pcache_ops_call_write_page(p: *mut Pcache, page: *mut Page) -> c_int {
-    let f = unsafe { PcacheHandle::new(p) }.ops_write_page();
-    // SAFETY: see `xv6_pcache_ops_call_read_page`.
-    unsafe { (f.unwrap_unchecked())(p, page) }
+impl Pcache {
+    fn ops_call_read_page(p: *mut Pcache, page: *mut Page) -> c_int {
+        let f = unsafe { PcacheHandle::new(p) }.ops_read_page();
+        // SAFETY: `pcache_init_validate` rejects any pcache whose
+        // `ops->read_page` is null before the pcache is registered.
+        unsafe { (f.unwrap_unchecked())(p, page) }
+    }
+
+
+    fn ops_call_write_page(p: *mut Pcache, page: *mut Page) -> c_int {
+        let f = unsafe { PcacheHandle::new(p) }.ops_write_page();
+        // SAFETY: see `xv6_pcache_ops_call_read_page`.
+        unsafe { (f.unwrap_unchecked())(p, page) }
+    }
 }
 fn ops_call_optional(
     f: Option<unsafe extern "C" fn(*mut Pcache, *mut Page) -> c_int>,
@@ -1601,12 +1618,16 @@ fn ops_call_optional(
         None => 0,
     }
 }
-fn xv6_pcache_ops_call_write_end(p: *mut Pcache, page: *mut Page) -> c_int {
-    ops_call_optional(unsafe { PcacheHandle::new(p) }.ops_write_end(), p, page)
-}
-fn xv6_pcache_ops_call_mark_dirty(p: *mut Pcache, page: *mut Page) {
-    if let Some(f) = unsafe { PcacheHandle::new(p) }.ops_mark_dirty() {
-        unsafe { f(p, page) };
+impl Pcache {
+    fn ops_call_write_end(p: *mut Pcache, page: *mut Page) -> c_int {
+        ops_call_optional(unsafe { PcacheHandle::new(p) }.ops_write_end(), p, page)
+    }
+
+
+    fn ops_call_mark_dirty(p: *mut Pcache, page: *mut Page) {
+        if let Some(f) = unsafe { PcacheHandle::new(p) }.ops_mark_dirty() {
+            unsafe { f(p, page) };
+        }
     }
 }
 
@@ -1616,160 +1637,193 @@ fn xv6_pcache_ops_call_mark_dirty(p: *mut Pcache, page: *mut Page) {
 // `get_jiffs`/`sleep_ms` are Rust too (`kernel/timer/`), imported via the
 // `ffi` module's crate-path re-exports (P3-D3c).
 // ---------------------------------------------------------------------------
-fn xv6_pcache_get_jiffs() -> u64 {
-    get_jiffs()
-}
-fn xv6_pcache_sleep_ms(ms: u64) {
-    sleep_ms(ms);
-}
-fn xv6_pcache_wakeup(t: *mut Thread) {
-    Scheduler::wakeup(t);
-}
-fn xv6_pcache_wakeup_on_chan(chan: *mut c_void) {
-    Scheduler::wakeup_on_chan(chan);
-}
-fn xv6_pcache_kthread_create(
-    name: *const c_char,
-    entry: unsafe extern "C" fn(u64, u64),
-    a1: u64,
-    a2: u64,
-    stack_order: c_int,
-) -> *mut Thread {
-    let np = crate::proc::thread::Thread::kthread_create(name, entry as *mut c_void, a1, a2, stack_order);
-    // IS_ERR_OR_NULL: pointer in error range (high bits set) or null -> NULL
-    if np.is_null() {
-        return ptr::null_mut();
+impl Pcache {
+    fn get_jiffs() -> u64 {
+        get_jiffs()
     }
-    let raw = np as u64;
-    // ERR_PTR encodes errno as (unsigned long)(-errno); detect via high bit set
-    if (raw as i64) < 0 && (raw as i64) >= -4095 {
-        return ptr::null_mut();
+
+
+    fn sleep_ms(ms: u64) {
+        sleep_ms(ms);
     }
-    np
+
+
+    fn wakeup(t: *mut Thread) {
+        Scheduler::wakeup(t);
+    }
+
+
+    fn wakeup_on_chan(chan: *mut c_void) {
+        Scheduler::wakeup_on_chan(chan);
+    }
+
+
+    fn kthread_create(
+        name: *const c_char,
+        entry: unsafe extern "C" fn(u64, u64),
+        a1: u64,
+        a2: u64,
+        stack_order: c_int,
+    ) -> *mut Thread {
+        let np = crate::proc::thread::Thread::kthread_create(name, entry as *mut c_void, a1, a2, stack_order);
+        // IS_ERR_OR_NULL: pointer in error range (high bits set) or null -> NULL
+        if np.is_null() {
+            return ptr::null_mut();
+        }
+        let raw = np as u64;
+        // ERR_PTR encodes errno as (unsigned long)(-errno); detect via high bit set
+        if (raw as i64) < 0 && (raw as i64) >= -4095 {
+            return ptr::null_mut();
+        }
+        np
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Slab helpers (kernel/mm/slab.rs).
 // ---------------------------------------------------------------------------
-fn xv6_pcache_node_slab_init() -> c_int {
-    slab_cache_init(
-        node_slab(),
-        PCACHE_NODE_NAME.as_ptr() as *const c_char,
-        size_of::<PcacheNode>(),
-        SLAB_FLAG_EMBEDDED,
-    )
+impl Pcache {
+    fn node_slab_init() -> c_int {
+        unsafe { crate::mm::slab::slab_cache_init(Pcache::node_slab() as *mut crate::mm::slab::SlabCache, PCACHE_NODE_NAME.as_ptr() as *const c_char as *mut c_char, size_of::<PcacheNode>(), SLAB_FLAG_EMBEDDED as u64, ) }
+    }
 }
-fn xv6_pcache_node_free(p: *mut PcacheNode) {
-    slab_free(p as *mut c_void);
+impl PcacheNode {
+    fn free(p: *mut PcacheNode) {
+        unsafe { crate::mm::slab::slab_free(p as *mut c_void) };
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Diagnostic printf wrappers.
 // ---------------------------------------------------------------------------
-fn xv6_pcache_printf_flush_queue_warn(p: *mut Pcache) {
-    unsafe {
+impl Pcache {
+    fn printf_flush_queue_warn(p: *mut Pcache) {
+        unsafe {
+            crate::kprintln!(
+                "warning: flusher failed to queue work for pcache {}",
+                crate::printf::Ptr(p as u64),
+            );
+        }
+    }
+
+
+    fn printf_flush_wait_err(p: *mut Pcache, ret: c_int) {
+        unsafe {
+            crate::kprintln!(
+                "warning: __pcache_wait_for_pending_flushes: pcache {} flush error {}",
+                crate::printf::Ptr(p as u64),
+                ret,
+            );
+        }
+    }
+
+
+    fn printf_default_page_invalid() {
         crate::kprintln!(
-            "warning: flusher failed to queue work for pcache {}",
-            crate::printf::Ptr(p as u64),
+            "__pcache_get_page: default_page is not from the given pcache",
         );
     }
-}
-fn xv6_pcache_printf_flush_wait_err(p: *mut Pcache, ret: c_int) {
-    unsafe {
-        crate::kprintln!(
-            "warning: __pcache_wait_for_pending_flushes: pcache {} flush error {}",
-            crate::printf::Ptr(p as u64),
-            ret,
-        );
+
+
+    fn printf_invalid_page(page: *mut Page, p: *mut Pcache) {
+        unsafe {
+            crate::kprintln!(
+                "Pcache::put_page(): invalid page {} for cache {}",
+                crate::printf::Ptr(page as u64),
+                crate::printf::Ptr(p as u64),
+            );
+        }
     }
-}
-fn xv6_pcache_printf_default_page_invalid() {
-    crate::kprintln!(
-        "__pcache_get_page: default_page is not from the given pcache",
-    );
-}
-fn xv6_pcache_printf_invalid_page(page: *mut Page, p: *mut Pcache) {
-    unsafe {
-        crate::kprintln!(
-            "pcache_put_page(): invalid page {} for cache {}",
-            crate::printf::Ptr(page as u64),
-            crate::printf::Ptr(p as u64),
-        );
+
+
+    fn printf_refcount_too_small(page: *mut Page, refcount: c_int) {
+        unsafe {
+            crate::kprintln!(
+                "Pcache::put_page(): page {} refcount {} is too small to drop",
+                crate::printf::Ptr(page as u64),
+                refcount,
+            );
+        }
     }
-}
-fn xv6_pcache_printf_refcount_too_small(page: *mut Page, refcount: c_int) {
-    unsafe {
-        crate::kprintln!(
-            "pcache_put_page(): page {} refcount {} is too small to drop",
-            crate::printf::Ptr(page as u64),
-            refcount,
-        );
+
+
+    fn printf_read_refcount_too_small(page: *mut Page, refcount: c_int) {
+        unsafe {
+            crate::kprintln!(
+                "Pcache::read_page(): page {} refcount {} is too small to read",
+                crate::printf::Ptr(page as u64),
+                refcount,
+            );
+        }
     }
-}
-fn xv6_pcache_printf_read_refcount_too_small(page: *mut Page, refcount: c_int) {
-    unsafe {
-        crate::kprintln!(
-            "pcache_read_page(): page {} refcount {} is too small to read",
-            crate::printf::Ptr(page as u64),
-            refcount,
-        );
+
+
+    fn printf_read_invalid_meta(page: *mut Page, blkno: u64, sz: usize) {
+        unsafe {
+            crate::kprintln!(
+                "Pcache::read_page(): invalid metadata for page {} (blkno={} size={})",
+                crate::printf::Ptr(page as u64),
+                blkno,
+                sz as u64,
+            );
+        }
     }
-}
-fn xv6_pcache_printf_read_invalid_meta(page: *mut Page, blkno: u64, sz: usize) {
-    unsafe {
-        crate::kprintln!(
-            "pcache_read_page(): invalid metadata for page {} (blkno={} size={})",
-            crate::printf::Ptr(page as u64),
-            blkno,
-            sz as u64,
-        );
+
+
+    fn printf_io_unexpected(dirty: c_int, uptodate: c_int) {
+        unsafe {
+            crate::kprintln!(
+                "Pcache::read_page(): io in progress with unexpected state (dirty={} uptodate={})",
+                dirty,
+                uptodate,
+            );
+        }
     }
-}
-fn xv6_pcache_printf_io_unexpected(dirty: c_int, uptodate: c_int) {
-    unsafe {
-        crate::kprintln!(
-            "pcache_read_page(): io in progress with unexpected state (dirty={} uptodate={})",
-            dirty,
-            uptodate,
-        );
+
+
+    fn printf_sys_sync_failed(ret: c_int) {
+        unsafe {
+            crate::kprintln!("sys_sync: pcache_sync failed with error {}", ret);
+        }
     }
-}
-fn xv6_pcache_printf_sys_sync_failed(ret: c_int) {
-    unsafe {
-        crate::kprintln!("sys_sync: pcache_sync failed with error {}", ret);
+
+
+    fn printf_stats_header(p: *mut Pcache) {
+        unsafe {
+            crate::kprintln!("Pcache {} stats:", crate::printf::Ptr(p as u64));
+        }
     }
-}
-fn xv6_pcache_printf_stats_header(p: *mut Pcache) {
-    unsafe {
-        crate::kprintln!("Pcache {} stats:", crate::printf::Ptr(p as u64));
+
+
+    fn printf_stats_body(
+        active: c_int,
+        blk_count: u64,
+        dirty: i64,
+        lru: i64,
+        page: i64,
+        max: i64,
+        rate: c_int,
+        requested: c_int,
+        err: c_int,
+    ) {
+        unsafe {
+            crate::kprintln!("  Active: {}", active);
+            crate::kprintln!("  Block count: {}", blk_count);
+            crate::kprintln!("  Dirty count: {}", dirty);
+            crate::kprintln!("  LRU count: {}", lru);
+            crate::kprintln!("  Page count / Max pages: {}/{}", page, max);
+            crate::kprintln!("  Dirty rate: {}%", rate);
+            crate::kprintln!("  Flush requested: {}", requested);
+            crate::kprintln!("  Flush error: {}", err);
+        }
     }
-}
-fn xv6_pcache_printf_stats_body(
-    active: c_int,
-    blk_count: u64,
-    dirty: i64,
-    lru: i64,
-    page: i64,
-    max: i64,
-    rate: c_int,
-    requested: c_int,
-    err: c_int,
-) {
-    unsafe {
-        crate::kprintln!("  Active: {}", active);
-        crate::kprintln!("  Block count: {}", blk_count);
-        crate::kprintln!("  Dirty count: {}", dirty);
-        crate::kprintln!("  LRU count: {}", lru);
-        crate::kprintln!("  Page count / Max pages: {}/{}", page, max);
-        crate::kprintln!("  Dirty rate: {}%", rate);
-        crate::kprintln!("  Flush requested: {}", requested);
-        crate::kprintln!("  Flush error: {}", err);
-    }
-}
-fn xv6_pcache_printf_dump_all_header(total: c_int) {
-    unsafe {
-        crate::kprintln!("Dumping all pcache stats:");
-        crate::kprintln!("Total pcaches: {}", total);
+
+
+    fn printf_dump_all_header(total: c_int) {
+        unsafe {
+            crate::kprintln!("Dumping all pcache stats:");
+            crate::kprintln!("Total pcaches: {}", total);
+        }
     }
 }
 
@@ -1783,45 +1837,51 @@ fn assert_msg(cond: bool, msg: &'static [u8]) {
     }
 }
 
-#[inline]
-fn pcache_is_active(p: *mut Pcache) -> bool {
-    xv6_pcache_active(p) != 0
-}
+impl Pcache {
+    #[inline]
+    fn is_active(p: *mut Pcache) -> bool {
+        Pcache::active(p) != 0
+    }
 
-fn pcache_init_validate(p: *mut Pcache) -> Result<(), crate::mm::cffi::Errno> {
-    use crate::mm::cffi::Errno;
-    if p.is_null() {
-        return Err(Errno::Inval);
-    }
-    // SAFETY: `p` is non-null; the pcache has not yet been published
-    // (registered) anywhere, so nothing else can be concurrently
-    // mutating it while we validate it.
-    let ops = unsafe { (*p).ops };
-    if ops.is_null() {
-        return Err(Errno::Inval);
-    }
-    let (read_page, write_page) = unsafe { ((*ops).read_page, (*ops).write_page) };
-    if read_page.is_none() || write_page.is_none() {
-        return Err(Errno::Inval);
-    }
-    if xv6_pcache_blk_count(p) == 0 {
-        return Err(Errno::Inval);
-    }
-    if !unsafe { PcacheHandle::new(p) }.is_zero_inited() {
-        return Err(Errno::Inval);
-    }
-    Ok(())
-}
 
-#[inline]
-fn pcache_page_valid(p: *mut Pcache, page: *mut Page) -> bool {
-    if p.is_null() || page.is_null() {
-        return false;
+
+    fn init_validate(p: *mut Pcache) -> Result<(), crate::mm::cffi::Errno> {
+        use crate::mm::cffi::Errno;
+        if p.is_null() {
+            return Err(Errno::Inval);
+        }
+        // SAFETY: `p` is non-null; the pcache has not yet been published
+        // (registered) anywhere, so nothing else can be concurrently
+        // mutating it while we validate it.
+        let ops = unsafe { (*p).ops };
+        if ops.is_null() {
+            return Err(Errno::Inval);
+        }
+        let (read_page, write_page) = unsafe { ((*ops).read_page, (*ops).write_page) };
+        if read_page.is_none() || write_page.is_none() {
+            return Err(Errno::Inval);
+        }
+        if Pcache::blk_count(p) == 0 {
+            return Err(Errno::Inval);
+        }
+        if !unsafe { PcacheHandle::new(p) }.is_zero_inited() {
+            return Err(Errno::Inval);
+        }
+        Ok(())
     }
-    if xv6_page_is_pcache_type(page) == 0 {
-        return false;
+
+
+
+    #[inline]
+    fn page_valid(p: *mut Pcache, page: *mut Page) -> bool {
+        if p.is_null() || page.is_null() {
+            return false;
+        }
+        if Pcache::page_is_type(page) == 0 {
+            return false;
+        }
+        Pcache::page_get_pcache(page) == p && !Pcache::page_get_node(page).is_null()
     }
-    xv6_page_pcache_get_pcache(page) == p && !xv6_page_pcache_get_node(page).is_null()
 }
 
 // ---------------------------------------------------------------------------
@@ -1846,7 +1906,7 @@ fn pcache_page_valid(p: *mut Pcache, page: *mut Page) -> bool {
 #[must_use = "global pcache lock is released immediately if the guard is dropped"]
 struct PcGlobalGuard;
 impl Drop for PcGlobalGuard {
-    fn drop(&mut self) { spin_unlock(global_spinlock()); }
+    fn drop(&mut self) { unsafe { crate::lock::spinlock::spin_unlock(Pcache::global_spinlock()) }; }
 }
 impl PcGlobalGuard {
     /// Read `PCACHE_GLOBAL_COUNT` (registered-pcache count) under the held
@@ -1861,9 +1921,11 @@ impl PcGlobalGuard {
         unsafe { *PCACHE_GLOBAL_COUNT.get() }
     }
 }
-fn lock_pcache_global() -> PcGlobalGuard {
-    spin_lock(global_spinlock());
-    PcGlobalGuard
+impl Pcache {
+    fn lock_global() -> PcGlobalGuard {
+        unsafe { crate::lock::spinlock::spin_lock(Pcache::global_spinlock()) };
+        PcGlobalGuard
+    }
 }
 
 /// RAII guard for a pcache's per-instance spinlock
@@ -1882,19 +1944,21 @@ impl core::ops::Deref for PcLocalGuard {
         &self.handle
     }
 }
-fn lock_pcache_local(p: *mut Pcache) -> PcLocalGuard {
-    // SAFETY: every call site passes a `p` already known non-null/live --
-    // either checked directly by the caller just above (e.g.
-    // `pcache_register`, `pcache_teardown`, the `#[no_mangle]` public API
-    // functions all null-check `p` on entry) or a `p`/`cur` freshly
-    // returned from the global pcache list (`xv6_pcache_global_first`/
-    // `_next`, themselves walking a list that only ever holds live
-    // `pcache` pointers). Identical precondition to the bare-newtype
-    // guard this replaces, which reconstructed the same `PcacheHandle` in
-    // `Drop`.
-    let handle = unsafe { PcacheHandle::new(p) };
-    handle.spin_lock();
-    PcLocalGuard { handle }
+impl Pcache {
+    fn lock_local(p: *mut Pcache) -> PcLocalGuard {
+        // SAFETY: every call site passes a `p` already known non-null/live --
+        // either checked directly by the caller just above (e.g.
+        // `pcache_register`, `pcache_teardown`, the `#[no_mangle]` public API
+        // functions all null-check `p` on entry) or a `p`/`cur` freshly
+        // returned from the global pcache list (`xv6_pcache_global_first`/
+        // `_next`, themselves walking a list that only ever holds live
+        // `pcache` pointers). Identical precondition to the bare-newtype
+        // guard this replaces, which reconstructed the same `PcacheHandle` in
+        // `Drop`.
+        let handle = unsafe { PcacheHandle::new(p) };
+        handle.spin_lock();
+        PcLocalGuard { handle }
+    }
 }
 
 /// RAII guard for a pcache's rb-tree read lock. See [`PcLocalGuard`] for
@@ -1912,11 +1976,13 @@ impl core::ops::Deref for PcTreeReadGuard {
         &self.handle
     }
 }
-fn rlock_pcache_tree(p: *mut Pcache) -> PcTreeReadGuard {
-    // SAFETY: see `lock_pcache_local`.
-    let handle = unsafe { PcacheHandle::new(p) };
-    handle.tree_rlock();
-    PcTreeReadGuard { handle }
+impl Pcache {
+    fn rlock_tree(p: *mut Pcache) -> PcTreeReadGuard {
+        // SAFETY: see `lock_pcache_local`.
+        let handle = unsafe { PcacheHandle::new(p) };
+        handle.tree_rlock();
+        PcTreeReadGuard { handle }
+    }
 }
 
 /// RAII guard for a pcache's rb-tree write lock. See [`PcLocalGuard`] for
@@ -1934,11 +2000,13 @@ impl core::ops::Deref for PcTreeWriteGuard {
         &self.handle
     }
 }
-fn wlock_pcache_tree(p: *mut Pcache) -> PcTreeWriteGuard {
-    // SAFETY: see `lock_pcache_local`.
-    let handle = unsafe { PcacheHandle::new(p) };
-    handle.tree_wlock();
-    PcTreeWriteGuard { handle }
+impl Pcache {
+    fn wlock_tree(p: *mut Pcache) -> PcTreeWriteGuard {
+        // SAFETY: see `lock_pcache_local`.
+        let handle = unsafe { PcacheHandle::new(p) };
+        handle.tree_wlock();
+        PcTreeWriteGuard { handle }
+    }
 }
 
 /// RAII guard for the per-`Page` sleep-free lock
@@ -1951,102 +2019,122 @@ fn wlock_pcache_tree(p: *mut Pcache) -> PcTreeWriteGuard {
 #[must_use = "page lock is released immediately if the guard is dropped (use .forget() to hand off the locked page)"]
 struct PcPageGuard(*mut Page);
 impl Drop for PcPageGuard {
-    fn drop(&mut self) { xv6_pcache_page_lock_release(self.0); }
+    fn drop(&mut self) { Pcache::page_lock_release(self.0); }
 }
 impl PcPageGuard {
     /// Release ownership without unlocking — the page lock is being
     /// handed off to the caller of the current function.
     fn forget(self) { core::mem::forget(self); }
 }
-fn lock_pcache_page(page: *mut Page) -> PcPageGuard {
-    page_lock_acquire(page);
-    PcPageGuard(page)
-}
-/// Wrap a page pointer that is already locked (lock ownership handed in
-/// from elsewhere, e.g. `pcache_pop_lru`/`pcache_pop_dirty`) in a guard
-/// so this function's remaining unlock paths become RAII.
-fn adopt_page_lock(page: *mut Page) -> PcPageGuard {
-    PcPageGuard(page)
-}
-
-fn pcache_register(p: *mut Pcache) {
-    if p.is_null() {
-        return;
+impl Pcache {
+    fn lock_page(page: *mut Page) -> PcPageGuard {
+        unsafe { crate::mm::page::page_lock_acquire(page as *mut crate::mm::page::Page) };
+        PcPageGuard(page)
     }
-    let _gg = lock_pcache_global();
-    let _gp = lock_pcache_local(p);
-    if xv6_pcache_list_entry_is_detached(p) != 0 {
-        _gp.push_global();
-        xv6_pcache_inc_global_count();
-    } else {
-        crate::kprint!("warning: __pcache_register: pcache already registered");
+
+
+    /// Wrap a page pointer that is already locked (lock ownership handed in
+    /// from elsewhere, e.g. `pcache_pop_lru`/`pcache_pop_dirty`) in a guard
+    /// so this function's remaining unlock paths become RAII.
+    fn adopt_page_lock(page: *mut Page) -> PcPageGuard {
+        PcPageGuard(page)
+    }
+
+
+
+    fn register(p: *mut Pcache) {
+        if p.is_null() {
+            return;
+        }
+        let _gg = Pcache::lock_global();
+        let _gp = Pcache::lock_local(p);
+        if Pcache::list_entry_is_detached(p) != 0 {
+            _gp.push_global();
+            Pcache::inc_global_count();
+        } else {
+            crate::kprint!("warning: __pcache_register: pcache already registered");
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Flush coordination
 // ---------------------------------------------------------------------------
-fn pcache_notify_flush_complete(p: *mut Pcache) {
-    if p.is_null() { return; }
-    xv6_pcache_flush_completion_complete_all(p);
-}
-
-fn pcache_wait_flush_complete(p: *mut Pcache) -> c_int {
-    if p.is_null() { return -(EINVAL as c_int); }
-    unsafe { PcacheHandle::new(p) }.flush_completion_wait();
-    xv6_pcache_flush_error(p)
-}
-
-fn pcache_queue_work(p: *mut Pcache) -> bool {
-    if p.is_null() || (unsafe { *PCACHE_GLOBAL_FLUSH_WQ.get() }).is_null() {
-        return false;
+impl Pcache {
+    fn notify_flush_complete(p: *mut Pcache) {
+        if p.is_null() { return; }
+        Pcache::flush_completion_complete_all(p);
     }
-    xv6_pcache_spin_assert_holding(p);
-    if xv6_pcache_flush_requested(p) != 0 {
-        return true;
-    }
-    xv6_pcache_init_flush_work(p, pcache_flush_worker);
-    let queued = (unsafe { PcacheHandle::new(p) }.queue_flush_work());
-    if queued {
-        xv6_pcache_set_flush_requested(p, 1);
-        xv6_pcache_set_last_request(p, xv6_pcache_get_jiffs());
-        xv6_pcache_set_flush_error(p, 0);
-        unsafe { PcacheHandle::new(p) }.flush_completion_reinit();
-    }
-    queued
-}
 
-fn pcache_flush_done(p: *mut Pcache) {
-    xv6_pcache_spin_assert_holding(p);
-    xv6_pcache_set_flush_requested(p, 0);
-    xv6_pcache_set_last_flushed(p, xv6_pcache_get_jiffs());
-    pcache_notify_flush_complete(p);
-}
 
-fn pcache_flusher_start() {
-    xv6_pcache_global_spin_assert_holding();
-    if xv6_pcache_get_flusher_running() {
-        return;
-    }
-    xv6_pcache_set_flusher_running(true);
-    completion_reinit(global_completion());
-    let pcb = (unsafe { *PCACHE_FLUSHER_THREAD_PCB.get() });
-    if machine::current_thread_ptr() != pcb {
-        xv6_pcache_wakeup(pcb);
-    }
-}
 
-fn pcache_wait_flusher() -> c_int {
-    if xv6_pcache_get_flusher_running() {
-        wait_for_completion(global_completion());
+    fn wait_flush_complete(p: *mut Pcache) -> c_int {
+        if p.is_null() { return -(EINVAL as c_int); }
+        unsafe { PcacheHandle::new(p) }.flush_completion_wait();
+        Pcache::flush_error(p)
     }
-    0
-}
 
-fn pcache_flusher_done() {
-    xv6_pcache_global_spin_assert_holding();
-    xv6_pcache_set_flusher_running(false);
-    xv6_pcache_global_flusher_complete_all();
+
+
+    fn queue_work(p: *mut Pcache) -> bool {
+        if p.is_null() || (unsafe { *PCACHE_GLOBAL_FLUSH_WQ.get() }).is_null() {
+            return false;
+        }
+        Pcache::spin_assert_holding(p);
+        if Pcache::flush_requested(p) != 0 {
+            return true;
+        }
+        Pcache::init_flush_work(p, pcache_flush_worker);
+        let queued = (unsafe { PcacheHandle::new(p) }.queue_flush_work());
+        if queued {
+            Pcache::set_flush_requested(p, 1);
+            Pcache::set_last_request(p, Pcache::get_jiffs());
+            Pcache::set_flush_error(p, 0);
+            unsafe { PcacheHandle::new(p) }.flush_completion_reinit();
+        }
+        queued
+    }
+
+
+
+    fn flush_done(p: *mut Pcache) {
+        Pcache::spin_assert_holding(p);
+        Pcache::set_flush_requested(p, 0);
+        Pcache::set_last_flushed(p, Pcache::get_jiffs());
+        Pcache::notify_flush_complete(p);
+    }
+
+
+
+    fn flusher_start() {
+        Pcache::global_spin_assert_holding();
+        if Pcache::get_flusher_running() {
+            return;
+        }
+        Pcache::set_flusher_running(true);
+        completion_reinit(Pcache::global_completion());
+        let pcb = (unsafe { *PCACHE_FLUSHER_THREAD_PCB.get() });
+        if machine::current_thread_ptr() != pcb {
+            Pcache::wakeup(pcb);
+        }
+    }
+
+
+
+    fn wait_flusher() -> c_int {
+        if Pcache::get_flusher_running() {
+            wait_for_completion(Pcache::global_completion());
+        }
+        0
+    }
+
+
+
+    fn flusher_done() {
+        Pcache::global_spin_assert_holding();
+        Pcache::set_flusher_running(false);
+        Pcache::global_flusher_complete_all();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2054,7 +2142,7 @@ fn pcache_flusher_done() {
 // ---------------------------------------------------------------------------
 extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
     let p = (unsafe { (*work).data }) as *mut Pcache;
-    let start_jiffs = xv6_pcache_get_jiffs();
+    let start_jiffs = Pcache::get_jiffs();
 
     if p.is_null() {
         crate::kprintln!("__pcache_flush_worker: pcache is NULL");
@@ -2064,18 +2152,18 @@ extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
     // `p_guard` spans the whole loop (each iteration's top,
     // `pcache_pop_dirty`, asserts it is held) and is explicitly
     // dropped/reacquired around the out-of-lock IO calls below.
-    let mut p_guard = lock_pcache_local(p);
+    let mut p_guard = Pcache::lock_local(p);
     loop {
-        let page = pcache_pop_dirty(p, start_jiffs);
+        let page = Pcache::pop_dirty(p, start_jiffs);
         if page.is_null() { break; }
         // `page` comes back page-locked (ownership handed off by
         // `pcache_pop_dirty`); adopt it into a guard.
-        let page_guard = adopt_page_lock(page);
+        let page_guard = Pcache::adopt_page_lock(page);
 
-        let mut r = xv6_pcache_page_ref_inc_unlocked(page);
+        let mut r = Pcache::page_ref_inc_unlocked(page);
         assert_msg(r > 1, b"flush_worker: failed to increment page ref\0");
 
-        r = pcache_node_io_begin(p, page);
+        r = Pcache::node_io_begin(p, page);
         assert_msg(r == 0, b"flush_worker: failed to begin IO\0");
 
         drop(page_guard);
@@ -2084,1075 +2172,1147 @@ extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
         // Real write outside lock
         let mut ret = (ops_call_optional(unsafe { PcacheHandle::new(p) }.ops_write_begin(), p, page));
         if ret != 0 {
-            p_guard = lock_pcache_local(p);
-            xv6_pcache_set_flush_error(p, ret);
-            flush_err_continue(p, page);
+            p_guard = Pcache::lock_local(p);
+            Pcache::set_flush_error(p, ret);
+            Pcache::flush_err_continue(p, page);
             continue;
         }
-        ret = xv6_pcache_ops_call_write_page(p, page);
+        ret = Pcache::ops_call_write_page(p, page);
         if ret != 0 {
-            let _ = xv6_pcache_ops_call_write_end(p, page);
-            p_guard = lock_pcache_local(p);
-            xv6_pcache_set_flush_error(p, ret);
-            flush_err_continue(p, page);
+            let _ = Pcache::ops_call_write_end(p, page);
+            p_guard = Pcache::lock_local(p);
+            Pcache::set_flush_error(p, ret);
+            Pcache::flush_err_continue(p, page);
             continue;
         }
-        ret = xv6_pcache_ops_call_write_end(p, page);
+        ret = Pcache::ops_call_write_end(p, page);
 
-        p_guard = lock_pcache_local(p);
-        let page_guard = lock_pcache_page(page);
+        p_guard = Pcache::lock_local(p);
+        let page_guard = Pcache::lock_page(page);
         if ret != 0 {
-            xv6_pcache_set_flush_error(p, ret);
+            Pcache::set_flush_error(p, ret);
         }
-        let pcnode = xv6_page_pcache_get_node(page);
+        let pcnode = Pcache::page_get_node(page);
         assert_msg(!pcnode.is_null(), b"flush_worker: page missing pcache_node\0");
-        xv6_pcache_node_set_dirty(pcnode, 0);
-        xv6_pcache_node_set_uptodate(pcnode, 1);
-        let r2 = pcache_node_io_end(p, page);
+        PcacheNode::set_dirty(pcnode, 0);
+        PcacheNode::set_uptodate(pcnode, 1);
+        let r2 = Pcache::node_io_end(p, page);
         assert_msg(r2 == 0, b"flush_worker: failed to end IO\0");
-        let r3 = xv6_pcache_page_ref_dec_unlocked(page);
+        let r3 = Pcache::page_ref_dec_unlocked(page);
         assert_msg(r3 >= 1, b"flush_worker: page refcount underflow\0");
-        if r3 == 1 && xv6_pcache_node_lru_detached(pcnode) != 0 {
-            pcache_push_lru(p, page);
-            xv6_pcache_wakeup_on_chan(p as *mut c_void);
+        if r3 == 1 && PcacheNode::lru_detached(pcnode) != 0 {
+            Pcache::push_lru(p, page);
+            Pcache::wakeup_on_chan(p as *mut c_void);
         }
         drop(page_guard);
     }
-    pcache_flush_done(p);
+    Pcache::flush_done(p);
     drop(p_guard);
 }
 
-/// err_continue arm of the flush worker (assumes spinlock held).
-fn flush_err_continue(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_spin_assert_holding(p);
-    let _pg = lock_pcache_page(page);
-    let r = pcache_node_io_end(p, page);
-    assert_msg(r == 0, b"flush_worker: failed to end IO (err)\0");
-    pcache_push_dirty(p, page);
-    let r2 = xv6_pcache_page_ref_dec_unlocked(page);
-    assert_msg(r2 > 0, b"flush_worker: failed to decrement ref (err)\0");
-}
-
-fn pcache_schedule_flushes_locked(round_start: u64, force_round: bool) -> bool {
-    let mut pending_flush = false;
-    for cur in global_pcache_iter() {
-        let _g = lock_pcache_local(cur);
-        if !pcache_is_active(cur) {
-            continue;
-        }
-        let mut should_flush = false;
-        let dirty_count = xv6_pcache_dirty_count(cur);
-        if dirty_count > 0 {
-            if force_round {
-                should_flush = true;
-            } else {
-                let page_count = xv6_pcache_page_count(cur);
-                let dirty_rate = xv6_pcache_dirty_rate(cur) as i64;
-                let mut dirty_threshold: i64 = 0;
-                if page_count > 0 && dirty_rate > 0 {
-                    dirty_threshold = (page_count * dirty_rate) / 100;
-                }
-                if dirty_threshold == 0 && dirty_count > 0 {
-                    dirty_threshold = 1;
-                }
-                let last_flushed = _g.last_flushed();
-                if dirty_threshold > 0 && dirty_count >= dirty_threshold {
-                    should_flush = true;
-                } else if round_start >= last_flushed
-                    && round_start - last_flushed >= xv6_pcache_flush_interval_jiffs()
-                {
-                    should_flush = true;
-                }
-            }
-        }
-        if should_flush {
-            if !pcache_queue_work(cur) {
-                if xv6_pcache_flush_requested(cur) == 0 {
-                    xv6_pcache_printf_flush_queue_warn(cur);
-                }
-            }
-        }
-        if xv6_pcache_flush_requested(cur) != 0 {
-            pending_flush = true;
-        }
+impl Pcache {
+    /// err_continue arm of the flush worker (assumes spinlock held).
+    fn flush_err_continue(p: *mut Pcache, page: *mut Page) {
+        Pcache::spin_assert_holding(p);
+        let _pg = Pcache::lock_page(page);
+        let r = Pcache::node_io_end(p, page);
+        assert_msg(r == 0, b"flush_worker: failed to end IO (err)\0");
+        Pcache::push_dirty(p, page);
+        let r2 = Pcache::page_ref_dec_unlocked(page);
+        assert_msg(r2 > 0, b"flush_worker: failed to decrement ref (err)\0");
     }
-    pending_flush
-}
 
-fn pcache_pick_pending_before(jiffs: u64) -> *mut Pcache {
-    xv6_pcache_global_spin_assert_holding();
-    for cur in global_pcache_iter() {
-        let found = {
-            let _g = lock_pcache_local(cur);
-            if xv6_pcache_flush_requested(cur) != 0 {
-                let last_request = _g.last_request();
-                last_request <= jiffs
-            } else {
-                false
+
+
+    fn schedule_flushes_locked(round_start: u64, force_round: bool) -> bool {
+        let mut pending_flush = false;
+        for cur in Pcache::global_iter() {
+            let _g = Pcache::lock_local(cur);
+            if !Pcache::is_active(cur) {
+                continue;
             }
-        };
-        if found {
-            return cur;
+            let mut should_flush = false;
+            let dirty_count = Pcache::dirty_count(cur);
+            if dirty_count > 0 {
+                if force_round {
+                    should_flush = true;
+                } else {
+                    let page_count = Pcache::page_count(cur);
+                    let dirty_rate = Pcache::dirty_rate(cur) as i64;
+                    let mut dirty_threshold: i64 = 0;
+                    if page_count > 0 && dirty_rate > 0 {
+                        dirty_threshold = (page_count * dirty_rate) / 100;
+                    }
+                    if dirty_threshold == 0 && dirty_count > 0 {
+                        dirty_threshold = 1;
+                    }
+                    let last_flushed = _g.last_flushed();
+                    if dirty_threshold > 0 && dirty_count >= dirty_threshold {
+                        should_flush = true;
+                    } else if round_start >= last_flushed
+                        && round_start - last_flushed >= Pcache::flush_interval_jiffs()
+                    {
+                        should_flush = true;
+                    }
+                }
+            }
+            if should_flush {
+                if !Pcache::queue_work(cur) {
+                    if Pcache::flush_requested(cur) == 0 {
+                        Pcache::printf_flush_queue_warn(cur);
+                    }
+                }
+            }
+            if Pcache::flush_requested(cur) != 0 {
+                pending_flush = true;
+            }
         }
+        pending_flush
     }
-    ptr::null_mut()
-}
 
-fn pcache_wait_for_pending_flushes() {
-    let start_jiffs = xv6_pcache_get_jiffs();
-    loop {
-        let p = {
-            let _gg = lock_pcache_global();
-            let p = pcache_pick_pending_before(start_jiffs);
-            if !p.is_null() {
-                let _gp = lock_pcache_local(p);
-                _gp.inc_wait_refcount();
+
+
+    fn pick_pending_before(jiffs: u64) -> *mut Pcache {
+        Pcache::global_spin_assert_holding();
+        for cur in Pcache::global_iter() {
+            let found = {
+                let _g = Pcache::lock_local(cur);
+                if Pcache::flush_requested(cur) != 0 {
+                    let last_request = _g.last_request();
+                    last_request <= jiffs
+                } else {
+                    false
+                }
+            };
+            if found {
+                return cur;
             }
-            p
-        };
-        if p.is_null() {
-            break;
         }
+        ptr::null_mut()
+    }
 
-        let ret = pcache_wait_flush_complete(p);
-        if ret != 0 {
-            xv6_pcache_printf_flush_wait_err(p, ret);
+
+
+    fn wait_for_pending_flushes() {
+        let start_jiffs = Pcache::get_jiffs();
+        loop {
+            let p = {
+                let _gg = Pcache::lock_global();
+                let p = Pcache::pick_pending_before(start_jiffs);
+                if !p.is_null() {
+                    let _gp = Pcache::lock_local(p);
+                    _gp.inc_wait_refcount();
+                }
+                p
+            };
+            if p.is_null() {
+                break;
+            }
+
+            let ret = Pcache::wait_flush_complete(p);
+            if ret != 0 {
+                Pcache::printf_flush_wait_err(p, ret);
+            }
+
+            {
+                let _gp = Pcache::lock_local(p);
+                _gp.dec_wait_refcount();
+                Pcache::wakeup_on_chan(p as *mut c_void);
+            }
+
+            Pcache::sleep_ms(10);
         }
-
-        {
-            let _gp = lock_pcache_local(p);
-            _gp.dec_wait_refcount();
-            xv6_pcache_wakeup_on_chan(p as *mut c_void);
-        }
-
-        xv6_pcache_sleep_ms(10);
     }
 }
 
 extern "C" fn flusher_thread(_a1: u64, _a2: u64) {
     crate::kprintln!("pcache flusher thread started");
     loop {
-        let round_start = xv6_pcache_get_jiffs();
+        let round_start = Pcache::get_jiffs();
         let pending = {
-            let _gg = lock_pcache_global();
-            let force_round = xv6_pcache_get_flusher_running();
-            pcache_flusher_start();
-            pcache_schedule_flushes_locked(round_start, force_round)
+            let _gg = Pcache::lock_global();
+            let force_round = Pcache::get_flusher_running();
+            Pcache::flusher_start();
+            Pcache::schedule_flushes_locked(round_start, force_round)
         };
         if pending {
-            pcache_wait_for_pending_flushes();
+            Pcache::wait_for_pending_flushes();
         }
         {
-            let _gg = lock_pcache_global();
-            pcache_flusher_done();
+            let _gg = Pcache::lock_global();
+            Pcache::flusher_done();
         }
 
-        let sleep_ticks = xv6_pcache_flush_interval_jiffs();
-        let mut sleep_ms_val = (sleep_ticks * 1000) / xv6_hz();
+        let sleep_ticks = Pcache::flush_interval_jiffs();
+        let mut sleep_ms_val = (sleep_ticks * 1000) / Pcache::hz();
         if sleep_ms_val == 0 { sleep_ms_val = 1; }
-        xv6_pcache_sleep_ms(sleep_ms_val);
+        Pcache::sleep_ms(sleep_ms_val);
     }
 }
 
-fn create_flusher_thread() {
-    let name = b"pcache_flusher\0".as_ptr() as *const c_char;
-    let stack = xv6_kernel_stack_order();
-    let np = xv6_pcache_kthread_create(name, flusher_thread, 0, 0, stack);
-    assert_msg(!np.is_null(), b"Failed to create pcache flusher thread\0");
-    xv6_pcache_set_flusher_thread(np);
-    xv6_pcache_wakeup(np);
+impl Pcache {
+    fn create_flusher_thread() {
+        let name = b"pcache_flusher\0".as_ptr() as *const c_char;
+        let stack = Pcache::kernel_stack_order();
+        let np = Pcache::kthread_create(name, flusher_thread, 0, 0, stack);
+        assert_msg(!np.is_null(), b"Failed to create pcache flusher thread\0");
+        Pcache::set_flusher_thread(np);
+        Pcache::wakeup(np);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Tree helpers (Rust-level — call into rb shims)
 // ---------------------------------------------------------------------------
-fn pcache_get_page_internal(
-    p: *mut Pcache,
-    blkno: u64,
-    _size: usize,
-    default_page: *mut Page,
-) -> *mut Page {
-    let blk_count = xv6_pcache_blk_count(p);
-    if blkno >= blk_count { return ptr::null_mut(); }
-    if blkno + xv6_pcache_blks_per_page() as u64 > blk_count {
-        return ptr::null_mut();
-    }
-
-    if !default_page.is_null() {
-        xv6_pcache_page_lock_assert_holding(default_page);
-        let dp_pcache = xv6_page_pcache_get_pcache(default_page);
-        let dp_node = xv6_page_pcache_get_node(default_page);
-        if xv6_page_is_pcache_type(default_page) == 0
-            || !dp_pcache.is_null()
-            || dp_node.is_null()
-            || xv6_pcache_node_page(dp_node) != default_page
-        {
-            xv6_pcache_printf_default_page_invalid();
+impl Pcache {
+    fn get_page_internal(
+        p: *mut Pcache,
+        blkno: u64,
+        _size: usize,
+        default_page: *mut Page,
+    ) -> *mut Page {
+        let blk_count = Pcache::blk_count(p);
+        if blkno >= blk_count { return ptr::null_mut(); }
+        if blkno + Pcache::blks_per_page() as u64 > blk_count {
             return ptr::null_mut();
         }
+
+        if !default_page.is_null() {
+            Pcache::page_lock_assert_holding(default_page);
+            let dp_pcache = Pcache::page_get_pcache(default_page);
+            let dp_node = Pcache::page_get_node(default_page);
+            if Pcache::page_is_type(default_page) == 0
+                || !dp_pcache.is_null()
+                || dp_node.is_null()
+                || PcacheNode::page(dp_node) != default_page
+            {
+                Pcache::printf_default_page_invalid();
+                return ptr::null_mut();
+            }
+        }
+
+        let found_node: *mut PcacheNode;
+        if !default_page.is_null() {
+            let _g = Pcache::wlock_tree(p);
+            let dp_node = Pcache::page_get_node(default_page);
+            found_node = _g.rb_insert(dp_node);
+            if found_node != dp_node {
+                return PcacheNode::page(found_node);
+            }
+        } else {
+            let _g = Pcache::rlock_tree(p);
+            found_node = _g.rb_find(blkno);
+            if found_node.is_null() {
+                return ptr::null_mut();
+            }
+        }
+        PcacheNode::page(found_node)
     }
 
-    let found_node: *mut PcacheNode;
-    if !default_page.is_null() {
-        let _g = wlock_pcache_tree(p);
-        let dp_node = xv6_page_pcache_get_node(default_page);
-        found_node = _g.rb_insert(dp_node);
-        if found_node != dp_node {
-            return xv6_pcache_node_page(found_node);
-        }
-    } else {
-        let _g = rlock_pcache_tree(p);
-        found_node = _g.rb_find(blkno);
-        if found_node.is_null() {
-            return ptr::null_mut();
-        }
-    }
-    xv6_pcache_node_page(found_node)
-}
 
-fn pcache_remove_node(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_page_lock_assert_holding(page);
-    let _g = wlock_pcache_tree(p);
-    let pcnode = xv6_page_pcache_get_node(page);
-    assert_msg(!pcnode.is_null(), b"remove_node: page has no node\0");
-    assert_msg(xv6_pcache_node_page(pcnode) == page,
-        b"remove_node: pcnode mismatch\0");
-    assert_msg(xv6_pcache_node_lru_detached(pcnode) != 0,
-        b"remove_node: must be detached from lru/dirty\0");
-    xv6_pcache_rb_delete(p, pcnode);
+
+    fn remove_node(p: *mut Pcache, page: *mut Page) {
+        Pcache::page_lock_assert_holding(page);
+        let _g = Pcache::wlock_tree(p);
+        let pcnode = Pcache::page_get_node(page);
+        assert_msg(!pcnode.is_null(), b"remove_node: page has no node\0");
+        assert_msg(PcacheNode::page(pcnode) == page,
+            b"remove_node: pcnode mismatch\0");
+        assert_msg(PcacheNode::lru_detached(pcnode) != 0,
+            b"remove_node: must be detached from lru/dirty\0");
+        Pcache::rb_delete(p, pcnode);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // page alloc / discard
 // ---------------------------------------------------------------------------
-fn pcache_page_alloc() -> *mut Page {
-    // Borrow the node cache through the layout-verified bindgen<->slab.rs
-    // view (same pointer-cast pattern the `ffi::slab_alloc` redeclaration
-    // above already relies on; sizes are cross-checked by static asserts
-    // in slab.rs). SAFETY: `node_slab()` is initialised once at pcache
-    // subsystem startup (`xv6_pcache_node_slab_init`) and lives for the
-    // rest of the kernel's lifetime — the `'static`-equivalent borrow is
-    // always valid.
-    let cache_ref = unsafe {
-        SlabCacheRef::from_raw(&*(node_slab() as *mut crate::mm::slab::SlabCache))
-    };
-    // SAFETY: the cache was created with `size_of::<PcacheNode>()` as its
-    // object size (see `xv6_pcache_node_slab_init` above), matching `T`.
-    let node_box: SlabBox<'_, MaybeUninit<PcacheNode>> = match unsafe { cache_ref.alloc_uninit() } {
-        Some(b) => b,
-        None => return ptr::null_mut(),
-    };
-    let pcnode = node_box.as_ptr() as *mut PcacheNode;
-    let page = (__page_alloc(0, PAGE_TYPE_PCACHE as u64));
-    if page.is_null() {
-        // `node_box` drops here -> slab_free(pcnode); replaces the old
-        // manual `xv6_pcache_node_free(pcnode)` call.
-        return ptr::null_mut();
+impl Pcache {
+    fn page_alloc() -> *mut Page {
+        // Borrow the node cache through the layout-verified bindgen<->slab.rs
+        // view (same pointer-cast pattern the `ffi::slab_alloc` redeclaration
+        // above already relies on; sizes are cross-checked by static asserts
+        // in slab.rs). SAFETY: `Pcache::node_slab()` is initialised once at pcache
+        // subsystem startup (`xv6_pcache_node_slab_init`) and lives for the
+        // rest of the kernel's lifetime — the `'static`-equivalent borrow is
+        // always valid.
+        let cache_ref = unsafe {
+            SlabCacheRef::from_raw(&*(Pcache::node_slab() as *mut crate::mm::slab::SlabCache))
+        };
+        // SAFETY: the cache was created with `size_of::<PcacheNode>()` as its
+        // object size (see `xv6_pcache_node_slab_init` above), matching `T`.
+        let node_box: SlabBox<'_, MaybeUninit<PcacheNode>> = match unsafe { cache_ref.alloc_uninit() } {
+            Some(b) => b,
+            None => return ptr::null_mut(),
+        };
+        let pcnode = node_box.as_ptr() as *mut PcacheNode;
+        let page = ((unsafe { crate::mm::page::__page_alloc(0, PAGE_TYPE_PCACHE as u64) } as *mut page_t));
+        if page.is_null() {
+            // `node_box` drops here -> unsafe { crate::mm::slab::slab_free(pcnode) }; replaces the old
+            // manual `PcacheNode::free(pcnode)` call.
+            return ptr::null_mut();
+        }
+        unsafe { NodeHandle::new(pcnode) }.init();
+        PcacheNode::set_page(pcnode, page);
+        PcacheNode::set_page_count(pcnode, 1);
+        PcacheNode::set_size(pcnode, Pcache::pgsize());
+        unsafe { NodeHandle::new(pcnode) }.set_data((unsafe { crate::mm::page::__page_to_pa(page as *mut crate::mm::page::Page) } as *mut c_void));
+        Pcache::page_set_node(page, pcnode);
+        Pcache::page_set_pcache(page, ptr::null_mut());
+        // `pcnode` is now reachable and owned via `page->pcache.pcache_node`
+        // (a C-visible pointer walked from many other sites via
+        // `Pcache::page_get_node`); its lifetime is no longer scoped to
+        // this function, so hand ownership off the RAII box.
+        //
+        // SAFETY: every field the type requires has just been written above
+        // via `NodeHandle::init()` + the explicit `set_*` calls.
+        let node_box: SlabBox<'_, PcacheNode> = unsafe { node_box.assume_init() };
+        let _ = node_box.into_raw();
+        page
     }
-    unsafe { NodeHandle::new(pcnode) }.init();
-    xv6_pcache_node_set_page(pcnode, page);
-    xv6_pcache_node_set_page_count(pcnode, 1);
-    xv6_pcache_node_set_size(pcnode, xv6_pcache_pgsize());
-    unsafe { NodeHandle::new(pcnode) }.set_data((__page_to_pa(page) as *mut c_void));
-    xv6_page_pcache_set_node(page, pcnode);
-    xv6_page_pcache_set_pcache(page, ptr::null_mut());
-    // `pcnode` is now reachable and owned via `page->pcache.pcache_node`
-    // (a C-visible pointer walked from many other sites via
-    // `xv6_page_pcache_get_node`); its lifetime is no longer scoped to
-    // this function, so hand ownership off the RAII box.
-    //
-    // SAFETY: every field the type requires has just been written above
-    // via `NodeHandle::init()` + the explicit `set_*` calls.
-    let node_box: SlabBox<'_, PcacheNode> = unsafe { node_box.assume_init() };
-    let _ = node_box.into_raw();
-    page
-}
 
-fn pcache_page_put(page: *mut Page) {
-    if page.is_null() { return; }
-    xv6_pcache_page_ref_dec(page);
-}
 
-fn pcache_page_discard(page: *mut Page) {
-    if page.is_null() { return; }
-    let pcnode = xv6_page_pcache_get_node(page);
-    if !pcnode.is_null() {
-        xv6_page_pcache_set_node(page, ptr::null_mut());
-        xv6_pcache_node_free(pcnode);
+
+    fn page_put(page: *mut Page) {
+        if page.is_null() { return; }
+        Pcache::page_ref_dec(page);
     }
-    xv6_pcache_page_ref_dec(page);
-}
 
-fn pcache_node_attach_page(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_page_lock_assert_holding(page);
-    xv6_pcache_spin_assert_holding(p);
-    let pcnode = xv6_page_pcache_get_node(page);
-    assert_msg(!pcnode.is_null(), b"attach: page has no node\0");
-    assert_msg(xv6_pcache_node_page(pcnode) == page, b"attach: mismatch\0");
-    assert_msg(xv6_pcache_node_pcache(pcnode).is_null(),
-        b"attach: pcache_node's pcache must be NULL\0");
-    xv6_pcache_node_set_page_count(pcnode, 1);
-    xv6_pcache_node_set_pcache(pcnode, p);
-    xv6_page_pcache_set_pcache(page, p);
-    xv6_page_pcache_set_node(page, pcnode);
-    xv6_pcache_add_page_count(p, 1);
-}
 
-fn pcache_node_detach_page(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_page_lock_assert_holding(page);
-    xv6_pcache_spin_assert_holding(p);
-    let pcnode = xv6_page_pcache_get_node(page);
-    assert_msg(!pcnode.is_null(), b"detach: page has no node\0");
-    assert_msg(xv6_pcache_node_page(pcnode) == page, b"detach: mismatch\0");
-    assert_msg(xv6_pcache_node_pcache(pcnode) == p, b"detach: pcache mismatch\0");
-    assert_msg(xv6_pcache_node_lru_detached(pcnode) != 0,
-        b"detach: must be detached from lru/dirty\0");
-    xv6_page_pcache_set_pcache(page, ptr::null_mut());
-    xv6_pcache_node_set_pcache(pcnode, ptr::null_mut());
-    xv6_pcache_add_page_count(p, -1);
-    assert_msg(xv6_pcache_page_count(p) >= 0, b"detach: page_count negative\0");
+
+    fn page_discard(page: *mut Page) {
+        if page.is_null() { return; }
+        let pcnode = Pcache::page_get_node(page);
+        if !pcnode.is_null() {
+            Pcache::page_set_node(page, ptr::null_mut());
+            PcacheNode::free(pcnode);
+        }
+        Pcache::page_ref_dec(page);
+    }
+
+
+
+    fn node_attach_page(p: *mut Pcache, page: *mut Page) {
+        Pcache::page_lock_assert_holding(page);
+        Pcache::spin_assert_holding(p);
+        let pcnode = Pcache::page_get_node(page);
+        assert_msg(!pcnode.is_null(), b"attach: page has no node\0");
+        assert_msg(PcacheNode::page(pcnode) == page, b"attach: mismatch\0");
+        assert_msg(PcacheNode::pcache(pcnode).is_null(),
+            b"attach: pcache_node's pcache must be NULL\0");
+        PcacheNode::set_page_count(pcnode, 1);
+        PcacheNode::set_pcache(pcnode, p);
+        Pcache::page_set_pcache(page, p);
+        Pcache::page_set_node(page, pcnode);
+        Pcache::add_page_count(p, 1);
+    }
+
+
+
+    fn node_detach_page(p: *mut Pcache, page: *mut Page) {
+        Pcache::page_lock_assert_holding(page);
+        Pcache::spin_assert_holding(p);
+        let pcnode = Pcache::page_get_node(page);
+        assert_msg(!pcnode.is_null(), b"detach: page has no node\0");
+        assert_msg(PcacheNode::page(pcnode) == page, b"detach: mismatch\0");
+        assert_msg(PcacheNode::pcache(pcnode) == p, b"detach: pcache mismatch\0");
+        assert_msg(PcacheNode::lru_detached(pcnode) != 0,
+            b"detach: must be detached from lru/dirty\0");
+        Pcache::page_set_pcache(page, ptr::null_mut());
+        PcacheNode::set_pcache(pcnode, ptr::null_mut());
+        Pcache::add_page_count(p, -1);
+        assert_msg(Pcache::page_count(p) >= 0, b"detach: page_count negative\0");
+    }
 }
 
 // ---------------------------------------------------------------------------
 // IO sync
 // ---------------------------------------------------------------------------
-fn pcache_node_io_begin(p: *mut Pcache, page: *mut Page) -> c_int {
-    let _g = rlock_pcache_tree(p);
-    let node = xv6_page_pcache_get_node(page);
-    if xv6_pcache_node_io_in_progress(node) != 0 {
-        return -(EINVAL as c_int); // We use EALREADY in C; same numeric handling not critical
+impl Pcache {
+    fn node_io_begin(p: *mut Pcache, page: *mut Page) -> c_int {
+        let _g = Pcache::rlock_tree(p);
+        let node = Pcache::page_get_node(page);
+        if PcacheNode::io_in_progress(node) != 0 {
+            return -(EINVAL as c_int); // We use EALREADY in C; same numeric handling not critical
+        }
+        PcacheNode::set_io_in_progress(node, 1);
+        unsafe { NodeHandle::new(node) }.set_last_request(Pcache::get_jiffs());
+        0
     }
-    xv6_pcache_node_set_io_in_progress(node, 1);
-    unsafe { NodeHandle::new(node) }.set_last_request(xv6_pcache_get_jiffs());
-    0
-}
 
-fn pcache_node_io_end(p: *mut Pcache, page: *mut Page) -> c_int {
-    let _g = rlock_pcache_tree(p);
-    let node = xv6_page_pcache_get_node(page);
-    if xv6_pcache_node_io_in_progress(node) == 0 {
-        return -(EINVAL as c_int);
-    }
-    xv6_pcache_node_set_io_in_progress(node, 0);
-    unsafe { NodeHandle::new(node) }.io_wakeup_all();
-    0
-}
 
-fn pcache_node_io_wait(p: *mut Pcache, page: *mut Page) -> c_int {
-    let _g = rlock_pcache_tree(p);
-    let node = xv6_page_pcache_get_node(page);
-    while xv6_pcache_node_io_in_progress(node) != 0 {
-        let _ = (unsafe { NodeHandle::new(node) }.io_wait(p));
+
+    fn node_io_end(p: *mut Pcache, page: *mut Page) -> c_int {
+        let _g = Pcache::rlock_tree(p);
+        let node = Pcache::page_get_node(page);
+        if PcacheNode::io_in_progress(node) == 0 {
+            return -(EINVAL as c_int);
+        }
+        PcacheNode::set_io_in_progress(node, 0);
+        unsafe { NodeHandle::new(node) }.io_wakeup_all();
+        0
     }
-    0
+
+
+
+    fn node_io_wait(p: *mut Pcache, page: *mut Page) -> c_int {
+        let _g = Pcache::rlock_tree(p);
+        let node = Pcache::page_get_node(page);
+        while PcacheNode::io_in_progress(node) != 0 {
+            let _ = (unsafe { NodeHandle::new(node) }.io_wait(p));
+        }
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
 // LRU / dirty list
 // ---------------------------------------------------------------------------
-fn pcache_push_lru(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_spin_assert_holding(p);
-    xv6_pcache_page_lock_assert_holding(page);
-    let pcnode = xv6_page_pcache_get_node(page);
-    assert_msg(!pcnode.is_null(), b"push_lru: no node\0");
-    assert_msg(xv6_pcache_node_dirty(pcnode) == 0, b"push_lru: dirty\0");
-    assert_msg(xv6_pcache_node_pcache(pcnode) == p, b"push_lru: pcache mismatch\0");
-    assert_msg(xv6_pcache_node_page(pcnode) == page, b"push_lru: page mismatch\0");
-    assert_msg(xv6_pcache_page_ref_count_fn(page) == 1, b"push_lru: ref != 1\0");
-    assert_msg(xv6_pcache_node_lru_detached(pcnode) != 0,
-        b"push_lru: already in list\0");
-    unsafe { NodeHandle::new(pcnode) }.push_lru(p);
-    unsafe { PcacheHandle::new(p) }.inc_lru_count();
-}
-
-fn pcache_pop_lru(p: *mut Pcache) -> *mut Page {
-    xv6_pcache_spin_assert_holding(p);
-    if unsafe { PcacheHandle::new(p) }.lru_is_empty() {
-        return ptr::null_mut();
+impl Pcache {
+    fn push_lru(p: *mut Pcache, page: *mut Page) {
+        Pcache::spin_assert_holding(p);
+        Pcache::page_lock_assert_holding(page);
+        let pcnode = Pcache::page_get_node(page);
+        assert_msg(!pcnode.is_null(), b"push_lru: no node\0");
+        assert_msg(PcacheNode::dirty(pcnode) == 0, b"push_lru: dirty\0");
+        assert_msg(PcacheNode::pcache(pcnode) == p, b"push_lru: pcache mismatch\0");
+        assert_msg(PcacheNode::page(pcnode) == page, b"push_lru: page mismatch\0");
+        assert_msg(Pcache::page_ref_count(page) == 1, b"push_lru: ref != 1\0");
+        assert_msg(PcacheNode::lru_detached(pcnode) != 0,
+            b"push_lru: already in list\0");
+        unsafe { NodeHandle::new(pcnode) }.push_lru(p);
+        unsafe { PcacheHandle::new(p) }.inc_lru_count();
     }
-    loop {
-        let pcnode = (unsafe { PcacheHandle::new(p) }.lru_last());
-        if pcnode.is_null() {
+
+
+
+    fn pop_lru(p: *mut Pcache) -> *mut Page {
+        Pcache::spin_assert_holding(p);
+        if unsafe { PcacheHandle::new(p) }.lru_is_empty() {
             return ptr::null_mut();
         }
-        let page = xv6_pcache_node_page(pcnode);
-        assert_msg(!page.is_null(), b"pop_lru: no page\0");
-        let guard = lock_pcache_page(page);
-        if xv6_pcache_node_lru_detached(pcnode) != 0 {
-            drop(guard);
-            continue;
-        }
-        assert_msg(xv6_pcache_node_pcache(pcnode) == p,
-            b"pop_lru: pcache mismatch\0");
-        xv6_pcache_dec_lru_count(p);
-        assert_msg(xv6_pcache_lru_count(p) >= 0, b"pop_lru: count underflow\0");
-        xv6_pcache_node_detach_lru(pcnode);
-        // Returned page-locked — ownership handed to the caller.
-        guard.forget();
-        return page;
-    }
-}
-
-fn pcache_remove_lru(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_spin_assert_holding(p);
-    xv6_pcache_page_lock_assert_holding(page);
-    let pcnode = xv6_page_pcache_get_node(page);
-    assert_msg(!pcnode.is_null(), b"remove_lru: no node\0");
-    assert_msg(xv6_pcache_node_page(pcnode) == page, b"remove_lru: page mismatch\0");
-    assert_msg(xv6_pcache_node_pcache(pcnode) == p,
-        b"remove_lru: pcache mismatch\0");
-    assert_msg(xv6_pcache_node_lru_detached(pcnode) == 0,
-        b"remove_lru: not in list\0");
-    xv6_pcache_node_detach_lru(pcnode);
-    if xv6_pcache_node_dirty(pcnode) != 0 {
-        xv6_pcache_dec_dirty_count(p);
-        assert_msg(xv6_pcache_dirty_count(p) >= 0,
-            b"remove_lru: dirty count underflow\0");
-    } else {
-        xv6_pcache_dec_lru_count(p);
-        assert_msg(xv6_pcache_lru_count(p) >= 0,
-            b"remove_lru: lru count underflow\0");
-    }
-}
-
-fn pcache_push_dirty(p: *mut Pcache, page: *mut Page) {
-    xv6_pcache_spin_assert_holding(p);
-    xv6_pcache_page_lock_assert_holding(page);
-    let pcnode = xv6_page_pcache_get_node(page);
-    assert_msg(!pcnode.is_null(), b"push_dirty: no node\0");
-    assert_msg(xv6_pcache_node_dirty(pcnode) != 0,
-        b"push_dirty: not dirty\0");
-    assert_msg(xv6_pcache_node_pcache(pcnode) == p,
-        b"push_dirty: pcache mismatch\0");
-    assert_msg(xv6_pcache_node_page(pcnode) == page,
-        b"push_dirty: page mismatch\0");
-    if xv6_pcache_node_lru_detached(pcnode) != 0 {
-        unsafe { PcacheHandle::new(p) }.inc_dirty_count();
-    } else {
-        xv6_pcache_node_detach_lru(pcnode);
-    }
-    unsafe { NodeHandle::new(pcnode) }.push_dirty(p);
-}
-
-fn pcache_pop_dirty(p: *mut Pcache, latest_flush_jiffs: u64) -> *mut Page {
-    xv6_pcache_spin_assert_holding(p);
-    if unsafe { PcacheHandle::new(p) }.dirty_is_empty() {
-        return ptr::null_mut();
-    }
-    loop {
-        let pcnode = (unsafe { PcacheHandle::new(p) }.dirty_last());
-        if pcnode.is_null() {
-            return ptr::null_mut();
-        }
-        let page = xv6_pcache_node_page(pcnode);
-        assert_msg(!page.is_null(), b"pop_dirty: no page\0");
-        let guard = lock_pcache_page(page);
-        let last_flushed = (unsafe { NodeHandle::new(pcnode) }.last_flushed());
-        if last_flushed > latest_flush_jiffs && latest_flush_jiffs != 0 {
-            return ptr::null_mut();
-        }
-        if xv6_pcache_node_lru_detached(pcnode) != 0 {
-            drop(guard);
-            continue;
-        }
-        assert_msg(xv6_pcache_node_pcache(pcnode) == p,
-            b"pop_dirty: pcache mismatch\0");
-        assert_msg(xv6_pcache_node_dirty(pcnode) != 0,
-            b"pop_dirty: not dirty\0");
-        assert_msg(xv6_pcache_node_io_in_progress(pcnode) == 0,
-            b"pop_dirty: io in progress\0");
-        xv6_pcache_dec_dirty_count(p);
-        assert_msg(xv6_pcache_dirty_count(p) >= 0,
-            b"pop_dirty: dirty count underflow\0");
-        xv6_pcache_node_detach_lru(pcnode);
-        // Returned page-locked — ownership handed to the caller.
-        guard.forget();
-        return page;
-    }
-}
-
-fn pcache_evict_lru(p: *mut Pcache) -> *mut Page {
-    let page = pcache_pop_lru(p);
-    if page.is_null() { return ptr::null_mut(); }
-    let pcnode = xv6_page_pcache_get_node(page);
-    pcache_remove_node(p, page);
-    pcache_node_detach_page(p, page);
-    xv6_page_pcache_set_node(page, ptr::null_mut());
-    xv6_pcache_node_set_page(pcnode, ptr::null_mut());
-    xv6_pcache_page_lock_release(page);
-    xv6_pcache_node_free(pcnode);
-    page
-}
-
-// ===========================================================================
-// Public API
-// ===========================================================================
-
-pub(crate) fn pcache_global_init() {
-    xv6_pcache_globals_init();
-    let ret = xv6_pcache_node_slab_init();
-    assert_msg(ret == 0, b"Failed to initialize pcache node slab\0");
-    let wq = (Workqueue::create(PCACHE_FLUSH_WQ_NAME.as_ptr() as *const c_char, WORKQUEUE_DEFAULT_MAX_ACTIVE));
-    assert_msg(!wq.is_null(), b"Failed to create global pcache flush workqueue\0");
-    xv6_pcache_set_flush_wq(wq);
-    crate::kprintln!("Page cache subsystem initialized");
-    completion_init(global_completion());
-    xv6_pcache_global_flusher_complete_all();
-    create_flusher_thread();
-}
-
-pub(crate) fn pcache_init(p: *mut Pcache)-> c_int  {
-    // C-ABI boundary: convert `Result<(), Errno>` to a negative-errno
-    // `c_int` exactly once, here.
-    if let Err(e) = pcache_init_validate(p) {
-        return e.neg();
-    }
-    unsafe { PcacheHandle::new(p) }.list_entries_init();
-    xv6_pcache_set_dirty_count(p, 0);
-    xv6_pcache_set_lru_count(p, 0);
-    xv6_pcache_set_page_count(p, 0);
-    unsafe { PcacheHandle::new(p) }.set_flags(0);
-    unsafe { PcacheHandle::new(p) }.rb_init();
-    if (unsafe { PcacheHandle::new(p) }.gfp_flags()) == 0 {
-        unsafe { PcacheHandle::new(p) }.set_gfp_flags(0);
-    }
-    unsafe { PcacheHandle::new(p) }.spin_init();
-    unsafe { PcacheHandle::new(p) }.tree_lock_init();
-    unsafe { PcacheHandle::new(p) }.flush_completion_init();
-    xv6_pcache_flush_completion_complete_all(p);
-    unsafe { PcacheHandle::new(p) }.set_private_data(ptr::null_mut());
-    xv6_pcache_set_flush_error(p, 0);
-    unsafe { PcacheHandle::new(p) }.set_wait_refcount(0);
-    xv6_pcache_set_active(p, 1);
-    xv6_pcache_set_flush_requested(p, 0);
-    if xv6_pcache_max_pages(p) == 0 {
-        unsafe { PcacheHandle::new(p) }.set_max_pages(PCACHE_DEFAULT_MAX_PAGES);
-    }
-    let rate = xv6_pcache_dirty_rate(p);
-    if rate == 0 || rate > 100 {
-        unsafe { PcacheHandle::new(p) }.set_dirty_rate(PCACHE_DEFAULT_DIRTY_RATE);
-    }
-    let now = xv6_pcache_get_jiffs();
-    xv6_pcache_set_last_flushed(p, now);
-    xv6_pcache_set_last_request(p, now);
-    pcache_register(p);
-    0
-}
-
-pub(crate) fn pcache_teardown(p: *mut Pcache) {
-    if p.is_null() { return; }
-
-    // 1. unregister
-    {
-        let _gg = lock_pcache_global();
-        let _gp = lock_pcache_local(p);
-        if xv6_pcache_list_entry_is_detached(p) == 0 {
-            _gp.detach_global();
-            xv6_pcache_dec_global_count();
-        }
-    }
-
-    // 2. wait wait_refcount drain
-    {
-        let _gp = lock_pcache_local(p);
-        while _gp.wait_refcount() > 0 {
-            sleep_on_chan(p as *mut c_void, xv6_pcache_spinlock(p));
-        }
-    }
-
-    // 3. mark inactive
-    let flush_pending = {
-        let _gp = lock_pcache_local(p);
-        xv6_pcache_set_active(p, 0);
-        let flush_pending = xv6_pcache_flush_requested(p) != 0;
-        xv6_pcache_wakeup_on_chan(p as *mut c_void);
-        flush_pending
-    };
-
-    if flush_pending {
-        let _ = pcache_wait_flush_complete(p);
-    }
-
-    // 4. evict clean LRU pages
-    {
-        let _gp = lock_pcache_local(p);
         loop {
-            let victim = pcache_evict_lru(p);
-            if victim.is_null() { break; }
-            pcache_page_put(victim);
-        }
-    }
-
-    // 5. drain remaining rb-tree
-    {
-        let _gp = lock_pcache_local(p);
-        let _gt = wlock_pcache_tree(p);
-        loop {
-            let node = _gt.rb_first();
-            if node.is_null() { break; }
-            xv6_pcache_rb_delete(p, node);
-            let pg = xv6_pcache_node_page(node);
-            if !pg.is_null() {
-                let _pg_lock = lock_pcache_page(pg);
-                if xv6_pcache_node_lru_detached(node) == 0 {
-                    xv6_pcache_node_detach_lru(node);
-                }
-                xv6_page_pcache_set_node(pg, ptr::null_mut());
-                xv6_page_pcache_set_pcache(pg, ptr::null_mut());
-                xv6_pcache_node_set_page(node, ptr::null_mut());
-                drop(_pg_lock);
-                pcache_page_put(pg);
+            let pcnode = (unsafe { PcacheHandle::new(p) }.lru_last());
+            if pcnode.is_null() {
+                return ptr::null_mut();
             }
-            xv6_pcache_node_free(node);
-        }
-        xv6_pcache_set_page_count(p, 0);
-        xv6_pcache_set_lru_count(p, 0);
-        xv6_pcache_set_dirty_count(p, 0);
-    }
-}
-
-pub(crate) fn pcache_get_page(p: *mut Pcache, blkno: u64)-> *mut Page  {
-    if p.is_null() || !pcache_is_active(p) { return ptr::null_mut(); }
-    let base_blkno = xv6_pcache_align_blkno(blkno);
-    let blk_count = xv6_pcache_blk_count(p);
-    if base_blkno >= blk_count { return ptr::null_mut(); }
-    if base_blkno + xv6_pcache_blks_per_page() as u64 > blk_count {
-        return ptr::null_mut();
-    }
-
-    'retry_lookup: loop {
-        let page = pcache_get_page_internal(p, base_blkno, xv6_pcache_pgsize(), ptr::null_mut());
-        if !page.is_null() {
-            let _gp = lock_pcache_local(p);
-            let _pg = lock_pcache_page(page);
-            if !pcache_page_valid(p, page) {
-                continue 'retry_lookup;
+            let page = PcacheNode::page(pcnode);
+            assert_msg(!page.is_null(), b"pop_lru: no page\0");
+            let guard = Pcache::lock_page(page);
+            if PcacheNode::lru_detached(pcnode) != 0 {
+                drop(guard);
+                continue;
             }
-            let pcnode = xv6_page_pcache_get_node(page);
-            assert_msg(!pcnode.is_null(), b"get_page: missing pcache node\0");
-            if xv6_pcache_node_blkno(pcnode) != base_blkno {
-                continue 'retry_lookup;
-            }
-            if xv6_pcache_node_dirty(pcnode) == 0
-                && xv6_pcache_node_lru_detached(pcnode) == 0
-            {
-                pcache_remove_lru(p, page);
-            }
-            let r = xv6_pcache_page_ref_inc_unlocked(page);
-            if r < 0 {
-                continue 'retry_lookup;
-            }
+            assert_msg(PcacheNode::pcache(pcnode) == p,
+                b"pop_lru: pcache mismatch\0");
+            Pcache::dec_lru_count(p);
+            assert_msg(Pcache::lru_count(p) >= 0, b"pop_lru: count underflow\0");
+            PcacheNode::detach_lru(pcnode);
+            // Returned page-locked — ownership handed to the caller.
+            guard.forget();
             return page;
         }
+    }
 
-        // Alloc fresh page
-        let new_page = pcache_page_alloc();
-        if new_page.is_null() { return ptr::null_mut(); }
 
-        let mut new_page_guard = lock_pcache_page(new_page);
-        let new_pcnode = xv6_page_pcache_get_node(new_page);
-        assert_msg(!new_pcnode.is_null(), b"get_page: new page no node\0");
-        unsafe { NodeHandle::new(new_pcnode) }.set_blkno(base_blkno);
-        xv6_pcache_node_set_dirty(new_pcnode, 0);
-        xv6_pcache_node_set_uptodate(new_pcnode, 0);
-        xv6_pcache_node_set_io_in_progress(new_pcnode, 0);
-        xv6_pcache_node_set_size(new_pcnode, xv6_pcache_pgsize());
 
-        let _gp = lock_pcache_local(p);
+    fn remove_lru(p: *mut Pcache, page: *mut Page) {
+        Pcache::spin_assert_holding(p);
+        Pcache::page_lock_assert_holding(page);
+        let pcnode = Pcache::page_get_node(page);
+        assert_msg(!pcnode.is_null(), b"remove_lru: no node\0");
+        assert_msg(PcacheNode::page(pcnode) == page, b"remove_lru: page mismatch\0");
+        assert_msg(PcacheNode::pcache(pcnode) == p,
+            b"remove_lru: pcache mismatch\0");
+        assert_msg(PcacheNode::lru_detached(pcnode) == 0,
+            b"remove_lru: not in list\0");
+        PcacheNode::detach_lru(pcnode);
+        if PcacheNode::dirty(pcnode) != 0 {
+            Pcache::dec_dirty_count(p);
+            assert_msg(Pcache::dirty_count(p) >= 0,
+                b"remove_lru: dirty count underflow\0");
+        } else {
+            Pcache::dec_lru_count(p);
+            assert_msg(Pcache::lru_count(p) >= 0,
+                b"remove_lru: lru count underflow\0");
+        }
+    }
 
-        if xv6_pcache_max_pages(p) > 0 {
-            while xv6_pcache_page_count(p) as u64 >= xv6_pcache_max_pages(p) {
-                let victim = pcache_evict_lru(p);
-                if !victim.is_null() {
-                    // Release `new_page`'s page lock across the victim
-                    // free. Dropping the victim's last reference can free
-                    // it back to the buddy allocator, whose merge step
-                    // (`buddy_merge_and_insert` -> `lock_get_buddy`) locks
-                    // the victim's physically-adjacent buddy to inspect it
-                    // -- and that buddy may *be* `new_page`. Holding
-                    // `new_page`'s lock here would then re-enter it on the
-                    // same hart ("spin_lock reentry"). `new_page` is not
-                    // published anywhere yet (not in the tree, not
-                    // attached), so releasing its lock momentarily is safe;
-                    // it stays allocated (refcount >= 1, off the free
-                    // list), so the buddy allocator inspects and correctly
-                    // declines to merge it. Mirrors the existing
-                    // drop/re-acquire around the sleep below.
-                    drop(new_page_guard);
-                    pcache_page_put(victim);
-                    new_page_guard = lock_pcache_page(new_page);
-                    continue;
-                }
-                if xv6_pcache_dirty_count(p) > 0 {
-                    pcache_queue_work(p);
-                }
-                drop(new_page_guard);
-                let ret = (sleep_on_chan_interruptible(p as *mut c_void, xv6_pcache_spinlock(p)));
-                new_page_guard = lock_pcache_page(new_page);
-                if ret == -(EINTR as c_int) {
-                    drop(new_page_guard);
-                    drop(_gp);
-                    pcache_page_discard(new_page);
-                    return ptr::null_mut();
-                }
-                if !pcache_is_active(p) {
-                    drop(new_page_guard);
-                    drop(_gp);
-                    pcache_page_discard(new_page);
-                    return ptr::null_mut();
-                }
+
+
+    fn push_dirty(p: *mut Pcache, page: *mut Page) {
+        Pcache::spin_assert_holding(p);
+        Pcache::page_lock_assert_holding(page);
+        let pcnode = Pcache::page_get_node(page);
+        assert_msg(!pcnode.is_null(), b"push_dirty: no node\0");
+        assert_msg(PcacheNode::dirty(pcnode) != 0,
+            b"push_dirty: not dirty\0");
+        assert_msg(PcacheNode::pcache(pcnode) == p,
+            b"push_dirty: pcache mismatch\0");
+        assert_msg(PcacheNode::page(pcnode) == page,
+            b"push_dirty: page mismatch\0");
+        if PcacheNode::lru_detached(pcnode) != 0 {
+            unsafe { PcacheHandle::new(p) }.inc_dirty_count();
+        } else {
+            PcacheNode::detach_lru(pcnode);
+        }
+        unsafe { NodeHandle::new(pcnode) }.push_dirty(p);
+    }
+
+
+
+    fn pop_dirty(p: *mut Pcache, latest_flush_jiffs: u64) -> *mut Page {
+        Pcache::spin_assert_holding(p);
+        if unsafe { PcacheHandle::new(p) }.dirty_is_empty() {
+            return ptr::null_mut();
+        }
+        loop {
+            let pcnode = (unsafe { PcacheHandle::new(p) }.dirty_last());
+            if pcnode.is_null() {
+                return ptr::null_mut();
+            }
+            let page = PcacheNode::page(pcnode);
+            assert_msg(!page.is_null(), b"pop_dirty: no page\0");
+            let guard = Pcache::lock_page(page);
+            let last_flushed = (unsafe { NodeHandle::new(pcnode) }.last_flushed());
+            if last_flushed > latest_flush_jiffs && latest_flush_jiffs != 0 {
+                return ptr::null_mut();
+            }
+            if PcacheNode::lru_detached(pcnode) != 0 {
+                drop(guard);
+                continue;
+            }
+            assert_msg(PcacheNode::pcache(pcnode) == p,
+                b"pop_dirty: pcache mismatch\0");
+            assert_msg(PcacheNode::dirty(pcnode) != 0,
+                b"pop_dirty: not dirty\0");
+            assert_msg(PcacheNode::io_in_progress(pcnode) == 0,
+                b"pop_dirty: io in progress\0");
+            Pcache::dec_dirty_count(p);
+            assert_msg(Pcache::dirty_count(p) >= 0,
+                b"pop_dirty: dirty count underflow\0");
+            PcacheNode::detach_lru(pcnode);
+            // Returned page-locked — ownership handed to the caller.
+            guard.forget();
+            return page;
+        }
+    }
+
+
+
+    fn evict_lru(p: *mut Pcache) -> *mut Page {
+        let page = Pcache::pop_lru(p);
+        if page.is_null() { return ptr::null_mut(); }
+        let pcnode = Pcache::page_get_node(page);
+        Pcache::remove_node(p, page);
+        Pcache::node_detach_page(p, page);
+        Pcache::page_set_node(page, ptr::null_mut());
+        PcacheNode::set_page(pcnode, ptr::null_mut());
+        Pcache::page_lock_release(page);
+        PcacheNode::free(pcnode);
+        page
+    }
+
+
+    // ===========================================================================
+    // Public API
+    // ===========================================================================
+
+
+    pub(crate) fn global_init() {
+        Pcache::globals_init();
+        let ret = Pcache::node_slab_init();
+        assert_msg(ret == 0, b"Failed to initialize pcache node slab\0");
+        let wq = (Workqueue::create(PCACHE_FLUSH_WQ_NAME.as_ptr() as *const c_char, WORKQUEUE_DEFAULT_MAX_ACTIVE));
+        assert_msg(!wq.is_null(), b"Failed to create global pcache flush workqueue\0");
+        Pcache::set_flush_wq(wq);
+        crate::kprintln!("Page cache subsystem initialized");
+        completion_init(Pcache::global_completion());
+        Pcache::global_flusher_complete_all();
+        Pcache::create_flusher_thread();
+    }
+
+
+
+    pub(crate) fn init(p: *mut Pcache)-> c_int  {
+        // C-ABI boundary: convert `Result<(), Errno>` to a negative-errno
+        // `c_int` exactly once, here.
+        if let Err(e) = Pcache::init_validate(p) {
+            return e.neg();
+        }
+        unsafe { PcacheHandle::new(p) }.list_entries_init();
+        Pcache::set_dirty_count(p, 0);
+        Pcache::set_lru_count(p, 0);
+        Pcache::set_page_count(p, 0);
+        unsafe { PcacheHandle::new(p) }.set_flags(0);
+        unsafe { PcacheHandle::new(p) }.rb_init();
+        if (unsafe { PcacheHandle::new(p) }.gfp_flags()) == 0 {
+            unsafe { PcacheHandle::new(p) }.set_gfp_flags(0);
+        }
+        unsafe { PcacheHandle::new(p) }.spin_init();
+        unsafe { PcacheHandle::new(p) }.tree_lock_init();
+        unsafe { PcacheHandle::new(p) }.flush_completion_init();
+        Pcache::flush_completion_complete_all(p);
+        unsafe { PcacheHandle::new(p) }.set_private_data(ptr::null_mut());
+        Pcache::set_flush_error(p, 0);
+        unsafe { PcacheHandle::new(p) }.set_wait_refcount(0);
+        Pcache::set_active(p, 1);
+        Pcache::set_flush_requested(p, 0);
+        if Pcache::max_pages(p) == 0 {
+            unsafe { PcacheHandle::new(p) }.set_max_pages(PCACHE_DEFAULT_MAX_PAGES);
+        }
+        let rate = Pcache::dirty_rate(p);
+        if rate == 0 || rate > 100 {
+            unsafe { PcacheHandle::new(p) }.set_dirty_rate(PCACHE_DEFAULT_DIRTY_RATE);
+        }
+        let now = Pcache::get_jiffs();
+        Pcache::set_last_flushed(p, now);
+        Pcache::set_last_request(p, now);
+        Pcache::register(p);
+        0
+    }
+
+
+
+    pub(crate) fn teardown(p: *mut Pcache) {
+        if p.is_null() { return; }
+
+        // 1. unregister
+        {
+            let _gg = Pcache::lock_global();
+            let _gp = Pcache::lock_local(p);
+            if Pcache::list_entry_is_detached(p) == 0 {
+                _gp.detach_global();
+                Pcache::dec_global_count();
             }
         }
 
-        let page = pcache_get_page_internal(p, base_blkno, xv6_pcache_pgsize(), new_page);
-        if page.is_null() {
-            drop(new_page_guard);
-            drop(_gp);
-            pcache_page_discard(new_page);
+        // 2. wait wait_refcount drain
+        {
+            let _gp = Pcache::lock_local(p);
+            while _gp.wait_refcount() > 0 {
+                sleep_on_chan(p as *mut c_void, Pcache::spinlock(p));
+            }
+        }
+
+        // 3. mark inactive
+        let flush_pending = {
+            let _gp = Pcache::lock_local(p);
+            Pcache::set_active(p, 0);
+            let flush_pending = Pcache::flush_requested(p) != 0;
+            Pcache::wakeup_on_chan(p as *mut c_void);
+            flush_pending
+        };
+
+        if flush_pending {
+            let _ = Pcache::wait_flush_complete(p);
+        }
+
+        // 4. evict clean LRU pages
+        {
+            let _gp = Pcache::lock_local(p);
+            loop {
+                let victim = Pcache::evict_lru(p);
+                if victim.is_null() { break; }
+                Pcache::page_put(victim);
+            }
+        }
+
+        // 5. drain remaining rb-tree
+        {
+            let _gp = Pcache::lock_local(p);
+            let _gt = Pcache::wlock_tree(p);
+            loop {
+                let node = _gt.rb_first();
+                if node.is_null() { break; }
+                Pcache::rb_delete(p, node);
+                let pg = PcacheNode::page(node);
+                if !pg.is_null() {
+                    let _pg_lock = Pcache::lock_page(pg);
+                    if PcacheNode::lru_detached(node) == 0 {
+                        PcacheNode::detach_lru(node);
+                    }
+                    Pcache::page_set_node(pg, ptr::null_mut());
+                    Pcache::page_set_pcache(pg, ptr::null_mut());
+                    PcacheNode::set_page(node, ptr::null_mut());
+                    drop(_pg_lock);
+                    Pcache::page_put(pg);
+                }
+                PcacheNode::free(node);
+            }
+            Pcache::set_page_count(p, 0);
+            Pcache::set_lru_count(p, 0);
+            Pcache::set_dirty_count(p, 0);
+        }
+    }
+
+
+
+    pub(crate) fn get_page(p: *mut Pcache, blkno: u64)-> *mut Page  {
+        if p.is_null() || !Pcache::is_active(p) { return ptr::null_mut(); }
+        let base_blkno = Pcache::align_blkno(blkno);
+        let blk_count = Pcache::blk_count(p);
+        if base_blkno >= blk_count { return ptr::null_mut(); }
+        if base_blkno + Pcache::blks_per_page() as u64 > blk_count {
             return ptr::null_mut();
         }
 
-        if page != new_page {
-            drop(new_page_guard);
-            drop(_gp);
-            pcache_page_discard(new_page);
-            continue 'retry_lookup;
+        'retry_lookup: loop {
+            let page = Pcache::get_page_internal(p, base_blkno, Pcache::pgsize(), ptr::null_mut());
+            if !page.is_null() {
+                let _gp = Pcache::lock_local(p);
+                let _pg = Pcache::lock_page(page);
+                if !Pcache::page_valid(p, page) {
+                    continue 'retry_lookup;
+                }
+                let pcnode = Pcache::page_get_node(page);
+                assert_msg(!pcnode.is_null(), b"get_page: missing pcache node\0");
+                if PcacheNode::blkno(pcnode) != base_blkno {
+                    continue 'retry_lookup;
+                }
+                if PcacheNode::dirty(pcnode) == 0
+                    && PcacheNode::lru_detached(pcnode) == 0
+                {
+                    Pcache::remove_lru(p, page);
+                }
+                let r = Pcache::page_ref_inc_unlocked(page);
+                if r < 0 {
+                    continue 'retry_lookup;
+                }
+                return page;
+            }
+
+            // Alloc fresh page
+            let new_page = Pcache::page_alloc();
+            if new_page.is_null() { return ptr::null_mut(); }
+
+            let mut new_page_guard = Pcache::lock_page(new_page);
+            let new_pcnode = Pcache::page_get_node(new_page);
+            assert_msg(!new_pcnode.is_null(), b"get_page: new page no node\0");
+            unsafe { NodeHandle::new(new_pcnode) }.set_blkno(base_blkno);
+            PcacheNode::set_dirty(new_pcnode, 0);
+            PcacheNode::set_uptodate(new_pcnode, 0);
+            PcacheNode::set_io_in_progress(new_pcnode, 0);
+            PcacheNode::set_size(new_pcnode, Pcache::pgsize());
+
+            let _gp = Pcache::lock_local(p);
+
+            if Pcache::max_pages(p) > 0 {
+                while Pcache::page_count(p) as u64 >= Pcache::max_pages(p) {
+                    let victim = Pcache::evict_lru(p);
+                    if !victim.is_null() {
+                        // Release `new_page`'s page lock across the victim
+                        // free. Dropping the victim's last reference can free
+                        // it back to the buddy allocator, whose merge step
+                        // (`buddy_merge_and_insert` -> `lock_get_buddy`) locks
+                        // the victim's physically-adjacent buddy to inspect it
+                        // -- and that buddy may *be* `new_page`. Holding
+                        // `new_page`'s lock here would then re-enter it on the
+                        // same hart ("spin_lock reentry"). `new_page` is not
+                        // published anywhere yet (not in the tree, not
+                        // attached), so releasing its lock momentarily is safe;
+                        // it stays allocated (refcount >= 1, off the free
+                        // list), so the buddy allocator inspects and correctly
+                        // declines to merge it. Mirrors the existing
+                        // drop/re-acquire around the sleep below.
+                        drop(new_page_guard);
+                        Pcache::page_put(victim);
+                        new_page_guard = Pcache::lock_page(new_page);
+                        continue;
+                    }
+                    if Pcache::dirty_count(p) > 0 {
+                        Pcache::queue_work(p);
+                    }
+                    drop(new_page_guard);
+                    let ret = (sleep_on_chan_interruptible(p as *mut c_void, Pcache::spinlock(p)));
+                    new_page_guard = Pcache::lock_page(new_page);
+                    if ret == -(EINTR as c_int) {
+                        drop(new_page_guard);
+                        drop(_gp);
+                        Pcache::page_discard(new_page);
+                        return ptr::null_mut();
+                    }
+                    if !Pcache::is_active(p) {
+                        drop(new_page_guard);
+                        drop(_gp);
+                        Pcache::page_discard(new_page);
+                        return ptr::null_mut();
+                    }
+                }
+            }
+
+            let page = Pcache::get_page_internal(p, base_blkno, Pcache::pgsize(), new_page);
+            if page.is_null() {
+                drop(new_page_guard);
+                drop(_gp);
+                Pcache::page_discard(new_page);
+                return ptr::null_mut();
+            }
+
+            if page != new_page {
+                drop(new_page_guard);
+                drop(_gp);
+                Pcache::page_discard(new_page);
+                continue 'retry_lookup;
+            }
+
+            Pcache::node_attach_page(p, new_page);
+            let r = Pcache::page_ref_inc_unlocked(new_page);
+            assert_msg(r > 1, b"get_page: failed to add caller reference\0");
+            return new_page;
+        }
+    }
+
+
+
+    pub(crate) fn put_page(p: *mut Pcache, page: *mut Page) {
+        if p.is_null() || page.is_null() { return; }
+
+        let _gp = Pcache::lock_local(p);
+        let _pg = Pcache::lock_page(page);
+
+        if !Pcache::page_valid(p, page) {
+            Pcache::printf_invalid_page(page, p);
+            return;
         }
 
-        pcache_node_attach_page(p, new_page);
-        let r = xv6_pcache_page_ref_inc_unlocked(new_page);
-        assert_msg(r > 1, b"get_page: failed to add caller reference\0");
-        return new_page;
-    }
-}
+        let pcnode = Pcache::page_get_node(page);
+        let refcount = Pcache::page_ref_count(page);
+        if refcount < 2 {
+            Pcache::printf_refcount_too_small(page, refcount);
+            return;
+        }
+        let new_refcount = Pcache::page_ref_dec_unlocked(page);
+        assert_msg(new_refcount >= 1, b"put_page: refcount underflow\0");
 
-pub(crate) fn pcache_put_page(p: *mut Pcache, page: *mut Page) {
-    if p.is_null() || page.is_null() { return; }
+        if new_refcount == 1 {
+            let dirty = PcacheNode::dirty(pcnode) != 0;
+            let detached = PcacheNode::lru_detached(pcnode) != 0;
+            let uptodate = PcacheNode::uptodate(pcnode) != 0;
 
-    let _gp = lock_pcache_local(p);
-    let _pg = lock_pcache_page(page);
-
-    if !pcache_page_valid(p, page) {
-        xv6_pcache_printf_invalid_page(page, p);
-        return;
-    }
-
-    let pcnode = xv6_page_pcache_get_node(page);
-    let refcount = xv6_pcache_page_ref_count_fn(page);
-    if refcount < 2 {
-        xv6_pcache_printf_refcount_too_small(page, refcount);
-        return;
-    }
-    let new_refcount = xv6_pcache_page_ref_dec_unlocked(page);
-    assert_msg(new_refcount >= 1, b"put_page: refcount underflow\0");
-
-    if new_refcount == 1 {
-        let dirty = xv6_pcache_node_dirty(pcnode) != 0;
-        let detached = xv6_pcache_node_lru_detached(pcnode) != 0;
-        let uptodate = xv6_pcache_node_uptodate(pcnode) != 0;
-
-        if dirty && detached {
-            pcache_push_dirty(p, page);
-        } else if !dirty && detached {
-            if !uptodate {
-                pcache_remove_node(p, page);
-                pcache_node_detach_page(p, page);
-                xv6_page_pcache_set_node(page, ptr::null_mut());
-                xv6_pcache_node_set_page(pcnode, ptr::null_mut());
-                xv6_pcache_wakeup_on_chan(p as *mut c_void);
-                drop(_pg);
-                drop(_gp);
-                xv6_pcache_node_free(pcnode);
-                pcache_page_put(page);
-                return;
-            }
-            pcache_push_lru(p, page);
-            xv6_pcache_wakeup_on_chan(p as *mut c_void);
-        } else {
-            if dirty {
-                assert_msg(!detached, b"put_page: dirty page lost from dirty list\0");
-            } else if !uptodate {
-                if !detached {
-                    pcache_remove_lru(p, page);
+            if dirty && detached {
+                Pcache::push_dirty(p, page);
+            } else if !dirty && detached {
+                if !uptodate {
+                    Pcache::remove_node(p, page);
+                    Pcache::node_detach_page(p, page);
+                    Pcache::page_set_node(page, ptr::null_mut());
+                    PcacheNode::set_page(pcnode, ptr::null_mut());
+                    Pcache::wakeup_on_chan(p as *mut c_void);
+                    drop(_pg);
+                    drop(_gp);
+                    PcacheNode::free(pcnode);
+                    Pcache::page_put(page);
+                    return;
+                }
+                Pcache::push_lru(p, page);
+                Pcache::wakeup_on_chan(p as *mut c_void);
+            } else {
+                if dirty {
+                    assert_msg(!detached, b"put_page: dirty page lost from dirty list\0");
+                } else if !uptodate {
+                    if !detached {
+                        Pcache::remove_lru(p, page);
+                    }
                 }
             }
         }
     }
-}
 
-pub(crate) fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page)-> c_int  {
-    if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
-    let mut ret: c_int = 0;
 
-    let _gp = lock_pcache_local(p);
-    let _pg = lock_pcache_page(page);
 
-    if !pcache_page_valid(p, page) {
-        ret = -(EINVAL as c_int);
-    } else {
-        let pcnode = xv6_page_pcache_get_node(page);
-        if xv6_pcache_node_dirty(pcnode) != 0 {
-            // already dirty
-        } else if xv6_pcache_node_io_in_progress(pcnode) != 0 {
-            ret = -(EBUSY as c_int);
+    pub(crate) fn mark_page_dirty(p: *mut Pcache, page: *mut Page)-> c_int  {
+        if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
+        let mut ret: c_int = 0;
+
+        let _gp = Pcache::lock_local(p);
+        let _pg = Pcache::lock_page(page);
+
+        if !Pcache::page_valid(p, page) {
+            ret = -(EINVAL as c_int);
         } else {
-            if xv6_pcache_node_lru_detached(pcnode) == 0
-                && xv6_pcache_node_dirty(pcnode) == 0
-            {
-                pcache_remove_lru(p, page);
+            let pcnode = Pcache::page_get_node(page);
+            if PcacheNode::dirty(pcnode) != 0 {
+                // already dirty
+            } else if PcacheNode::io_in_progress(pcnode) != 0 {
+                ret = -(EBUSY as c_int);
+            } else {
+                if PcacheNode::lru_detached(pcnode) == 0
+                    && PcacheNode::dirty(pcnode) == 0
+                {
+                    Pcache::remove_lru(p, page);
+                }
+                PcacheNode::set_dirty(pcnode, 1);
+                PcacheNode::set_uptodate(pcnode, 1);
+                Pcache::ops_call_mark_dirty(p, page);
+                Pcache::push_dirty(p, page);
             }
-            xv6_pcache_node_set_dirty(pcnode, 1);
-            xv6_pcache_node_set_uptodate(pcnode, 1);
-            xv6_pcache_ops_call_mark_dirty(p, page);
-            pcache_push_dirty(p, page);
         }
+
+        ret
     }
 
-    ret
-}
 
-pub(crate) fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page)-> c_int  {
-    if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
-    let mut ret: c_int = 0;
-    let _gp = lock_pcache_local(p);
-    let _pg = lock_pcache_page(page);
-    if !pcache_page_valid(p, page) {
-        ret = -(EINVAL as c_int);
-    } else {
-        let pcnode = xv6_page_pcache_get_node(page);
-        if xv6_pcache_node_io_in_progress(pcnode) != 0 {
-            ret = -(EBUSY as c_int);
+
+    pub(crate) fn invalidate_page(p: *mut Pcache, page: *mut Page)-> c_int  {
+        if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
+        let mut ret: c_int = 0;
+        let _gp = Pcache::lock_local(p);
+        let _pg = Pcache::lock_page(page);
+        if !Pcache::page_valid(p, page) {
+            ret = -(EINVAL as c_int);
         } else {
-            if xv6_pcache_node_lru_detached(pcnode) == 0 {
-                pcache_remove_lru(p, page);
+            let pcnode = Pcache::page_get_node(page);
+            if PcacheNode::io_in_progress(pcnode) != 0 {
+                ret = -(EBUSY as c_int);
+            } else {
+                if PcacheNode::lru_detached(pcnode) == 0 {
+                    Pcache::remove_lru(p, page);
+                }
+                if PcacheNode::dirty(pcnode) != 0 {
+                    PcacheNode::set_dirty(pcnode, 0);
+                }
+                PcacheNode::set_uptodate(pcnode, 0);
             }
-            if xv6_pcache_node_dirty(pcnode) != 0 {
-                xv6_pcache_node_set_dirty(pcnode, 0);
-            }
-            xv6_pcache_node_set_uptodate(pcnode, 0);
         }
+        ret
     }
-    ret
-}
 
-pub(crate) fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64)-> c_int  {
-    if p.is_null() || !pcache_is_active(p) { return -(EINVAL as c_int); }
-    let base_blkno = xv6_pcache_align_blkno(blkno);
 
-    let _gp = lock_pcache_local(p);
-    let page = pcache_get_page_internal(p, base_blkno, xv6_pcache_pgsize(), ptr::null_mut());
-    if page.is_null() {
-        return 0;
-    }
-    let _pg = lock_pcache_page(page);
-    if !pcache_page_valid(p, page) {
-        return 0;
-    }
-    let pcnode = xv6_page_pcache_get_node(page);
-    if xv6_pcache_node_blkno(pcnode) != base_blkno {
-        return 0;
-    }
-    if xv6_pcache_node_io_in_progress(pcnode) != 0 {
-        return -(EBUSY as c_int);
-    }
-    if xv6_pcache_node_lru_detached(pcnode) == 0 {
-        pcache_remove_lru(p, page);
-    }
-    xv6_pcache_node_set_dirty(pcnode, 0);
-    xv6_pcache_node_set_uptodate(pcnode, 0);
-    0
-}
 
-pub(crate) fn pcache_discard_blk(p: *mut Pcache, blkno: u64)-> c_int  {
-    if p.is_null() || !pcache_is_active(p) { return -(EINVAL as c_int); }
-    let base_blkno = xv6_pcache_align_blkno(blkno);
+    pub(crate) fn invalidate_blk(p: *mut Pcache, blkno: u64)-> c_int  {
+        if p.is_null() || !Pcache::is_active(p) { return -(EINVAL as c_int); }
+        let base_blkno = Pcache::align_blkno(blkno);
 
-    let _gp = lock_pcache_local(p);
-    let page = pcache_get_page_internal(p, base_blkno, xv6_pcache_pgsize(), ptr::null_mut());
-    if page.is_null() {
-        return 0;
-    }
-    let _pg = lock_pcache_page(page);
-    if !pcache_page_valid(p, page) {
-        return 0;
-    }
-    let pcnode = xv6_page_pcache_get_node(page);
-    if xv6_pcache_node_blkno(pcnode) != base_blkno {
-        return 0;
-    }
-    if xv6_pcache_node_io_in_progress(pcnode) != 0 {
-        return -(EBUSY as c_int);
-    }
-    if xv6_pcache_node_lru_detached(pcnode) == 0 {
-        pcache_remove_lru(p, page);
-    }
-    {
-        let _gt = wlock_pcache_tree(p);
-        xv6_pcache_rb_delete(p, pcnode);
-        xv6_pcache_add_page_count(p, -1);
-    }
-    xv6_page_pcache_set_node(page, ptr::null_mut());
-    xv6_page_pcache_set_pcache(page, ptr::null_mut());
-    xv6_pcache_node_set_page(pcnode, ptr::null_mut());
-    drop(_pg);
-    drop(_gp);
-    xv6_pcache_node_free(pcnode);
-    pcache_page_put(page);
-    0
-}
-
-pub(crate) fn pcache_flush(p: *mut Pcache)-> c_int  {
-    if p.is_null() { return -(EINVAL as c_int); }
-    let _gp = lock_pcache_local(p);
-    if !pcache_is_active(p) {
-        return -(EINVAL as c_int);
-    }
-    let queued = pcache_queue_work(p);
-    if !queued {
-        xv6_pcache_set_flush_requested(p, 0);
-        xv6_pcache_set_flush_error(p, -(EAGAIN as c_int));
-        return -(EAGAIN as c_int);
-    }
-    drop(_gp);
-    pcache_wait_flush_complete(p)
-}
-
-pub(crate) fn pcache_sync()-> c_int  {
-    {
-        let _gg = lock_pcache_global();
-        pcache_flusher_start();
-    }
-    pcache_wait_flusher()
-}
-
-pub(crate) fn pcache_read_page(p: *mut Pcache, page: *mut Page)-> c_int  {
-    if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
-
-    'retry_locked: loop {
-        let _gp = lock_pcache_local(p);
-        let _pg = lock_pcache_page(page);
-
-        if !pcache_is_active(p) || !pcache_page_valid(p, page) {
-            return -(EINVAL as c_int);
-        }
-        let refcount = xv6_pcache_page_ref_count_fn(page);
-        if refcount < 2 {
-            xv6_pcache_printf_read_refcount_too_small(page, refcount);
-            return -(EINVAL as c_int);
-        }
-        let pcnode = xv6_page_pcache_get_node(page);
-        let blkno = xv6_pcache_node_blkno(pcnode);
-        let size = (unsafe { NodeHandle::new(pcnode) }.size_get());
-        if blkno >= xv6_pcache_blk_count(p) || size == 0 || size > xv6_pcache_pgsize() {
-            xv6_pcache_printf_read_invalid_meta(page, blkno, size);
-            return -(EINVAL as c_int);
-        }
-
-        if xv6_pcache_node_io_in_progress(pcnode) != 0 {
-            let dirty = xv6_pcache_node_dirty(pcnode);
-            let uptodate = xv6_pcache_node_uptodate(pcnode);
-            drop(_pg);
-            drop(_gp);
-            if uptodate != 0 { return 0; }
-            if dirty == 0 && uptodate == 0 {
-                let _ = pcache_node_io_wait(p, page);
-                continue 'retry_locked;
-            }
-            xv6_pcache_printf_io_unexpected(dirty, uptodate);
-            return -(EIO as c_int);
-        }
-
-        if xv6_pcache_node_uptodate(pcnode) != 0 {
+        let _gp = Pcache::lock_local(p);
+        let page = Pcache::get_page_internal(p, base_blkno, Pcache::pgsize(), ptr::null_mut());
+        if page.is_null() {
             return 0;
         }
+        let _pg = Pcache::lock_page(page);
+        if !Pcache::page_valid(p, page) {
+            return 0;
+        }
+        let pcnode = Pcache::page_get_node(page);
+        if PcacheNode::blkno(pcnode) != base_blkno {
+            return 0;
+        }
+        if PcacheNode::io_in_progress(pcnode) != 0 {
+            return -(EBUSY as c_int);
+        }
+        if PcacheNode::lru_detached(pcnode) == 0 {
+            Pcache::remove_lru(p, page);
+        }
+        PcacheNode::set_dirty(pcnode, 0);
+        PcacheNode::set_uptodate(pcnode, 0);
+        0
+    }
 
-        let ret = pcache_node_io_begin(p, page);
-        assert_msg(ret == 0, b"read_page: io_begin failed\0");
 
+
+    pub(crate) fn discard_blk(p: *mut Pcache, blkno: u64)-> c_int  {
+        if p.is_null() || !Pcache::is_active(p) { return -(EINVAL as c_int); }
+        let base_blkno = Pcache::align_blkno(blkno);
+
+        let _gp = Pcache::lock_local(p);
+        let page = Pcache::get_page_internal(p, base_blkno, Pcache::pgsize(), ptr::null_mut());
+        if page.is_null() {
+            return 0;
+        }
+        let _pg = Pcache::lock_page(page);
+        if !Pcache::page_valid(p, page) {
+            return 0;
+        }
+        let pcnode = Pcache::page_get_node(page);
+        if PcacheNode::blkno(pcnode) != base_blkno {
+            return 0;
+        }
+        if PcacheNode::io_in_progress(pcnode) != 0 {
+            return -(EBUSY as c_int);
+        }
+        if PcacheNode::lru_detached(pcnode) == 0 {
+            Pcache::remove_lru(p, page);
+        }
+        {
+            let _gt = Pcache::wlock_tree(p);
+            Pcache::rb_delete(p, pcnode);
+            Pcache::add_page_count(p, -1);
+        }
+        Pcache::page_set_node(page, ptr::null_mut());
+        Pcache::page_set_pcache(page, ptr::null_mut());
+        PcacheNode::set_page(pcnode, ptr::null_mut());
         drop(_pg);
         drop(_gp);
+        PcacheNode::free(pcnode);
+        Pcache::page_put(page);
+        0
+    }
 
-        let mut wait_for_completion = false;
-        let mut ret = xv6_pcache_ops_call_read_page(p, page);
-        if ret == -(EINPROGRESS as c_int) {
-            wait_for_completion = true;
-            ret = 0;
-        } else if ret != 0 {
-            let _ = pcache_node_io_end(p, page);
-            return ret;
+
+
+    pub(crate) fn flush(p: *mut Pcache)-> c_int  {
+        if p.is_null() { return -(EINVAL as c_int); }
+        let _gp = Pcache::lock_local(p);
+        if !Pcache::is_active(p) {
+            return -(EINVAL as c_int);
         }
+        let queued = Pcache::queue_work(p);
+        if !queued {
+            Pcache::set_flush_requested(p, 0);
+            Pcache::set_flush_error(p, -(EAGAIN as c_int));
+            return -(EAGAIN as c_int);
+        }
+        drop(_gp);
+        Pcache::wait_flush_complete(p)
+    }
 
-        if wait_for_completion {
-            let r = pcache_node_io_wait(p, page);
-            if r != 0 {
-                let _ = pcache_node_io_end(p, page);
-                return r;
+
+
+    pub(crate) fn sync()-> c_int  {
+        {
+            let _gg = Pcache::lock_global();
+            Pcache::flusher_start();
+        }
+        Pcache::wait_flusher()
+    }
+
+
+
+    pub(crate) fn read_page(p: *mut Pcache, page: *mut Page)-> c_int  {
+        if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
+
+        'retry_locked: loop {
+            let _gp = Pcache::lock_local(p);
+            let _pg = Pcache::lock_page(page);
+
+            if !Pcache::is_active(p) || !Pcache::page_valid(p, page) {
+                return -(EINVAL as c_int);
             }
-        }
+            let refcount = Pcache::page_ref_count(page);
+            if refcount < 2 {
+                Pcache::printf_read_refcount_too_small(page, refcount);
+                return -(EINVAL as c_int);
+            }
+            let pcnode = Pcache::page_get_node(page);
+            let blkno = PcacheNode::blkno(pcnode);
+            let size = (unsafe { NodeHandle::new(pcnode) }.size_get());
+            if blkno >= Pcache::blk_count(p) || size == 0 || size > Pcache::pgsize() {
+                Pcache::printf_read_invalid_meta(page, blkno, size);
+                return -(EINVAL as c_int);
+            }
 
-        let ret_post = {
-            let _gp = lock_pcache_local(p);
-            let _pg = lock_pcache_page(page);
-            let mut ret_post: c_int = 0;
-            if !pcache_page_valid(p, page) {
-                ret_post = -(EINVAL as c_int);
-            } else {
-                let pcnode = xv6_page_pcache_get_node(page);
-                if xv6_pcache_node_lru_detached(pcnode) == 0 {
-                    pcache_remove_lru(p, page);
+            if PcacheNode::io_in_progress(pcnode) != 0 {
+                let dirty = PcacheNode::dirty(pcnode);
+                let uptodate = PcacheNode::uptodate(pcnode);
+                drop(_pg);
+                drop(_gp);
+                if uptodate != 0 { return 0; }
+                if dirty == 0 && uptodate == 0 {
+                    let _ = Pcache::node_io_wait(p, page);
+                    continue 'retry_locked;
                 }
-                xv6_pcache_node_set_dirty(pcnode, 0);
-                xv6_pcache_node_set_uptodate(pcnode, 1);
+                Pcache::printf_io_unexpected(dirty, uptodate);
+                return -(EIO as c_int);
             }
-            ret_post
-        };
-        let _ = pcache_node_io_end(p, page);
-        return ret_post;
+
+            if PcacheNode::uptodate(pcnode) != 0 {
+                return 0;
+            }
+
+            let ret = Pcache::node_io_begin(p, page);
+            assert_msg(ret == 0, b"read_page: io_begin failed\0");
+
+            drop(_pg);
+            drop(_gp);
+
+            let mut wait_for_completion = false;
+            let mut ret = Pcache::ops_call_read_page(p, page);
+            if ret == -(EINPROGRESS as c_int) {
+                wait_for_completion = true;
+                ret = 0;
+            } else if ret != 0 {
+                let _ = Pcache::node_io_end(p, page);
+                return ret;
+            }
+
+            if wait_for_completion {
+                let r = Pcache::node_io_wait(p, page);
+                if r != 0 {
+                    let _ = Pcache::node_io_end(p, page);
+                    return r;
+                }
+            }
+
+            let ret_post = {
+                let _gp = Pcache::lock_local(p);
+                let _pg = Pcache::lock_page(page);
+                let mut ret_post: c_int = 0;
+                if !Pcache::page_valid(p, page) {
+                    ret_post = -(EINVAL as c_int);
+                } else {
+                    let pcnode = Pcache::page_get_node(page);
+                    if PcacheNode::lru_detached(pcnode) == 0 {
+                        Pcache::remove_lru(p, page);
+                    }
+                    PcacheNode::set_dirty(pcnode, 0);
+                    PcacheNode::set_uptodate(pcnode, 1);
+                }
+                ret_post
+            };
+            let _ = Pcache::node_io_end(p, page);
+            return ret_post;
+        }
     }
-}
 
-// ===========================================================================
-// Diagnostics and syscall handlers
-// ===========================================================================
 
-pub(crate) fn dump_pcache_stats(p: *mut Pcache) {
-    if p.is_null() { return; }
-    let _gp = lock_pcache_local(p);
-    xv6_pcache_printf_stats_header(p);
-    xv6_pcache_printf_stats_body(
-        xv6_pcache_active(p),
-        xv6_pcache_blk_count(p),
-        xv6_pcache_dirty_count(p),
-        xv6_pcache_lru_count(p),
-        xv6_pcache_page_count(p),
-        xv6_pcache_max_pages(p) as i64,
-        xv6_pcache_dirty_rate(p) as c_int,
-        xv6_pcache_flush_requested(p),
-        xv6_pcache_flush_error(p),
-    );
-}
+    // ===========================================================================
+    // Diagnostics and syscall handlers
+    // ===========================================================================
 
-pub(crate) fn dump_all_pcache_stats() {
-    let _gg = lock_pcache_global();
-    xv6_pcache_printf_dump_all_header(_gg.global_count());
-    for cur in global_pcache_iter() {
-        dump_pcache_stats(cur);
+
+    pub(crate) fn dump_stats(p: *mut Pcache) {
+        if p.is_null() { return; }
+        let _gp = Pcache::lock_local(p);
+        Pcache::printf_stats_header(p);
+        Pcache::printf_stats_body(
+            Pcache::active(p),
+            Pcache::blk_count(p),
+            Pcache::dirty_count(p),
+            Pcache::lru_count(p),
+            Pcache::page_count(p),
+            Pcache::max_pages(p) as i64,
+            Pcache::dirty_rate(p) as c_int,
+            Pcache::flush_requested(p),
+            Pcache::flush_error(p),
+        );
     }
-}
 
-pub(crate) fn pcache_shrink_caches() {
-    slab_cache_shrink(node_slab(), 0x7fff_ffff);
+
+
+    pub(crate) fn dump_all_stats() {
+        let _gg = Pcache::lock_global();
+        Pcache::printf_dump_all_header(_gg.global_count());
+        for cur in Pcache::global_iter() {
+            Pcache::dump_stats(cur);
+        }
+    }
+
+
+
+    pub(crate) fn shrink_caches() {
+        unsafe { crate::mm::slab::slab_cache_shrink(Pcache::node_slab() as *mut crate::mm::slab::SlabCache, 0x7fff_ffff) };
+    }
 }
 
 pub(crate) extern "C" fn sys_sync()-> u64  {
-    let ret = pcache_sync();
+    let ret = Pcache::sync();
     if ret != 0 {
-        xv6_pcache_printf_sys_sync_failed(ret);
+        Pcache::printf_sys_sync_failed(ret);
     }
     0
 }
 
 pub(crate) extern "C" fn sys_dumppcache()-> u64  {
-    dump_all_pcache_stats();
+    Pcache::dump_all_stats();
     0
 }

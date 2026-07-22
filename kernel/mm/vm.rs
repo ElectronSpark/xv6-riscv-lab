@@ -250,31 +250,31 @@ pub(crate) use crate::sbi::sbi_remote_hfence_vma;
     }
     /// SAFETY: `pc` must be a live `Pcache` (`crate::mm::pcache::pcache_get_page`'s contract).
     pub fn pcache_get_page(pc: *mut c_void, blkno: u64) -> *mut c_void {
-        crate::mm::pcache::pcache_get_page(pc as *mut crate::bindings::pcache, blkno)
+        crate::mm::pcache::Pcache::get_page(pc as *mut crate::bindings::pcache, blkno)
             as *mut c_void
     }
     /// SAFETY: `pc`/`page` must be live (`crate::mm::pcache::pcache_put_page`'s contract).
     pub fn pcache_put_page(pc: *mut c_void, page: *mut c_void) {
-        crate::mm::pcache::pcache_put_page(
+        crate::mm::pcache::Pcache::put_page(
             pc as *mut crate::bindings::pcache,
             page as *mut crate::mm::pcache::Page,
         );
     }
     /// SAFETY: see `pcache_put_page` above.
     pub fn pcache_read_page(pc: *mut c_void, page: *mut c_void) -> c_int {
-        crate::mm::pcache::pcache_read_page(
+        crate::mm::pcache::Pcache::read_page(
             pc as *mut crate::bindings::pcache,
             page as *mut crate::mm::pcache::Page,
         )
     }
     /// SAFETY: `page` must be a live `Page` (`xv6_page_pcache_get_node`'s contract).
     pub fn xv6_page_pcache_get_node(page: *mut c_void) -> *mut c_void {
-        crate::mm::pcache::xv6_page_pcache_get_node(page as *mut crate::mm::pcache::Page)
+        crate::mm::pcache::Pcache::page_get_node(page as *mut crate::mm::pcache::Page)
             as *mut c_void
     }
     /// SAFETY: `n` must be a live `PcacheNode` (`xv6_pcache_node_data`'s contract).
     pub fn xv6_pcache_node_data(n: *mut c_void) -> *mut c_void {
-        crate::mm::pcache::xv6_pcache_node_data(n as *mut crate::mm::pcache::PcacheNode)
+        crate::mm::pcache::PcacheNode::data(n as *mut crate::mm::pcache::PcacheNode)
     }
 }
 use ffi::*;

@@ -62,8 +62,7 @@ unsafe extern "C" {
 // file already uses) — plain `use` instead of the `extern "C"`
 // redeclarations that used to sit in the block above.
 use crate::mm::{
-    pcache_get_page, pcache_init, pcache_mark_page_dirty, pcache_put_page, pcache_read_page,
-    pcache_teardown, vm_copyin, vm_copyout, xv6_page_pcache_get_node,
+    vm_copyin, vm_copyout, Pcache,
 };
 
 // `page_alloc`/`page_free` are genuinely `unsafe fn` in
@@ -114,7 +113,7 @@ fn tmpfs_iblock_offset(pos: loff_t) -> loff_t {
 // ===========================================================================
 
 extern "C" fn tmpfs_pcache_read_page(_pcache: *mut pcache, page: *mut page_t) -> c_int {
-    let pcn = xv6_page_pcache_get_node(page);
+    let pcn = Pcache::page_get_node(page);
     // SAFETY: `pcn` is a live `pcache_node` (caller's contract, matches
     // the C `pcache_ops.read_page` callback convention).
     unsafe { memset((*pcn).data, 0, crate::bindings::PGSIZE as usize) };
@@ -152,7 +151,7 @@ pub(crate) extern "C" fn tmpfs_inode_pcache_init(inode: *mut vfs_inode) {
             & !(PCACHE_BLKS_PER_PAGE - 1);
     }
 
-    let ret = pcache_init(pc);
+    let ret = Pcache::init(pc);
     if ret != 0 {
         return; // proceed without pcache
     }
@@ -172,7 +171,7 @@ pub(crate) extern "C" fn tmpfs_inode_pcache_teardown(inode: *mut vfs_inode) {
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     // SAFETY: `pc` is live embedded storage.
     if unsafe { (*pc).flags.bits.active() != 0 } {
-        pcache_teardown(pc);
+        Pcache::teardown(pc);
     }
 }
 
@@ -244,7 +243,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         }
 
         let blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
-        let page = pcache_get_page(pc, blkno_512);
+        let page = Pcache::get_page(pc, blkno_512);
         if page.is_null() {
             vfs_iunlock(inode);
             if bytes_read == 0 {
@@ -252,23 +251,23 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
             }
             return Ok(bytes_read as isize);
         }
-        let ret = pcache_read_page(pc, page);
+        let ret = Pcache::read_page(pc, page);
         if ret != 0 {
-            pcache_put_page(pc, page);
+            Pcache::put_page(pc, page);
             vfs_iunlock(inode);
             if bytes_read == 0 {
                 return Err(Errno::Io);
             }
             return Ok(bytes_read as isize);
         }
-        let pcn = xv6_page_pcache_get_node(page);
+        let pcn = Pcache::page_get_node(page);
         // SAFETY: `pcn` is live; `block_off < PGSIZE`.
         let data = unsafe { ((*pcn).data as *mut u8).add(block_off) };
 
         if user {
             // SAFETY: `current()` is the live running thread.
             if vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, chunk as u64) < 0 {
-                pcache_put_page(pc, page);
+                Pcache::put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_read == 0 {
                     return Err(Errno::Fault);
@@ -278,7 +277,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         } else {
             unsafe { memmove(buf.add(bytes_read) as *mut c_void, data as *const c_void, chunk) };
         }
-        pcache_put_page(pc, page);
+        Pcache::put_page(pc, page);
 
         bytes_read += chunk;
         pos += chunk as loff_t;
@@ -370,7 +369,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
         }
 
         let blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
-        let page = pcache_get_page(pc, blkno_512);
+        let page = Pcache::get_page(pc, blkno_512);
         if page.is_null() {
             vfs_iunlock(inode);
             if bytes_written == 0 {
@@ -378,9 +377,9 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             }
             return Ok(bytes_written as isize);
         }
-        let ret = pcache_read_page(pc, page);
+        let ret = Pcache::read_page(pc, page);
         if ret != 0 {
-            pcache_put_page(pc, page);
+            Pcache::put_page(pc, page);
             vfs_iunlock(inode);
             if bytes_written == 0 {
                 // Cross-module already-negative `c_int` — passthrough.
@@ -388,14 +387,14 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             }
             return Ok(bytes_written as isize);
         }
-        let pcn = xv6_page_pcache_get_node(page);
+        let pcn = Pcache::page_get_node(page);
         // SAFETY: `pcn` is live; `block_off < PGSIZE`.
         let data = unsafe { ((*pcn).data as *mut u8).add(block_off) };
 
         if user {
             // SAFETY: `current()` is the live running thread.
             if vm_copyin(unsafe { (*current()).vm }, data as *mut c_void, unsafe { buf.add(bytes_written) } as u64, chunk as u64) < 0 {
-                pcache_put_page(pc, page);
+                Pcache::put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_written == 0 {
                     return Err(Errno::Fault);
@@ -405,8 +404,8 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
         } else {
             unsafe { memmove(data as *mut c_void, buf.add(bytes_written) as *const c_void, chunk) };
         }
-        pcache_mark_page_dirty(pc, page);
-        pcache_put_page(pc, page);
+        Pcache::mark_page_dirty(pc, page);
+        Pcache::put_page(pc, page);
 
         bytes_written += chunk;
         pos += chunk as loff_t;
@@ -540,21 +539,21 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
     let block_idx = tmpfs_iblock(file_off as loff_t) as u64;
     let blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
 
-    let pcpage = pcache_get_page(pc, blkno_512);
+    let pcpage = Pcache::get_page(pc, blkno_512);
     if pcpage.is_null() {
         vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
-    let ret = pcache_read_page(pc, pcpage);
+    let ret = Pcache::read_page(pc, pcpage);
     if ret != 0 {
-        pcache_put_page(pc, pcpage);
+        Pcache::put_page(pc, pcpage);
         vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
 
-    let pcn = xv6_page_pcache_get_node(pcpage);
+    let pcn = Pcache::page_get_node(pcpage);
     // SAFETY: `pcn` is a live `pcache_node` just populated above.
     unsafe { memmove(pa, (*pcn).data as *const c_void, bytes_to_read as usize) };
     if bytes_to_read < crate::bindings::PGSIZE as u64 {
@@ -567,7 +566,7 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
         }
     }
 
-    pcache_put_page(pc, pcpage);
+    Pcache::put_page(pc, pcpage);
     vfs_iunlock(inode);
     pa
 }

@@ -40,10 +40,7 @@ unsafe extern "C" {
 // bindgen `pcache`/`page_t`/`pcache_node` this file already uses) —
 // plain `use` instead of the `extern "C"` redeclarations that used to
 // sit in the block above.
-use crate::mm::{
-    pcache_discard_blk, pcache_get_page, pcache_mark_page_dirty, pcache_put_page,
-    pcache_read_page, pcache_teardown, xv6_page_pcache_get_node,
-};
+use crate::mm::Pcache;
 
 /* Convert block size to 512-byte units for pcache. */
 const PCACHE_BLKS_PER_PAGE: u64 = PGSIZE as u64 / 512;
@@ -103,7 +100,7 @@ fn __tmpfs_truncate_shrink(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
     // `xv6fs_itrunc`'s `for j in 0..N` block-walk style (e3cb8a0).
     for blk in first_discard..old_block_cnt {
         let blkno_512 = (blk as u64) * PCACHE_BLKS_PER_PAGE;
-        pcache_discard_blk(pc, blkno_512);
+        Pcache::discard_blk(pc, blkno_512);
     }
     0
 }
@@ -160,25 +157,25 @@ pub(crate) extern "C" fn __tmpfs_migrate_to_allocated_blocks(ti: *mut tmpfs_inod
 
     // Copy the old embedded data into the first page.
     if size > 0 {
-        let page = pcache_get_page(pc, 0);
+        let page = Pcache::get_page(pc, 0);
         if page.is_null() {
-            pcache_teardown(pc);
+            Pcache::teardown(pc);
             return neg(ENOMEM);
         }
-        let ret = pcache_read_page(pc, page);
+        let ret = Pcache::read_page(pc, page);
         if ret != 0 {
-            pcache_put_page(pc, page);
-            pcache_teardown(pc);
+            Pcache::put_page(pc, page);
+            Pcache::teardown(pc);
             return ret;
         }
-        let pcn = xv6_page_pcache_get_node(page);
+        let pcn = Pcache::page_get_node(page);
         // SAFETY: `pcn` is a live `pcache_node` just populated by
         // `pcache_read_page`.
         unsafe {
             memcpy((*pcn).data, embedded_copy.as_ptr() as *const c_void, size as usize);
         }
-        pcache_mark_page_dirty(pc, page);
-        pcache_put_page(pc, page);
+        Pcache::mark_page_dirty(pc, page);
+        Pcache::put_page(pc, page);
     }
 
     0

@@ -226,7 +226,7 @@ use crate::bufcache::{bread, brelse, bwrite};
 // P3-D3a: `pcache_init`/`xv6_page_pcache_get_node` (mm/pcache.rs) are
 // ordinary (safe) Rust fns now that their `#[no_mangle]` exports are
 // gone; identical signatures, plain `use`.
-use crate::mm::{pcache_init, xv6_page_pcache_get_node};
+use crate::mm::Pcache;
 
 // The slab entry points are genuinely `unsafe fn` in `crate::mm::slab`;
 // this file's original extern declarations asserted `safe fn` (usual FFI
@@ -385,7 +385,7 @@ extern "C" fn xv6fs_pcache_read_page(pc: *mut pcache, page: *mut page_t) -> c_in
         let inode = (*pc).private_data as *mut vfs_inode;
         let ip = inode as *mut xv6fs_inode;
         let xv6_sb = (*inode).sb as *mut xv6fs_superblock;
-        let pcnode = xv6_page_pcache_get_node(page);
+        let pcnode = Pcache::page_get_node(page);
         let base_bn = (*pcnode).blkno / BLK512_PER_BSIZE;
 
         for i in 0..BSIZE_PER_PAGE as u64 {
@@ -444,7 +444,7 @@ extern "C" fn xv6fs_pcache_write_page(pc: *mut pcache, page: *mut page_t) -> c_i
 
         let ip = inode as *mut xv6fs_inode;
         let xv6_sb = (*inode).sb as *mut xv6fs_superblock;
-        let pcnode = xv6_page_pcache_get_node(page);
+        let pcnode = Pcache::page_get_node(page);
         let base_bn = (*pcnode).blkno / BLK512_PER_BSIZE;
 
         for i in 0..BSIZE_PER_PAGE as u64 {
@@ -516,7 +516,7 @@ pub(crate) extern "C" fn xv6fs_inode_pcache_init(inode: *mut vfs_inode) {
         let maxfile_blk512 = super::MAXFILE as u64 * BLK512_PER_BSIZE;
         (*pc).blk_count = (maxfile_blk512 + 7) & !7u64;
 
-        let ret = pcache_init(pc);
+        let ret = Pcache::init(pc);
         if ret != 0 {
             return; // proceed without pcache
         }

@@ -264,7 +264,7 @@ use crate::bufcache::{bread, brelse};
 // `use`. `slab_free` is genuinely `unsafe fn` in `crate::mm::slab`; the
 // thin wrapper preserves the `safe fn` facade the old redeclaration
 // asserted (see `cffi::raw`'s identical note).
-use crate::mm::pcache_teardown;
+use crate::mm::Pcache;
 
 /// SAFETY: `obj` must originate from the paired `slab_alloc`
 /// (see [`crate::mm::slab::slab_free`]'s contract).
@@ -1107,7 +1107,7 @@ fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
         // releasing the file reference. 2. The data is being truncated below
         // anyway.
         if (*inode).i_data.flags.bits.active() != 0 {
-            pcache_teardown(ptr::addr_of_mut!((*inode).i_data));
+            Pcache::teardown(ptr::addr_of_mut!((*inode).i_data));
         }
 
         // Note: Transaction is managed by VFS layer (vfs_iput calls
@@ -1145,7 +1145,7 @@ fn xv6fs_free_inode(inode: *mut vfs_inode) {
     // SAFETY: `inode` is live.
     unsafe {
         if (*inode).i_data.flags.bits.active() != 0 {
-            pcache_teardown(ptr::addr_of_mut!((*inode).i_data));
+            Pcache::teardown(ptr::addr_of_mut!((*inode).i_data));
         }
     }
 

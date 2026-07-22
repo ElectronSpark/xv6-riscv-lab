@@ -22,7 +22,7 @@
 //! `pcache_node` by hand, so those port over unchanged in spirit. The few
 //! that built a raw `page_t`/`pcache_node` on the stack (`init_mock_page`/
 //! `init_mock_node`/`make_dirty_page`) are rewritten to source a *real*
-//! page: `pcache_get_page()` for anything meant to already belong to the
+//! page: `Pcache::get_page()` for anything meant to already belong to the
 //! cache, or `__page_alloc()` (a real, un-typed buddy page) for the two
 //! cases that specifically want a page NOT owned by this pcache. This
 //! matters because `page_lock_acquire`/`page_lock_release` (and most of
@@ -55,10 +55,10 @@
 //!     real seam.
 //!   * `test_pcache_flusher_force_round_flushes_dirty_page` — called
 //!     `pcache_test_run_flusher_round(start, true)` (force=true). Reading
-//!     the real `pcache_flush()` public API confirms force-flushing a
+//!     the real `Pcache::flush()` public API confirms force-flushing a
 //!     specific pcache *is* precisely what it does — so this case collapses
 //!     into (and is subsumed by) T20 (`flush_cleans_dirty_page`), which
-//!     already calls the real `pcache_flush()`.
+//!     already calls the real `Pcache::flush()`.
 //!   * `test_pcache_flusher_respects_dirty_threshold` /
 //!     `test_pcache_flusher_time_based_flush` — these test the *private*
 //!     periodic flusher kthread's dirty-rate%/time-interval gating logic
@@ -76,7 +76,7 @@
 //!   * A2 `background_flusher_eventually_cleans` — an end-to-end substitute
 //!     for the two dropped threshold/time-based cases: dirties a page and
 //!     waits (bounded) for the real periodic flusher kthread to clean it
-//!     *without* an explicit `pcache_flush()` call, proving the background
+//!     *without* an explicit `Pcache::flush()` call, proving the background
 //!     path works even though its internal gating math isn't unit-testable
 //!     from here.
 //!
@@ -117,9 +117,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::bindings::page_t as Page;
 use crate::bindings::{pcache_ops, EAGAIN, EBUSY, EINVAL, EIO};
 pub(crate) use crate::mm::{
-    __page_alloc, __page_free, page_lock_acquire, page_lock_release, pcache_flush,
-    pcache_get_page, pcache_init, pcache_invalidate_page, pcache_mark_page_dirty,
-    pcache_put_page, pcache_read_page, pcache_teardown, xv6_page_pcache_get_node, Pcache,
+    __page_alloc, __page_free, page_lock_acquire, page_lock_release, Pcache,
     PcacheNode,
 };
 
@@ -351,25 +349,25 @@ fn with_cache(blk_count: u64, max_pages: u64, body: impl FnOnce(*mut Pcache)) {
             (*p).max_pages = max_pages;
         }
     }
-    let rc = pcache_init(p);
+    let rc = Pcache::init(p);
     if rc != 0 {
         crate::kprintln!("pcache_init failed rc={}", rc);
         case_fail();
         return;
     }
     body(p);
-    pcache_teardown(p);
+    Pcache::teardown(p);
 }
 
 /// `pcache_get_page` + basic sanity, mirroring the C `create_cached_page`
 /// helper every already-real-path case in the old suite used.
 fn create_cached_page(cache: *mut Pcache, blkno: u64) -> *mut Page {
-    let page = pcache_get_page(cache, blkno);
+    let page = Pcache::get_page(cache, blkno);
     if page.is_null() {
         case_fail();
         return page;
     }
-    let node = xv6_page_pcache_get_node(page);
+    let node = Pcache::page_get_node(page);
     if node.is_null() {
         case_fail();
         return page;
@@ -443,7 +441,7 @@ fn free_foreign_page(page: *mut Page) {
 /// max(1, page_count * dirty_rate / 100)`. With a single dirty page in an
 /// otherwise-empty cache that's `1 >= max(1, 1*15/100) == 1` — true
 /// immediately, with no time gate — so a cache holding just one dirty page
-/// races the flusher tests' own explicit `pcache_flush()` calls (T20-T23)
+/// races the flusher tests' own explicit `Pcache::flush()` calls (T20-T23)
 /// against this suite's whitebox `WRITE_*_CALLS` counters, which can then
 /// observe extra/duplicate callback invocations from whichever side won
 /// the race. Padding `page_count` well above the dirty-rate threshold
@@ -455,12 +453,12 @@ fn free_foreign_page(page: *mut Page) {
 fn pad_clean_pages(cache: *mut Pcache, pad_base: u64, n: u64) {
     for i in 0..n {
         let blkno = (pad_base + i) * BLKS_PER_PAGE;
-        let p = pcache_get_page(cache, blkno);
+        let p = Pcache::get_page(cache, blkno);
         if p.is_null() {
             case_fail();
             continue;
         }
-        pcache_put_page(cache, p);
+        Pcache::put_page(cache, p);
     }
 }
 
@@ -494,13 +492,13 @@ fn t02_get_page_from_lru() {
         if page.is_null() {
             return;
         }
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
         // SAFETY: plain field reads on this test's own cache.
         unsafe { check_eq!((*cache).lru_count, 1); }
-        let result = pcache_get_page(cache, 20);
+        let result = Pcache::get_page(cache, 20);
         check!(result == page);
         unsafe { check_eq!((*cache).lru_count, 0); }
-        pcache_put_page(cache, result);
+        Pcache::put_page(cache, result);
     });
 }
 
@@ -510,15 +508,15 @@ fn t03_mark_page_dirty_tracks_state() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        let rc = pcache_mark_page_dirty(cache, page);
+        let node = Pcache::page_get_node(page);
+        let rc = Pcache::mark_page_dirty(cache, page);
         check_eq!(rc, 0);
         check!(node_dirty(node));
         check!(node_uptodate(node));
         unsafe { check_eq!((*cache).dirty_count, 1); }
         check_eq!(MARK_DIRTY_CALLS.load(Ordering::SeqCst), 1);
-        check_eq!(pcache_invalidate_page(cache, page), 0);
-        pcache_put_page(cache, page);
+        check_eq!(Pcache::invalidate_page(cache, page), 0);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -528,15 +526,15 @@ fn t04_mark_page_dirty_busy() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
+        let node = Pcache::page_get_node(page);
         set_io_in_progress(page, node, true);
-        let rc = pcache_mark_page_dirty(cache, page);
+        let rc = Pcache::mark_page_dirty(cache, page);
         check_eq!(rc, -(EBUSY as c_int));
         check!(!node_dirty(node));
         unsafe { check_eq!((*cache).dirty_count, 0); }
         check_eq!(MARK_DIRTY_CALLS.load(Ordering::SeqCst), 0);
         set_io_in_progress(page, node, false);
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -546,7 +544,7 @@ fn t05_mark_page_dirty_detaches_lru() {
         if page.is_null() {
             return;
         }
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
         unsafe {
             check_eq!((*cache).lru_count, 1);
             check_eq!((*cache).dirty_count, 0);
@@ -562,14 +560,14 @@ fn t05_mark_page_dirty_detaches_lru() {
             (*page).ref_count = 2;
             pg_unlock(page);
         }
-        let rc = pcache_mark_page_dirty(cache, page);
+        let rc = Pcache::mark_page_dirty(cache, page);
         check_eq!(rc, 0);
         unsafe {
             check_eq!((*cache).dirty_count, 1);
             check_eq!((*cache).lru_count, 0);
         }
-        check_eq!(pcache_invalidate_page(cache, page), 0);
-        pcache_put_page(cache, page);
+        check_eq!(Pcache::invalidate_page(cache, page), 0);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -579,12 +577,12 @@ fn t06_mark_page_dirty_idempotent() {
         if page.is_null() {
             return;
         }
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
         unsafe { check_eq!((*cache).dirty_count, 1); }
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
         unsafe { check_eq!((*cache).dirty_count, 1); }
-        check_eq!(pcache_invalidate_page(cache, page), 0);
-        pcache_put_page(cache, page);
+        check_eq!(Pcache::invalidate_page(cache, page), 0);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -595,7 +593,7 @@ fn t07_mark_page_dirty_rejects_invalid_page() {
             case_fail();
             return;
         }
-        let rc = pcache_mark_page_dirty(cache, page);
+        let rc = Pcache::mark_page_dirty(cache, page);
         check_eq!(rc, -(EINVAL as c_int));
         unsafe { check_eq!((*cache).dirty_count, 0); }
         free_foreign_page(page);
@@ -608,15 +606,15 @@ fn t08_invalidate_dirty_page() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
         unsafe { check_eq!((*cache).dirty_count, 1); }
-        let rc = pcache_invalidate_page(cache, page);
+        let rc = Pcache::invalidate_page(cache, page);
         check_eq!(rc, 0);
         check!(!node_dirty(node));
         check!(!node_uptodate(node));
         unsafe { check_eq!((*cache).dirty_count, 0); }
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -626,9 +624,9 @@ fn t09_invalidate_clean_lru_page() {
         if page.is_null() {
             return;
         }
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
         unsafe { check_eq!((*cache).lru_count, 1); }
-        let rc = pcache_invalidate_page(cache, page);
+        let rc = Pcache::invalidate_page(cache, page);
         check_eq!(rc, 0);
         unsafe {
             check_eq!((*cache).lru_count, 0);
@@ -643,18 +641,18 @@ fn t10_invalidate_page_io_in_progress() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
         unsafe { check_eq!((*cache).dirty_count, 1); }
         set_io_in_progress(page, node, true);
-        check_eq!(pcache_invalidate_page(cache, page), -(EBUSY as c_int));
+        check_eq!(Pcache::invalidate_page(cache, page), -(EBUSY as c_int));
         check!(node_dirty(node));
         unsafe { check_eq!((*cache).dirty_count, 1); }
         set_io_in_progress(page, node, false);
-        check_eq!(pcache_invalidate_page(cache, page), 0);
+        check_eq!(Pcache::invalidate_page(cache, page), 0);
         check!(!node_dirty(node));
         unsafe { check_eq!((*cache).dirty_count, 0); }
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -665,7 +663,7 @@ fn t11_invalidate_page_invalid_page() {
             case_fail();
             return;
         }
-        check_eq!(pcache_invalidate_page(cache, page), -(EINVAL as c_int));
+        check_eq!(Pcache::invalidate_page(cache, page), -(EINVAL as c_int));
         unsafe {
             check_eq!((*cache).dirty_count, 0);
             check_eq!((*cache).lru_count, 0);
@@ -680,17 +678,17 @@ fn t12_get_page_from_dirty_refcount_one() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
         unsafe { check_eq!((*cache).dirty_count, 1); }
-        let result = pcache_get_page(cache, 22);
+        let result = Pcache::get_page(cache, 22);
         check!(result == page);
         unsafe { check_eq!((*cache).dirty_count, 1); }
         check!(node_dirty(node));
         // Two refs now (the original + this re-fetch): undo both.
-        pcache_put_page(cache, result);
-        check_eq!(pcache_invalidate_page(cache, page), 0);
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, result);
+        check_eq!(Pcache::invalidate_page(cache, page), 0);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -700,13 +698,13 @@ fn t13_get_page_from_dirty_refcount_many() {
         if page.is_null() {
             return;
         }
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
-        let extra = pcache_get_page(cache, 24);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
+        let extra = Pcache::get_page(cache, 24);
         check!(extra == page);
         unsafe { check_eq!((*cache).dirty_count, 1); }
-        pcache_put_page(cache, extra);
-        check_eq!(pcache_invalidate_page(cache, page), 0);
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, extra);
+        check_eq!(Pcache::invalidate_page(cache, page), 0);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -716,11 +714,11 @@ fn t14_get_page_up_to_date() {
         if page.is_null() {
             return;
         }
-        pcache_put_page(cache, page);
-        let result = pcache_get_page(cache, 26);
+        Pcache::put_page(cache, page);
+        let result = Pcache::get_page(cache, 26);
         check!(result == page);
-        check!(node_uptodate(xv6_page_pcache_get_node(result)));
-        pcache_put_page(cache, result);
+        check!(node_uptodate(Pcache::page_get_node(result)));
+        Pcache::put_page(cache, result);
     });
 }
 
@@ -730,7 +728,7 @@ fn t15_get_page_not_up_to_date() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
+        let node = Pcache::page_get_node(page);
         // SAFETY: `node` valid while this test holds a ref on `page`.
         unsafe {
             pg_lock(page);
@@ -743,8 +741,8 @@ fn t15_get_page_not_up_to_date() {
         // there is nothing worth keeping cached about a page whose data
         // was never populated), rather than parking it on the LRU list.
         // `page` is therefore invalid after this call.
-        pcache_put_page(cache, page);
-        let result = pcache_get_page(cache, 28);
+        Pcache::put_page(cache, page);
+        let result = Pcache::get_page(cache, 28);
         // The re-fetch allocates a "new" cache entry (the old one was just
         // reclaimed above) — but unlike the host cmocka mock (whose fixed
         // fixture-object allocator made the *pointer itself* an observable,
@@ -758,7 +756,7 @@ fn t15_get_page_not_up_to_date() {
         // T18/T19), so `uptodate` isn't asserted here.
         check!(!result.is_null());
         if !result.is_null() {
-            pcache_put_page(cache, result);
+            Pcache::put_page(cache, result);
         }
     });
 }
@@ -769,9 +767,9 @@ fn t16_get_page_eviction_success() {
         if victim.is_null() {
             return;
         }
-        pcache_put_page(cache, victim);
+        Pcache::put_page(cache, victim);
         unsafe { check_eq!((*cache).lru_count, 1); }
-        let new_page = pcache_get_page(cache, 32);
+        let new_page = Pcache::get_page(cache, 32);
         if new_page.is_null() {
             case_fail();
             return;
@@ -781,14 +779,14 @@ fn t16_get_page_eviction_success() {
             check_eq!((*cache).lru_count, 0);
         }
         check!(new_page != victim);
-        pcache_put_page(cache, new_page);
+        Pcache::put_page(cache, new_page);
     });
 }
 
 fn t17_get_page_invalid_block() {
     with_cache(64, 0, |cache| {
         let invalid_blk = unsafe { (*cache).blk_count } + 10;
-        let result = pcache_get_page(cache, invalid_blk);
+        let result = Pcache::get_page(cache, invalid_blk);
         check!(result.is_null());
     });
 }
@@ -799,7 +797,7 @@ fn t18_read_page_populates_clean_page() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
+        let node = Pcache::page_get_node(page);
         // SAFETY: see `t15`.
         unsafe {
             pg_lock(page);
@@ -807,12 +805,12 @@ fn t18_read_page_populates_clean_page() {
             (*node).flags.set_dirty(0);
             pg_unlock(page);
         }
-        let rc = pcache_read_page(cache, page);
+        let rc = Pcache::read_page(cache, page);
         check_eq!(rc, 0);
         check_eq!(READ_PAGE_CALLS.load(Ordering::SeqCst), 1);
         check!(node_uptodate(node));
         check!(!node_dirty(node));
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -822,18 +820,18 @@ fn t19_read_page_propagates_failure() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
+        let node = Pcache::page_get_node(page);
         unsafe {
             pg_lock(page);
             (*node).flags.set_uptodate(0);
             pg_unlock(page);
         }
         READ_PAGE_ERR.store(EIO as i32, Ordering::SeqCst);
-        let rc = pcache_read_page(cache, page);
+        let rc = Pcache::read_page(cache, page);
         check_eq!(rc, -(EIO as c_int));
         check_eq!(READ_PAGE_CALLS.load(Ordering::SeqCst), 1);
         check!(!node_uptodate(node));
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -844,10 +842,10 @@ fn t20_flush_cleans_dirty_page() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
-        pcache_put_page(cache, page); // back to a bare pcache-owned ref
-        let rc = pcache_flush(cache);
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
+        Pcache::put_page(cache, page); // back to a bare pcache-owned ref
+        let rc = Pcache::flush(cache);
         check_eq!(rc, 0);
         unsafe {
             check_eq!((*cache).dirty_count, 0);
@@ -871,18 +869,18 @@ fn t20_flush_cleans_dirty_page() {
 /// still satisfies). A **one-shot** injected failure (this suite's own
 /// `WRITE_*_ERR` atomics are consumed-on-read, matching how a single
 /// transient I/O error would look) is therefore retried and *succeeds* on
-/// the second pass, all inside one `pcache_flush()` call — T21/T22 assert
+/// the second pass, all inside one `Pcache::flush()` call — T21/T22 assert
 /// exactly that (call counts of 2 for the callback that failed and
 /// everything downstream of it, ending clean) rather than "one failure
 /// leaves the page permanently dirty", which the retry loop makes
-/// unreachable via a single `pcache_flush()` call without risking an
+/// unreachable via a single `Pcache::flush()` call without risking an
 /// actual unbounded retry hang (a *persistent* injected failure has no
 /// backoff or attempt cap in this loop — deliberately not exercised here).
 /// `cache.flush_error` is sticky (sits at the *first* failure's code, per
 /// the doc-noted pre-existing C behavior in `pcache.rs`'s history — see
 /// `flush_error keeps the write_page error instead of being overwritten
 /// by write_end's` in the crate's iteration log) and is what
-/// `pcache_flush()` itself returns, even though the retry ultimately
+/// `Pcache::flush()` itself returns, even though the retry ultimately
 /// cleaned the page.
 fn t21_flush_write_begin_failure() {
     with_cache(4096, 0, |cache| {
@@ -891,11 +889,11 @@ fn t21_flush_write_begin_failure() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
-        pcache_put_page(cache, page);
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
+        Pcache::put_page(cache, page);
         WRITE_BEGIN_ERR.store(EIO as i32, Ordering::SeqCst);
-        let rc = pcache_flush(cache);
+        let rc = Pcache::flush(cache);
         // Sticky `flush_error` from the failed first attempt; the retry
         // (attempt 2) succeeded and cleaned the page regardless.
         check_eq!(rc, -(EIO as c_int));
@@ -934,12 +932,12 @@ fn t22_flush_write_page_failure() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
-        pcache_put_page(cache, page);
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
+        Pcache::put_page(cache, page);
         WRITE_PAGE_ERR.store(EIO as i32, Ordering::SeqCst);
         WRITE_END_ERR.store(crate::bindings::EPIPE as i32, Ordering::SeqCst);
-        let rc = pcache_flush(cache);
+        let rc = Pcache::flush(cache);
         check_eq!(rc, -(EIO as c_int));
         unsafe {
             check_eq!((*cache).dirty_count, 0);
@@ -961,17 +959,17 @@ fn t23_flush_write_end_error_propagates() {
         if page.is_null() {
             return;
         }
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
-        pcache_put_page(cache, page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
+        Pcache::put_page(cache, page);
         // Hold an extra reference across the flush (mirrors the C
         // original's `page.ref_count = 2`): a page that's still externally
         // referenced when its write-end callback fails should end up
         // neither dirty nor on the LRU list (nothing decided it's safe to
         // reclaim yet), unlike T20's fully-unreferenced success path.
-        let extra = pcache_get_page(cache, 10);
+        let extra = Pcache::get_page(cache, 10);
         check!(extra == page);
         WRITE_END_ERR.store(crate::bindings::EAGAIN as i32, Ordering::SeqCst);
-        let rc = pcache_flush(cache);
+        let rc = Pcache::flush(cache);
         check_eq!(rc, -(EAGAIN as c_int));
         unsafe {
             check_eq!((*cache).dirty_count, 0);
@@ -982,7 +980,7 @@ fn t23_flush_write_end_error_propagates() {
         check_eq!(WRITE_END_CALLS.load(Ordering::SeqCst), 1);
         // Release the extra reference taken above, back to the baseline
         // "cached, unreferenced" refcount for `with_cache`'s teardown.
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -994,7 +992,7 @@ fn a1_teardown_then_reinit() {
     with_cache(4096, 0, |cache| {
         let page = create_cached_page(cache, 100);
         if !page.is_null() {
-            pcache_put_page(cache, page);
+            Pcache::put_page(cache, page);
         }
         // `with_cache` itself calls `pcache_teardown` after this closure
         // returns; reinitialize immediately here to prove the same
@@ -1016,10 +1014,10 @@ fn a2_background_flusher_eventually_cleans() {
         if page.is_null() {
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
-        check_eq!(pcache_mark_page_dirty(cache, page), 0);
-        pcache_put_page(cache, page);
-        // No explicit `pcache_flush()` call — wait for the real periodic
+        let node = Pcache::page_get_node(page);
+        check_eq!(Pcache::mark_page_dirty(cache, page), 0);
+        Pcache::put_page(cache, page);
+        // No explicit `Pcache::flush()` call — wait for the real periodic
         // flusher kthread (see `pcache_global_init`'s
         // `create_flusher_thread()`, always running once the kernel has
         // booted) to notice and clean this dirty page on its own. Bounded,
@@ -1038,7 +1036,7 @@ fn a2_background_flusher_eventually_cleans() {
         // flush also doesn't clear it (which would indicate a real bug,
         // not just gating).
         if node_dirty(node) {
-            check_eq!(pcache_flush(cache), 0);
+            check_eq!(Pcache::flush(cache), 0);
             check!(!node_dirty(node));
         }
         // No further `pcache_put_page` here: the put right after
@@ -1069,7 +1067,7 @@ extern "C" fn conc_get_page_thread(idx: u64, _a2: u64) {
     // SAFETY: `ctx` was populated by the spawning test before this thread
     // was woken, and nothing else touches slot `idx` concurrently.
     unsafe {
-        (*ctx).result = pcache_get_page((*ctx).cache, (*ctx).blkno);
+        (*ctx).result = Pcache::get_page((*ctx).cache, (*ctx).blkno);
     }
     CONC_DONE[idx as usize].store(1, Ordering::SeqCst);
 }
@@ -1093,8 +1091,8 @@ fn c1_conc_get_page_same_block() {
             let r1 = (*CONC_CTX[1].as_mut_ptr()).result;
             check!(!r0.is_null() && !r1.is_null());
             check!(r0 == r1);
-            if !r0.is_null() { pcache_put_page(cache, r0); }
-            if !r1.is_null() { pcache_put_page(cache, r1); }
+            if !r0.is_null() { Pcache::put_page(cache, r0); }
+            if !r1.is_null() { Pcache::put_page(cache, r1); }
         }
     });
 }
@@ -1117,8 +1115,8 @@ fn c2_conc_get_page_different_blocks() {
             let r1 = (*CONC_CTX[1].as_mut_ptr()).result;
             check!(!r0.is_null() && !r1.is_null());
             check!(r0 != r1);
-            if !r0.is_null() { pcache_put_page(cache, r0); }
-            if !r1.is_null() { pcache_put_page(cache, r1); }
+            if !r0.is_null() { Pcache::put_page(cache, r0); }
+            if !r1.is_null() { Pcache::put_page(cache, r1); }
         }
     });
 }
@@ -1136,7 +1134,7 @@ extern "C" fn conc_read_page_thread(idx: u64, _a2: u64) {
     let ctx = CONC_IO_CTX[idx as usize].as_mut_ptr();
     // SAFETY: see `conc_get_page_thread`.
     unsafe {
-        (*ctx).result = pcache_read_page((*ctx).cache, (*ctx).page);
+        (*ctx).result = Pcache::read_page((*ctx).cache, (*ctx).page);
     }
     CONC_DONE[idx as usize].store(1, Ordering::SeqCst);
 }
@@ -1144,12 +1142,12 @@ extern "C" fn conc_read_page_thread(idx: u64, _a2: u64) {
 fn c3_conc_io_wait_and_complete() {
     with_cache(4096, 0, |cache| {
         SLOW_READ.store(1, Ordering::SeqCst);
-        let page = pcache_get_page(cache, 16);
+        let page = Pcache::get_page(cache, 16);
         if page.is_null() {
             case_fail();
             return;
         }
-        let node = xv6_page_pcache_get_node(page);
+        let node = Pcache::page_get_node(page);
         unsafe {
             pg_lock(page);
             (*node).flags.set_uptodate(0);
@@ -1174,7 +1172,7 @@ fn c3_conc_io_wait_and_complete() {
         // read_page callback; the other should have waited on
         // `io_in_progress` and observed the already-populated page.
         check_eq!(READ_PAGE_CALLS.load(Ordering::SeqCst), 1);
-        pcache_put_page(cache, page);
+        Pcache::put_page(cache, page);
     });
 }
 
@@ -1205,7 +1203,7 @@ extern "C" fn conc_stress_thread(idx: u64, _a2: u64) {
         for i in 0..STRESS_PAGES_PER_THREAD {
             let blkno = ((*ctx).thread_id * STRESS_PAGES_PER_THREAD as u64 + i as u64)
                 * BLKS_PER_PAGE;
-            let page = pcache_get_page((*ctx).cache, blkno);
+            let page = Pcache::get_page((*ctx).cache, blkno);
             (*ctx).pages[i] = page;
             if !page.is_null() {
                 (*ctx).success += 1;
@@ -1259,7 +1257,7 @@ fn c4_conc_stress_get_pages() {
             }
         }
         for i in 0..total {
-            pcache_put_page(cache, all_pages[i]);
+            Pcache::put_page(cache, all_pages[i]);
         }
     });
 }
@@ -1283,10 +1281,10 @@ extern "C" fn conc_get_and_dirty_thread(idx: u64, _a2: u64) {
     let ctx = DIRTY_CTX[idx as usize].as_mut_ptr();
     // SAFETY: `ctx` populated by the spawning test before wakeup.
     unsafe {
-        (*ctx).page = pcache_get_page((*ctx).cache, (*ctx).blkno);
+        (*ctx).page = Pcache::get_page((*ctx).cache, (*ctx).blkno);
         (*ctx).get_ok = !(*ctx).page.is_null();
         if (*ctx).get_ok {
-            (*ctx).dirty_ok = pcache_mark_page_dirty((*ctx).cache, (*ctx).page) == 0;
+            (*ctx).dirty_ok = Pcache::mark_page_dirty((*ctx).cache, (*ctx).page) == 0;
         }
     }
     DIRTY_DONE[idx as usize].store(1, Ordering::SeqCst);
@@ -1321,8 +1319,8 @@ fn c5_conc_get_and_dirty() {
             // SAFETY: thread `i` joined above; `page` valid until put.
             let page = unsafe { (*DIRTY_CTX[i].as_mut_ptr()).page };
             if !page.is_null() {
-                check_eq!(pcache_invalidate_page(cache, page), 0);
-                pcache_put_page(cache, page);
+                check_eq!(Pcache::invalidate_page(cache, page), 0);
+                Pcache::put_page(cache, page);
             }
         }
     });
