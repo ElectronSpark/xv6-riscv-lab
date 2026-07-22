@@ -384,23 +384,29 @@ const _: () = {
 // declaration asserted `safe fn` (usual FFI facade) and typed `order` as
 // `c_int` rather than the real `u64` (non-negative small value under the
 // old C ABI). The thin wrapper preserves both.
+// ---------------- macros / helpers --------------------------------------
+// NOTE: these two `macro_rules!` must stay at true file/module scope (not
+// nested inside any `impl Scheduler { .. }` block below) -- macro_rules
+// textual scoping does not escape its enclosing block, so nesting them
+// inside an impl block would make `kassert!`/`kpanic!` invisible to every
+// *other* `impl Scheduler` block later in the file.
+macro_rules! kpanic { ($m:expr) => {{ xv6_panic(concat!($m, "\0").as_ptr() as *const c_char) }}; }
+macro_rules! kassert { ($c:expr, $m:expr) => {{ if !($c) { kpanic!($m); } }}; }
+
 /// SAFETY: `ptr` must originate from the paired `page_alloc`
 /// (see `crate::mm::page::page_free`'s contract).
+impl Scheduler {
 #[inline]
 fn page_free(ptr: *mut c_void, order: c_int) {
     unsafe { crate::mm::page_free(ptr, order as u64) };
 }
-
-// ---------------- macros / helpers --------------------------------------
-macro_rules! kpanic { ($m:expr) => {{ xv6_panic(concat!($m, "\0").as_ptr() as *const c_char) }}; }
-macro_rules! kassert { ($c:expr, $m:expr) => {{ if !($c) { kpanic!($m); } }}; }
 
 #[inline] fn cpu_access<'a>() -> CpuLocalRef<'a> {
     // SAFETY: `cpu_local_ptr()` indexes into statically-allocated, always-initialized
     // per-CPU storage; never null.
     unsafe { CpuLocalRef::assume(cpu_local_ptr()) }
 }
-#[inline] fn current_thread() -> *mut thread { cpu_access().proc_ptr() }
+#[inline] fn current_thread() -> *mut thread { Scheduler::cpu_access().proc_ptr() }
 
 #[inline(always)]
 fn ta_of<'a>(p: *mut thread) -> Option<ThreadAccess<'a>> {
@@ -413,16 +419,16 @@ fn lk_of<'a>(p: *mut spinlock_t) -> Option<SpinLockRef<'a>> {
 
 #[inline]
 fn cpu_in_itr() -> bool {
-    cpu_access().flag_set(CPU_FLAG_IN_ITR)
+    Scheduler::cpu_access().flag_set(CPU_FLAG_IN_ITR)
 }
 
 #[inline]
 fn thread_state_get(p: *mut thread) -> thread_state {
-    ta_of(p).map_or(THREAD_UNUSED, |t| t.state_load() as thread_state)
+    Scheduler::ta_of(p).map_or(THREAD_UNUSED, |t| t.state_load() as thread_state)
 }
 #[inline]
 fn thread_state_set(p: *mut thread, s: thread_state) {
-    if let Some(t) = ta_of(p) { t.state_store(s as u32); }
+    if let Some(t) = Scheduler::ta_of(p) { t.state_store(s as u32); }
 }
 #[inline] fn state_is_sleeping(s: thread_state) -> bool {
     s == THREAD_INTERRUPTIBLE || s == THREAD_UNINTERRUPTIBLE
@@ -439,25 +445,25 @@ fn thread_state_set(p: *mut thread, s: thread_state) {
 #[inline] fn state_is_stopped(s: thread_state) -> bool { s == THREAD_STOPPED }
 #[inline] fn state_is_zombie(s: thread_state) -> bool { s == THREAD_ZOMBIE }
 
-#[inline] fn thread_sleeping(p: *mut thread) -> bool { state_is_sleeping(thread_state_get(p)) }
-#[inline] fn thread_running(p: *mut thread) -> bool { state_is_running(thread_state_get(p)) }
-#[inline] fn thread_zombie(p: *mut thread) -> bool { state_is_zombie(thread_state_get(p)) }
-#[inline] fn thread_stopped(p: *mut thread) -> bool { state_is_stopped(thread_state_get(p)) }
-#[inline] fn thread_killable(p: *mut thread) -> bool { state_is_killable(thread_state_get(p)) }
-#[inline] fn thread_timer(p: *mut thread) -> bool { state_is_timer(thread_state_get(p)) }
-#[inline] fn thread_interruptible(p: *mut thread) -> bool { state_is_interruptible(thread_state_get(p)) }
+#[inline] fn thread_sleeping(p: *mut thread) -> bool { Scheduler::state_is_sleeping(Scheduler::thread_state_get(p)) }
+#[inline] fn thread_running(p: *mut thread) -> bool { Scheduler::state_is_running(Scheduler::thread_state_get(p)) }
+#[inline] fn thread_zombie(p: *mut thread) -> bool { Scheduler::state_is_zombie(Scheduler::thread_state_get(p)) }
+#[inline] fn thread_stopped(p: *mut thread) -> bool { Scheduler::state_is_stopped(Scheduler::thread_state_get(p)) }
+#[inline] fn thread_killable(p: *mut thread) -> bool { Scheduler::state_is_killable(Scheduler::thread_state_get(p)) }
+#[inline] fn thread_timer(p: *mut thread) -> bool { Scheduler::state_is_timer(Scheduler::thread_state_get(p)) }
+#[inline] fn thread_interruptible(p: *mut thread) -> bool { Scheduler::state_is_interruptible(Scheduler::thread_state_get(p)) }
 
 #[inline]
 fn thread_set_flag(p: *mut thread, bit: u64) {
-    if let Some(t) = ta_of(p) { t.flags_set_bit(bit); }
+    if let Some(t) = Scheduler::ta_of(p) { t.flags_set_bit(bit); }
 }
 #[inline]
 fn thread_clear_flag(p: *mut thread, bit: u64) {
-    if let Some(t) = ta_of(p) { t.flags_clear_bit(bit); }
+    if let Some(t) = Scheduler::ta_of(p) { t.flags_clear_bit(bit); }
 }
 #[inline]
 fn thread_test_flag(p: *mut thread, bit: u64) -> bool {
-    ta_of(p).map_or(false, |t| t.flags_test_bit(bit))
+    Scheduler::ta_of(p).map_or(false, |t| t.flags_test_bit(bit))
 }
 
 #[inline]
@@ -469,6 +475,7 @@ fn thread_from_context(ctx: *mut context) -> *mut thread {
     // `thread_from_context`, a kernel-internal context-switch helper always
     // invoked with such a pointer.
     unsafe { SchedEntityRef::assume(se) }.thread_ptr()
+}
 }
 
 // ---------------- static lock + chan queue ------------------------------
@@ -486,6 +493,7 @@ unsafe impl<T> Sync for SyncBuf<T> {}
 static SLEEP_LOCK: SyncBuf<spinlock_t> = SyncBuf(UnsafeCell::new(MaybeUninit::uninit()));
 static CHAN_QUEUE_ROOT: SyncBuf<ttree_t> = SyncBuf(UnsafeCell::new(MaybeUninit::uninit()));
 
+impl Scheduler {
 #[inline] fn sleep_lock_ptr() -> *mut spinlock_t {
     SLEEP_LOCK.0.get() as *mut spinlock_t
 }
@@ -495,62 +503,68 @@ static CHAN_QUEUE_ROOT: SyncBuf<ttree_t> = SyncBuf(UnsafeCell::new(MaybeUninit::
 
 #[inline]
 fn sleep_lock_ref<'a>() -> SpinLockRef<'a> {
-    // SAFETY: `sleep_lock_ptr()` points into statically-allocated, always-initialized
+    // SAFETY: `Scheduler::sleep_lock_ptr()` points into statically-allocated, always-initialized
     // storage (`SLEEP_LOCK`); never null.
-    unsafe { SpinLockRef::assume(sleep_lock_ptr()) }
+    unsafe { SpinLockRef::assume(Scheduler::sleep_lock_ptr()) }
 }
 
 fn chan_queue_init() {
-    if let Some(r) = TtreeRef::from_ptr(chan_queue_ptr()) {
-        r.init(c"chan_queue_root".as_ptr(), sleep_lock_ptr());
+    if let Some(r) = TtreeRef::from_ptr(Scheduler::chan_queue_ptr()) {
+        r.init(c"chan_queue_root".as_ptr(), Scheduler::sleep_lock_ptr());
     }
 }
 
 // ---------------- sleep lock helpers ------------------------------------
-fn chan_holding_impl() -> c_int { sleep_lock_ref().holding() as c_int }
-fn sleep_lock_impl() { sleep_lock_ref().lock(); }
-fn sleep_unlock_impl() { sleep_lock_ref().unlock(); }
-fn sleep_lock_irqsave_impl() -> c_int { sleep_lock_ref().lock_irqsave() }
-fn sleep_unlock_irqrestore_impl(state: c_int) { sleep_lock_ref().unlock_irqrestore(state); }
+fn chan_holding_impl() -> c_int { Scheduler::sleep_lock_ref().holding() as c_int }
+fn sleep_lock_impl() { Scheduler::sleep_lock_ref().lock(); }
+fn sleep_unlock_impl() { Scheduler::sleep_lock_ref().unlock(); }
+fn sleep_lock_irqsave_impl() -> c_int { Scheduler::sleep_lock_ref().lock_irqsave() }
+fn sleep_unlock_irqrestore_impl(state: c_int) { Scheduler::sleep_lock_ref().unlock_irqrestore(state); }
 fn sched_holding_impl() -> c_int { Rq::holding_current() }
+}
 
 // P3-1B: only cross-file caller is `timer/timer_core.rs::clockintr` (now a
 // direct crate-path `use`, no more `extern` redeclaration) -- demoted.
-impl Scheduler { pub(crate) fn holding() -> c_int { sched_holding_impl() } }
+impl Scheduler { pub(crate) fn holding() -> c_int { Scheduler::sched_holding_impl() } }
 
+impl Scheduler {
 #[inline]
 fn sched_assert_holding() {
-    kassert!(sched_holding_impl() != 0, "rq_lock must be held");
+    kassert!(Scheduler::sched_holding_impl() != 0, "rq_lock must be held");
 }
 #[inline]
 fn sched_assert_unholding() {
-    kassert!(sched_holding_impl() == 0, "rq_lock must not be held");
+    kassert!(Scheduler::sched_holding_impl() == 0, "rq_lock must not be held");
+}
 }
 
 // ---------------- scheduler init ----------------------------------------
+impl Scheduler {
 fn scheduler_init_impl() {
     unsafe {
-        spin_init(sleep_lock_ptr(), c"xv6_schport_sleep_lock".as_ptr() as *mut c_char);
-        chan_queue_init();
+        spin_init(Scheduler::sleep_lock_ptr(), c"xv6_schport_sleep_lock".as_ptr() as *mut c_char);
+        Scheduler::chan_queue_init();
         Rq::global_init();
     }
+}
 }
 
 // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
-impl Scheduler { pub(crate) fn init() { scheduler_init_impl() } }
+impl Scheduler { pub(crate) fn init() { Scheduler::scheduler_init_impl() } }
 
 // ---------------- pick next ---------------------------------------------
+impl Scheduler {
 fn sched_pick_next() -> *mut thread {
-    sched_assert_holding();
+    Scheduler::sched_assert_holding();
     let rq = Rq::pick_next();
     if is_err_or_null(rq) { return core::ptr::null_mut(); }
     // SAFETY: `rq` is proven non-null (and not an errptr) by the
     // `is_err_or_null` guard immediately above.
     let se = unsafe { RqRef::assume(rq) }.pick_next();
     if se.is_null() { return core::ptr::null_mut(); }
-    let cur = current_thread();
-    // SAFETY: `cur` is `current_thread()`, the currently running thread; the currently
+    let cur = Scheduler::current_thread();
+    // SAFETY: `cur` is `Scheduler::current_thread()`, the currently running thread; the currently
     // running thread's pointer (from `xv6_current_thread()`/`current()`) is a
     // kernel-wide invariant: always non-null while executing kernel code on
     // behalf of a thread.
@@ -563,16 +577,16 @@ fn sched_pick_next() -> *mut thread {
     // ...; }`).
     let next = unsafe { SchedEntityRef::assume(se) };
     let next_priority = next.priority();
-    if thread_running(cur) && this_priority < next_priority {
+    if Scheduler::thread_running(cur) && this_priority < next_priority {
         return cur;
     }
     let p = next.thread_ptr();
     kassert!(!p.is_null(), "sched_pick_next: se->thread is NULL");
     next.set_next();
     next.on_cpu_store_release(1);
-    let pstate = thread_state_get(p);
+    let pstate = Scheduler::thread_state_get(p);
     if pstate == THREAD_WAKENING {
-        thread_state_set(p, THREAD_RUNNING);
+        Scheduler::thread_state_set(p, THREAD_RUNNING);
     } else if pstate != THREAD_RUNNING {
         kassert!(pstate != THREAD_INTERRUPTIBLE, "try to schedule an interruptible thread");
         kassert!(pstate != THREAD_UNINTERRUPTIBLE, "try to schedule an uninterruptible thread");
@@ -582,44 +596,48 @@ fn sched_pick_next() -> *mut thread {
     }
     p
 }
+}
 
 // ---------------- switch_to ---------------------------------------------
+impl Scheduler {
 fn switch_to_impl(cur: *mut thread, target: *mut thread) -> *mut thread {
     unsafe {
         let now = get_jiffs();
-        cpu_access().store_rcu_timestamp_release(now);
-        cpu_access().set_proc(target);
+        Scheduler::cpu_access().store_rcu_timestamp_release(now);
+        Scheduler::cpu_access().set_proc(target);
         let cur_se = ThreadAccess::from_raw(cur).unwrap_unchecked().sched_entity_ptr();
         let target_se = ThreadAccess::from_raw(target).unwrap_unchecked().sched_entity_ptr();
         let prev_ctx = __swtch_context(
             SchedEntityRef::from_raw(cur_se).unwrap_unchecked().context_ptr(),
             SchedEntityRef::from_raw(target_se).unwrap_unchecked().context_ptr(),
         );
-        thread_from_context(prev_ctx)
+        Scheduler::thread_from_context(prev_ctx)
     }
 }
 
 fn switch_to_internal(p: *mut thread) -> *mut thread {
-    sched_assert_holding();
+    Scheduler::sched_assert_holding();
     kassert!(!intr_get(), "Interrupts must be disabled before switching to a thread");
-    let proc = current_thread();
-    let intena = cpu_access().intena();
+    let proc = Scheduler::current_thread();
+    let intena = Scheduler::cpu_access().intena();
     let mut spin_depth_expected = 1;
-    if chan_holding_impl() != 0 { spin_depth_expected += 1; }
-    kassert!(cpu_access().noff() == 0, "Thread must not hold any other locks when yielding");
-    kassert!(cpu_access().spin_depth() == spin_depth_expected,
+    if Scheduler::chan_holding_impl() != 0 { spin_depth_expected += 1; }
+    kassert!(Scheduler::cpu_access().noff() == 0, "Thread must not hold any other locks when yielding");
+    kassert!(Scheduler::cpu_access().spin_depth() == spin_depth_expected,
         "Thread must hold and only hold the rq lock when yielding");
 
-    let prev = switch_to_impl(proc, p);
+    let prev = Scheduler::switch_to_impl(proc, p);
 
     kassert!(!intr_get(), "Interrupts must be disabled after switching");
-    kassert!(current_thread() == proc, "Yield returned to a different thread");
-    kassert!(thread_running(proc), "Thread state must be RUNNING after yield");
-    cpu_access().set_intena(intena);
+    kassert!(Scheduler::current_thread() == proc, "Yield returned to a different thread");
+    kassert!(Scheduler::thread_running(proc), "Thread state must be RUNNING after yield");
+    Scheduler::cpu_access().set_intena(intena);
     prev
+}
 }
 
 // ---------------- scheduler_yield ---------------------------------------
+impl Scheduler {
 fn scheduler_yield_inner() {
     __do_timer_tick();
     // SAFETY: `rq_flush_wake_list` (kernel/proc/rq.rs) is `unsafe` because
@@ -631,29 +649,29 @@ fn scheduler_yield_inner() {
     unsafe { Rq::flush_wake_list(cpuid_rs()); }
 
     let intr = Rq::lock_current_irqsave();
-    let proc = current_thread();
+    let proc = Scheduler::current_thread();
 
-    kassert!(!cpu_in_itr(), "Cannot yield CPU in interrupt context");
+    kassert!(!Scheduler::cpu_in_itr(), "Cannot yield CPU in interrupt context");
 
-    let mut p = sched_pick_next();
+    let mut p = Scheduler::sched_pick_next();
 
-    if p == current_thread() {
+    if p == Scheduler::current_thread() {
         Rq::unlock_current_irqrestore(intr);
     } else if p.is_null() {
-        let idle = cpu_access().idle_thread_ptr();
+        let idle = Scheduler::cpu_access().idle_thread_ptr();
         if proc == idle {
             Rq::unlock_current_irqrestore(intr);
         } else {
             p = idle;
             kassert!(!p.is_null(), "Idle process is NULL");
-            context_switch_prepare_impl(proc, p);
-            let prev = switch_to_internal(p);
-            context_switch_finish_impl(prev, current_thread(), intr);
+            Scheduler::context_switch_prepare_impl(proc, p);
+            let prev = Scheduler::switch_to_internal(p);
+            Scheduler::context_switch_finish_impl(prev, Scheduler::current_thread(), intr);
         }
     } else {
-        context_switch_prepare_impl(proc, p);
-        let prev = switch_to_internal(p);
-        context_switch_finish_impl(prev, current_thread(), intr);
+        Scheduler::context_switch_prepare_impl(proc, p);
+        let prev = Scheduler::switch_to_internal(p);
+        Scheduler::context_switch_finish_impl(prev, Scheduler::current_thread(), intr);
     }
 
     // SAFETY: see the matching call above.
@@ -662,43 +680,47 @@ fn scheduler_yield_inner() {
     // is gone).
     rcu_check_callbacks();
 }
+}
 
-impl Scheduler { pub(crate) fn yield_now() { scheduler_yield_inner() } }
+impl Scheduler { pub(crate) fn yield_now() { Scheduler::scheduler_yield_inner() } }
 
 // ---------------- scheduler_sleep ---------------------------------------
+impl Scheduler {
 fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) {
     let intr = intr_off_save();
-    let proc = current_thread();
+    let proc = Scheduler::current_thread();
     kassert!(!proc.is_null(), "PCB is NULL");
-    kassert!(state_is_sleeping(sleep_state),
+    kassert!(Scheduler::state_is_sleeping(sleep_state),
         "Thread must be in INTERRUPTIBLE or UNINTERRUPTIBLE state to sleep");
-    thread_state_set(proc, sleep_state);
+    Scheduler::thread_state_set(proc, sleep_state);
     let lk_holding = lk.is_some_and(|l| l.holding());
     if lk_holding {
         lk.expect("BUG: scheduler_sleep lk_holding true but lk is None").unlock();
     }
-    scheduler_yield_inner();
+    Scheduler::scheduler_yield_inner();
     if lk_holding {
         lk.expect("BUG: scheduler_sleep lk_holding true but lk is None").lock();
     }
     intr_restore(intr);
 }
+}
 
 // ---------------- wakeup helpers ----------------------------------------
+impl Scheduler {
 #[inline]
 fn scheduler_wakeup_assert(p: *mut thread) {
     kassert!(!p.is_null(), "Cannot wake up a NULL process");
-    if let Some(t) = ta_of(p) {
+    if let Some(t) = Scheduler::ta_of(p) {
         kassert!(!t.lock_ref().holding(),
             "Process lock must not be held when waking up a process");
     }
-    kassert!(sched_holding_impl() == 0,
+    kassert!(Scheduler::sched_holding_impl() == 0,
         "Scheduler lock must not be held when waking up a process");
 }
 
 #[inline]
 fn do_scheduler_wakeup_safe(p: *mut thread, from_stopped: bool) {
-    unsafe { do_scheduler_wakeup(p, from_stopped); }
+    unsafe { Scheduler::do_scheduler_wakeup(p, from_stopped); }
 }
 
 unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
@@ -706,14 +728,14 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
         let se = (*p).sched_entity;
         spin_lock(&raw mut (*se).pi_lock);
 
-        if p == current_thread() {
+        if p == Scheduler::current_thread() {
             smp_rmb();
             if from_stopped {
                 spin_unlock(&raw mut (*se).pi_lock);
                 return;
             }
             let old_state = smp_load_acquire_state(&(*p).state as *const _);
-            if !state_is_sleeping(old_state) {
+            if !Scheduler::state_is_sleeping(old_state) {
                 spin_unlock(&raw mut (*se).pi_lock);
                 return;
             }
@@ -729,7 +751,7 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
                 spin_unlock(&raw mut (*se).pi_lock);
                 return;
             }
-        } else if !state_is_sleeping(old_state) {
+        } else if !Scheduler::state_is_sleeping(old_state) {
             spin_unlock(&raw mut (*se).pi_lock);
             return;
         }
@@ -754,7 +776,7 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
                         spin_unlock(&raw mut (*se).pi_lock);
                         return;
                     }
-                } else if !state_is_sleeping(old_state) {
+                } else if !Scheduler::state_is_sleeping(old_state) {
                     spin_unlock(&raw mut (*se).pi_lock);
                     return;
                 }
@@ -773,7 +795,7 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
                         spin_unlock(&raw mut (*se).pi_lock);
                         return;
                     }
-                } else if !state_is_sleeping(old_state) {
+                } else if !Scheduler::state_is_sleeping(old_state) {
                     spin_unlock(&raw mut (*se).pi_lock);
                     return;
                 }
@@ -806,68 +828,70 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
 }
 
 fn scheduler_wakeup_impl(p: *mut thread) {
-    scheduler_wakeup_assert(p);
-    if !thread_sleeping(p) { return; }
-    do_scheduler_wakeup_safe(p, false);
+    Scheduler::scheduler_wakeup_assert(p);
+    if !Scheduler::thread_sleeping(p) { return; }
+    Scheduler::do_scheduler_wakeup_safe(p, false);
 }
 fn scheduler_wakeup_timeout_impl(p: *mut thread) {
-    scheduler_wakeup_assert(p);
-    if !thread_timer(p) { return; }
-    do_scheduler_wakeup_safe(p, false);
+    Scheduler::scheduler_wakeup_assert(p);
+    if !Scheduler::thread_timer(p) { return; }
+    Scheduler::do_scheduler_wakeup_safe(p, false);
 }
 fn scheduler_wakeup_killable_impl(p: *mut thread) {
-    scheduler_wakeup_assert(p);
-    if !thread_killable(p) { return; }
-    do_scheduler_wakeup_safe(p, false);
+    Scheduler::scheduler_wakeup_assert(p);
+    if !Scheduler::thread_killable(p) { return; }
+    Scheduler::do_scheduler_wakeup_safe(p, false);
 }
 fn scheduler_wakeup_interruptible_impl(p: *mut thread) {
-    scheduler_wakeup_assert(p);
-    if !thread_interruptible(p) { return; }
-    do_scheduler_wakeup_safe(p, false);
+    Scheduler::scheduler_wakeup_assert(p);
+    if !Scheduler::thread_interruptible(p) { return; }
+    Scheduler::do_scheduler_wakeup_safe(p, false);
 }
 fn scheduler_wakeup_stopped_impl(p: *mut thread) {
-    scheduler_wakeup_assert(p);
-    if !thread_stopped(p) { return; }
-    do_scheduler_wakeup_safe(p, true);
+    Scheduler::scheduler_wakeup_assert(p);
+    if !Scheduler::thread_stopped(p) { return; }
+    Scheduler::do_scheduler_wakeup_safe(p, true);
+}
 }
 
 impl Scheduler {
 /// Wake a known-non-null thread from a sleeping state (was the free
 /// `scheduler_wakeup`).
-pub(crate) fn wakeup_thread(p: *mut thread) { scheduler_wakeup_impl(p) }
+pub(crate) fn wakeup_thread(p: *mut thread) { Scheduler::scheduler_wakeup_impl(p) }
 
 /// Wake a known-non-null interruptible thread (was the free
 /// `scheduler_wakeup_interruptible`).
-pub(crate) fn wakeup_interruptible_thread(p: *mut thread) { scheduler_wakeup_interruptible_impl(p) }
+pub(crate) fn wakeup_interruptible_thread(p: *mut thread) { Scheduler::scheduler_wakeup_interruptible_impl(p) }
 
 /// Wake a stopped thread (was the free `scheduler_wakeup_stopped`).
-pub(super) fn wakeup_stopped(p: *mut thread) { scheduler_wakeup_stopped_impl(p) }
+pub(super) fn wakeup_stopped(p: *mut thread) { Scheduler::scheduler_wakeup_stopped_impl(p) }
 }
 
 // ---------------- sleep_on_chan / wakeup_on_chan ------------------------
+impl Scheduler {
 fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: thread_state) -> c_int {
-    let intr = sleep_lock_irqsave_impl();
-    let cur = current_thread();
+    let intr = Scheduler::sleep_lock_irqsave_impl();
+    let cur = Scheduler::current_thread();
     kassert!(!cur.is_null(), "PCB is NULL");
     kassert!(!chan.is_null(), "Cannot sleep on a NULL channel");
     // SAFETY: `cur` is proven non-null by the diverging `kassert!` immediately above.
     unsafe { ThreadAccess::assume(cur) }.set_chan(chan);
-    thread_set_flag(cur, THREAD_FLAG_ONCHAN);
-    thread_state_set(cur, state);
+    Scheduler::thread_set_flag(cur, THREAD_FLAG_ONCHAN);
+    Scheduler::thread_state_set(cur, state);
 
     let lk_holding = lk.is_some_and(|l| l.holding());
     if lk_holding {
         lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").unlock();
     }
 
-    let ret = TtreeRef::from_ptr(chan_queue_ptr())
+    let ret = TtreeRef::from_ptr(Scheduler::chan_queue_ptr())
         .map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(chan as u64, core::ptr::null_mut(), core::ptr::null_mut()));
 
-    sleep_lock_irqsave_impl();
-    thread_clear_flag(cur, THREAD_FLAG_ONCHAN);
+    Scheduler::sleep_lock_irqsave_impl();
+    Scheduler::thread_clear_flag(cur, THREAD_FLAG_ONCHAN);
     // SAFETY: `cur` is proven non-null by the diverging `kassert!` above.
     unsafe { ThreadAccess::assume(cur) }.set_chan(core::ptr::null_mut());
-    sleep_unlock_irqrestore_impl(intr);
+    Scheduler::sleep_unlock_irqrestore_impl(intr);
 
     if lk_holding {
         lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").lock();
@@ -876,30 +900,31 @@ fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: t
 }
 
 fn sleep_on_chan_impl(chan: *mut c_void, lk: Option<SpinLockRef<'_>>) {
-    let _ = sleep_on_chan_common(chan, lk, THREAD_UNINTERRUPTIBLE);
+    let _ = Scheduler::sleep_on_chan_common(chan, lk, THREAD_UNINTERRUPTIBLE);
 }
 
 fn sleep_on_chan_interruptible_impl(chan: *mut c_void, lk: Option<SpinLockRef<'_>>) -> c_int {
-    let ret = sleep_on_chan_common(chan, lk, THREAD_INTERRUPTIBLE);
+    let ret = Scheduler::sleep_on_chan_common(chan, lk, THREAD_INTERRUPTIBLE);
     if ret != 0 { -EINTR } else { 0 }
 }
 
 fn wakeup_on_chan_impl(chan: *mut c_void) {
-    sleep_lock_impl();
-    let _ = TtreeRef::from_ptr(chan_queue_ptr())
+    Scheduler::sleep_lock_impl();
+    let _ = TtreeRef::from_ptr(Scheduler::chan_queue_ptr())
         .map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_key(chan as u64, 0, 0));
-    sleep_unlock_impl();
+    Scheduler::sleep_unlock_impl();
+}
 }
 
 pub(crate) fn sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t) {
-    sleep_on_chan_impl(chan, lk_of(lk))
+    Scheduler::sleep_on_chan_impl(chan, Scheduler::lk_of(lk))
 }
 
 pub(crate) fn sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int {
-    sleep_on_chan_interruptible_impl(chan, lk_of(lk))
+    Scheduler::sleep_on_chan_interruptible_impl(chan, Scheduler::lk_of(lk))
 }
 
-impl Scheduler { pub(crate) fn wakeup_on_chan(chan: *mut c_void) { wakeup_on_chan_impl(chan) } }
+impl Scheduler { pub(crate) fn wakeup_on_chan(chan: *mut c_void) { Scheduler::wakeup_on_chan_impl(chan) } }
 
 // ---------------- dump --------------------------------------------------
 // Provide our own state-to-str (inline static in C header — re-implement).
@@ -918,17 +943,20 @@ const STATE_STRS: &[(thread_state, &[u8])] = &[
     (THREAD_ZOMBIE,            b"ZOMBIE\0"),
 ];
 
+impl Scheduler {
 fn state_str(s: thread_state) -> *const c_char {
     STATE_STRS
         .iter()
         .find(|(k, _)| *k == s)
         .map_or_else(|| c"UNKNOWN".as_ptr(), |(_, v)| v.as_ptr() as *const c_char)
 }
+}
 
+impl Scheduler {
 unsafe fn scheduler_dump_chan_queue() {
     crate::kprintln!("Channel Queue Dump:");
     unsafe {
-        let root = &raw mut (*chan_queue_ptr()).root;
+        let root = &raw mut (*Scheduler::chan_queue_ptr()).root;
         // P3-N2: `tnode` IS `thread_queue::Tnode` now; the anonymous
         // union field is `u`, and the tree arm is the native
         // `TnodeTreeArm` (its `entry` sits at arm offset 0).
@@ -949,57 +977,63 @@ unsafe fn scheduler_dump_chan_queue() {
                     crate::printf::Ptr((*proc).chan as u64),
                     crate::printf::Cs((*proc).name.as_ptr()),
                     t.pid(),
-                    crate::printf::Cs(state_str(thread_state_get(proc))),
+                    crate::printf::Cs(Scheduler::state_str(Scheduler::thread_state_get(proc))),
                 );
             }
         }
     }
 }
+}
 
 use crate::bindings::tnode;
 
 // ---------------- wakeup wrappers ---------------------------------------
+impl Scheduler {
 fn wakeup_impl(p: *mut thread) {
     if p.is_null() { return; }
-    scheduler_wakeup_impl(p);
+    Scheduler::scheduler_wakeup_impl(p);
 }
 fn wakeup_timeout_impl(p: *mut thread) {
     if p.is_null() { return; }
-    scheduler_wakeup_timeout_impl(p);
+    Scheduler::scheduler_wakeup_timeout_impl(p);
 }
 fn wakeup_killable_impl(p: *mut thread) {
     if p.is_null() { return; }
-    scheduler_wakeup_killable_impl(p);
+    Scheduler::scheduler_wakeup_killable_impl(p);
 }
 fn wakeup_interruptible_impl(p: *mut thread) {
     if p.is_null() { return; }
-    scheduler_wakeup_interruptible_impl(p);
+    Scheduler::scheduler_wakeup_interruptible_impl(p);
+}
 }
 
 impl Scheduler {
 /// Null-safe generic wakeup (was the free `wakeup`).
-pub(crate) fn wakeup(p: *mut thread) { wakeup_impl(p) }
+pub(crate) fn wakeup(p: *mut thread) { Scheduler::wakeup_impl(p) }
 
 /// Null-safe interruptible wakeup (was the free `wakeup_interruptible`).
-pub(crate) fn wakeup_interruptible(p: *mut thread) { wakeup_interruptible_impl(p) }
+pub(crate) fn wakeup_interruptible(p: *mut thread) { Scheduler::wakeup_interruptible_impl(p) }
 }
 
+impl Scheduler {
 fn sys_dumpchan_impl() -> u64 {
-    sleep_lock_impl();
-    unsafe { scheduler_dump_chan_queue(); }
-    sleep_unlock_impl();
+    Scheduler::sleep_lock_impl();
+    unsafe { Scheduler::scheduler_dump_chan_queue(); }
+    Scheduler::sleep_unlock_impl();
     0
+}
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
-pub(crate) extern "C" fn sys_dumpchan() -> u64 { sys_dumpchan_impl() }
+pub(crate) extern "C" fn sys_dumpchan() -> u64 { Scheduler::sys_dumpchan_impl() }
 
 // ---------------- context switch ----------------------------------------
+impl Scheduler {
 fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
     kassert!(!prev.is_null(), "Previous process is NULL");
     kassert!(!next.is_null(), "Next process is NULL");
-    sched_assert_holding();
+    Scheduler::sched_assert_holding();
     // SAFETY: `next` is proven non-null by the diverging `kassert!` immediately above.
     let next_se = unsafe { ThreadAccess::assume(next) }.sched_entity_ptr();
     // SAFETY: `next_se` is `next`'s embedded scheduling entity: every thread reaching
@@ -1008,7 +1042,7 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
     let next_se_ref = unsafe { SchedEntityRef::assume(next_se) };
     next_se_ref.on_cpu_store_release(1);
     next_se_ref.set_cpu_id(cpuid_rs());
-    if thread_zombie(prev) {
+    if Scheduler::thread_zombie(prev) {
         // SAFETY: `prev` is proven non-null by the diverging `kassert!` above;
         // its embedded `sched_entity` is live by kernel invariant.
         unsafe { SchedEntityRef::assume(ThreadAccess::assume(prev).sched_entity_ptr()) }.task_dead();
@@ -1018,18 +1052,18 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
 fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int) {
     kassert!(!prev.is_null(), "Previous process is NULL");
     kassert!(!next.is_null(), "Next process is NULL");
-    let pstate = thread_state_get(prev);
+    let pstate = Scheduler::thread_state_get(prev);
     // SAFETY: `prev` is proven non-null by the diverging `kassert!` above.
     let prev_access = unsafe { ThreadAccess::assume(prev) };
     let se = prev_access.sched_entity_ptr();
-    let idle = cpu_access().idle_thread_ptr();
+    let idle = Scheduler::cpu_access().idle_thread_ptr();
 
     if prev != idle {
-        if state_is_running(pstate) {
+        if Scheduler::state_is_running(pstate) {
             // SAFETY: `se` is `prev_access`'s embedded scheduling entity,
             // field-derived from the already-valid `prev_access` handle above.
             unsafe { SchedEntityRef::assume(se) }.put_prev();
-        } else if state_is_sleeping(pstate) || state_is_stopped(pstate) {
+        } else if Scheduler::state_is_sleeping(pstate) || Scheduler::state_is_stopped(pstate) {
             // SAFETY: `se` is `prev_access`'s embedded scheduling entity, field-
             // derived from the already-valid `prev_access` handle above.
             let se_rq = unsafe { SchedEntityRef::assume(se) }.rq_ptr();
@@ -1040,9 +1074,9 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
         }
     }
 
-    if thread_test_flag(prev, THREAD_FLAG_SELF_REAP) {
+    if Scheduler::thread_test_flag(prev, THREAD_FLAG_SELF_REAP) {
         let (kstack_addr, kstack_order) = (prev_access.kstack_addr(), prev_access.kstack_order());
-        page_free(kstack_addr as *mut c_void, kstack_order);
+        Scheduler::page_free(kstack_addr as *mut c_void, kstack_order);
         // prev is now dangling -- do not touch.
     } else {
         // SAFETY: `prev_access` is already a valid handle (constructed above);
@@ -1050,18 +1084,19 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
         unsafe { SchedEntityRef::assume(prev_access.sched_entity_ptr()) }.on_cpu_store_release(0);
     }
 
-    if chan_holding_impl() != 0 {
-        sleep_unlock_irqrestore_impl(0);
+    if Scheduler::chan_holding_impl() != 0 {
+        Scheduler::sleep_unlock_irqrestore_impl(0);
     }
 
     Rq::unlock_current_irqrestore(intr);
+}
 }
 
 impl Scheduler {
 /// Finish a context switch: put/dequeue prev, free self-reap stacks,
 /// release the rq lock (was the free `context_switch_finish`).
 pub(super) fn context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int) {
-    context_switch_finish_impl(prev, next, intr)
+    Scheduler::context_switch_finish_impl(prev, next, intr)
 }
 }
 
