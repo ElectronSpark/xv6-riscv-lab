@@ -153,7 +153,7 @@ fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
 // (identical signatures). `vfs_root_inode` is fs.rs's single dummy
 // VFS-root `vfs_inode` instance.
 use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_root_inode};
-use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iunlock, VfsInode};
+use crate::vfs::inode::VfsInode;
 
 // `kassert!`'s canonical home is `crate::kstd`/crate root (P3-CS1
 // centralization). P3-10b (ops-table redesign): the CS13-era
@@ -373,7 +373,7 @@ pub(crate) fn tmpfs_unmount_begin_impl(sb: *mut vfs_superblock) {
             if inode != root_inode {
                 // Only evict inodes with no references.
                 if (*inode).ref_count == 0 {
-                    vfs_ilock(inode);
+                    VfsInode::vfs_ilock(inode);
                     // Double-check ref_count under lock.
                     if (*inode).ref_count == 0 {
                         // Destroy the inode's data if it has any.
@@ -384,11 +384,11 @@ pub(crate) fn tmpfs_unmount_begin_impl(sb: *mut vfs_superblock) {
                         // Remove from hash and mark invalid.
                         (*inode).flags.set_valid(0);
                         VfsSuperblock::vfs_remove_inode(sb, inode);
-                        vfs_iunlock(inode);
+                        VfsInode::vfs_iunlock(inode);
                         // Free the inode structure.
                         crate::vfs::inode::inode_ops(inode).free_inode(inode);
                     } else {
-                        vfs_iunlock(inode);
+                        VfsInode::vfs_iunlock(inode);
                     }
                 }
             }
@@ -636,7 +636,7 @@ pub(crate) extern "C" fn tmpfs_mount_root() {
     Vfs::vfs_mount_lock();
     // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
     // (`vfs/fs.rs`), always live.
-    unsafe { vfs_ilock(ptr::addr_of_mut!(vfs_root_inode)) };
+    unsafe { VfsInode::vfs_ilock(ptr::addr_of_mut!(vfs_root_inode)) };
 
     // SAFETY: same as above.
     let ret = unsafe {
@@ -652,12 +652,12 @@ pub(crate) extern "C" fn tmpfs_mount_root() {
     // On success, release locks. On failure, vfs_mount already released
     // them (matches the C original's own comment).
     if ret == 0 {
-        unsafe { vfs_iunlock(ptr::addr_of_mut!(vfs_root_inode)) };
+        unsafe { VfsInode::vfs_iunlock(ptr::addr_of_mut!(vfs_root_inode)) };
     }
     Vfs::vfs_mount_unlock();
 
     // SAFETY: same as above.
     let mnt_rooti = unsafe { vfs_root_inode.dev_mnt.mnt.mnt_rooti };
-    let ret = vfs_chroot(mnt_rooti);
+    let ret = VfsInode::vfs_chroot(mnt_rooti);
     kassert!(ret == 0, "tmpfs_mount_root: vfs_chroot failed");
 }

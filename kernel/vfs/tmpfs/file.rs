@@ -42,7 +42,7 @@ use super::{s_isdir, s_islnk, s_isreg, TMPFS_MAX_FILE_SIZE};
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
 use crate::vfs::fs::FsStruct;
-use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
+use crate::vfs::inode::VfsInode;
 
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
@@ -190,13 +190,13 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
 
     // Acquire inode lock to safely read size and data. The file
     // reference guarantees the inode remains allocated.
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
 
     // SAFETY: `file`/`inode` are live and locked.
     let mut pos = unsafe { (*file).pos.f_pos };
     let size = unsafe { (*inode).size };
     if pos >= size {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Ok(0); // EOF
     }
     if pos + count as loff_t > size {
@@ -215,19 +215,19 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         if user {
             // SAFETY: `current()` is the live running thread.
             if Vm::vm_copyout(unsafe { (*current()).vm }, buf as u64, src as *const c_void, count as u64) < 0 {
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 return Err(Errno::Fault);
             }
         } else {
             unsafe { memmove(buf as *mut c_void, src as *const c_void, count) };
         }
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Ok(count as isize);
     }
 
     // pcache-based read.
     if unsafe { (*pc).flags.bits.active() == 0 } {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Err(Errno::Io);
     }
 
@@ -243,7 +243,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         let blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
         let page = Pcache::get_page(pc, blkno_512);
         if page.is_null() {
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             if bytes_read == 0 {
                 return Err(Errno::Io);
             }
@@ -252,7 +252,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         let ret = Pcache::read_page(pc, page);
         if ret != 0 {
             Pcache::put_page(pc, page);
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             if bytes_read == 0 {
                 return Err(Errno::Io);
             }
@@ -266,7 +266,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
             // SAFETY: `current()` is the live running thread.
             if Vm::vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, chunk as u64) < 0 {
                 Pcache::put_page(pc, page);
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 if bytes_read == 0 {
                     return Err(Errno::Fault);
                 }
@@ -281,7 +281,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         pos += chunk as loff_t;
     }
 
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     Ok(bytes_read as isize)
 }
 
@@ -299,7 +299,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
 
     // Acquire inode lock to protect size and data. The file reference
     // guarantees the inode remains allocated.
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
 
     // SAFETY: `file` is live and `inode` is locked.
     let mut pos = unsafe { (*file).pos.f_pos };
@@ -307,7 +307,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
 
     // Check for file size limits.
     if end_pos > TMPFS_MAX_FILE_SIZE as loff_t {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Err(Errno::FBig);
     }
 
@@ -321,7 +321,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             if user {
                 // SAFETY: `current()` is the live running thread.
                 if Vm::vm_copyin(unsafe { (*current()).vm }, dst as *mut c_void, buf as u64, count as u64) < 0 {
-                    vfs_iunlock(inode);
+                    VfsInode::vfs_iunlock(inode);
                     return Err(Errno::Fault);
                 }
             } else {
@@ -333,13 +333,13 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
                     (*inode).size = end_pos;
                 }
             }
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             return Ok(count as isize);
         }
         // Need to migrate to pcache storage.
         let ret = super::truncate::__tmpfs_migrate_to_allocated_blocks(ti);
         if ret != 0 {
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             // Sibling-module already-negative `c_int` — passthrough
             // (`Errno::Raw` round-trips it losslessly).
             return Err(Errno::Raw(ret));
@@ -348,7 +348,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
 
     // pcache-based write.
     if unsafe { (*pc).flags.bits.active() == 0 } {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Err(Errno::Io);
     }
 
@@ -369,7 +369,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
         let blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
         let page = Pcache::get_page(pc, blkno_512);
         if page.is_null() {
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             if bytes_written == 0 {
                 return Err(Errno::NoMem);
             }
@@ -378,7 +378,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
         let ret = Pcache::read_page(pc, page);
         if ret != 0 {
             Pcache::put_page(pc, page);
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             if bytes_written == 0 {
                 // Cross-module already-negative `c_int` — passthrough.
                 return Err(Errno::Raw(ret));
@@ -393,7 +393,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             // SAFETY: `current()` is the live running thread.
             if Vm::vm_copyin(unsafe { (*current()).vm }, data as *mut c_void, unsafe { buf.add(bytes_written) } as u64, chunk as u64) < 0 {
                 Pcache::put_page(pc, page);
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 if bytes_written == 0 {
                     return Err(Errno::Fault);
                 }
@@ -416,7 +416,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             (*inode).size = pos;
         }
     }
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     Ok(bytes_written as isize)
 }
 
@@ -436,10 +436,10 @@ fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KR
         }
         SEEK_END => {
             // Need to lock inode to safely read size.
-            vfs_ilock(inode);
+            VfsInode::vfs_ilock(inode);
             // SAFETY: `inode` is live and locked.
             let sz = unsafe { (*inode).size };
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             sz + offset
         }
         _ => return Err(Errno::Inval),
@@ -477,14 +477,14 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
         return ptr::null_mut();
     }
 
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
 
     // SAFETY: `inode` is live and locked.
     let size = unsafe { (*inode).size } as u64;
 
     // Entirely beyond EOF -- return a zero page.
     if file_off >= size {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         unsafe { memset(pa, 0, crate::bindings::PGSIZE as usize) };
         return pa;
     }
@@ -514,7 +514,7 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
         } else {
             bytes_to_read = 0;
         }
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         if bytes_to_read < crate::bindings::PGSIZE as u64 {
             unsafe {
                 memset(
@@ -529,7 +529,7 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
 
     // ---- pcache path ----
     if unsafe { (*pc).flags.bits.active() == 0 } {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
@@ -539,14 +539,14 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
 
     let pcpage = Pcache::get_page(pc, blkno_512);
     if pcpage.is_null() {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
     let ret = Pcache::read_page(pc, pcpage);
     if ret != 0 {
         Pcache::put_page(pc, pcpage);
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
@@ -565,7 +565,7 @@ fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
     }
 
     Pcache::put_page(pc, pcpage);
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     pa
 }
 

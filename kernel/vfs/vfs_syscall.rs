@@ -151,11 +151,7 @@ use crate::vfs::file::{
 use crate::vfs::fs::{
     vfs_release_dentry, FsStruct, Vfs, VfsFsType, VfsSuperblock,
 };
-use crate::vfs::inode::{
-    vfs_chdir, vfs_chroot, vfs_create, vfs_dir_iter, vfs_idup, vfs_ilock, vfs_ilookup,
-    vfs_iput, vfs_itruncate, vfs_iunlock, vfs_link, vfs_mkdir, vfs_mknod, vfs_move, vfs_namei,
-    vfs_nameiparent, vfs_readlink, vfs_symlink, vfs_unlink, IRef, VfsInode,
-};
+use crate::vfs::inode::{IRef, VfsInode};
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, mode bits, O_*/
@@ -817,14 +813,14 @@ fn vfs_inode_stat_fallback(inode: *mut vfs_inode, kst: *mut stat) -> c_int {
                 Err(e) => e.neg(),
             };
         }
-        vfs_ilock(inode);
+        VfsInode::vfs_ilock(inode);
         memset(kst as *mut c_void, 0, core::mem::size_of::<stat>());
         (*kst).dev = if !(*inode).sb.is_null() { (*inode).sb as u64 as i32 } else { 0 };
         (*kst).ino = (*inode).ino;
         (*kst).mode = (*inode).mode;
         (*kst).nlink = (*inode).n_links;
         (*kst).size = (*inode).size as u64;
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
     }
     0
 }
@@ -849,7 +845,7 @@ fn stat_inner() -> KResult<()> {
     let mut symloop_count = 0i32;
 
     loop {
-        let raw_inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
+        let raw_inode = VfsInode::vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
         if is_err(raw_inode) {
             return Err(Errno::Raw(ptr_err(raw_inode)));
         }
@@ -860,7 +856,7 @@ fn stat_inner() -> KResult<()> {
         // whose postcondition is an owned, already-held reference.
         // Reassigning `inode` here drops the *previous* iteration's
         // reference automatically -- replaces the manual
-        // `vfs_iput(inode); inode = ptr::null_mut();` pair below (P3-9d).
+        // `VfsInode::vfs_iput(inode); inode = ptr::null_mut();` pair below (P3-9d).
         // SAFETY: see the comment above.
         inode = unsafe { IRef::from_raw(raw_inode) };
 
@@ -868,7 +864,7 @@ fn stat_inner() -> KResult<()> {
             break;
         }
 
-        let link_len = vfs_readlink(IRef::as_ptr(&inode), path.as_mut_ptr(), MAXPATH - 1);
+        let link_len = VfsInode::vfs_readlink(IRef::as_ptr(&inode), path.as_mut_ptr(), MAXPATH - 1);
         if link_len < 0 {
             return Err(Errno::Raw(link_len as c_int));
         }
@@ -909,7 +905,7 @@ fn lstat_inner() -> KResult<()> {
         return Err(Errno::Fault);
     }
 
-    let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         return Err(Errno::Raw(ptr_err(parent)));
     }
@@ -920,15 +916,15 @@ fn lstat_inner() -> KResult<()> {
     let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
     dentry.sb = unsafe { (*parent).sb };
     dentry.parent = parent;
-    let ret = vfs_ilookup(parent, &mut dentry, name.as_ptr(), unsafe { strlen(name.as_ptr()) });
+    let ret = VfsInode::vfs_ilookup(parent, &mut dentry, name.as_ptr(), unsafe { strlen(name.as_ptr()) });
     if ret != 0 {
-        vfs_iput(parent);
+        VfsInode::vfs_iput(parent);
         return Err(Errno::Raw(ret));
     }
 
     let inode = VfsInode::vfs_get_dentry_inode(&mut dentry);
     vfs_release_dentry(&mut dentry);
-    vfs_iput(parent);
+    VfsInode::vfs_iput(parent);
     if is_err(inode) {
         return Err(Errno::Raw(ptr_err(inode)));
     }
@@ -938,7 +934,7 @@ fn lstat_inner() -> KResult<()> {
 
     let mut kst: stat = unsafe { core::mem::zeroed() };
     let ret = vfs_inode_stat_fallback(inode, &mut kst);
-    vfs_iput(inode);
+    VfsInode::vfs_iput(inode);
     if ret != 0 {
         return Err(Errno::Raw(ret));
     }
@@ -967,7 +963,7 @@ fn access_inner() -> KResult<()> {
         return Err(Errno::Fault);
     }
 
-    let inode = vfs_namei(path.as_ptr(), n as usize);
+    let inode = VfsInode::vfs_namei(path.as_ptr(), n as usize);
     if is_err(inode) {
         return Err(Errno::Raw(ptr_err(inode)));
     }
@@ -976,7 +972,7 @@ fn access_inner() -> KResult<()> {
     }
     // `IRef::from_raw`: `vfs_namei` succeeded (non-null, non-error),
     // whose postcondition is an owned, already-held reference -- this
-    // `IRef`'s `Drop` replaces all four manual `vfs_iput(inode)` calls
+    // `IRef`'s `Drop` replaces all four manual `VfsInode::vfs_iput(inode)` calls
     // below (three error-path, one success-path), eliminating the
     // "forget on a new branch" leak shape (P3-9d).
     // SAFETY: see the comment above.
@@ -1023,7 +1019,7 @@ fn readlink_inner() -> KResult<isize> {
         return Err(Errno::Inval);
     }
 
-    let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         return Err(Errno::Raw(ptr_err(parent)));
     }
@@ -1034,15 +1030,15 @@ fn readlink_inner() -> KResult<isize> {
     let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
     dentry.sb = unsafe { (*parent).sb };
     dentry.parent = parent;
-    let ret = vfs_ilookup(parent, &mut dentry, name.as_ptr(), unsafe { strlen(name.as_ptr()) });
+    let ret = VfsInode::vfs_ilookup(parent, &mut dentry, name.as_ptr(), unsafe { strlen(name.as_ptr()) });
     if ret != 0 {
-        vfs_iput(parent);
+        VfsInode::vfs_iput(parent);
         return Err(Errno::Raw(ret));
     }
 
     let inode = VfsInode::vfs_get_dentry_inode(&mut dentry);
     vfs_release_dentry(&mut dentry);
-    vfs_iput(parent);
+    VfsInode::vfs_iput(parent);
     if is_err(inode) {
         return Err(Errno::Raw(ptr_err(inode)));
     }
@@ -1052,12 +1048,12 @@ fn readlink_inner() -> KResult<isize> {
 
     let kbuf = kmm_alloc(bufsz as usize);
     if kbuf.is_null() {
-        vfs_iput(inode);
+        VfsInode::vfs_iput(inode);
         return Err(Errno::NoMem);
     }
 
-    let len = vfs_readlink(inode, kbuf as *mut c_char, bufsz as usize);
-    vfs_iput(inode);
+    let len = VfsInode::vfs_readlink(inode, kbuf as *mut c_char, bufsz as usize);
+    VfsInode::vfs_iput(inode);
     if len < 0 {
         kmm_free(kbuf);
         return Err(Errno::Raw(len as c_int));
@@ -1094,7 +1090,7 @@ fn rename_inner() -> KResult<c_int> {
         return Err(Errno::Fault);
     }
 
-    let old_parent = vfs_nameiparent(oldpath.as_ptr(), n1 as usize, oldname.as_mut_ptr(), DIRSIZ + 1);
+    let old_parent = VfsInode::vfs_nameiparent(oldpath.as_ptr(), n1 as usize, oldname.as_mut_ptr(), DIRSIZ + 1);
     if is_err(old_parent) {
         return Err(Errno::Raw(ptr_err(old_parent)));
     }
@@ -1102,27 +1098,27 @@ fn rename_inner() -> KResult<c_int> {
         return Err(Errno::NoEnt);
     }
 
-    let new_parent = vfs_nameiparent(newpath.as_ptr(), n2 as usize, newname.as_mut_ptr(), DIRSIZ + 1);
+    let new_parent = VfsInode::vfs_nameiparent(newpath.as_ptr(), n2 as usize, newname.as_mut_ptr(), DIRSIZ + 1);
     if is_err(new_parent) {
-        vfs_iput(old_parent);
+        VfsInode::vfs_iput(old_parent);
         return Err(Errno::Raw(ptr_err(new_parent)));
     }
     if new_parent.is_null() {
-        vfs_iput(old_parent);
+        VfsInode::vfs_iput(old_parent);
         return Err(Errno::NoEnt);
     }
 
     let mut old_dentry: vfs_dentry = unsafe { core::mem::zeroed() };
     old_dentry.sb = unsafe { (*old_parent).sb };
     old_dentry.parent = old_parent;
-    let ret = vfs_ilookup(old_parent, &mut old_dentry, oldname.as_ptr(), unsafe { strlen(oldname.as_ptr()) });
+    let ret = VfsInode::vfs_ilookup(old_parent, &mut old_dentry, oldname.as_ptr(), unsafe { strlen(oldname.as_ptr()) });
     if ret != 0 {
-        vfs_iput(old_parent);
-        vfs_iput(new_parent);
+        VfsInode::vfs_iput(old_parent);
+        VfsInode::vfs_iput(new_parent);
         return Err(Errno::Raw(ret));
     }
 
-    let ret = vfs_move(
+    let ret = VfsInode::vfs_move(
         old_parent,
         &mut old_dentry,
         new_parent,
@@ -1130,8 +1126,8 @@ fn rename_inner() -> KResult<c_int> {
         unsafe { strlen(newname.as_ptr()) },
     );
     vfs_release_dentry(&mut old_dentry);
-    vfs_iput(old_parent);
-    vfs_iput(new_parent);
+    VfsInode::vfs_iput(old_parent);
+    VfsInode::vfs_iput(new_parent);
     Ok(ret)
 }
 
@@ -1177,7 +1173,7 @@ fn open_inner() -> KResult<c_int> {
     let mut inode: *mut vfs_inode = ptr::null_mut();
 
     if omode & O_CREAT != 0 {
-        let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
+        let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
         if is_err(parent) {
             return Err(Errno::Raw(ptr_err(parent)));
         }
@@ -1186,14 +1182,14 @@ fn open_inner() -> KResult<c_int> {
         }
 
         let name_len = unsafe { strlen(name.as_ptr()) };
-        inode = vfs_create(parent, 0o644, name.as_ptr(), name_len);
-        vfs_iput(parent);
+        inode = VfsInode::vfs_create(parent, 0o644, name.as_ptr(), name_len);
+        VfsInode::vfs_iput(parent);
 
         if is_err(inode) {
             if ptr_err(inode) == neg(EEXIST) && omode & O_EXCL == 0 {
-                inode = vfs_namei(path.as_ptr(), n as usize);
+                inode = VfsInode::vfs_namei(path.as_ptr(), n as usize);
                 if !is_err_or_null(inode) && is_dir(unsafe { (*inode).mode }) {
-                    vfs_iput(inode);
+                    VfsInode::vfs_iput(inode);
                     return Err(Errno::IsDir);
                 }
             } else {
@@ -1203,7 +1199,7 @@ fn open_inner() -> KResult<c_int> {
     } else {
         let mut symloop_count = 0i32;
         loop {
-            inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
+            inode = VfsInode::vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
             if is_err(inode) {
                 return Err(Errno::Raw(ptr_err(inode)));
             }
@@ -1215,8 +1211,8 @@ fn open_inner() -> KResult<c_int> {
                 break;
             }
 
-            let link_len = vfs_readlink(inode, path.as_mut_ptr(), MAXPATH - 1);
-            vfs_iput(inode);
+            let link_len = VfsInode::vfs_readlink(inode, path.as_mut_ptr(), MAXPATH - 1);
+            VfsInode::vfs_iput(inode);
             inode = ptr::null_mut();
 
             if link_len < 0 {
@@ -1243,21 +1239,21 @@ fn open_inner() -> KResult<c_int> {
     }
 
     if is_dir(unsafe { (*inode).mode }) && (omode & O_WRONLY != 0 || omode & O_RDWR != 0) {
-        vfs_iput(inode);
+        VfsInode::vfs_iput(inode);
         return Err(Errno::IsDir);
     }
 
     let should_truncate = omode & O_TRUNC != 0 && is_reg(unsafe { (*inode).mode });
 
     let f = vfs_fileopen(inode, omode);
-    vfs_iput(inode);
+    VfsInode::vfs_iput(inode);
 
     if is_err(f) {
         return Err(Errno::Raw(ptr_err(f)));
     }
 
     if should_truncate {
-        let ret = vfs_itruncate(FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) }), 0);
+        let ret = VfsInode::vfs_itruncate(FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) }), 0);
         if ret != 0 {
             vfs_fput(f);
             return Err(Errno::Raw(ret));
@@ -1301,7 +1297,7 @@ fn mkdir_inner() -> KResult<()> {
         return Err(Errno::Fault);
     }
 
-    let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         return Err(Errno::Raw(ptr_err(parent)));
     }
@@ -1310,14 +1306,14 @@ fn mkdir_inner() -> KResult<()> {
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
-    let dir = vfs_mkdir(parent, 0o755, name.as_ptr(), name_len);
-    vfs_iput(parent);
+    let dir = VfsInode::vfs_mkdir(parent, 0o755, name.as_ptr(), name_len);
+    VfsInode::vfs_iput(parent);
 
     if is_err(dir) {
         return Err(Errno::Raw(ptr_err(dir)));
     }
 
-    vfs_iput(dir);
+    VfsInode::vfs_iput(dir);
     Ok(())
 }
 
@@ -1343,7 +1339,7 @@ fn mknod_inner() -> KResult<()> {
     argint(2, &mut major);
     argint(3, &mut minor);
 
-    let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         return Err(Errno::Raw(ptr_err(parent)));
     }
@@ -1353,14 +1349,14 @@ fn mknod_inner() -> KResult<()> {
 
     let name_len = unsafe { strlen(name.as_ptr()) };
     let dev = mkdev(major, minor);
-    let node = vfs_mknod(parent, mode as mode_t, dev, name.as_ptr(), name_len);
-    vfs_iput(parent);
+    let node = VfsInode::vfs_mknod(parent, mode as mode_t, dev, name.as_ptr(), name_len);
+    VfsInode::vfs_iput(parent);
 
     if is_err(node) {
         return Err(Errno::Raw(ptr_err(node)));
     }
 
-    vfs_iput(node);
+    VfsInode::vfs_iput(node);
     Ok(())
 }
 
@@ -1381,7 +1377,7 @@ fn unlink_inner() -> KResult<c_int> {
         return Err(Errno::Fault);
     }
 
-    let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         return Err(Errno::Raw(ptr_err(parent)));
     }
@@ -1390,8 +1386,8 @@ fn unlink_inner() -> KResult<c_int> {
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
-    let ret = vfs_unlink(parent, name.as_ptr(), name_len);
-    vfs_iput(parent);
+    let ret = VfsInode::vfs_unlink(parent, name.as_ptr(), name_len);
+    VfsInode::vfs_iput(parent);
 
     Ok(ret)
 }
@@ -1419,7 +1415,7 @@ fn link_inner() -> KResult<c_int> {
         return Err(Errno::Fault);
     }
 
-    let src = vfs_namei(old.as_ptr(), n1 as usize);
+    let src = VfsInode::vfs_namei(old.as_ptr(), n1 as usize);
     if is_err(src) {
         return Err(Errno::Raw(ptr_err(src)));
     }
@@ -1431,23 +1427,23 @@ fn link_inner() -> KResult<c_int> {
     // refcount `vfs_namei` returned is held through the last read below);
     // one audited shared borrow replaces the three separate
     // raw `(*src).*` field reads (`mode`/`sb`/`ino`). The borrow
-    // ends before the `vfs_iput(src)` teardown; the intervening
+    // ends before the `VfsInode::vfs_iput(src)` teardown; the intervening
     // `vfs_nameiparent` resolves a different path and does not mutate
     // `src`. SAFETY: non-null `src` (checked above).
     let src_ref = unsafe { &*src };
 
     if is_dir(src_ref.mode) {
-        vfs_iput(src);
+        VfsInode::vfs_iput(src);
         return Err(Errno::Perm);
     }
 
-    let parent = vfs_nameiparent(new.as_ptr(), n2 as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(new.as_ptr(), n2 as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        vfs_iput(src);
+        VfsInode::vfs_iput(src);
         return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        vfs_iput(src);
+        VfsInode::vfs_iput(src);
         return Err(Errno::NoEnt);
     }
 
@@ -1457,10 +1453,10 @@ fn link_inner() -> KResult<c_int> {
     old_dentry.sb = src_ref.sb;
     old_dentry.ino = src_ref.ino;
 
-    let ret = vfs_link(&mut old_dentry, parent, name.as_ptr(), name_len);
+    let ret = VfsInode::vfs_link(&mut old_dentry, parent, name.as_ptr(), name_len);
 
-    vfs_iput(src);
-    vfs_iput(parent);
+    VfsInode::vfs_iput(src);
+    VfsInode::vfs_iput(parent);
 
     Ok(ret)
 }
@@ -1601,7 +1597,7 @@ fn symlink_inner() -> KResult<()> {
         return Err(Errno::Raw(abs_len));
     }
 
-    let parent = vfs_nameiparent(linkpath.as_ptr(), n2 as usize, name.as_mut_ptr(), DIRSIZ + 1);
+    let parent = VfsInode::vfs_nameiparent(linkpath.as_ptr(), n2 as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
         return Err(Errno::Raw(ptr_err(parent)));
     }
@@ -1611,14 +1607,14 @@ fn symlink_inner() -> KResult<()> {
 
     let name_len = unsafe { strlen(name.as_ptr()) };
 
-    let sym = vfs_symlink(parent, 0o777, name.as_ptr(), name_len, abs_target.as_ptr(), abs_len as usize);
-    vfs_iput(parent);
+    let sym = VfsInode::vfs_symlink(parent, 0o777, name.as_ptr(), name_len, abs_target.as_ptr(), abs_len as usize);
+    VfsInode::vfs_iput(parent);
 
     if is_err(sym) {
         return Err(Errno::Raw(ptr_err(sym)));
     }
 
-    vfs_iput(sym);
+    VfsInode::vfs_iput(sym);
     Ok(())
 }
 
@@ -1640,7 +1636,7 @@ fn chdir_inner() -> KResult<()> {
         return Err(Errno::Fault);
     }
 
-    let inode = vfs_namei(path.as_ptr(), n as usize);
+    let inode = VfsInode::vfs_namei(path.as_ptr(), n as usize);
     if is_err(inode) {
         return Err(Errno::Raw(ptr_err(inode)));
     }
@@ -1649,7 +1645,7 @@ fn chdir_inner() -> KResult<()> {
     }
 
     if !is_dir(unsafe { (*inode).mode }) {
-        vfs_iput(inode);
+        VfsInode::vfs_iput(inode);
         return Err(Errno::NotDir);
     }
 
@@ -1658,7 +1654,7 @@ fn chdir_inner() -> KResult<()> {
     let mut new_cwd_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
     let ret = FsStruct::vfs_inode_get_ref(inode, &mut new_cwd_ref);
     if ret != 0 {
-        vfs_iput(inode);
+        VfsInode::vfs_iput(inode);
         return Err(Errno::Raw(ret));
     }
 
@@ -1679,7 +1675,7 @@ fn chdir_inner() -> KResult<()> {
     }
 
     FsStruct::vfs_inode_put_ref(&mut old_cwd);
-    vfs_iput(inode);
+    VfsInode::vfs_iput(inode);
 
     Ok(())
 }
@@ -1970,7 +1966,7 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
         let (saved_cookies, saved_index) =
             unsafe { ((*f).pos.dir_iter.cookies, (*f).pos.dir_iter.index) };
 
-        let ret = vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).pos.dir_iter) }, &mut dentry);
+        let ret = VfsInode::vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).pos.dir_iter) }, &mut dentry);
         if ret != 0 {
             kmm_free(kbuf);
             vfs_fput(f);
@@ -2002,7 +1998,7 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
         let mut d_type = DT_UNKNOWN;
         if !is_err_or_null(child) {
             d_type = mode_to_dtype(unsafe { (*child).mode });
-            vfs_iput(child);
+            VfsInode::vfs_iput(child);
         }
 
         // Fill in the dirent.
@@ -2068,7 +2064,7 @@ fn chroot_inner() -> KResult<c_int> {
         return Err(Errno::Fault);
     }
 
-    let new_root = vfs_namei(path.as_ptr(), n as usize);
+    let new_root = VfsInode::vfs_namei(path.as_ptr(), n as usize);
     if is_err(new_root) {
         return Err(Errno::Raw(ptr_err(new_root)));
     }
@@ -2077,18 +2073,18 @@ fn chroot_inner() -> KResult<c_int> {
     }
 
     if !is_dir(unsafe { (*new_root).mode }) {
-        vfs_iput(new_root);
+        VfsInode::vfs_iput(new_root);
         return Err(Errno::NotDir);
     }
 
-    let ret = vfs_chroot(new_root);
+    let ret = VfsInode::vfs_chroot(new_root);
     if ret < 0 {
-        vfs_iput(new_root);
+        VfsInode::vfs_iput(new_root);
         return Err(Errno::Raw(ret));
     }
 
-    let ret = vfs_chdir(new_root);
-    vfs_iput(new_root);
+    let ret = VfsInode::vfs_chdir(new_root);
+    VfsInode::vfs_iput(new_root);
 
     Ok(ret)
 }
@@ -2116,7 +2112,7 @@ pub(crate) extern "C" fn vfs_mount_path(
     source: *const c_char,
     source_len: c_int,
 ) -> c_int {
-    let target_dir = vfs_namei(target, target_len as usize);
+    let target_dir = VfsInode::vfs_namei(target, target_len as usize);
     if is_err(target_dir) {
         return ptr_err(target_dir) as c_int;
     }
@@ -2125,18 +2121,18 @@ pub(crate) extern "C" fn vfs_mount_path(
     }
 
     if !is_dir(unsafe { (*target_dir).mode }) {
-        vfs_iput(target_dir);
+        VfsInode::vfs_iput(target_dir);
         return neg(ENOTDIR);
     }
 
     let mut source_inode: *mut vfs_inode = ptr::null_mut();
     if !source.is_null() && source_len > 0 {
-        let source_dev = vfs_namei(source, source_len as usize);
+        let source_dev = VfsInode::vfs_namei(source, source_len as usize);
         if !is_err_or_null(source_dev) {
             if is_blk(unsafe { (*source_dev).mode }) {
                 source_inode = source_dev;
             } else {
-                vfs_iput(source_dev);
+                VfsInode::vfs_iput(source_dev);
             }
         }
     }
@@ -2151,22 +2147,22 @@ pub(crate) extern "C" fn vfs_mount_path(
     // lock, mountpoint inode lock.
     Vfs::vfs_mount_lock();
     VfsSuperblock::vfs_superblock_wlock(target_sb);
-    vfs_ilock(target_dir);
+    VfsInode::vfs_ilock(target_dir);
 
     let ret = VfsInode::vfs_mount(fstype, target_dir, source_inode, 0, ptr::null());
 
     // On success, release the locks. On failure, VfsInode::vfs_mount() already
     // released them.
     if ret == 0 {
-        vfs_iunlock(target_dir);
+        VfsInode::vfs_iunlock(target_dir);
         VfsSuperblock::vfs_superblock_unlock(target_sb);
     }
     Vfs::vfs_mount_unlock();
 
     if !source_inode.is_null() {
-        vfs_iput(source_inode);
+        VfsInode::vfs_iput(source_inode);
     }
-    vfs_iput(target_dir);
+    VfsInode::vfs_iput(target_dir);
 
     ret
 }
@@ -2206,7 +2202,7 @@ pub(crate) extern "C" fn sys_mount() -> u64 {
 /// mount root, acquires the lock nest `VfsInode::vfs_unmount()` requires, and calls
 /// it. Mirrors the C `vfs_umount_path()`.
 pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_int) -> c_int {
-    let mounted_root = vfs_namei(target, target_len as usize);
+    let mounted_root = VfsInode::vfs_namei(target, target_len as usize);
     if is_err(mounted_root) {
         return ptr_err(mounted_root) as c_int;
     }
@@ -2215,14 +2211,14 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     }
 
     if !vfs_inode_is_local_root(mounted_root) {
-        vfs_iput(mounted_root);
+        VfsInode::vfs_iput(mounted_root);
         return neg(EINVAL); // Not a mounted filesystem root.
     }
 
     // SAFETY: non-null `mounted_root`.
     let child_sb = unsafe { (*mounted_root).sb };
     if child_sb.is_null() {
-        vfs_iput(mounted_root);
+        VfsInode::vfs_iput(mounted_root);
         return neg(EINVAL); // Not mounted.
     }
     // P3-7d: read `child_sb->mountpoint` once (was deref'd twice — the
@@ -2230,12 +2226,12 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     // SAFETY: `child_sb` checked non-null above.
     let target_dir = unsafe { (*child_sb).mountpoint };
     if target_dir.is_null() {
-        vfs_iput(mounted_root);
+        VfsInode::vfs_iput(mounted_root);
         return neg(EINVAL); // No mountpoint.
     }
     // SAFETY: non-null `target_dir`.
     if unsafe { (*target_dir).flags.mount() } == 0 {
-        vfs_iput(mounted_root);
+        VfsInode::vfs_iput(mounted_root);
         return neg(EINVAL); // Mountpoint not marked as a mount.
     }
 
@@ -2252,26 +2248,26 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     Vfs::vfs_mount_lock();
     VfsSuperblock::vfs_superblock_wlock(parent_sb);
     VfsSuperblock::vfs_superblock_wlock(child_sb);
-    vfs_ilock(target_dir);
-    vfs_ilock(mounted_root);
+    VfsInode::vfs_ilock(target_dir);
+    VfsInode::vfs_ilock(mounted_root);
 
     let ret = VfsInode::vfs_unmount(target_dir);
 
     if ret != 0 {
         // On failure, release the locks in reverse order (VfsInode::vfs_unmount()
         // did not free anything).
-        vfs_iunlock(mounted_root);
-        vfs_iunlock(target_dir);
+        VfsInode::vfs_iunlock(mounted_root);
+        VfsInode::vfs_iunlock(target_dir);
         VfsSuperblock::vfs_superblock_unlock(child_sb);
         VfsSuperblock::vfs_superblock_unlock(parent_sb);
         Vfs::vfs_mount_unlock();
-        vfs_iput(mounted_root);
+        VfsInode::vfs_iput(mounted_root);
         return ret;
     }
 
     // On success, VfsInode::vfs_unmount() has already unlocked and freed
     // mounted_root/child_sb; only release what's left.
-    vfs_iunlock(target_dir);
+    VfsInode::vfs_iunlock(target_dir);
     VfsSuperblock::vfs_superblock_unlock(parent_sb);
     Vfs::vfs_mount_unlock();
 
@@ -2318,7 +2314,7 @@ fn dumpinode_inner() -> KResult<()> {
         return Ok(());
     }
 
-    let inode = vfs_namei(path.as_ptr(), n as usize);
+    let inode = VfsInode::vfs_namei(path.as_ptr(), n as usize);
     if inode.is_null() {
         crate::kprintln!("dumpinode: cannot find path '{}'", crate::printf::Cs(path.as_ptr()));
         return Err(Errno::NoEnt);
@@ -2326,7 +2322,7 @@ fn dumpinode_inner() -> KResult<()> {
 
     // SAFETY: non-null `inode`.
     let sb = unsafe { (*inode).sb };
-    vfs_iput(inode);
+    VfsInode::vfs_iput(inode);
 
     if sb.is_null() {
         crate::kprintln!("dumpinode: inode has no superblock");
@@ -2554,7 +2550,7 @@ fn statfs_inner() -> KResult<()> {
         return Err(Errno::Fault);
     }
 
-    let inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
+    let inode = VfsInode::vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
     if is_err(inode) {
         return Err(Errno::Raw(ptr_err(inode)));
     }
@@ -2565,7 +2561,7 @@ fn statfs_inner() -> KResult<()> {
     // SAFETY: non-null `inode`.
     let sb = unsafe { (*inode).sb };
     if sb.is_null() {
-        vfs_iput(inode);
+        VfsInode::vfs_iput(inode);
         return Err(Errno::NoSys);
     }
 
@@ -2593,12 +2589,12 @@ fn statfs_inner() -> KResult<()> {
         // SAFETY: `sb`/`kbuf` are both live; `statfs` is a filesystem
         // driver callback with exactly this contract.
         if let Err(e) = unsafe { ops.statfs(sb, &mut kbuf) } {
-            vfs_iput(inode);
+            VfsInode::vfs_iput(inode);
             return Err(e);
         }
     }
 
-    vfs_iput(inode);
+    VfsInode::vfs_iput(inode);
 
     if either_copyout(1, buf_addr, &mut kbuf as *mut statfs as *mut c_void, core::mem::size_of::<statfs>() as u64) < 0 {
         return Err(Errno::Fault);

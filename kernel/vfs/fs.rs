@@ -772,10 +772,7 @@ use crate::mm::cffi::raw::kmm_free;
 use crate::vfs::devtmpfs::superblock::{devtmpfs_init, devtmpfs_post_mount_populate};
 use crate::vfs::fdtable::{__vfs_fdtable_global_init, vfs_fdtable_init};
 use crate::vfs::file::{__vfs_file_init, __vfs_file_shrink_cache};
-use crate::vfs::inode::{
-    __vfs_inode_init, inode_ops, vfs_chroot, vfs_idup, vfs_idup_not_zero, vfs_ilock, vfs_iunlock,
-    vfs_iput, vfs_mkdir, vfs_namei, VfsInode,
-};
+use crate::vfs::inode::{inode_ops, VfsInode};
 use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
 use crate::vfs::vfs_syscall::vfs_mount_path;
 use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
@@ -948,7 +945,7 @@ static mut VFS_FS_TYPES: list_node_t = list_node_t { prev: ptr::null_mut(), next
 static mut VFS_FS_TYPE_COUNT: u16 = 0;
 const MAX_FS_TYPES: u16 = 256;
 
-/// Workqueue for deferred `vfs_iput()` operations. `vfs_iput()` can block
+/// Workqueue for deferred `VfsInode::vfs_iput()` operations. `VfsInode::vfs_iput()` can block
 /// on the superblock wlock, inode mutex, and filesystem transactions; it
 /// must not be called directly from RCU callbacks (deadlock risk against
 /// threads waiting on the same locks for a grace period). RCU callbacks
@@ -1556,7 +1553,7 @@ impl VfsSuperblock {
     /// Mirrors `__vfs_init_sb_rooti()`.
     unsafe fn init_sb_rooti(sb: *mut vfs_superblock) -> c_int {
         unsafe {
-            __vfs_inode_init((*sb).root_inode);
+            VfsInode::__vfs_inode_init((*sb).root_inode);
             loop {
                 // P3-10b: `KResult`-native insert (the old `ERR_PTR`
                 // consumption and its dead null -> `ENOENT` branch are
@@ -1575,11 +1572,11 @@ impl VfsSuperblock {
                     Err(e) => return e.neg(),
                 };
                 if inode != (*sb).root_inode {
-                    vfs_iunlock(inode);
+                    VfsInode::vfs_iunlock(inode);
                     return neg(EEXIST);
                 }
                 (*(*sb).root_inode).parent = (*sb).root_inode;
-                vfs_iunlock((*sb).root_inode);
+                VfsInode::vfs_iunlock((*sb).root_inode);
                 return 0;
             }
         }
@@ -1700,14 +1697,14 @@ impl VfsSuperblock {
                         break 'skip;
                     }
 
-                    vfs_ilock(inode);
+                    VfsInode::vfs_ilock(inode);
 
                     if (*inode).ref_count > 1
                         || (*inode).flags.destroying() != 0
                         || (*inode).flags.valid() == 0
                         || (*inode).flags.mount() != 0
                     {
-                        vfs_iunlock(inode);
+                        VfsInode::vfs_iunlock(inode);
                         break 'skip;
                     }
 
@@ -1723,7 +1720,7 @@ impl VfsSuperblock {
                     }
                     (*inode).flags.set_valid(0);
                     VfsSuperblock::vfs_remove_inode(sb, inode);
-                    vfs_iunlock(inode);
+                    VfsInode::vfs_iunlock(inode);
 
                     inode_ops(inode).free_inode(inode);
                     evicted += 1;
@@ -1759,13 +1756,13 @@ impl VfsSuperblock {
 
             if !(*sb).root_inode.is_null() {
                 let rooti = (*sb).root_inode;
-                vfs_ilock(rooti);
+                VfsInode::vfs_ilock(rooti);
                 // P3-10b: `destroy_inode` is a required trait method (the
                 // old `None`-slot skip had no live instance).
                 inode_ops(rooti).destroy_inode(rooti);
                 (*rooti).flags.set_valid(0);
                 VfsSuperblock::vfs_remove_inode(sb, rooti);
-                vfs_iunlock(rooti);
+                VfsInode::vfs_iunlock(rooti);
                 inode_ops(rooti).free_inode(rooti);
                 (*sb).root_inode = ptr::null_mut();
             }
@@ -1892,7 +1889,7 @@ impl VfsSuperblock {
             // producer) is gone; `Errno::Again` propagates to the caller's
             // retry loops exactly as the old `EAGAIN` pointer did.
             let inode = VfsSuperblock::sb_ops(sb).alloc_inode(sb)?;
-            __vfs_inode_init(inode);
+            VfsInode::__vfs_inode_init(inode);
             match VfsSuperblock::vfs_add_inode_inner(sb, inode) {
                 Ok(_) => Ok(inode), // locked
                 Err(e) => {
@@ -1922,7 +1919,7 @@ impl VfsSuperblock {
             }
             // P3-10b: `KResult`-native end to end (see `VfsSuperblock::vfs_alloc_inode_inner`).
             let inode = VfsSuperblock::sb_ops(sb).get_inode(sb, ino)?;
-            __vfs_inode_init(inode);
+            VfsInode::__vfs_inode_init(inode);
             match VfsSuperblock::vfs_add_inode_inner(sb, inode) {
                 Ok(existing) => {
                     if existing != inode {
@@ -1988,7 +1985,7 @@ impl VfsSuperblock {
             // use-after-free. Backendless filesystems keep refcount=0,
             // n_links>0 inodes alive in cache; allow bumping from 0 in that
             // case, otherwise the inode is unreachable.
-            if !vfs_idup_not_zero(inode) {
+            if !VfsInode::vfs_idup_not_zero(inode) {
                 if (*sb).flags.backendless() != 0
                     && (*inode).n_links > 0
                     && (*inode).flags.valid() != 0
@@ -1999,12 +1996,12 @@ impl VfsSuperblock {
                     return Err(Errno::NoEnt); // Inode is dying.
                 }
             }
-            vfs_ilock(inode);
+            VfsInode::vfs_ilock(inode);
             if (*inode).flags.valid() == 0 || (*inode).flags.destroying() != 0 {
                 // Invalidated or being destroyed after being fetched from the
                 // cache. Can't call vfs_iput here (caller may hold sb wlock);
                 // queue to the workqueue instead.
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 Vfs::queue_deferred_iput(inode);
                 return Err(Errno::NoEnt);
             }
@@ -2048,11 +2045,11 @@ impl VfsSuperblock {
                 if (*existing).flags.destroying() != 0 {
                     return Err(Errno::Again);
                 }
-                vfs_ilock(existing);
+                VfsInode::vfs_ilock(existing);
                 if (*existing).flags.destroying() != 0
                     || (*existing).flags.valid() == 0
                 {
-                    vfs_iunlock(existing);
+                    VfsInode::vfs_iunlock(existing);
                     return Err(Errno::Again);
                 }
                 return Ok(existing);
@@ -2065,7 +2062,7 @@ impl VfsSuperblock {
             }
             (*inode).flags.set_valid(1);
             (*inode).sb = sb;
-            vfs_ilock(inode);
+            VfsInode::vfs_ilock(inode);
             Ok(inode)
         }
     }
@@ -2280,7 +2277,7 @@ impl VfsInode {
             (*mountpoint).dev_mnt.mnt.mnt_sb = ptr::null_mut();
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
                 VfsSuperblock::vfs_superblock_mountcount_inc((*mountpoint).sb);
-                vfs_idup(mountpoint);
+                VfsInode::vfs_idup(mountpoint);
             }
             0
         }
@@ -2457,12 +2454,12 @@ impl VfsInode {
                     (*fs_type).ops.expect("vfs: registered fs_type without ops").free(sb);
                 }
                 VfsInode::clear_mountpoint(mountpoint);
-                vfs_iunlock(mountpoint);
+                VfsInode::vfs_iunlock(mountpoint);
                 if !(*mountpoint).sb.is_null() {
                     VfsSuperblock::vfs_superblock_unlock((*mountpoint).sb);
                 }
                 if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
-                    vfs_iput(mountpoint);
+                    VfsInode::vfs_iput(mountpoint);
                 }
                 // `fs_type_ref` drops here (function return), releasing the
                 // reference `VfsFsType::vfs_get_fs_type` acquired above -- replaces the
@@ -2581,7 +2578,7 @@ impl VfsInode {
             VfsSuperblock::detach_superblock_from_fstype(sb);
             VfsInode::clear_mountpoint(mountpoint);
 
-            vfs_iunlock(mounted_inode);
+            VfsInode::vfs_iunlock(mounted_inode);
             // Free the root inode (one ref from `VfsSuperblock::set_mountpoint`'s `vfs_idup`
             // plus the creation ref -- freed directly since already removed
             // from cache).
@@ -2591,12 +2588,12 @@ impl VfsInode {
             let fs_type = (*sb).fs_type;
             VfsSuperblock::vfs_superblock_unlock(sb);
 
-            vfs_iunlock(mountpoint);
+            VfsInode::vfs_iunlock(mountpoint);
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) && !(*mountpoint).sb.is_null() {
                 VfsSuperblock::vfs_superblock_unlock((*mountpoint).sb);
             }
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
-                vfs_iput(mountpoint);
+                VfsInode::vfs_iput(mountpoint);
             }
 
             (*fs_type).ops.expect("vfs: registered fs_type without ops").free(sb);
@@ -2705,12 +2702,12 @@ impl VfsInode {
             (*sb).flags.set_attached(0);
             (*sb).flags.set_valid(0); // Prevent new lookups.
 
-            vfs_iunlock(mountpoint);
+            VfsInode::vfs_iunlock(mountpoint);
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) && !(*mountpoint).sb.is_null() {
                 VfsSuperblock::vfs_superblock_unlock((*mountpoint).sb);
             }
             if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
-                vfs_iput(mountpoint);
+                VfsInode::vfs_iput(mountpoint);
             }
 
             // Phase 3: sync if needed (backend filesystems).
@@ -2733,11 +2730,11 @@ impl VfsInode {
                 let inode = pos;
                 if inode != rooti && (*inode).ref_count > 0 {
                     if (*inode).flags.orphan() == 0 {
-                        vfs_ilock(inode);
+                        VfsInode::vfs_ilock(inode);
                         (*inode).flags.set_orphan(1);
                         ln_push_back(&raw mut (*sb).orphan_list, &raw mut (*inode).orphan_entry);
                         (*sb).orphan_count += 1;
-                        vfs_iunlock(inode);
+                        VfsInode::vfs_iunlock(inode);
                     }
                 }
                 pos = tmp;
@@ -2748,13 +2745,13 @@ impl VfsInode {
                 VfsSuperblock::detach_superblock_from_fstype(sb);
 
                 if !rooti.is_null() {
-                    vfs_ilock(rooti);
+                    VfsInode::vfs_ilock(rooti);
                     // P3-10b: required trait method (see
                     // `VfsSuperblock::__vfs_final_unmount_cleanup`).
                     inode_ops(rooti).destroy_inode(rooti);
                     (*rooti).flags.set_valid(0);
                     VfsSuperblock::vfs_remove_inode(sb, rooti);
-                    vfs_iunlock(rooti);
+                    VfsInode::vfs_iunlock(rooti);
                     inode_ops(rooti).free_inode(rooti);
                     (*sb).root_inode = ptr::null_mut();
                 }
@@ -2781,39 +2778,39 @@ impl VfsInode {
                 return neg(EINVAL);
             }
             let ret_val;
-            vfs_ilock(mountpoint);
+            VfsInode::vfs_ilock(mountpoint);
             ret_val = (*mountpoint).dir_check_valid_holding();
             if ret_val != 0 {
-                vfs_iunlock(mountpoint);
+                VfsInode::vfs_iunlock(mountpoint);
                 return ret_val;
             }
             if !is_dir((*mountpoint).mode) {
-                vfs_iunlock(mountpoint);
+                VfsInode::vfs_iunlock(mountpoint);
                 return neg(ENOTDIR);
             }
             if (*mountpoint).flags.mount() == 0 {
-                vfs_iunlock(mountpoint);
+                VfsInode::vfs_iunlock(mountpoint);
                 return neg(EINVAL);
             }
             let sb = (*mountpoint).dev_mnt.mnt.mnt_sb;
             if sb.is_null() {
-                vfs_iunlock(mountpoint);
+                VfsInode::vfs_iunlock(mountpoint);
                 return neg(EINVAL);
             }
             let rooti = (*sb).root_inode;
             if rooti.is_null() {
-                vfs_iunlock(mountpoint);
+                VfsInode::vfs_iunlock(mountpoint);
                 return neg(EINVAL);
             }
             // Take a reference to root inode BEFORE unlocking mountpoint.
-            if !vfs_idup_not_zero(rooti) {
-                vfs_iunlock(mountpoint);
+            if !VfsInode::vfs_idup_not_zero(rooti) {
+                VfsInode::vfs_iunlock(mountpoint);
                 return neg(EINVAL);
             }
-            vfs_iunlock(mountpoint);
+            VfsInode::vfs_iunlock(mountpoint);
 
             // Now we hold a reference, safe to lock.
-            vfs_ilock(rooti);
+            VfsInode::vfs_ilock(rooti);
             *ret_rooti = rooti;
             ret_val
         }
@@ -2829,7 +2826,7 @@ impl VfsInode {
                 return ptr::null_mut();
             }
             if (*(*dentry).parent).sb == (*dentry).sb && (*(*dentry).parent).ino == (*dentry).ino {
-                vfs_idup((*dentry).parent);
+                VfsInode::vfs_idup((*dentry).parent);
                 return (*dentry).parent;
             }
             ptr::null_mut()
@@ -2844,7 +2841,7 @@ impl VfsInode {
             if !parent.is_null() && is_dir((*inode).mode) {
                 if inode != parent {
                     (*inode).parent = parent;
-                    vfs_idup(parent);
+                    VfsInode::vfs_idup(parent);
                 }
             }
         }
@@ -2883,7 +2880,7 @@ impl VfsInode {
             match VfsSuperblock::vfs_get_inode_cached_inner(sb, (*dentry).ino) {
                 Ok(inode) => {
                     VfsInode::set_name_if_null(inode, dentry);
-                    vfs_iunlock(inode);
+                    VfsInode::vfs_iunlock(inode);
                     return Ok(inode);
                 }
                 Err(e) if e.neg() != neg(ENOENT) => return Err(e),
@@ -2902,7 +2899,7 @@ impl VfsInode {
             match VfsSuperblock::vfs_get_inode_cached_inner(sb, (*dentry).ino) {
                 Ok(inode) => {
                     VfsInode::set_name_if_null(inode, dentry);
-                    vfs_iunlock(inode);
+                    VfsInode::vfs_iunlock(inode);
                     return Ok(inode);
                 }
                 Err(e) if e.neg() != neg(ENOENT) => return Err(e),
@@ -2926,7 +2923,7 @@ impl VfsInode {
 
             VfsInode::set_parent_from_dentry(inode, (*dentry).parent);
             VfsInode::set_name_if_null(inode, dentry);
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             Ok(inode)
         }
     }
@@ -3041,7 +3038,7 @@ impl Vfs {
 
             let thread = xv6_current_thread();
             kassert!(!thread.is_null(), "Vfs::vfs_init must be called from a thread context");
-            __vfs_inode_init(&raw mut vfs_root_inode);
+            VfsInode::__vfs_inode_init(&raw mut vfs_root_inode);
             __vfs_file_init();
             (*thread).fs = FsStruct::vfs_struct_init();
             (*thread).fdtable = vfs_fdtable_init();
@@ -3067,19 +3064,19 @@ impl Vfs {
 
             // Mount devtmpfs at /dev (auto-populated with device nodes).
             // Ensure /dev directory exists (create it if not present on root fs).
-            let mut dev_dir = vfs_namei(c"/dev".as_ptr(), 4);
+            let mut dev_dir = VfsInode::vfs_namei(c"/dev".as_ptr(), 4);
             if is_err_or_null(dev_dir) {
-                let root = vfs_namei(c"/".as_ptr(), 1);
+                let root = VfsInode::vfs_namei(c"/".as_ptr(), 1);
                 if !is_err_or_null(root) {
                     // vfs_mkdir handles its own locking -- do NOT lock root first.
-                    dev_dir = vfs_mkdir(root, 0o755, c"dev".as_ptr(), 3);
-                    vfs_iput(root);
+                    dev_dir = VfsInode::vfs_mkdir(root, 0o755, c"dev".as_ptr(), 3);
+                    VfsInode::vfs_iput(root);
                     if !is_err_or_null(dev_dir) {
-                        vfs_iput(dev_dir);
+                        VfsInode::vfs_iput(dev_dir);
                     }
                 }
             } else {
-                vfs_iput(dev_dir);
+                VfsInode::vfs_iput(dev_dir);
             }
             ret = vfs_mount_path(c"devtmpfs".as_ptr(), c"/dev".as_ptr(), 4, ptr::null(), 0);
             if ret == 0 {
@@ -3089,13 +3086,13 @@ impl Vfs {
                 devtmpfs_post_mount_populate();
 
                 // Pre-create /dev/pts directory for PTY slaves.
-                let dev_inode = vfs_namei(c"/dev".as_ptr(), 4);
+                let dev_inode = VfsInode::vfs_namei(c"/dev".as_ptr(), 4);
                 if !is_err_or_null(dev_inode) {
-                    let pts_dir = vfs_mkdir(dev_inode, 0o755, c"pts".as_ptr(), 3);
+                    let pts_dir = VfsInode::vfs_mkdir(dev_inode, 0o755, c"pts".as_ptr(), 3);
                     if !is_err_or_null(pts_dir) {
-                        vfs_iput(pts_dir);
+                        VfsInode::vfs_iput(pts_dir);
                     }
-                    vfs_iput(dev_inode);
+                    VfsInode::vfs_iput(dev_inode);
                 }
             } else if ret == neg(ENOENT) {
                 crate::kprintln!("devtmpfs: /dev directory not found");
@@ -3117,7 +3114,7 @@ impl Vfs {
     unsafe extern "C" fn iput_work_func(work: *mut work_struct) {
         unsafe {
             let inode = (*work).data as *mut vfs_inode;
-            vfs_iput(inode);
+            VfsInode::vfs_iput(inode);
             WorkStruct::free(work);
         }
     }
@@ -3127,7 +3124,7 @@ impl Vfs {
         unsafe {
             let wq = Vfs::vfs_get_deferred_iput_wq();
             if wq.is_null() {
-                vfs_iput(inode);
+                VfsInode::vfs_iput(inode);
                 return;
             }
             let work = WorkStruct::create(Some(Vfs::iput_work_func), inode as u64);
@@ -3135,7 +3132,7 @@ impl Vfs {
                 crate::kprintln!(
                     "__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput"
                 );
-                vfs_iput(inode);
+                VfsInode::vfs_iput(inode);
                 return;
             }
             Workqueue::queue(wq, work);
@@ -3233,17 +3230,17 @@ impl FsStruct {
             crate::lock::spinlock::spin_lock(&raw mut (*old_fs).lock);
             let rooti = (*old_fs).rooti.inode;
             let cwdi = (*old_fs).cwd.inode;
-            let rooti_ok = !rooti.is_null() && vfs_idup_not_zero(rooti);
-            let cwdi_ok = !cwdi.is_null() && vfs_idup_not_zero(cwdi);
+            let rooti_ok = !rooti.is_null() && VfsInode::vfs_idup_not_zero(rooti);
+            let cwdi_ok = !cwdi.is_null() && VfsInode::vfs_idup_not_zero(cwdi);
             crate::lock::spinlock::spin_unlock(&raw mut (*old_fs).lock);
 
             let mut ret;
             if rooti_ok {
                 ret = FsStruct::vfs_inode_get_ref(rooti, &raw mut (*new_fs).rooti);
-                vfs_iput(rooti);
+                VfsInode::vfs_iput(rooti);
                 if ret != 0 {
                     if cwdi_ok {
-                        vfs_iput(cwdi);
+                        VfsInode::vfs_iput(cwdi);
                     }
                     FsStruct::vfs_inode_put_ref(&raw mut (*new_fs).rooti);
                     FsStruct::vfs_inode_put_ref(&raw mut (*new_fs).cwd);
@@ -3253,7 +3250,7 @@ impl FsStruct {
             }
             if cwdi_ok {
                 ret = FsStruct::vfs_inode_get_ref(cwdi, &raw mut (*new_fs).cwd);
-                vfs_iput(cwdi);
+                VfsInode::vfs_iput(cwdi);
                 if ret != 0 {
                     FsStruct::vfs_inode_put_ref(&raw mut (*new_fs).rooti);
                     FsStruct::vfs_inode_put_ref(&raw mut (*new_fs).cwd);
@@ -3296,7 +3293,7 @@ impl FsStruct {
             }
             // Caller must already hold a reference, so these can't fail.
             VfsSuperblock::vfs_superblock_dup(sb);
-            vfs_idup(inode);
+            VfsInode::vfs_idup(inode);
             (*r).sb = sb;
             (*r).inode = inode;
             0
@@ -3310,7 +3307,7 @@ impl FsStruct {
                 return;
             }
             if !(*r).inode.is_null() {
-                vfs_iput((*r).inode);
+                VfsInode::vfs_iput((*r).inode);
                 (*r).inode = ptr::null_mut();
             }
             if !(*r).sb.is_null() {

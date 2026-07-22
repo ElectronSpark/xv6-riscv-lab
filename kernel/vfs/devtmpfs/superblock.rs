@@ -111,7 +111,7 @@
 //!
 //! # Deliberate fix
 //!
-//! [`__devtmpfs_walk_parent`]'s successful `vfs_ilookup()` branches
+//! [`__devtmpfs_walk_parent`]'s successful `VfsInode::vfs_ilookup()` branches
 //! (matching `.`/`..`-less intermediate path components) populate a
 //! `vfs_dentry` whose `name` field `vfs_ilookup` heap-allocates via
 //! `strndup` — the C original never released it (every other
@@ -138,7 +138,7 @@ use crate::sync::SpinLock;
 // are in scope for this wave; converted from `extern "C"` redeclarations
 // to plain crate-path items (identical signatures).
 use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_release_dentry};
-use crate::vfs::inode::{vfs_idup, vfs_ilookup, vfs_iput, vfs_unlink};
+use crate::vfs::inode::VfsInode;
 use crate::vfs::tmpfs::inode::tmpfs_make_directory;
 use crate::vfs::tmpfs::superblock::{
     tmpfs_alloc_inode_inner, tmpfs_alloc_superblock, tmpfs_free_impl, tmpfs_get_inode_inner,
@@ -400,7 +400,7 @@ unsafe fn __devtmpfs_walk_parent(
         .unwrap_or(-1);
 
     let mut dir = root;
-    vfs_idup(dir); // take a ref so caller can always iput the result
+    VfsInode::vfs_idup(dir); // take a ref so caller can always iput the result
 
     if last_slash > 0 {
         let last_slash = last_slash as usize;
@@ -417,7 +417,7 @@ unsafe fn __devtmpfs_walk_parent(
             let comp_len = token.len();
 
             let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
-            let ret = vfs_ilookup(dir, &mut dentry, comp, comp_len);
+            let ret = VfsInode::vfs_ilookup(dir, &mut dentry, comp, comp_len);
             if ret == 0 && dentry.ino != 0 {
                 // Found -- get the inode.
                 // SAFETY: `dir` is non-null (loop invariant); `sb`/`ops`
@@ -436,7 +436,7 @@ unsafe fn __devtmpfs_walk_parent(
                 // Deliberate fix (see module doc): release the dentry's
                 // heap-allocated name now that `.ino` has been consumed.
                 vfs_release_dentry(&mut dentry);
-                vfs_iput(dir);
+                VfsInode::vfs_iput(dir);
                 let Ok(child) = child else {
                     return ptr::null_mut();
                 };
@@ -444,8 +444,8 @@ unsafe fn __devtmpfs_walk_parent(
             } else {
                 // Not found -- create the directory. (P3-10b:
                 // `KResult`-native, no ERR_PTR decode.)
-                let sub = crate::vfs::inode::vfs_mkdir_inner(dir, 0o755, comp, comp_len);
-                vfs_iput(dir);
+                let sub = crate::vfs::inode::VfsInode::vfs_mkdir_inner(dir, 0o755, comp, comp_len);
+                VfsInode::vfs_iput(dir);
                 let Ok(sub) = sub else {
                     return ptr::null_mut();
                 };
@@ -464,7 +464,7 @@ unsafe fn __devtmpfs_walk_parent(
         *leaf = name;
         *leaf_len = name_len;
     }
-    dir // caller must vfs_iput()
+    dir // caller must VfsInode::vfs_iput()
 }
 
 /// `__devtmpfs_mknod_relative` — create a device node under the devtmpfs
@@ -491,8 +491,8 @@ unsafe fn __devtmpfs_mknod_relative(
 
     // P3-10b: `KResult`-native, no ERR_PTR decode.
     let mut ret = 0;
-    match crate::vfs::inode::vfs_mknod_inner(parent, mode, dev, leaf, leaf_len) {
-        Ok(inode) => vfs_iput(inode),
+    match crate::vfs::inode::VfsInode::vfs_mknod_inner(parent, mode, dev, leaf, leaf_len) {
+        Ok(inode) => VfsInode::vfs_iput(inode),
         Err(e) => {
             ret = e.neg();
             if ret == neg(EEXIST) {
@@ -500,7 +500,7 @@ unsafe fn __devtmpfs_mknod_relative(
             }
         }
     }
-    vfs_iput(parent);
+    VfsInode::vfs_iput(parent);
     ret
 }
 
@@ -523,8 +523,8 @@ unsafe fn __devtmpfs_unlink_relative(
         return neg(ENOENT);
     }
 
-    let ret = vfs_unlink(parent, leaf, leaf_len);
-    vfs_iput(parent);
+    let ret = VfsInode::vfs_unlink(parent, leaf, leaf_len);
+    VfsInode::vfs_iput(parent);
     ret
 }
 

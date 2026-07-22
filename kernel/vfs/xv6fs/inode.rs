@@ -277,7 +277,7 @@ fn slab_free(obj: *mut c_void) {
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
 use crate::vfs::fs::vfs_release_dentry;
-use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
+use crate::vfs::inode::VfsInode;
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -690,11 +690,11 @@ fn __xv6fs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
     // Add directory entry (name_buf already prepared above).
     if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) } {
         // TODO: Free inode on failure.
-        vfs_iunlock(new_inode);
+        VfsInode::vfs_iunlock(new_inode);
         return Err(e);
     }
 
-    vfs_iunlock(new_inode); // VFS's vfs_create will re-lock it.
+    VfsInode::vfs_iunlock(new_inode); // VFS's vfs_create will re-lock it.
     Ok(new_inode)
 }
 
@@ -736,7 +736,7 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
             || __xv6fs_dirlink(xv6_sb, ip, c"..".as_ptr(), (*dir).ino as u32).is_err()
         {
             // TODO: Cleanup on failure.
-            vfs_iunlock(new_inode);
+            VfsInode::vfs_iunlock(new_inode);
             return Err(Errno::Io);
         }
     }
@@ -745,7 +745,7 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
 
     // Add directory entry in parent (name_buf already set earlier).
     if unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) }.is_err() {
-        vfs_iunlock(new_inode);
+        VfsInode::vfs_iunlock(new_inode);
         return Err(Errno::Io);
     }
 
@@ -754,7 +754,7 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
     unsafe { (*dir).n_links += 1 };
     xv6fs_iupdate(dp);
 
-    vfs_iunlock(new_inode); // VFS's vfs_mkdir will re-lock it.
+    VfsInode::vfs_iunlock(new_inode); // VFS's vfs_mkdir will re-lock it.
     Ok(new_inode)
 }
 
@@ -992,7 +992,7 @@ fn __xv6fs_symlink_inner(
         if addr == 0 {
             // Failed to allocate block -- cleanup.
             xv6fs_itrunc(ip);
-            vfs_iunlock(new_inode);
+            VfsInode::vfs_iunlock(new_inode);
             return Err(Errno::NoSpc);
         }
 
@@ -1000,7 +1000,7 @@ fn __xv6fs_symlink_inner(
         let bp = bread(unsafe { (*ip).dev }, addr);
         if bp.is_null() {
             xv6fs_itrunc(ip);
-            vfs_iunlock(new_inode);
+            VfsInode::vfs_iunlock(new_inode);
             return Err(Errno::Io);
         }
         // SAFETY: `bp`/`target` are live.
@@ -1024,11 +1024,11 @@ fn __xv6fs_symlink_inner(
     // Add directory entry (name_buf already set earlier).
     if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) } {
         xv6fs_itrunc(ip);
-        vfs_iunlock(new_inode);
+        VfsInode::vfs_iunlock(new_inode);
         return Err(e);
     }
 
-    vfs_iunlock(new_inode);
+    VfsInode::vfs_iunlock(new_inode);
     Ok(new_inode)
 }
 
@@ -1078,11 +1078,11 @@ fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
 
     if let Err(e) = unsafe { __xv6fs_dirlink(xv6_sb, dp, name_buf.as_ptr() as *const c_char, (*new_inode).ino as u32) } {
         // TODO: Free inode on failure.
-        vfs_iunlock(new_inode);
+        VfsInode::vfs_iunlock(new_inode);
         return Err(e);
     }
 
-    vfs_iunlock(new_inode); // VFS's vfs_mknod will re-lock it.
+    VfsInode::vfs_iunlock(new_inode); // VFS's vfs_mknod will re-lock it.
     Ok(new_inode)
 }
 
@@ -1211,7 +1211,7 @@ fn __xv6fs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
         return Err(Errno::Inval);
     }
     let ip = inode as *mut xv6fs_inode;
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
     // SAFETY: `inode`/`stat` are live and `inode` is now locked.
     unsafe {
         ptr::write_bytes(stat, 0, 1);
@@ -1221,7 +1221,7 @@ fn __xv6fs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
         (*stat).nlink = (*inode).n_links;
         (*stat).size = (*inode).size as u64;
     }
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     Ok(())
 }
 

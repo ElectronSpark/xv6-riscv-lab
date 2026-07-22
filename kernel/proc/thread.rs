@@ -635,7 +635,7 @@ use crate::mm::Vm;
 // already imported above), so they become plain crate-path imports.
 use crate::vfs::fdtable::vfs_fdtable_put;
 use crate::vfs::fs::FsStruct;
-use crate::vfs::inode::vfs_iput;
+use crate::vfs::inode::VfsInode;
 
 // NO-STANDALONE-FN: the former FFI facades `session_alloc`/`session_add_pg`/
 // `session_add_thread`/`session_init`/`vfs_namei` and the dead
@@ -1249,7 +1249,7 @@ impl Thread {
             let p = Thread::current();
 
             // Inlined former `vfs_namei` facade (the sole call site).
-            let root_inode = crate::vfs::inode::vfs_namei(c"/".as_ptr(), 1) as *mut c_void;
+            let root_inode = crate::vfs::inode::VfsInode::vfs_namei(c"/".as_ptr(), 1) as *mut c_void;
             if root_inode.is_null() {
                 kpanic!("install_user_root: cannot find root directory");
             }
@@ -1278,7 +1278,7 @@ impl Thread {
         // right before this call, so `(*p).fs` and the subsequent
         // `(*fs).lock`/`(*fs).cwd` accesses are on a valid, non-null
         // `fs_struct`. `root_inode` is a just-returned, non-null
-        // `vfs_namei()` reference (also null-checked by the caller) that
+        // `VfsInode::vfs_namei()` reference (also null-checked by the caller) that
         // this function fully consumes: `vfs_inode_get_ref` takes a
         // reference into `cwd_ref` (written back through the `MaybeUninit`
         // out-pointer, then read via `assume_init` only after `ret >= 0`
@@ -1300,7 +1300,7 @@ impl Thread {
             let _g = crate::sync::KSpinlock::from_bindings(&raw mut (*fs).lock).lock();
             (*fs).cwd = cwd_ref.assume_init();
         }
-        vfs_iput(root_inode);
+        VfsInode::vfs_iput(root_inode);
         }
     }
 }

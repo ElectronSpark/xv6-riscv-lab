@@ -42,7 +42,7 @@ use super::{
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
 use crate::vfs::fs::{VfsSuperblock, vfs_release_dentry};
-use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
+use crate::vfs::inode::VfsInode;
 
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
@@ -876,7 +876,7 @@ fn __tmpfs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
             let ti = unsafe { &mut *ti };
             ti.make_regfile();
             let vi = ptr::addr_of_mut!(ti.vfs_inode);
-            vfs_iunlock(vi);
+            VfsInode::vfs_iunlock(vi);
             Ok(vi)
         }
     }
@@ -943,7 +943,7 @@ fn __tmpfs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
                 (*ti).vfs_inode.n_links = 2;
                 // Increment parent's n_links for this subdir's ".." entry.
                 (*dir).n_links += 1;
-                vfs_iunlock(ptr::addr_of_mut!((*ti).vfs_inode));
+                VfsInode::vfs_iunlock(ptr::addr_of_mut!((*ti).vfs_inode));
                 Ok(ptr::addr_of_mut!((*ti).vfs_inode))
             }
         }
@@ -993,7 +993,7 @@ fn __tmpfs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
                 ti.make_cdev(dev);
             }
             let vi = ptr::addr_of_mut!(ti.vfs_inode);
-            vfs_iunlock(vi);
+            VfsInode::vfs_iunlock(vi);
             Ok(vi)
         }
     }
@@ -1115,7 +1115,7 @@ fn __tmpfs_symlink_inner(
             );
             __tmpfs_free_dentry(dentry);
             // Inode is locked and detached from superblock; directly free it.
-            vfs_iunlock(vi);
+            VfsInode::vfs_iunlock(vi);
             super::superblock::tmpfs_free_inode(vi);
             return Err(e);
         }
@@ -1124,7 +1124,7 @@ fn __tmpfs_symlink_inner(
     // inode; one `&mut` hoist replaces the two former `addr_of_mut` derefs.
     let ni = unsafe { &mut *new_inode };
     let vi = ptr::addr_of_mut!(ni.vfs_inode);
-    vfs_iunlock(vi);
+    VfsInode::vfs_iunlock(vi);
     Ok(vi)
 }
 
@@ -1151,7 +1151,7 @@ fn __tmpfs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
     if inode.is_null() || stat.is_null() {
         return Err(Errno::Inval);
     }
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
     // SAFETY: `inode`/`stat` are live and `inode` is now locked.
     unsafe {
         ptr::write_bytes(stat, 0, 1);
@@ -1161,7 +1161,7 @@ fn __tmpfs_getattr(inode: *mut vfs_inode, stat: *mut stat) -> KResult<()> {
         (*stat).nlink = (*inode).n_links;
         (*stat).size = (*inode).size as u64;
     }
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     Ok(())
 }
 

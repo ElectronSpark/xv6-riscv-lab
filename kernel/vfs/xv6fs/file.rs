@@ -98,7 +98,7 @@ fn page_free(ptr: *mut c_void, order: u64) {
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
 use crate::vfs::fs::FsStruct;
-use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
+use crate::vfs::inode::VfsInode;
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -149,13 +149,13 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
     // so we can just lock the inode. The file reference guarantees the
     // inode remains allocated -- no validity check needed per Linux VFS
     // model (file holds inode reference).
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
 
     // SAFETY: `file`/`inode` are live and `inode` is locked.
     let mut pos = unsafe { (*file).pos.f_pos };
     let size = unsafe { (*inode).size };
     if pos >= size {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Ok(0); // EOF.
     }
     if pos + count as loff_t > size {
@@ -177,7 +177,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         let blkno_512 = bn as u64 * BLK512_PER_BSIZE;
         let page = Pcache::get_page(pc, blkno_512);
         if page.is_null() {
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             if bytes_read > 0 {
                 return Ok(bytes_read as isize);
             }
@@ -186,7 +186,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         let ret = Pcache::read_page(pc, page);
         if ret != 0 {
             Pcache::put_page(pc, page);
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             if bytes_read > 0 {
                 return Ok(bytes_read as isize);
             }
@@ -203,7 +203,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
             // `vm_copyout` itself.
             if Vm::vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, n as u64) < 0 {
                 Pcache::put_page(pc, page);
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 if bytes_read == 0 {
                     return Err(Errno::Fault);
                 }
@@ -221,7 +221,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         pos += n as loff_t;
     }
 
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     Ok(bytes_read as isize)
 }
 
@@ -290,7 +290,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
         // Now acquire the inode lock to protect inode metadata during
         // write. The file reference guarantees the inode remains
         // allocated.
-        vfs_ilock(inode);
+        VfsInode::vfs_ilock(inode);
 
         // `goto done;` in the C original always jumps straight to
         // `return bytes_written;` (the function's tail) with no other
@@ -311,7 +311,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
             // Ensure the block is allocated (may log indirect-block changes).
             let addr = xv6fs_bmap(ip, bn);
             if addr == 0 {
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if bytes_written == 0 {
                     return Err(Errno::NoSpc);
@@ -323,7 +323,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
             let blkno_512 = bn as u64 * BLK512_PER_BSIZE;
             let page = Pcache::get_page(pc, blkno_512);
             if page.is_null() {
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if bytes_written > 0 {
                     return Ok(bytes_written as isize);
@@ -333,7 +333,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
             let ret = Pcache::read_page(pc, page);
             if ret != 0 {
                 Pcache::put_page(pc, page);
-                vfs_iunlock(inode);
+                VfsInode::vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if bytes_written > 0 {
                     return Ok(bytes_written as isize);
@@ -356,7 +356,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
                 ) < 0
                 {
                     Pcache::put_page(pc, page);
-                    vfs_iunlock(inode);
+                    VfsInode::vfs_iunlock(inode);
                     xv6fs_end_op(xv6_sb);
                     if bytes_written == 0 {
                         return Err(Errno::Fault);
@@ -386,7 +386,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
         super::inode::xv6fs_iupdate(ip);
 
         // Release inode lock before ending transaction.
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         xv6fs_end_op(xv6_sb);
 
         bytes_written += chunk_written;
@@ -412,9 +412,9 @@ fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KR
         SEEK_CUR => unsafe { (*file).pos.f_pos + offset },
         SEEK_END => {
             // Need to lock the inode to safely read size.
-            vfs_ilock(inode);
+            VfsInode::vfs_ilock(inode);
             let sz = unsafe { (*inode).size };
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             sz + offset
         }
         _ => return Err(Errno::Inval),
@@ -504,11 +504,11 @@ fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
         return ptr::null_mut();
     }
 
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
 
     // Entirely beyond EOF -- return a zero page.
     if file_off >= unsafe { (*inode).size } as u64 {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         // SAFETY: `pa` is a freshly allocated, exclusively-owned page.
         unsafe { ptr::write_bytes(pa as *mut u8, 0, crate::bindings::PGSIZE as usize) };
         return pa;
@@ -520,7 +520,7 @@ fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
     }
 
     if unsafe { (*pc).flags.bits.active() } == 0 {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
@@ -533,14 +533,14 @@ fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
 
     let pcpage = Pcache::get_page(pc, blkno_512);
     if pcpage.is_null() {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
     let ret = Pcache::read_page(pc, pcpage);
     if ret != 0 {
         Pcache::put_page(pc, pcpage);
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         page_free(pa, 0);
         return ptr::null_mut();
     }
@@ -560,7 +560,7 @@ fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c
     }
 
     Pcache::put_page(pc, pcpage);
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     pa
 }
 

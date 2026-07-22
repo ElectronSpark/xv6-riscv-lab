@@ -119,7 +119,7 @@ use crate::proc::Proc;
 // simplification, not an ABI change.
 use crate::vfs::fdtable::vfs_fdtable_close_on_exec;
 use crate::vfs::file::{vfs_fileopen, vfs_filelseek, vfs_fileread, vfs_fput};
-use crate::vfs::inode::{vfs_iput, vfs_namei};
+use crate::vfs::inode::VfsInode;
 
 /// `proc/exit.rs::vfork_done` takes its own local opaque `Thread` marker
 /// type (`proc::exit::Thread`), not `crate::bindings::thread` -- both are
@@ -419,14 +419,14 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // SAFETY: `path` is a caller-owned, NUL-terminated C string (contract
     // shared with the C original's `strlen(path)`).
     let path_len = unsafe { strlen(path) };
-    let inode = vfs_namei(path as *const c_char, path_len);
+    let inode = VfsInode::vfs_namei(path as *const c_char, path_len);
     if is_err_or_null(inode) {
         return -1;
     }
 
     // Open the file for reading.
     file = vfs_fileopen(inode, O_RDONLY);
-    vfs_iput(inode); // vfs_fileopen takes its own reference.
+    VfsInode::vfs_iput(inode); // vfs_fileopen takes its own reference.
 
     if is_err(file) {
         return -1;

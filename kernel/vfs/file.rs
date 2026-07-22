@@ -499,7 +499,7 @@ use crate::sysnet::SOCKETS;
 // items (identical signatures, same `crate::bindings::*` types this file
 // already imports).
 use crate::vfs::fs::FsStruct;
-use crate::vfs::inode::{vfs_ilock, vfs_itruncate, vfs_iunlock};
+use crate::vfs::inode::VfsInode;
 use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_open};
 
 // `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
@@ -915,11 +915,11 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
         return Err(Errno::NxIo); // Named pipes not supported via open yet.
     }
 
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
     // @TODO: check permission
     let file = file_alloc();
     if file.is_null() {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Err(Errno::NoMem);
     }
     // SAFETY: `file_alloc` returned a fresh, exclusively-owned, non-null
@@ -933,18 +933,18 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     let ret = FsStruct::vfs_inode_get_ref(inode, &raw mut f.inode);
     if ret != 0 {
         file_free(&raw mut *f);
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         return Err(Errno::Raw(ret));
     }
 
     if is_chr(mode) {
         if let Err(e) = f.open_cdev(inode) {
-            vfs_iunlock(inode);
+            VfsInode::vfs_iunlock(inode);
             FsStruct::vfs_inode_put_ref(&raw mut f.inode);
             file_free(&raw mut *f);
             return Err(e);
         }
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         ftable_attach(&raw mut *f);
         f.f_flags = f_flags;
         return Ok(&raw mut *f);
@@ -952,7 +952,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
 
     if is_blk(mode) {
         f.open_blkdev(inode); // Infallible -- see its own doc comment.
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         ftable_attach(&raw mut *f);
         f.f_flags = f_flags;
         return Ok(&raw mut *f);
@@ -966,20 +966,20 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     // reference as the raw pointer `open` still takes; the callback runs
     // with the inode lock held, matching its documented contract.
     if let Err(e) = unsafe { crate::vfs::inode::inode_ops(inode).open(inode, &raw mut *f, f_flags) } {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         FsStruct::vfs_inode_put_ref(&raw mut f.inode);
         file_free(&raw mut *f);
         return Err(e);
     }
     if f.ops.is_none() {
-        vfs_iunlock(inode);
+        VfsInode::vfs_iunlock(inode);
         FsStruct::vfs_inode_put_ref(&raw mut f.inode);
         file_free(&raw mut *f);
         crate::kprintln!("vfs_fileopen: file operations not set by inode open");
         return Err(Errno::Inval);
     }
 
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     ftable_attach(&raw mut *f);
     f.f_flags = f_flags;
     // SAFETY: `pos.f_pos` is the active union member of a regular file.
@@ -1311,7 +1311,7 @@ fn stat_inner(&mut self, out: *mut stat) -> KResult<c_int> {
 
     // Generic fallback when the inode has no driver ops (the dummy
     // VFS-root inode).
-    vfs_ilock(inode);
+    VfsInode::vfs_ilock(inode);
     // SAFETY: non-null `inode`/`out`.
     unsafe {
         ptr::write_bytes(out, 0, 1);
@@ -1321,7 +1321,7 @@ fn stat_inner(&mut self, out: *mut stat) -> KResult<c_int> {
         (*out).nlink = (*inode).n_links;
         (*out).size = (*inode).size as u64;
     }
-    vfs_iunlock(inode);
+    VfsInode::vfs_iunlock(inode);
     Ok(0)
 }
 }
@@ -1525,7 +1525,7 @@ fn truncate_inner(&mut self, length: loff_t) -> KResult<c_int> {
 
     let _g = self.file_lock().lock();
     // `vfs_ilock` is acquired inside `vfs_itruncate`.
-    Ok(vfs_itruncate(inode, length))
+    Ok(VfsInode::vfs_itruncate(inode, length))
 }
 }
 

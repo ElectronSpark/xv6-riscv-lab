@@ -285,7 +285,7 @@ use crate::kobject::KArc;
 // aliases, so the former `u32`-typed params are unaffected). `vfs_root_inode`
 // is fs.rs's single dummy VFS-root `vfs_inode` instance.
 use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_root_inode};
-use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, VfsInode};
+use crate::vfs::inode::VfsInode;
 
 // `kassert!`/`is_err`/`is_err_or_null`'s canonical homes are
 // `crate::kstd`/crate root (P3-CS1 centralization). P3-CS12: the two
@@ -1024,7 +1024,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
 
     // Create /root directory in tmpfs root (vfs_mkdir handles its own
     // locking; P3-10b: `KResult`-native, no ERR_PTR decode).
-    let Ok(root_dir) = crate::vfs::inode::vfs_mkdir_inner(tmpfs_root, 0o755, c"root".as_ptr(), 4)
+    let Ok(root_dir) = crate::vfs::inode::VfsInode::vfs_mkdir_inner(tmpfs_root, 0o755, c"root".as_ptr(), 4)
     else {
         crate::kprintln!("xv6fs: failed to create /root directory");
         return;
@@ -1037,7 +1037,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     // Create a block device inode for root device. (P3-10b:
     // `KResult`-native; the old dead null -> `ENOMEM` branch had no
     // producer.)
-    let dev_inode = match crate::vfs::inode::vfs_mknod_inner(
+    let dev_inode = match crate::vfs::inode::VfsInode::vfs_mknod_inner(
         tmpfs_root,
         super::S_IFBLK | 0o600,
         root_dev,
@@ -1047,7 +1047,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
         Ok(i) => i,
         Err(e) => {
             crate::kprintln!("xv6fs: failed to create device inode, errno={}", e.neg() as i64);
-            vfs_iput(root_dir);
+            VfsInode::vfs_iput(root_dir);
             return;
         }
     };
@@ -1058,11 +1058,11 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     Vfs::vfs_mount_lock();
     // SAFETY: `root_dir` is a live, referenced inode; `.sb` is valid.
     unsafe { VfsSuperblock::vfs_superblock_wlock((*root_dir).sb) };
-    vfs_ilock(root_dir);
+    VfsInode::vfs_ilock(root_dir);
     let ret = VfsInode::vfs_mount(c"xv6fs".as_ptr(), root_dir, dev_inode, 0, ptr::null());
     if ret == 0 {
         // Success: caller releases locks.
-        vfs_iunlock(root_dir);
+        VfsInode::vfs_iunlock(root_dir);
         // SAFETY: same as above.
         unsafe { VfsSuperblock::vfs_superblock_unlock((*root_dir).sb) };
     }
@@ -1070,7 +1070,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     Vfs::vfs_mount_unlock();
 
     // Release device inode reference (mount holds its own if needed).
-    vfs_iput(dev_inode);
+    VfsInode::vfs_iput(dev_inode);
 
     if ret == 0 {
         crate::kprintln!("xv6fs: mounted at /root");
@@ -1079,7 +1079,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
         // SAFETY: `root_dir` is live.
         let xv6fs_root = unsafe { (*root_dir).dev_mnt.mnt.mnt_rooti };
         if !xv6fs_root.is_null() {
-            let ret = vfs_chroot(xv6fs_root);
+            let ret = VfsInode::vfs_chroot(xv6fs_root);
             if ret == 0 {
                 crate::kprintln!("xv6fs: chroot to /root successful");
             } else {
@@ -1089,7 +1089,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     } else {
         crate::kprintln!("xv6fs: failed to mount at /root, errno={}", ret);
     }
-    vfs_iput(root_dir);
+    VfsInode::vfs_iput(root_dir);
 
     // xv6fs_run_all_smoketests() -- dead code, not ported (see module doc).
 }
