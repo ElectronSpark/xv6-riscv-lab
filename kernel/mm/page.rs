@@ -510,7 +510,7 @@ mod ffi {
         xv6_cpuid, xv6_push_off, xv6_pop_off,
         xv6_list_init, xv6_list_is_empty, xv6_list_is_detached,
         xv6_list_detach, xv6_list_push_front, xv6_list_pop_front,
-        memset, __panic_start, __panic_end,
+        memset, Printf,
     };
 
     // P3-D3c: the runtime physical-memory globals (`start_kernel.rs`) and
@@ -581,12 +581,12 @@ pub(crate) use crate::mm::slab::slab_free;
     // each. `printf` is variadic so it cannot be declared `safe`. ---------
     #[inline]
     pub fn panic(msg: &'static [u8]) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         // `msg` is always a NUL-terminated byte-string literal supplied by
         // call sites in this module; render it via the `Cs` adapter as a
         // runtime C string (its content is not known at this call site).
         crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
-        __panic_end()
+        Printf::__panic_end()
     }
 
     #[inline] pub fn log_init_range(s: u64, e: u64, f: u64) {

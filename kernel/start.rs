@@ -91,7 +91,7 @@ static BOOT_HARTID: AtomicI32 = AtomicI32::new(-1);
 // `#[no_mangle]` in the same wave).
 // ===========================================================================
 
-use crate::start_kernel::start_kernel;
+use crate::start_kernel::StartKernel;
 
 /// `entry.S` jumps here in supervisor mode, on `stack0`, once per hart.
 ///
@@ -132,7 +132,7 @@ pub extern "C" fn start(hartid: c_int, fdt_base: *mut c_void) {
     // `entry.S`'s `a0`/`a1`, and `is_boot_hart` reflects the CAS above.
     // `entry.S` guarantees a valid stack for this call (a `stack0` slice,
     // cleared and fenced before use).
-    start_kernel(hartid, fdt_base, is_boot_hart);
+    StartKernel::start_kernel(hartid, fdt_base, is_boot_hart);
 }
 
 // ===========================================================================

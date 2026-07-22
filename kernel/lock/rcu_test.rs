@@ -29,7 +29,7 @@ use crate::machine;
 use crate::sync::KSpinlock;
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
-use crate::printf::trigger_panic;
+use crate::printf::Printf;
 
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
@@ -95,7 +95,7 @@ fn kpanic(msg: &CStr) -> ! {
     crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
     // SAFETY: `trigger_panic` is a kernel C symbol with the declared ABI.
     unsafe {
-        trigger_panic();
+        Printf::trigger_panic();
     }
 }
 

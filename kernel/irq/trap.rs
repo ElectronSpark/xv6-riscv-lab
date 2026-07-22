@@ -91,11 +91,11 @@ use crate::irq::irq_core::IrqCore;
 use crate::irq::syscall::Syscall;
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_disable_bt`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
-use crate::printf::{panic_disable_bt, Cs, Ptr};
+use crate::printf::{Cs, Ptr, Printf};
 // P3-1D mesh sweep: backtrace.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use crate::backtrace::print_backtrace;
+use crate::backtrace::Backtrace;
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::Scheduler;
@@ -393,7 +393,6 @@ unsafe extern "C" {
 // `trapinit` below casts the wrapper's base address to `*mut cpu_local`
 // exactly as `proc/rq.rs`/`lock/rcu.rs` do.
 use crate::mm::PageTable;
-use crate::printf::{__panic_end, __panic_start};
 use crate::proc::Proc;
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
@@ -592,7 +591,7 @@ impl Trap {
 impl Trap {
     #[cold]
     fn kpanic_msg(line: u32, function: &CStr, msg: &CStr) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!(
             "PANIC {}:{}: In function '{}':",
             Cs(c"kernel/irq/trap.rs".as_ptr()),
@@ -601,12 +600,12 @@ impl Trap {
         );
         crate::kprint!("{}", Cs(msg.as_ptr()));
         crate::kprintln!();
-        __panic_end()
+        Printf::__panic_end()
     }
 
     #[cold]
     fn kassert_fail(line: u32, function: &CStr, msg: &CStr) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!(
             "ASSERTION_FAILURE {}:{}: In function '{}':",
             Cs(c"kernel/irq/trap.rs".as_ptr()),
@@ -615,7 +614,7 @@ impl Trap {
         );
         crate::kprint!("{}", Cs(msg.as_ptr()));
         crate::kprintln!();
-        __panic_end()
+        Printf::__panic_end()
     }
 }
 
@@ -810,7 +809,7 @@ impl Trap {
         if p.is_null() {
             crate::kprintln!("kerneltrap: no current thread");
             Self::kerneltrap_dump_regs(tf);
-            panic_disable_bt();
+            Printf::panic_disable_bt();
             kpanic!(c"trap_panic_dump", c"kerneltrap");
         }
 
@@ -819,10 +818,10 @@ impl Trap {
         // while `p` is the thread currently executing).
         unsafe {
             let kstack_size = 1u64 << (PAGE_SHIFT as u64 + (*p).kstack_order as u64);
-            print_backtrace((*tf).s0, (*p).kstack, (*p).kstack + kstack_size);
+            Backtrace::print_backtrace((*tf).s0, (*p).kstack, (*p).kstack + kstack_size);
         }
         Self::kerneltrap_dump_regs(tf);
-        panic_disable_bt();
+        Printf::panic_disable_bt();
         kpanic!(c"trap_panic_dump", c"kerneltrap");
     }
 }
@@ -1452,7 +1451,7 @@ impl Trap {
             // `assert(cond, fmt, ...)` here carries a runtime `%d` argument
             // (`mycpu()->intr_depth`), unlike every other assert in this
             // file, which pass a fixed literal message.
-            __panic_start();
+            Printf::__panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 Cs(c"kernel/irq/trap.rs".as_ptr()),
@@ -1464,7 +1463,7 @@ impl Trap {
                 Self::intr_depth(),
             );
             crate::kprintln!();
-            __panic_end();
+            Printf::__panic_end();
         }
         Self::intr_depth_inc();
         if Self::intr_depth() == 1 {

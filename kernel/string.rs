@@ -304,17 +304,27 @@ pub unsafe extern "C" fn strnlen(s: *const c_char, maxlen: usize) -> usize {
     }
 }
 
-/// # Safety
-/// `dest` must point to a NUL-terminated string with enough trailing
-/// room to also hold `src`'s contents plus a NUL; `src` must point to a
-/// valid NUL-terminated string.
-pub(crate) unsafe fn strcat(dest: *mut c_char, src: *const c_char) -> *mut c_char {
-    unsafe {
-        let n = strlen(dest);
-        let m = strlen(src);
-        strncpy(dest.add(n), src, m);
-        *dest.add(n + m) = 0;
-        dest
+/// Zero-sized facade for the handful of `string.rs` helpers that are
+/// *not* compiler/C-ABI floor (see the module doc's `memcpy`/`memset`/
+/// `strdup`-class rationale for why the rest stay free `#[no_mangle]`
+/// fns): `strcat`/`strtok`/`strstr` are plain `pub(crate)` Rust-only
+/// entry points, callable from nowhere by symbol name, so they become
+/// associated fns here (KERNEL-OO final wave).
+pub(crate) struct Strings;
+
+impl Strings {
+    /// # Safety
+    /// `dest` must point to a NUL-terminated string with enough trailing
+    /// room to also hold `src`'s contents plus a NUL; `src` must point to a
+    /// valid NUL-terminated string.
+    pub(crate) unsafe fn strcat(dest: *mut c_char, src: *const c_char) -> *mut c_char {
+        unsafe {
+            let n = strlen(dest);
+            let m = strlen(src);
+            strncpy(dest.add(n), src, m);
+            *dest.add(n + m) = 0;
+            dest
+        }
     }
 }
 
@@ -382,48 +392,50 @@ pub unsafe extern "C" fn strtok_r(
 /// `static mut`.
 static STRTOK_SAVEPTR: AtomicPtr<c_char> = AtomicPtr::new(ptr::null_mut());
 
-/// # Safety
-/// Same contract as `strtok_r`'s `str_`/`delim`, using the shared
-/// `STRTOK_SAVEPTR` cursor in place of an explicit `saveptr`.
-pub(crate) unsafe fn strtok(str_: *mut c_char, delim: *const c_char) -> *mut c_char {
-    unsafe {
-        let mut saveptr = STRTOK_SAVEPTR.load(Ordering::Relaxed);
-        let result = strtok_r(str_, delim, &mut saveptr as *mut *mut c_char);
-        STRTOK_SAVEPTR.store(saveptr, Ordering::Relaxed);
-        result
+impl Strings {
+    /// # Safety
+    /// Same contract as `strtok_r`'s `str_`/`delim`, using the shared
+    /// `STRTOK_SAVEPTR` cursor in place of an explicit `saveptr`.
+    pub(crate) unsafe fn strtok(str_: *mut c_char, delim: *const c_char) -> *mut c_char {
+        unsafe {
+            let mut saveptr = STRTOK_SAVEPTR.load(Ordering::Relaxed);
+            let result = strtok_r(str_, delim, &mut saveptr as *mut *mut c_char);
+            STRTOK_SAVEPTR.store(saveptr, Ordering::Relaxed);
+            result
+        }
     }
-}
 
-/// Bounded substring search. See the module doc for the one deliberate
-/// behavior fix versus the literal (unused, latently out-of-bounds) C
-/// body: `needle` longer than `haystack` now returns null instead of
-/// underflowing the loop bound.
-///
-/// # Safety
-/// `haystack` and `needle` must point to valid NUL-terminated strings.
-pub(crate) unsafe fn strstr(
-    haystack: *const c_char,
-    needle: *const c_char,
-) -> *const c_char {
-    unsafe {
-        let needle_len = strlen(needle);
-        if needle_len == 0 {
-            return haystack;
-        }
-
-        let haystack_len = strlen(haystack);
-        if needle_len > haystack_len {
-            return ptr::null();
-        }
-
-        let mut i = 0usize;
-        while i <= haystack_len - needle_len {
-            if strncmp(haystack.add(i), needle, needle_len) == 0 {
-                return haystack.add(i);
+    /// Bounded substring search. See the module doc for the one deliberate
+    /// behavior fix versus the literal (unused, latently out-of-bounds) C
+    /// body: `needle` longer than `haystack` now returns null instead of
+    /// underflowing the loop bound.
+    ///
+    /// # Safety
+    /// `haystack` and `needle` must point to valid NUL-terminated strings.
+    pub(crate) unsafe fn strstr(
+        haystack: *const c_char,
+        needle: *const c_char,
+    ) -> *const c_char {
+        unsafe {
+            let needle_len = strlen(needle);
+            if needle_len == 0 {
+                return haystack;
             }
-            i += 1;
+
+            let haystack_len = strlen(haystack);
+            if needle_len > haystack_len {
+                return ptr::null();
+            }
+
+            let mut i = 0usize;
+            while i <= haystack_len - needle_len {
+                if strncmp(haystack.add(i), needle, needle_len) == 0 {
+                    return haystack.add(i);
+                }
+                i += 1;
+            }
+            ptr::null()
         }
-        ptr::null()
     }
 }
 

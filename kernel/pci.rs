@@ -65,7 +65,7 @@ use crate::bindings::pci_common_confspace_header;
 // ---------------------------------------------------------------------------
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
@@ -355,7 +355,7 @@ pub(crate) extern "C" fn pci_init() {
     let ecam: *mut u32 = 0x30000000u64 as *mut u32;
 
     if core::mem::size_of::<pci_common_confspace_header>() != 0x40 {
-        __panic_start();
+        Printf::__panic_start();
         // SAFETY: format string matches its one argument.
         unsafe {
             crate::kprintln!(
@@ -369,7 +369,7 @@ pub(crate) extern "C" fn pci_init() {
                 "The size of PCI-E Common Configuration Space Header Structure is not 0x40 Bytes!",
             )
         };
-        __panic_end();
+        Printf::__panic_end();
     }
 
     // Look at each possible PCI device on bus 0.

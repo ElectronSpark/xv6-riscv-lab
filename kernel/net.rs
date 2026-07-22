@@ -53,7 +53,7 @@ use crate::bindings::mbuf;
 // ---------------------------------------------------------------------------
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
 
@@ -237,9 +237,9 @@ impl Net {
 #[cold]
 #[inline(never)]
 fn panic_fixed(msg: &core::ffi::CStr) -> ! {
-    __panic_start();
+    Printf::__panic_start();
     crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
-    __panic_end()
+    Printf::__panic_end()
 }
 } // impl Net (panic_fixed)
 

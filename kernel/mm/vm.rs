@@ -1133,13 +1133,13 @@ impl Vm {
     fn xv6_vm_assert_vm_write_held(vm_ptr: *mut vm, msg: *const c_char) {
         if current_thread().is_null() { return; }
         if RawRwsem::is_write_holding(machine::Riscv::vm_rw_lock_ptr(vm_ptr)) { return; }
-        __panic_start();
+        Printf::__panic_start();
         if msg.is_null() {
             crate::kprintln!("PANIC: vm rwsem must be write-held");
         } else {
             crate::kprintln!("PANIC: {}", crate::printf::Cs(msg));
         }
-        __panic_end();
+        Printf::__panic_end();
     }
 
     /// Acquire-load of `vm->cpumask` (cpumask_t == u64).
@@ -2735,8 +2735,9 @@ const BLK_SIZE: u64 = 512; // from kernel/inc/dev/bio.h
 // for "// =====  xv6_vm_* shims (Rust)  =====").
 mod ffi {
     // P3-D3c: `printf.rs`'s panic plumbing -- plain crate-path re-exports
-    // now that the `#[no_mangle]` exports are gone.
-    pub(crate) use crate::printf::{__panic_end, __panic_start};
+    // now that the `#[no_mangle]` exports are gone. KERNEL-OO: reached as
+    // `Printf::__panic_start`/`Printf::__panic_end` now.
+    pub(crate) use crate::printf::Printf;
 
     use super::*;
     use core::ffi::{c_char, c_int, c_void};

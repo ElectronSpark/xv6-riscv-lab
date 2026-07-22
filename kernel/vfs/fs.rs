@@ -1187,7 +1187,7 @@ impl VfsFsType {
             }
             (*fs_type).kobj.ops.release = Some(VfsFsType::vfs_fs_type_kobj_release);
             (*fs_type).kobj.name = c"fs_type".as_ptr();
-            crate::kobject::kobject_init(&raw mut (*fs_type).kobj);
+            crate::kobject::Kobject::kobject_init(&raw mut (*fs_type).kobj);
             if VFS_FS_TYPE_COUNT >= MAX_FS_TYPES {
                 return neg(ENOSPC);
             }
@@ -1214,7 +1214,7 @@ impl VfsFsType {
             let pos = VfsFsType::get_fs_type_locked(name);
             if !pos.is_null() {
                 VfsFsType::unregister_fs_type_locked(pos);
-                crate::kobject::kobject_put(&raw mut (*pos).kobj);
+                crate::kobject::Kobject::kobject_put(&raw mut (*pos).kobj);
                 return 0;
             }
             neg(ENOENT)
@@ -1235,7 +1235,7 @@ impl VfsFsType {
             );
             let fs_type = VfsFsType::get_fs_type_locked(name);
             if !fs_type.is_null() {
-                crate::kobject::kobject_get(&raw mut (*fs_type).kobj);
+                crate::kobject::Kobject::kobject_get(&raw mut (*fs_type).kobj);
             }
             fs_type
         }
@@ -1251,7 +1251,7 @@ impl VfsFsType {
                 RawMutex::is_holding(&raw mut __MOUNT_MUTEX) != 0,
                 "VfsFsType::vfs_put_fs_type: must hold mount mutex"
             );
-            crate::kobject::kobject_put(&raw mut (*fs_type).kobj);
+            crate::kobject::Kobject::kobject_put(&raw mut (*fs_type).kobj);
         }
     }
 

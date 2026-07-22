@@ -403,7 +403,7 @@ mod ffi {
         xv6_list_init, xv6_list_is_empty, xv6_list_is_detached,
         xv6_list_detach, xv6_list_push_front, xv6_list_push_back,
         xv6_list_pop_front, xv6_list_first, xv6_list_last,
-        __panic_start, __panic_end,
+        Printf,
     };
 
     // `Page::__pa_to_page`/`Page::__page_alloc`/`Page::__page_free`/
@@ -547,12 +547,12 @@ mod ffi {
 // module is their only caller, so they are now direct `printf` calls.
 // ===========================================================================
 fn slab_panic(msg: &'static [u8]) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     // `msg` is always a NUL-terminated byte-string literal supplied by call
     // sites in this module; render it via the `Cs` adapter as a runtime C
     // string (its content is not known at this call site).
     crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 
 fn log_free_null(fn_name: *const c_char) {

@@ -93,8 +93,9 @@ pub mod raw {
 
     // P3-D3c: the kernel panic helpers (`printf.rs`) are plain crate-path
     // re-exports now that their `#[no_mangle]` exports are gone (the
-    // extern block that used to sit here is deleted).
-    pub(crate) use crate::printf::{__panic_end, __panic_start};
+    // extern block that used to sit here is deleted). KERNEL-OO: reached
+    // as `Printf::__panic_start`/`Printf::__panic_end` now.
+    pub(crate) use crate::printf::Printf;
 pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6_list_init, xv6_list_is_detached, xv6_list_is_empty, xv6_list_last, xv6_list_pop_front, xv6_list_push_back, xv6_list_push_front, xv6_pop_off, xv6_push_off};
 
     // `kmm_alloc`/`kmm_free`/`memset` are genuinely `unsafe fn` in their
@@ -207,7 +208,7 @@ pub fn list_is_detached_b(e: *const ListNode) -> bool {
 /// Convenience panic wrapper used by the safe-adapter functions.
 #[inline]
 pub fn panic_bytes(msg: &[u8]) -> ! {
-    raw::__panic_start();
+    raw::Printf::__panic_start();
     // The C panic macros print a final message and halt; `msg` is always a
     // NUL-terminated byte-string supplied by call sites, rendered via the
     // `Cs` adapter as a runtime C string (content unknown at this site).
@@ -215,7 +216,7 @@ pub fn panic_bytes(msg: &[u8]) -> ! {
     // below) but its extern decl is left in place -- unused now, removed
     // crate-wide once every file is migrated.
     crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
-    raw::__panic_end()
+    raw::Printf::__panic_end()
 }
 
 // ===========================================================================

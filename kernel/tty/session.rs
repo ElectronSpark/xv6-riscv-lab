@@ -264,7 +264,7 @@ use crate::lock::rcu::Rcu;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
 
@@ -342,7 +342,7 @@ use crate::proc::proc_shims::{xv6_pid_rlock, xv6_pid_runlock};
 macro_rules! session_assert {
     ($cond:expr, $func:literal, $msg:literal $(,)?) => {
         if !($cond) {
-            __panic_start();
+            Printf::__panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/tty/session.rs",
@@ -350,7 +350,7 @@ macro_rules! session_assert {
                 $func,
             );
             crate::kprintln!($msg);
-            __panic_end();
+            Printf::__panic_end();
         }
     };
 }
@@ -358,7 +358,7 @@ macro_rules! session_assert {
 macro_rules! session_assert_errno {
     ($cond:expr, $func:literal, $msg:literal, $errno:expr $(,)?) => {
         if !($cond) {
-            __panic_start();
+            Printf::__panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/tty/session.rs",
@@ -366,7 +366,7 @@ macro_rules! session_assert_errno {
                 $func,
             );
             crate::kprintln!($msg, $errno);
-            __panic_end();
+            Printf::__panic_end();
         }
     };
 }

@@ -84,7 +84,7 @@ use crate::irq::plic::Plic;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
     // printf is variadic, so it cannot be declared `safe`.
@@ -137,7 +137,7 @@ impl IrqCore {
         if cond {
             return;
         }
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!(
             "ASSERTION_FAILURE {}:{}: In function '{}':",
             "kernel/irq/irq_core.rs",
@@ -146,7 +146,7 @@ impl IrqCore {
         );
         crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
         crate::kprintln!();
-        __panic_end()
+        Printf::__panic_end()
     }
 }
 

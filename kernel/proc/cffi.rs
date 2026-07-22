@@ -194,9 +194,9 @@ pub(super) fn list_push_back(head: *mut ListNode, entry: *mut ListNode) {
 #[inline(never)]
 pub(super) fn panic_proc(msg: &[u8]) -> ! {
     debug_assert!(msg.last() == Some(&0), "panic msg must be NUL-terminated");
-    mm_raw::__panic_start();
+    mm_raw::Printf::__panic_start();
     crate::kprintln!("PANIC proc: {}", crate::printf::Cs(msg.as_ptr() as *const c_char));
-    mm_raw::__panic_end()
+    mm_raw::Printf::__panic_end()
 }
 
 // ===========================================================================

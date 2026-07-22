@@ -164,31 +164,39 @@ const BACKTRACE_MAX_DEPTH: u32 = 32;
 const PAGE_SHIFT: u32 = 12;
 const PGSIZE: u64 = 1 << PAGE_SHIFT;
 
-/// Port of the C `static inline uint64 strtoul(...)` in
-/// `kernel/inc/string.h`. That function is a per-translation-unit inline
-/// (never emitted as an out-of-line symbol string.c/string.rs could
-/// export), so it is reimplemented here rather than declared `extern`.
-/// Returns `(value, bytes_consumed)`.
-fn strtoul(s: &[u8], base: u32) -> (u64, usize) {
-    let mut result: u64 = 0;
-    let mut i = 0;
-    while i < s.len() {
-        let digit: u32 = match s[i] {
-            c @ b'0'..=b'9' => (c - b'0') as u32,
-            c @ b'a'..=b'f' => (c - b'a' + 10) as u32,
-            c @ b'A'..=b'F' => (c - b'A' + 10) as u32,
-            _ => break,
-        };
-        if digit >= base {
-            break;
+/// Zero-sized facade for the kernel symbol table + frame-pointer
+/// backtrace walker (KERNEL-OO final wave): no per-instance state
+/// (everything is a module `static`), so these become associated fns,
+/// raw params, no `&self`.
+pub(crate) struct Backtrace;
+
+impl Backtrace {
+    /// Port of the C `static inline uint64 strtoul(...)` in
+    /// `kernel/inc/string.h`. That function is a per-translation-unit inline
+    /// (never emitted as an out-of-line symbol string.c/string.rs could
+    /// export), so it is reimplemented here rather than declared `extern`.
+    /// Returns `(value, bytes_consumed)`.
+    fn strtoul(s: &[u8], base: u32) -> (u64, usize) {
+        let mut result: u64 = 0;
+        let mut i = 0;
+        while i < s.len() {
+            let digit: u32 = match s[i] {
+                c @ b'0'..=b'9' => (c - b'0') as u32,
+                c @ b'a'..=b'f' => (c - b'a' + 10) as u32,
+                c @ b'A'..=b'F' => (c - b'A' + 10) as u32,
+                _ => break,
+            };
+            if digit >= base {
+                break;
+            }
+            // Matches the C original's plain `result = result * base + digit`,
+            // which is well-defined wraparound for `uint64_t` -- no UB to
+            // replicate, just the same modular arithmetic.
+            result = result.wrapping_mul(base as u64).wrapping_add(digit as u64);
+            i += 1;
         }
-        // Matches the C original's plain `result = result * base + digit`,
-        // which is well-defined wraparound for `uint64_t` -- no UB to
-        // replicate, just the same modular arithmetic.
-        result = result.wrapping_mul(base as u64).wrapping_add(digit as u64);
-        i += 1;
+        (result, i)
     }
-    (result, i)
 }
 
 /// Rust port of `ksymbols_init()`. Parses the embedded `.ksymbols` text
@@ -203,7 +211,8 @@ fn strtoul(s: &[u8], base: u32) -> (u64, usize) {
 /// `docs/rustify/phase2_plan.md` §1).
 // P3-1D mesh sweep: only caller is `start_kernel.rs` (crate-path `use`, not
 // an `extern` redeclaration) -- demoted.
-pub(crate) unsafe extern "C" fn ksymbols_init() {
+impl Backtrace {
+    pub(crate) unsafe extern "C" fn ksymbols_init() {
     // SAFETY: see function-level `# Safety`; the whole body operates on
     // the boot-time-single-writer statics above and on the read-only
     // embedded `.ksymbols` section (part of the loaded kernel image, never
@@ -253,9 +262,9 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
                     current_symbol = &line[1..];
                 } else {
                     // Address line: "start_addr line_number".
-                    let (start_addr, consumed) = strtoul(line, 16);
+                    let (start_addr, consumed) = Backtrace::strtoul(line, 16);
                     if consumed < line.len() && line[consumed] == b' ' {
-                        let (line_num, _) = strtoul(&line[consumed + 1..], 10);
+                        let (line_num, _) = Backtrace::strtoul(&line[consumed + 1..], 10);
                         if (KSYM_COUNT as usize) < max_entries {
                             let entry = KSYM_ENTRIES_BASE.add(KSYM_COUNT as usize);
                             (*entry).start_addr = start_addr as *mut c_void;
@@ -281,12 +290,14 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
 
         crate::kprintln!("Kernel symbols initialized: {} entries", KSYM_COUNT);
     }
+    }
 }
 
 /// Find the pool entry whose `start_addr` is the greatest one `<= addr`
 /// (i.e. "which symbol contains this address"). Guard entries (the C
 /// original's `':/'`-terminated end-of-file markers, `line == 0`) are
 /// filtered out, matching `bt_search_sym`'s C original.
+impl Backtrace {
 fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
     // SAFETY: read of `KSYM_COUNT`/`KSYM_RB_ROOT`; both are write-once
     // (during `ksymbols_init`, single boot hart) then read-only (see
@@ -333,6 +344,7 @@ fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
     }
     Some(entry)
 }
+}
 
 /// Copies `entry`'s symbol name into `buf` (NUL-terminated, truncated to
 /// fit) and returns an index "for backwards compatibility" (matches the C
@@ -347,6 +359,7 @@ fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
 // non-`static` but unreferenced in the original `backtrace.c` too. Demoted;
 // `#[allow(dead_code)]` documents the gap rather than deleting still-
 // plausible public API, same precedent as `ipi.rs`'s `get_cpu_active_mask`.
+impl Backtrace {
 #[allow(dead_code)]
 pub(crate) unsafe extern "C" fn bt_search(
     addr: u64,
@@ -356,13 +369,13 @@ pub(crate) unsafe extern "C" fn bt_search(
 ) -> c_int {
     // SAFETY: caller contract (see `# Safety` above).
     let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, buflen) };
-    let Some(entry) = bt_search_sym(addr) else {
+    let Some(entry) = Backtrace::bt_search_sym(addr) else {
         if !out.is_empty() {
             out[0] = 0;
         }
         return -1;
     };
-    fill_symbol(entry, out);
+    Backtrace::fill_symbol(entry, out);
     if !return_addr.is_null() {
         // SAFETY: caller contract; `entry` is a live pool entry.
         unsafe {
@@ -375,6 +388,7 @@ pub(crate) unsafe extern "C" fn bt_search(
     let base = unsafe { KSYM_ENTRIES_BASE };
     ((entry as usize - base as usize) / core::mem::size_of::<KSymEntry>()) as c_int
 }
+}
 
 /// Writes `entry`'s symbol name into `out` (NUL-terminated, truncated to
 /// fit `out.len()`), or just NUL-terminates `out` if `entry` has no
@@ -382,6 +396,7 @@ pub(crate) unsafe extern "C" fn bt_search(
 /// `print_thread_backtrace`'s three symbol-printing sites (the C original
 /// inlined this at each site; factored out here to avoid a second
 /// redundant rb-tree lookup per frame -- see `print_backtrace`'s doc).
+impl Backtrace {
 fn fill_symbol(entry: *mut KSymEntry, out: &mut [u8]) {
     // SAFETY: `entry` is a live pool entry (from `bt_search_sym`).
     let (sym, len) = unsafe { ((*entry).symbol, (*entry).symbol_len as usize) };
@@ -469,6 +484,7 @@ fn return_address(fp: u64) -> u64 {
 fn is_top_frame(fp: u64) -> bool {
     fp == 0 || fp == (fp & !(PGSIZE - 1))
 }
+}
 
 /// Print a backtrace starting at frame pointer `context`, walking while
 /// each frame stays within `[stack_start, stack_end)`. Rust port of
@@ -482,6 +498,7 @@ fn is_top_frame(fp: u64) -> bool {
 // P3-1D mesh sweep: every caller (`printf.rs`, `ipi.rs`, `irq/trap.rs`) now
 // imports this via crate-path `use` instead of an `extern` redeclaration --
 // demoted.
+impl Backtrace {
 pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, stack_end: u64) {
     // SAFETY: see function-level `# Safety` and the frame-walking section
     // doc above.
@@ -489,9 +506,9 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
         crate::kprintln!("backtrace:");
 
         let mut last_fp = context;
-        let mut fp = frame_top(context);
+        let mut fp = Backtrace::frame_top(context);
         let mut depth = 0u32;
-        while !is_top_frame(fp) && depth < BACKTRACE_MAX_DEPTH {
+        while !Backtrace::is_top_frame(fp) && depth < BACKTRACE_MAX_DEPTH {
             if fp < stack_start || fp >= stack_end {
                 crate::kprintln!("  * unknown frame: {}", crate::printf::Ptr(fp));
                 break;
@@ -499,13 +516,13 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
 
             let mut symbuf = [0u8; 64];
             let mut filebuf = [0u8; 128];
-            let return_addr_val = return_address(last_fp);
+            let return_addr_val = Backtrace::return_address(last_fp);
             if return_addr_val == 0 {
                 crate::kprintln!("  top frame");
                 break;
             }
 
-            let entry = bt_search_sym(return_addr_val);
+            let entry = Backtrace::bt_search_sym(return_addr_val);
             match entry {
                 None => {
                     crate::kprintln!(
@@ -514,9 +531,9 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
                     );
                 }
                 Some(e) => {
-                    fill_symbol(e, &mut symbuf);
-                    let line = bt_get_location(entry, &mut filebuf);
-                    let offset = bt_get_offset(entry, return_addr_val);
+                    Backtrace::fill_symbol(e, &mut symbuf);
+                    let line = Backtrace::bt_get_location(entry, &mut filebuf);
+                    let offset = Backtrace::bt_get_offset(entry, return_addr_val);
                     crate::kprintln!(
                         "  * {}:{}: {}+{}",
                         crate::printf::Cs(filebuf.as_ptr() as *const c_char),
@@ -528,7 +545,7 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
             }
 
             last_fp = fp;
-            fp = frame_top(fp);
+            fp = Backtrace::frame_top(fp);
             depth += 1;
         }
     }
@@ -564,7 +581,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
         let mut filebuf = [0u8; 128];
 
         // Print the resume point (ctx->ra) first.
-        let entry0 = bt_search_sym((*ctx).ra);
+        let entry0 = Backtrace::bt_search_sym((*ctx).ra);
         match entry0 {
             None => {
                 crate::kprintln!(
@@ -573,9 +590,9 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
                 );
             }
             Some(e) => {
-                fill_symbol(e, &mut symbuf);
-                let line = bt_get_location(entry0, &mut filebuf);
-                let offset = bt_get_offset(entry0, (*ctx).ra);
+                Backtrace::fill_symbol(e, &mut symbuf);
+                let line = Backtrace::bt_get_location(entry0, &mut filebuf);
+                let offset = Backtrace::bt_get_offset(entry0, (*ctx).ra);
                 crate::kprintln!(
                     "  > {}:{}: {}+{} (resume point) [{}]",
                     crate::printf::Cs(filebuf.as_ptr() as *const c_char),
@@ -592,15 +609,15 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
         let mut repeat_count = 0u32;
         const MAX_REPEATS: u32 = 3;
 
-        let mut curr_fp = frame_top(fp0);
+        let mut curr_fp = Backtrace::frame_top(fp0);
         let mut depth = 0u32;
-        while !is_top_frame(curr_fp) && depth < BACKTRACE_MAX_DEPTH {
+        while !Backtrace::is_top_frame(curr_fp) && depth < BACKTRACE_MAX_DEPTH {
             if curr_fp < stack_start || curr_fp >= stack_end {
                 crate::kprintln!("  * frame outside stack: {}", crate::printf::Ptr(curr_fp));
                 break;
             }
 
-            let return_addr_val = return_address(last_fp);
+            let return_addr_val = Backtrace::return_address(last_fp);
             if return_addr_val == 0 {
                 break;
             }
@@ -616,7 +633,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
                 last_return_addr = return_addr_val;
             }
 
-            let entry = bt_search_sym(return_addr_val);
+            let entry = Backtrace::bt_search_sym(return_addr_val);
             match entry {
                 None => {
                     crate::kprintln!(
@@ -625,9 +642,9 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
                     );
                 }
                 Some(e) => {
-                    fill_symbol(e, &mut symbuf);
-                    let line = bt_get_location(entry, &mut filebuf);
-                    let offset = bt_get_offset(entry, return_addr_val);
+                    Backtrace::fill_symbol(e, &mut symbuf);
+                    let line = Backtrace::bt_get_location(entry, &mut filebuf);
+                    let offset = Backtrace::bt_get_offset(entry, return_addr_val);
                     crate::kprintln!(
                         "  * {}:{}: {}+{} [{}]",
                         crate::printf::Cs(filebuf.as_ptr() as *const c_char),
@@ -640,10 +657,11 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
             }
 
             last_fp = curr_fp;
-            curr_fp = frame_top(curr_fp);
+            curr_fp = Backtrace::frame_top(curr_fp);
             depth += 1;
         }
     }
+}
 }
 
 /// Set breakpoint for GDB (`b db_break`). Deliberately empty -- a stable

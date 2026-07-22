@@ -58,13 +58,13 @@ use crate::proc::Scheduler;
 // rather than risking an ambiguous glob re-export at `crate::<mod>::`
 // level -- see `timer/sched_timer.rs`'s module doc for the `E0659` class
 // this sidesteps).
-use crate::exec::exec;
+use crate::exec::Exec;
 use crate::irq::trap::Trap;
 // P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path.
 use crate::proc::Proc;
-use crate::start_kernel::start_kernel_post_init;
+use crate::start_kernel::StartKernel;
 
 /// `pid::proctab_proc_add`/`pid::__proctab_set_initproc` take
 /// `pid::Thread`, a distinct (but layout-identical) opaque marker from
@@ -1167,12 +1167,12 @@ extern "C" fn init_entry(prev: *mut context) {
         CpuLocalRef::assume(Riscv::cpu_local_ptr()).set_noff(0);
         Riscv::intr_on();
 
-        start_kernel_post_init();
+        StartKernel::start_kernel_post_init();
 
         let init_path = c"/bin/init".as_ptr() as *mut c_char;
         let argv0 = c"init".as_ptr() as *mut c_char;
         let mut argv: [*mut c_char; 2] = [argv0, ptr::null_mut()];
-        let ret = exec(init_path, argv.as_mut_ptr(), ptr::null_mut());
+        let ret = Exec::exec(init_path, argv.as_mut_ptr(), ptr::null_mut());
         kassert!(ret >= 0, "init_entry: exec /bin/init failed");
 
         core::sync::atomic::fence(Ordering::SeqCst);

@@ -75,7 +75,7 @@ use crate::sync::SpinLock;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 // N-R7h: the raw `spin_lock`/`spin_unlock` facade wrappers that used to
 // sit here were driven by exactly one site -- `consolewrite`'s manual
@@ -139,12 +139,6 @@ const CONSOLE_MINOR: c_int = 1;
 
 const BACKSPACE: c_int = 0x100;
 
-/// `C(x)` macro: `Control-x`.
-#[inline(always)]
-const fn ctrl(x: u8) -> c_int {
-    (x as c_int) - ('@' as c_int)
-}
-
 // ===========================================================================
 // Panic helper — replicates the C `assert(expr, fmt, arg)` macro
 // expansion (see `kernel/sbi.rs::required_extension_missing` for the
@@ -184,66 +178,83 @@ static UART_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// replaces (a plain pointer in the C original).
 static CONSOLE_TTY: AtomicPtr<tty> = AtomicPtr::new(core::ptr::null_mut());
 
-#[inline(always)]
-fn console_tty() -> *mut tty {
-    CONSOLE_TTY.load(Ordering::Relaxed)
-}
+/// Zero-sized facade for the console's C-ABI entry points and internal
+/// dispatch helpers (P3-10c style: no per-console state -- the console
+/// is a process-wide singleton backed by the module statics above/below
+/// -- so this groups the former free fns as associated fns, raw params,
+/// no `&self`, exactly as the driver-singleton precedent in
+/// `uart.rs`/`net.rs` from the root-drivers wave).
+pub(crate) struct Console;
 
-// ===========================================================================
-// consputc / consputs -- send character(s) to the console.
-// ===========================================================================
+impl Console {
+    #[inline(always)]
+    fn console_tty() -> *mut tty {
+        CONSOLE_TTY.load(Ordering::Relaxed)
+    }
 
-/// Send one character to the uart. Called by printf(), and to echo
-/// input characters, but not from write().
-pub(crate) extern "C" fn consputc(c: c_int) {
-    if !UART_INITIALIZED.load(Ordering::Relaxed) {
-        // Use SBI for early console output before UART is ready.
-        if c == BACKSPACE {
-            crate::sbi::Sbi::console_putchar('\u{8}' as c_int);
-            crate::sbi::Sbi::console_putchar(' ' as c_int);
-            crate::sbi::Sbi::console_putchar('\u{8}' as c_int);
-        } else {
-            // Convert \n to \r\n for proper terminal output.
-            if c == '\n' as c_int {
-                crate::sbi::Sbi::console_putchar('\r' as c_int);
+    /// `C(x)` macro: `Control-x`.
+    #[inline(always)]
+    const fn ctrl(x: u8) -> c_int {
+        (x as c_int) - ('@' as c_int)
+    }
+
+    // =======================================================================
+    // consputc / consputs -- send character(s) to the console.
+    // =======================================================================
+
+    /// Send one character to the uart. Called by printf(), and to echo
+    /// input characters, but not from write().
+    pub(crate) extern "C" fn consputc(c: c_int) {
+        if !UART_INITIALIZED.load(Ordering::Relaxed) {
+            // Use SBI for early console output before UART is ready.
+            if c == BACKSPACE {
+                crate::sbi::Sbi::console_putchar('\u{8}' as c_int);
+                crate::sbi::Sbi::console_putchar(' ' as c_int);
+                crate::sbi::Sbi::console_putchar('\u{8}' as c_int);
+            } else {
+                // Convert \n to \r\n for proper terminal output.
+                if c == '\n' as c_int {
+                    crate::sbi::Sbi::console_putchar('\r' as c_int);
+                }
+                crate::sbi::Sbi::console_putchar(c);
             }
-            crate::sbi::Sbi::console_putchar(c);
+            return;
         }
-        return;
+
+        // Use synchronous UART output (safe for interrupt context).
+        if c == BACKSPACE {
+            // If the user typed backspace, overwrite with a space.
+            crate::uart::Uart::uartputc_sync('\u{8}' as c_int);
+            crate::uart::Uart::uartputc_sync(' ' as c_int);
+            crate::uart::Uart::uartputc_sync('\u{8}' as c_int);
+        } else {
+            if c == '\n' as c_int {
+                crate::uart::Uart::uartputc_sync('\r' as c_int);
+            }
+            crate::uart::Uart::uartputc_sync(c);
+        }
     }
 
-    // Use synchronous UART output (safe for interrupt context).
-    if c == BACKSPACE {
-        // If the user typed backspace, overwrite with a space.
-        crate::uart::Uart::uartputc_sync('\u{8}' as c_int);
-        crate::uart::Uart::uartputc_sync(' ' as c_int);
-        crate::uart::Uart::uartputc_sync('\u{8}' as c_int);
-    } else {
-        if c == '\n' as c_int {
-            crate::uart::Uart::uartputc_sync('\r' as c_int);
+    /// Send a string to the console. For use by `puts()` and optimized
+    /// printing. Reuses [`Console::consputc`]'s per-character logic
+    /// verbatim (`UART_INITIALIZED` is read-mostly after boot, so
+    /// re-checking it per byte costs nothing observable and keeps this
+    /// a single code path instead of the C original's two
+    /// near-duplicate loops).
+    ///
+    /// # Safety
+    /// `s` must point to at least `n` readable bytes.
+    pub(crate) unsafe extern "C" fn consputs(s: *const c_char, n: c_int) {
+        // N-METH (goal #2): the raw `for i in 0..n { *s.offset(i) }` pointer
+        // walk became one `from_raw_parts` + slice iteration -- `n` per-byte
+        // raw derefs collapse to a single up-front `unsafe`, mirroring the
+        // tty.rs `tty_input` conversion in the N-METH model (da51c6c).
+        // SAFETY: caller guarantees `s` has at least `n` readable bytes (fn
+        // doc); `n.max(0)` reproduces the old loop's empty range for `n <= 0`.
+        let bytes = unsafe { core::slice::from_raw_parts(s as *const u8, n.max(0) as usize) };
+        for &b in bytes {
+            Console::consputc(b as c_int);
         }
-        crate::uart::Uart::uartputc_sync(c);
-    }
-}
-
-/// Send a string to the console. For use by `puts()` and optimized
-/// printing. Reuses [`consputc`]'s per-character logic verbatim
-/// (`UART_INITIALIZED` is read-mostly after boot, so re-checking it
-/// per byte costs nothing observable and keeps this a single code
-/// path instead of the C original's two near-duplicate loops).
-///
-/// # Safety
-/// `s` must point to at least `n` readable bytes.
-pub(crate) unsafe extern "C" fn consputs(s: *const c_char, n: c_int) {
-    // N-METH (goal #2): the raw `for i in 0..n { *s.offset(i) }` pointer
-    // walk became one `from_raw_parts` + slice iteration -- `n` per-byte
-    // raw derefs collapse to a single up-front `unsafe`, mirroring the
-    // tty.rs `tty_input` conversion in the N-METH model (da51c6c).
-    // SAFETY: caller guarantees `s` has at least `n` readable bytes (fn
-    // doc); `n.max(0)` reproduces the old loop's empty range for `n <= 0`.
-    let bytes = unsafe { core::slice::from_raw_parts(s as *const u8, n.max(0) as usize) };
-    for &b in bytes {
-        consputc(b as c_int);
     }
 }
 
@@ -288,244 +299,246 @@ static CONS: SpinLock<ConsInner> = SpinLock::new(
 /// [`SpinLockGuard::sleep_on`] and `consoleintr`'s `wakeup_on_chan`
 /// below (nothing else in the tree references it), so any consistent
 /// address is a faithful, race-free replacement.
-#[inline(always)]
-fn cons_chan() -> *mut c_void {
-    core::ptr::addr_of!(CONS) as *mut c_void
-}
-
-// ===========================================================================
-// consolewrite -- user write()s to the console go here.
-// ===========================================================================
-//
-// When the TTY is active, output post-processing (OPOST/ONLCR) is
-// controlled by the TTY's termios flags. Bytes are sent directly to
-// the UART via interrupt-driven uartputc -- the same approach Linux
-// uses (user writes go straight to the driver, only echo goes through
-// the TTY output pipe / drain thread).
-
-/// # Safety
-/// `buffer` must point to at least `n` readable bytes if `user_src` is
-/// false, or be a valid userspace address range otherwise (checked by
-/// `either_copyin`).
-unsafe fn consolewrite(
-    _cdev: *mut cdev_t,
-    user_src: crate::bindings::bool_,
-    buffer: *const c_void,
-    n: usize,
-) -> c_int {
-    let src = buffer as u64;
-    let mut kbuf = [0u8; 64];
-    let mut outbuf = [0u8; 128]; // room for ONLCR expansion (worst case 2x)
-    let mut written: usize = 0;
-
-    // Check OPOST flags from the TTY (if active).
-    let mut do_onlcr = true; // default: convert \n -> \r\n
-    let tty_ptr = console_tty();
-    if !tty_ptr.is_null() {
-        // SAFETY: `tty_ptr` was published by `consoledevinit()` and is
-        // never freed for the kernel's lifetime. N-R7h (lock-owns-data):
-        // the tty's `termios` now lives inside `SpinLock<TtyInner>`;
-        // `(*tty_ptr).inner.lock()` acquires the same per-tty lock this
-        // used to take manually, and the guard `Deref`s to read `termios`.
-        unsafe {
-            let tty = (*tty_ptr).inner.lock();
-            let oflag = tty.termios.c_oflag;
-            do_onlcr = (oflag & crate::bindings::OPOST) != 0 && (oflag & crate::bindings::ONLCR) != 0;
-            drop(tty);
-        }
+impl Console {
+    #[inline(always)]
+    fn cons_chan() -> *mut c_void {
+        core::ptr::addr_of!(CONS) as *mut c_void
     }
 
-    while written < n {
-        let mut batch_size = n - written;
-        if batch_size > 64 {
-            batch_size = 64;
-        }
+    // =======================================================================
+    // consolewrite -- user write()s to the console go here.
+    // =======================================================================
+    //
+    // When the TTY is active, output post-processing (OPOST/ONLCR) is
+    // controlled by the TTY's termios flags. Bytes are sent directly to
+    // the UART via interrupt-driven uartputc -- the same approach Linux
+    // uses (user writes go straight to the driver, only echo goes through
+    // the TTY output pipe / drain thread).
 
-        for i in 0..batch_size {
-            // SAFETY: `user_src` selects user vs. kernel copy semantics;
-            // `either_copyin` validates the userspace range itself.
-            let r = unsafe {
-                either_copyin(
-                    (&raw mut kbuf[i]) as *mut c_void,
-                    user_src as c_int,
-                    src + (written + i) as u64,
-                    1,
-                )
-            };
-            if r < 0 {
-                return if written > 0 { written as c_int } else { -EFAULT };
+    /// # Safety
+    /// `buffer` must point to at least `n` readable bytes if `user_src` is
+    /// false, or be a valid userspace address range otherwise (checked by
+    /// `either_copyin`).
+    unsafe fn consolewrite(
+        _cdev: *mut cdev_t,
+        user_src: crate::bindings::bool_,
+        buffer: *const c_void,
+        n: usize,
+    ) -> c_int {
+        let src = buffer as u64;
+        let mut kbuf = [0u8; 64];
+        let mut outbuf = [0u8; 128]; // room for ONLCR expansion (worst case 2x)
+        let mut written: usize = 0;
+
+        // Check OPOST flags from the TTY (if active).
+        let mut do_onlcr = true; // default: convert \n -> \r\n
+        let tty_ptr = Console::console_tty();
+        if !tty_ptr.is_null() {
+            // SAFETY: `tty_ptr` was published by `consoledevinit()` and is
+            // never freed for the kernel's lifetime. N-R7h (lock-owns-data):
+            // the tty's `termios` now lives inside `SpinLock<TtyInner>`;
+            // `(*tty_ptr).inner.lock()` acquires the same per-tty lock this
+            // used to take manually, and the guard `Deref`s to read `termios`.
+            unsafe {
+                let tty = (*tty_ptr).inner.lock();
+                let oflag = tty.termios.c_oflag;
+                do_onlcr = (oflag & crate::bindings::OPOST) != 0 && (oflag & crate::bindings::ONLCR) != 0;
+                drop(tty);
             }
         }
 
-        // Expand into output buffer.
-        // N-METH (goal #2): the `for i in 0..batch_size { ...kbuf[i]... }`
-        // index walk over the just-filled batch became a slice iteration,
-        // the same shape as the tty.rs `tty_write` NL->CRNL conversion in
-        // the N-METH model (da51c6c).
-        let mut olen = 0usize;
-        for &b in &kbuf[..batch_size] {
-            if do_onlcr && b == b'\n' {
-                outbuf[olen] = b'\r';
+        while written < n {
+            let mut batch_size = n - written;
+            if batch_size > 64 {
+                batch_size = 64;
+            }
+
+            for i in 0..batch_size {
+                // SAFETY: `user_src` selects user vs. kernel copy semantics;
+                // `either_copyin` validates the userspace range itself.
+                let r = unsafe {
+                    either_copyin(
+                        (&raw mut kbuf[i]) as *mut c_void,
+                        user_src as c_int,
+                        src + (written + i) as u64,
+                        1,
+                    )
+                };
+                if r < 0 {
+                    return if written > 0 { written as c_int } else { -EFAULT };
+                }
+            }
+
+            // Expand into output buffer.
+            // N-METH (goal #2): the `for i in 0..batch_size { ...kbuf[i]... }`
+            // index walk over the just-filled batch became a slice iteration,
+            // the same shape as the tty.rs `tty_write` NL->CRNL conversion in
+            // the N-METH model (da51c6c).
+            let mut olen = 0usize;
+            for &b in &kbuf[..batch_size] {
+                if do_onlcr && b == b'\n' {
+                    outbuf[olen] = b'\r';
+                    olen += 1;
+                }
+                outbuf[olen] = b;
                 olen += 1;
             }
-            outbuf[olen] = b;
-            olen += 1;
-        }
 
-        // Submit output, waiting interruptibly when the TX buffer is full.
-        let mut sent = 0usize;
-        while sent < olen {
-            // SAFETY: `outbuf[sent..olen]` is a valid readable slice.
-            let accepted = unsafe {
-                crate::uart::Uart::uartputs_nb(
-                    outbuf[sent..olen].as_ptr() as *const c_char,
-                    (olen - sent) as c_int,
-                )
-            };
-            sent += accepted.max(0) as usize;
-            if sent < olen {
-                let ret = crate::uart::Uart::uart_tx_wait();
-                if ret != 0 {
-                    // Interrupted by signal -- return partial write
-                    // count. We consumed this batch from userspace, so
-                    // count it.
-                    written += batch_size;
-                    return if written > 0 { written as c_int } else { -EINTR };
-                }
-            }
-        }
-        written += batch_size;
-    }
-
-    written as c_int
-}
-
-// ===========================================================================
-// consoleread -- user read()s from the console go here.
-// ===========================================================================
-//
-// When the TTY is active, reads go through the TTY line discipline.
-// Before TTY init, falls back to the raw console buffer.
-
-/// # Safety
-/// `buffer` must point to at least `n` writable bytes if `user_dst` is
-/// false, or be a valid userspace address range otherwise (checked by
-/// `either_copyout`).
-unsafe fn consoleread(
-    _cdev: *mut cdev_t,
-    user_dst: crate::bindings::bool_,
-    buffer: *mut c_void,
-    n: usize,
-) -> c_int {
-    let tty_ptr = console_tty();
-    if !tty_ptr.is_null() {
-        // SAFETY: see `consolewrite`.
-        return unsafe {
-            Tty::read(tty_ptr, buffer as *mut c_char, n as u64, user_dst as c_int)
-        } as c_int;
-    }
-
-    // --- Early boot fallback (before TTY is allocated) ---
-    //
-    // N-R7 lock-owns-data: the raw buffer + its lock are now `CONS`
-    // (`SpinLock<ConsInner>`). The guard is acquired fresh at the top of
-    // each outer iteration and dropped before the userspace copy, so the
-    // lock is held exactly during collection and released during the
-    // copy -- byte-identical to the C original's
-    // `acquire ... release-before-copyout ... reacquire-if-continuing`
-    // hold pattern, but expressed as guard drop/reacquire. No raw
-    // `static mut` access, hence no `unsafe`, remains on this path
-    // (`killed`/`current_thread_ptr`/`either_copyout` are all safe fns).
-    let target = n;
-    let mut n = n;
-    let mut dst = buffer as u64;
-    let mut got_newline = false;
-    let mut got_eof = false;
-
-    while n > 0 && !got_newline && !got_eof {
-        let mut cons = CONS.lock();
-        let mut kbuf = [0u8; 64];
-        let mut batch_count = 0usize;
-
-        // Collect up to 64 chars (or until newline/EOF) while holding
-        // the lock.
-        while n > 0 && batch_count < 64 && !got_newline && !got_eof {
-            // Wait until the interrupt handler has put some input into
-            // cons.buf.
-            while cons.r == cons.w {
-                if crate::proc::access::ThreadAccess::from_ptr(crate::machine::Riscv::current_thread_ptr()).map_or(0, |ta| ta.killed()) != 0 {
-                    drop(cons);
-                    // Copy any pending data before returning.
-                    if batch_count > 0 {
-                        if either_copyout(
-                            user_dst as c_int,
-                            dst,
-                            kbuf.as_mut_ptr() as *mut c_void,
-                            batch_count as u64,
-                        ) < 0
-                        {
-                            return (target - n) as c_int; // bytes read so far
-                        }
-                        dst += batch_count as u64;
-                        n -= batch_count;
+            // Submit output, waiting interruptibly when the TX buffer is full.
+            let mut sent = 0usize;
+            while sent < olen {
+                // SAFETY: `outbuf[sent..olen]` is a valid readable slice.
+                let accepted = unsafe {
+                    crate::uart::Uart::uartputs_nb(
+                        outbuf[sent..olen].as_ptr() as *const c_char,
+                        (olen - sent) as c_int,
+                    )
+                };
+                sent += accepted.max(0) as usize;
+                if sent < olen {
+                    let ret = crate::uart::Uart::uart_tx_wait();
+                    if ret != 0 {
+                        // Interrupted by signal -- return partial write
+                        // count. We consumed this batch from userspace, so
+                        // count it.
+                        written += batch_size;
+                        return if written > 0 { written as c_int } else { -EINTR };
                     }
-                    return (target - n) as c_int;
                 }
-                // Atomically release `CONS`, block on `cons_chan()`, and
-                // reacquire before returning -- the guard is still valid
-                // (lock re-held) afterward. Mirrors C `sleep(&cons.r,
-                // &cons.lock)`; `consoleintr` wakes this exact channel.
-                cons.sleep_on(cons_chan());
             }
-
-            let c = cons.buf[(cons.r % INPUT_BUF_SIZE as u32) as usize];
-            cons.r += 1;
-
-            if c as c_int == ctrl(b'D') {
-                // End-of-file.
-                if n < target || batch_count > 0 {
-                    // Save ^D for next time, to make sure caller gets a
-                    // 0-byte result.
-                    cons.r -= 1;
-                }
-                got_eof = true;
-                break;
-            }
-
-            kbuf[batch_count] = c;
-            batch_count += 1;
-            n -= 1;
-
-            if c == b'\n' {
-                // A whole line has arrived.
-                got_newline = true;
-                break;
-            }
+            written += batch_size;
         }
 
-        // Release lock before copying to userspace.
-        drop(cons);
-
-        // Copy batch to userspace (without holding the spinlock).
-        if batch_count > 0 {
-            if either_copyout(
-                user_dst as c_int,
-                dst,
-                kbuf.as_mut_ptr() as *mut c_void,
-                batch_count as u64,
-            ) < 0
-            {
-                // Copy failed, return what we've read so far.
-                return (target - n - batch_count) as c_int;
-            }
-            dst += batch_count as u64;
-        }
-        // Loop condition re-tests `n > 0 && !got_newline && !got_eof`;
-        // if it holds we reacquire a fresh guard at the top next
-        // iteration (the C original's "reacquire to continue").
+        written as c_int
     }
 
-    (target - n) as c_int
+    // =======================================================================
+    // consoleread -- user read()s from the console go here.
+    // =======================================================================
+    //
+    // When the TTY is active, reads go through the TTY line discipline.
+    // Before TTY init, falls back to the raw console buffer.
+
+    /// # Safety
+    /// `buffer` must point to at least `n` writable bytes if `user_dst` is
+    /// false, or be a valid userspace address range otherwise (checked by
+    /// `either_copyout`).
+    unsafe fn consoleread(
+        _cdev: *mut cdev_t,
+        user_dst: crate::bindings::bool_,
+        buffer: *mut c_void,
+        n: usize,
+    ) -> c_int {
+        let tty_ptr = Console::console_tty();
+        if !tty_ptr.is_null() {
+            // SAFETY: see `consolewrite`.
+            return unsafe {
+                Tty::read(tty_ptr, buffer as *mut c_char, n as u64, user_dst as c_int)
+            } as c_int;
+        }
+
+        // --- Early boot fallback (before TTY is allocated) ---
+        //
+        // N-R7 lock-owns-data: the raw buffer + its lock are now `CONS`
+        // (`SpinLock<ConsInner>`). The guard is acquired fresh at the top of
+        // each outer iteration and dropped before the userspace copy, so the
+        // lock is held exactly during collection and released during the
+        // copy -- byte-identical to the C original's
+        // `acquire ... release-before-copyout ... reacquire-if-continuing`
+        // hold pattern, but expressed as guard drop/reacquire. No raw
+        // `static mut` access, hence no `unsafe`, remains on this path
+        // (`killed`/`current_thread_ptr`/`either_copyout` are all safe fns).
+        let target = n;
+        let mut n = n;
+        let mut dst = buffer as u64;
+        let mut got_newline = false;
+        let mut got_eof = false;
+
+        while n > 0 && !got_newline && !got_eof {
+            let mut cons = CONS.lock();
+            let mut kbuf = [0u8; 64];
+            let mut batch_count = 0usize;
+
+            // Collect up to 64 chars (or until newline/EOF) while holding
+            // the lock.
+            while n > 0 && batch_count < 64 && !got_newline && !got_eof {
+                // Wait until the interrupt handler has put some input into
+                // cons.buf.
+                while cons.r == cons.w {
+                    if crate::proc::access::ThreadAccess::from_ptr(crate::machine::Riscv::current_thread_ptr()).map_or(0, |ta| ta.killed()) != 0 {
+                        drop(cons);
+                        // Copy any pending data before returning.
+                        if batch_count > 0 {
+                            if either_copyout(
+                                user_dst as c_int,
+                                dst,
+                                kbuf.as_mut_ptr() as *mut c_void,
+                                batch_count as u64,
+                            ) < 0
+                            {
+                                return (target - n) as c_int; // bytes read so far
+                            }
+                            dst += batch_count as u64;
+                            n -= batch_count;
+                        }
+                        return (target - n) as c_int;
+                    }
+                    // Atomically release `CONS`, block on `cons_chan()`, and
+                    // reacquire before returning -- the guard is still valid
+                    // (lock re-held) afterward. Mirrors C `sleep(&cons.r,
+                    // &cons.lock)`; `consoleintr` wakes this exact channel.
+                    cons.sleep_on(Console::cons_chan());
+                }
+
+                let c = cons.buf[(cons.r % INPUT_BUF_SIZE as u32) as usize];
+                cons.r += 1;
+
+                if c as c_int == Console::ctrl(b'D') {
+                    // End-of-file.
+                    if n < target || batch_count > 0 {
+                        // Save ^D for next time, to make sure caller gets a
+                        // 0-byte result.
+                        cons.r -= 1;
+                    }
+                    got_eof = true;
+                    break;
+                }
+
+                kbuf[batch_count] = c;
+                batch_count += 1;
+                n -= 1;
+
+                if c == b'\n' {
+                    // A whole line has arrived.
+                    got_newline = true;
+                    break;
+                }
+            }
+
+            // Release lock before copying to userspace.
+            drop(cons);
+
+            // Copy batch to userspace (without holding the spinlock).
+            if batch_count > 0 {
+                if either_copyout(
+                    user_dst as c_int,
+                    dst,
+                    kbuf.as_mut_ptr() as *mut c_void,
+                    batch_count as u64,
+                ) < 0
+                {
+                    // Copy failed, return what we've read so far.
+                    return (target - n - batch_count) as c_int;
+                }
+                dst += batch_count as u64;
+            }
+            // Loop condition re-tests `n > 0 && !got_newline && !got_eof`;
+            // if it holds we reacquire a fresh guard at the top next
+            // iteration (the C original's "reacquire to continue").
+        }
+
+        (target - n) as c_int
+    }
 }
 
 /// Zero-sized [`CdevOps`] implementor for the console cdev (P3-10c; was
@@ -551,19 +564,19 @@ impl CdevOps for ConsoleCdevOps {
     unsafe fn read(&self, cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
         -> KResult<c_int> {
         // SAFETY: forwarded caller contract (see `consoleread`'s doc).
-        Errno::cint_result(unsafe { consoleread(cdev, user as crate::bindings::bool_, buf, count) })
+        Errno::cint_result(unsafe { Console::consoleread(cdev, user as crate::bindings::bool_, buf, count) })
     }
 
     unsafe fn write(&self, cdev: *mut cdev_t, user: bool, buf: *const c_void, count: usize)
         -> KResult<c_int> {
         // SAFETY: forwarded caller contract (see `consolewrite`'s doc).
-        Errno::cint_result(unsafe { consolewrite(cdev, user as crate::bindings::bool_, buf, count) })
+        Errno::cint_result(unsafe { Console::consolewrite(cdev, user as crate::bindings::bool_, buf, count) })
     }
 
     /// Console ioctl -- delegates to the TTY layer for
     /// termios/TIOCSPGRP/etc.
     unsafe fn ioctl(&self, _cdev: *mut cdev_t, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
-        let tty_ptr = console_tty();
+        let tty_ptr = Console::console_tty();
         if tty_ptr.is_null() {
             return Err(Errno::NotTy);
         }
@@ -577,7 +590,7 @@ impl CdevOps for ConsoleCdevOps {
     /// reading/writing. Delegates to `tty_poll`, which inspects
     /// `raw_buf` (raw mode) or `input_pipe` (canonical mode).
     unsafe fn poll(&self, _cdev: *mut cdev_t, events: c_short) -> Option<c_int> {
-        let tty_ptr = console_tty();
+        let tty_ptr = Console::console_tty();
         if tty_ptr.is_null() {
             return Some(0);
         }
@@ -622,7 +635,7 @@ impl crate::dev::dev::DeviceOps for ConsoleDevOps {
     /// [`ConsoleCdevOps::ioctl`] but reached from `dev_ioctl` via
     /// `vfs_ioctl`.
     unsafe fn ioctl(&self, _dev: *mut device_t, cmd: u64, arg: *mut c_void) -> Option<c_int> {
-        let tty_ptr = console_tty();
+        let tty_ptr = Console::console_tty();
         if tty_ptr.is_null() {
             return Some(-ENOTTY);
         }
@@ -674,119 +687,121 @@ impl TtyInbufCell {
     }
 }
 
-pub(crate) extern "C" fn consoleintr(c: c_int) {
-    // ---- TTY path: stage in ring buffer for deferred processing ----
-    let tty_ptr = console_tty();
-    if !tty_ptr.is_null() {
-        // ^P still handled here for kernel debugging.
-        if c == ctrl(b'P') {
-            ProcTable::dump();
+impl Console {
+    pub(crate) extern "C" fn consoleintr(c: c_int) {
+        // ---- TTY path: stage in ring buffer for deferred processing ----
+        let tty_ptr = Console::console_tty();
+        if !tty_ptr.is_null() {
+            // ^P still handled here for kernel debugging.
+            if c == Console::ctrl(b'P') {
+                ProcTable::dump();
+                return;
+            }
+            let w = TTY_INBUF_W.load(Ordering::Relaxed);
+            let next = (w + 1) % TTY_INBUF_SIZE;
+            if next != TTY_INBUF_R.load(Ordering::Acquire) {
+                // SAFETY: single producer (this function, serialised by the
+                // UART interrupt handler); the slot at `w` is not read by
+                // the consumer until the `Release` store below publishes
+                // the new `w`.
+                unsafe {
+                    *TTY_INBUF[w as usize].0.get() = c as u8;
+                }
+                TTY_INBUF_W.store(next, Ordering::Release);
+            } // else: drop if full
             return;
         }
-        let w = TTY_INBUF_W.load(Ordering::Relaxed);
-        let next = (w + 1) % TTY_INBUF_SIZE;
-        if next != TTY_INBUF_R.load(Ordering::Acquire) {
-            // SAFETY: single producer (this function, serialised by the
-            // UART interrupt handler); the slot at `w` is not read by
-            // the consumer until the `Release` store below publishes
-            // the new `w`.
-            unsafe {
-                *TTY_INBUF[w as usize].0.get() = c as u8;
+
+        // ---- Early boot fallback (raw buffer) ----
+        //
+        // N-R7 lock-owns-data: `CONS.lock()` acquires the guard; `cons`
+        // `DerefMut`s to `&mut ConsInner`, so `cons.buf`/`cons.r`/`cons.w`/
+        // `cons.e` are plain safe field accesses. The guard drops (unlocks)
+        // at the end of the function -- byte-identical to the old
+        // `spin_lock ... spin_unlock` bracket, with no `unsafe`.
+        let mut cons = CONS.lock();
+
+        match c {
+            _ if c == Console::ctrl(b'P') => {
+                // Print process list.
+                ProcTable::dump();
             }
-            TTY_INBUF_W.store(next, Ordering::Release);
-        } // else: drop if full
-        return;
-    }
-
-    // ---- Early boot fallback (raw buffer) ----
-    //
-    // N-R7 lock-owns-data: `CONS.lock()` acquires the guard; `cons`
-    // `DerefMut`s to `&mut ConsInner`, so `cons.buf`/`cons.r`/`cons.w`/
-    // `cons.e` are plain safe field accesses. The guard drops (unlocks)
-    // at the end of the function -- byte-identical to the old
-    // `spin_lock ... spin_unlock` bracket, with no `unsafe`.
-    let mut cons = CONS.lock();
-
-    match c {
-        _ if c == ctrl(b'P') => {
-            // Print process list.
-            ProcTable::dump();
-        }
-        _ if c == ctrl(b'U') => {
-            // Kill line.
-            while cons.e != cons.w
-                && cons.buf[((cons.e - 1) % INPUT_BUF_SIZE as u32) as usize] != b'\n'
-            {
-                cons.e -= 1;
-                consputc(BACKSPACE);
-            }
-        }
-        _ if c == ctrl(b'H') || c == 0x7f => {
-            // Backspace / Delete key.
-            if cons.e != cons.w {
-                cons.e -= 1;
-                consputc(BACKSPACE);
-            }
-        }
-        _ => {
-            if c != 0 && cons.e.wrapping_sub(cons.r) < INPUT_BUF_SIZE as u32 {
-                let mut c = c;
-                if c == '\r' as c_int {
-                    c = '\n' as c_int;
-                }
-
-                // Echo back to the user.
-                if c == 0x1b {
-                    consputc('[' as c_int); // Escape sequence start
-                } else if c == '\t' as c_int {
-                    consputc(' ' as c_int); // Convert tab to space
-                } else if (c < 32 || c > 126) && c != '\n' as c_int {
-                    consputc('?' as c_int); // Non-printable
-                } else {
-                    consputc(c);
-                }
-
-                // Store for consumption by consoleread().
-                let idx = (cons.e % INPUT_BUF_SIZE as u32) as usize;
-                cons.buf[idx] = c as u8;
-                cons.e += 1;
-
-                if c == '\n' as c_int
-                    || c == '\t' as c_int
-                    || c == ctrl(b'D')
-                    || cons.e.wrapping_sub(cons.r) == INPUT_BUF_SIZE as u32
+            _ if c == Console::ctrl(b'U') => {
+                // Kill line.
+                while cons.e != cons.w
+                    && cons.buf[((cons.e - 1) % INPUT_BUF_SIZE as u32) as usize] != b'\n'
                 {
-                    // Wake up consoleread() if a whole line (or
-                    // end-of-file) has arrived.
-                    cons.w = cons.e;
-                    Scheduler::wakeup_on_chan(cons_chan());
+                    cons.e -= 1;
+                    Console::consputc(BACKSPACE);
+                }
+            }
+            _ if c == Console::ctrl(b'H') || c == 0x7f => {
+                // Backspace / Delete key.
+                if cons.e != cons.w {
+                    cons.e -= 1;
+                    Console::consputc(BACKSPACE);
+                }
+            }
+            _ => {
+                if c != 0 && cons.e.wrapping_sub(cons.r) < INPUT_BUF_SIZE as u32 {
+                    let mut c = c;
+                    if c == '\r' as c_int {
+                        c = '\n' as c_int;
+                    }
+
+                    // Echo back to the user.
+                    if c == 0x1b {
+                        Console::consputc('[' as c_int); // Escape sequence start
+                    } else if c == '\t' as c_int {
+                        Console::consputc(' ' as c_int); // Convert tab to space
+                    } else if (c < 32 || c > 126) && c != '\n' as c_int {
+                        Console::consputc('?' as c_int); // Non-printable
+                    } else {
+                        Console::consputc(c);
+                    }
+
+                    // Store for consumption by consoleread().
+                    let idx = (cons.e % INPUT_BUF_SIZE as u32) as usize;
+                    cons.buf[idx] = c as u8;
+                    cons.e += 1;
+
+                    if c == '\n' as c_int
+                        || c == '\t' as c_int
+                        || c == Console::ctrl(b'D')
+                        || cons.e.wrapping_sub(cons.r) == INPUT_BUF_SIZE as u32
+                    {
+                        // Wake up consoleread() if a whole line (or
+                        // end-of-file) has arrived.
+                        cons.w = cons.e;
+                        Scheduler::wakeup_on_chan(Console::cons_chan());
+                    }
                 }
             }
         }
+        // `cons` drops here -> unlock.
     }
-    // `cons` drops here -> unlock.
-}
 
-// ===========================================================================
-// consoleinit / consoledevinit.
-// ===========================================================================
+    // =======================================================================
+    // consoleinit / consoledevinit.
+    // =======================================================================
 
-pub(crate) extern "C" fn consoleinit() {
-    // Initialise `CONS`'s embedded lock at the historical
-    // `spin_init(&CONS_LOCK)` site. Runs once, before any other hart or
-    // interrupt handler can touch `CONS`. (`SpinLock::new` already
-    // const-initialised the same fields, so this is belt-and-suspenders,
-    // preserving the explicit init point.)
-    CONS.init();
+    pub(crate) extern "C" fn consoleinit() {
+        // Initialise `CONS`'s embedded lock at the historical
+        // `spin_init(&CONS_LOCK)` site. Runs once, before any other hart or
+        // interrupt handler can touch `CONS`. (`SpinLock::new` already
+        // const-initialised the same fields, so this is belt-and-suspenders,
+        // preserving the explicit init point.)
+        CONS.init();
 
-    // Try to initialize UART hardware. Returns 1 if successful (QEMU),
-    // 0 if deferred (real hardware uses SBI).
-    if crate::uart::Uart::uartinit() != 0 {
-        // Mark UART as initialized - switch from SBI to UART output.
-        UART_INITIALIZED.store(true, Ordering::Relaxed);
+        // Try to initialize UART hardware. Returns 1 if successful (QEMU),
+        // 0 if deferred (real hardware uses SBI).
+        if crate::uart::Uart::uartinit() != 0 {
+            // Mark UART as initialized - switch from SBI to UART output.
+            UART_INITIALIZED.store(true, Ordering::Relaxed);
+        }
+        // If uartinit returned 0, keep UART_INITIALIZED false to continue
+        // using SBI.
     }
-    // If uartinit returned 0, keep UART_INITIALIZED false to continue
-    // using SBI.
 }
 
 /// SBI console input polling thread. On non-QEMU platforms where UART
@@ -799,7 +814,7 @@ extern "C" fn sbi_console_poll_thread(_arg1: u64, _arg2: u64) {
             // Read up to 32 chars per cycle.
             let c = crate::sbi::Sbi::console_getchar();
             if c >= 0 {
-                consoleintr(c);
+                Console::consoleintr(c);
                 got_input = true;
             } else {
                 break; // No more input available.
@@ -822,7 +837,7 @@ extern "C" fn sbi_console_poll_thread(_arg1: u64, _arg2: u64) {
 /// interrupt context) and feeds characters to `tty_input()`, which can
 /// safely sleep.
 extern "C" fn console_tty_input_thread(_arg1: u64, _arg2: u64) {
-    let tty_ptr = console_tty();
+    let tty_ptr = Console::console_tty();
     loop {
         let mut r = TTY_INBUF_R.load(Ordering::Acquire);
         let mut w = TTY_INBUF_W.load(Ordering::Acquire);
@@ -868,7 +883,7 @@ extern "C" fn console_tty_input_thread(_arg1: u64, _arg2: u64) {
 /// `tty_echo_char` (OPOST/ONLCR), so bytes are output verbatim -- no
 /// additional `\n` -> `\r\n` conversion is performed.
 extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
-    let tty_ptr = console_tty();
+    let tty_ptr = Console::console_tty();
     let mut buf = [0u8; 64];
     loop {
         // `tty_output` blocks if no data is available.
@@ -892,139 +907,141 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
 
 static mut CONSOLE_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
-pub(crate) extern "C" fn consoledevinit() {
-    // SAFETY: `consoledevinit()` runs exactly once, from
-    // `start_kernel.c`'s single-hart init sequence, before any other
-    // code can observe `CONSOLE_CDEV`.
-    unsafe {
-        let cdev = CONSOLE_CDEV.as_mut_ptr();
-        (*cdev).dev.major = CONSOLE_MAJOR;
-        (*cdev).dev.minor = CONSOLE_MINOR;
-        (*cdev).dev.devname = c"console".as_ptr();
-        (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).flags.set_readable(1);
-        (*cdev).flags.set_writable(1);
-        (*cdev).ops = Some(&CONSOLE_CDEV_OPS);
+impl Console {
+    pub(crate) extern "C" fn consoledevinit() {
+        // SAFETY: `consoledevinit()` runs exactly once, from
+        // `start_kernel.c`'s single-hart init sequence, before any other
+        // code can observe `CONSOLE_CDEV`.
+        unsafe {
+            let cdev = CONSOLE_CDEV.as_mut_ptr();
+            (*cdev).dev.major = CONSOLE_MAJOR;
+            (*cdev).dev.minor = CONSOLE_MINOR;
+            (*cdev).dev.devname = c"console".as_ptr();
+            (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
+            (*cdev).flags.set_readable(1);
+            (*cdev).flags.set_writable(1);
+            (*cdev).ops = Some(&CONSOLE_CDEV_OPS);
 
-        let errno = Cdev::register(cdev);
-        if errno != 0 {
-            __panic_start();
-            crate::kprintln!(
-                "ASSERTION_FAILURE {}:{}: In function '{}':",
-                "kernel/console.rs", line!(), "consoledevinit",
-            );
-            crate::kprintln!("consoleinit: cdev_register failed: {}", errno);
-            __panic_end();
-        }
-
-        // Install ioctl on the device_t level (used by vfs_ioctl ->
-        // dev_ioctl) -- replaces the cdev forwarder installed by
-        // `cdev_register`, matching the historical install order.
-        (*cdev).dev.ops = Some(&CONSOLE_DEV_OPS);
-
-        let mut irq_desc = IrqDesc {
-            handler: Some(crate::uart::uartintr),
-            data: core::ptr::null_mut(),
-            dev: &raw mut (*cdev).dev,
-            irq: 0,
-            count: 0,
-            // SAFETY: `rcu_head` is plain-old-data (pointers/u64/a one-bit
-            // bitfield); zero is a valid "not yet queued" state —
-            // `register_irq_handler` overwrites it unconditionally anyway
-            // (see `irq_core::register_irq_handler`).
-            rcu_head: unsafe { core::mem::zeroed() },
-        };
-        let errno = IrqCore::register_irq_handler(IrqCore::plic_irq(crate::uart::__uart0_irqno as c_int), &raw mut irq_desc);
-        if errno != 0 {
-            __panic_start();
-            crate::kprintln!(
-                "ASSERTION_FAILURE {}:{}: In function '{}':",
-                "kernel/console.rs", line!(), "consoledevinit",
-            );
-            crate::kprintln!(
-                "consoledevinit: register_irq_handler failed, error code: {}",
-                errno,
-            );
-            __panic_end();
-        }
-
-        // --- Allocate the console TTY ---
-        // P3-10d: `None` = no driver ops (previously a null `tty_ops*`
-        // — the console tty deliberately has no `TtyOps` hooks; every
-        // tty-core dispatcher's `None` fallback is its behavior).
-        let t = Tty::alloc(c"console".as_ptr(), None);
-        if is_err_or_null(t) {
-            __panic_start();
-            crate::kprintln!(
-                "ASSERTION_FAILURE {}:{}: In function '{}':",
-                "kernel/console.rs", line!(), "consoledevinit",
-            );
-            crate::kprintln!("consoledevinit: Tty::alloc failed");
-            __panic_end();
-        }
-        CONSOLE_TTY.store(t, Ordering::Relaxed);
-
-        // Make both TTY pipes non-blocking for writes so that
-        // tty_input() (called from the feeder thread) and
-        // tty_echo_char() never sleep when the pipe is full --
-        // characters are silently discarded instead.
-        const PIPE_FLAGS_NONBLOCK_WR: c_int = 4;
-        Pipe::pipe_set_flags((*t).input_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
-        Pipe::pipe_set_flags((*t).output_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
-
-        // Attach the console TTY to init's session as the controlling
-        // terminal.
-        let initproc = ProcTable::get_initproc();
-        if !initproc.is_null() {
-            // N-R6d-2a: `thread.session` is now a generational `Sid`; resolve
-            // it to a live `*mut session` under `pid_wlock` (required by
-            // `session_lookup`). Init always has its boot session here, so this
-            // attaches the console as its controlling terminal exactly as
-            // before; a null (no/stale session) simply skips, as the old
-            // null-pointer guard did.
-            ProcTable::wlock();
-            let sess = SessionTable::lookup((*initproc).session).unwrap_or(core::ptr::null_mut());
-            if !sess.is_null() {
-                Session::set_ctrl_tty(sess, t);
+            let errno = Cdev::register(cdev);
+            if errno != 0 {
+                Printf::__panic_start();
+                crate::kprintln!(
+                    "ASSERTION_FAILURE {}:{}: In function '{}':",
+                    "kernel/console.rs", line!(), "consoledevinit",
+                );
+                crate::kprintln!("consoleinit: cdev_register failed: {}", errno);
+                Printf::__panic_end();
             }
-            ProcTable::wunlock();
-        }
 
-        // Start the input feeder thread (intr ring buf -> tty_input).
-        let feeder = crate::proc::thread::Thread::kthread_create(
-            c"tty_input".as_ptr(),
-            console_tty_input_thread as *mut c_void,
-            0,
-            0,
-            0,
-        );
-        if !is_err_or_null(feeder) {
-            Scheduler::wakeup(feeder);
-        }
+            // Install ioctl on the device_t level (used by vfs_ioctl ->
+            // dev_ioctl) -- replaces the cdev forwarder installed by
+            // `cdev_register`, matching the historical install order.
+            (*cdev).dev.ops = Some(&CONSOLE_DEV_OPS);
 
-        // Start the output drain thread (echo -> UART).
-        let drain = crate::proc::thread::Thread::kthread_create(
-            c"tty_drain".as_ptr(),
-            console_tty_drain_thread as *mut c_void,
-            0,
-            0,
-            0,
-        );
-        if !is_err_or_null(drain) {
-            Scheduler::wakeup(drain);
-        }
+            let mut irq_desc = IrqDesc {
+                handler: Some(crate::uart::uartintr),
+                data: core::ptr::null_mut(),
+                dev: &raw mut (*cdev).dev,
+                irq: 0,
+                count: 0,
+                // SAFETY: `rcu_head` is plain-old-data (pointers/u64/a one-bit
+                // bitfield); zero is a valid "not yet queued" state —
+                // `register_irq_handler` overwrites it unconditionally anyway
+                // (see `irq_core::register_irq_handler`).
+                rcu_head: unsafe { core::mem::zeroed() },
+            };
+            let errno = IrqCore::register_irq_handler(IrqCore::plic_irq(crate::uart::__uart0_irqno as c_int), &raw mut irq_desc);
+            if errno != 0 {
+                Printf::__panic_start();
+                crate::kprintln!(
+                    "ASSERTION_FAILURE {}:{}: In function '{}':",
+                    "kernel/console.rs", line!(), "consoledevinit",
+                );
+                crate::kprintln!(
+                    "consoledevinit: register_irq_handler failed, error code: {}",
+                    errno,
+                );
+                Printf::__panic_end();
+            }
 
-        // Start SBI polling thread if UART hardware not available.
-        if !UART_INITIALIZED.load(Ordering::Relaxed) {
-            let p = crate::proc::thread::Thread::kthread_create(
-                c"sbi_console".as_ptr(),
-                sbi_console_poll_thread as *mut c_void,
+            // --- Allocate the console TTY ---
+            // P3-10d: `None` = no driver ops (previously a null `tty_ops*`
+            // — the console tty deliberately has no `TtyOps` hooks; every
+            // tty-core dispatcher's `None` fallback is its behavior).
+            let t = Tty::alloc(c"console".as_ptr(), None);
+            if is_err_or_null(t) {
+                Printf::__panic_start();
+                crate::kprintln!(
+                    "ASSERTION_FAILURE {}:{}: In function '{}':",
+                    "kernel/console.rs", line!(), "consoledevinit",
+                );
+                crate::kprintln!("consoledevinit: Tty::alloc failed");
+                Printf::__panic_end();
+            }
+            CONSOLE_TTY.store(t, Ordering::Relaxed);
+
+            // Make both TTY pipes non-blocking for writes so that
+            // tty_input() (called from the feeder thread) and
+            // tty_echo_char() never sleep when the pipe is full --
+            // characters are silently discarded instead.
+            const PIPE_FLAGS_NONBLOCK_WR: c_int = 4;
+            Pipe::pipe_set_flags((*t).input_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
+            Pipe::pipe_set_flags((*t).output_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
+
+            // Attach the console TTY to init's session as the controlling
+            // terminal.
+            let initproc = ProcTable::get_initproc();
+            if !initproc.is_null() {
+                // N-R6d-2a: `thread.session` is now a generational `Sid`; resolve
+                // it to a live `*mut session` under `pid_wlock` (required by
+                // `session_lookup`). Init always has its boot session here, so this
+                // attaches the console as its controlling terminal exactly as
+                // before; a null (no/stale session) simply skips, as the old
+                // null-pointer guard did.
+                ProcTable::wlock();
+                let sess = SessionTable::lookup((*initproc).session).unwrap_or(core::ptr::null_mut());
+                if !sess.is_null() {
+                    Session::set_ctrl_tty(sess, t);
+                }
+                ProcTable::wunlock();
+            }
+
+            // Start the input feeder thread (intr ring buf -> tty_input).
+            let feeder = crate::proc::thread::Thread::kthread_create(
+                c"tty_input".as_ptr(),
+                console_tty_input_thread as *mut c_void,
                 0,
                 0,
                 0,
             );
-            if !is_err_or_null(p) {
-                Scheduler::wakeup(p);
+            if !is_err_or_null(feeder) {
+                Scheduler::wakeup(feeder);
+            }
+
+            // Start the output drain thread (echo -> UART).
+            let drain = crate::proc::thread::Thread::kthread_create(
+                c"tty_drain".as_ptr(),
+                console_tty_drain_thread as *mut c_void,
+                0,
+                0,
+                0,
+            );
+            if !is_err_or_null(drain) {
+                Scheduler::wakeup(drain);
+            }
+
+            // Start SBI polling thread if UART hardware not available.
+            if !UART_INITIALIZED.load(Ordering::Relaxed) {
+                let p = crate::proc::thread::Thread::kthread_create(
+                    c"sbi_console".as_ptr(),
+                    sbi_console_poll_thread as *mut c_void,
+                    0,
+                    0,
+                    0,
+                );
+                if !is_err_or_null(p) {
+                    Scheduler::wakeup(p);
+                }
             }
         }
     }

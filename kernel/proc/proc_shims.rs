@@ -17,7 +17,7 @@ use crate::u;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 use crate::bindings::{
     ksiginfo, pgroup, session, slab_cache_t, thread, thread_group, SLAB_FLAG_EMBEDDED,
@@ -227,10 +227,10 @@ pub(crate) fn xv6_panic(msg: *const c_char) -> ! {
     // caller-owned stack buffer that outlives the call). Nothing in this
     // function can itself panic or otherwise re-enter `xv6_panic`.
     unsafe {
-        __panic_start();
+        Printf::__panic_start();
     }
     crate::kprintln!("{}", crate::printf::Cs(msg));
-    unsafe { __panic_end() }
+    unsafe { Printf::__panic_end() }
 }
 
 // ===========================================================================
@@ -1030,7 +1030,7 @@ pub(super) fn xv6_mycpu_clear_noff() {
 // user space. Mirrors the C `assert(THREAD_USER_SPACE(p), "...", p->pid)`.
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
-use crate::printf::trigger_panic;
+// KERNEL-OO: reached via the `Printf` import above.
 
 pub(super) fn xv6_forkret_assert_user(p: *mut thread) {
     // SAFETY: `thread_user_space` itself tolerates a null `p` (returns
@@ -1045,7 +1045,7 @@ pub(super) fn xv6_forkret_assert_user(p: *mut thread) {
                 "ASSERTION_FAILURE: kernel thread {} tries to return to user space",
                 (*p).pid,
             );
-            trigger_panic();
+            Printf::trigger_panic();
         }
     }
 }
@@ -1995,7 +1995,7 @@ use crate::bindings::{pgroup as Pgroup, session as Session, thread_group as Tgro
 // P3-1D mesh sweep: backtrace.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use crate::backtrace::print_thread_backtrace;
+use crate::backtrace::Backtrace;
 
 // Variadic printf alias for ergonomics (bindgen already exports it; we
 // re-shape the first arg as a *const c_char for use with `c"..."` literals).
@@ -2230,7 +2230,7 @@ pub(super) fn xv6_procdump_bt_one(p: *mut thread) {
                     sid_v, pgid_v, tgid, pid, stype, crate::printf::Cs(name.as_ptr() as *const c_char),
                 );
                 let pse = (*p).sched_entity;
-                print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
+                Backtrace::print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
             }
         }
         ThreadAccess::assume(p).tcb_unlock();
@@ -2273,7 +2273,7 @@ pub(super) fn xv6_procdump_bt_pid(pid: c_int) {
                      crate::printf::Cs(xv6_thread_state_to_str(pstate)));
         } else {
             let pse = (*p).sched_entity;
-            print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
+            Backtrace::print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
         }
         ThreadAccess::assume(p).tcb_unlock();
     }

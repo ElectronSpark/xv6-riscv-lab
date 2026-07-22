@@ -54,7 +54,7 @@ use crate::dev::cdev::{Cdev, CdevOps};
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
 
@@ -136,7 +136,7 @@ const S_IFCHR: u32 = 0o020_000;
 macro_rules! ptmx_assert_errno {
     ($cond:expr, $msg:literal, $errno:expr $(,)?) => {
         if !($cond) {
-            __panic_start();
+            Printf::__panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/tty/ptmx.rs",
@@ -144,7 +144,7 @@ macro_rules! ptmx_assert_errno {
                 "PtyPair::init",
             );
             crate::kprintln!($msg, $errno);
-            __panic_end();
+            Printf::__panic_end();
         }
     };
 }

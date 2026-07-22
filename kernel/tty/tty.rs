@@ -450,7 +450,7 @@ const _: () = {
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
@@ -618,7 +618,7 @@ impl Tty {
             )
         };
         if ret != 0 {
-            __panic_start();
+            Printf::__panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/tty/tty.rs",
@@ -626,7 +626,7 @@ impl Tty {
                 "Tty::init",
             );
             crate::kprintln!("Tty::init: failed to init tty_cache slab, errno={}", ret);
-            __panic_end();
+            Printf::__panic_end();
         }
     }
 }

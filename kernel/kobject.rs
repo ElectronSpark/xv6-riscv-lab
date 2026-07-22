@@ -136,250 +136,252 @@ static KOBJECT_LIST: SyncCell<list_node_t> =
 static KOBJECT_LOCK: SyncCell<MaybeUninit<spinlock_t>> = SyncCell::new(MaybeUninit::uninit());
 static KOBJECT_COUNT: AtomicI64 = AtomicI64::new(0);
 
-#[inline(always)]
-fn kobject_list_head() -> *mut list_node_t {
-    KOBJECT_LIST.get()
-}
-
-#[inline(always)]
-fn kobject_lock() -> KSpinlock {
-    // SAFETY: `KOBJECT_LOCK` is initialised once by `kobject_global_init`,
-    // called before any other `kobject_*` entry point per the
-    // `start_kernel.c` init order (mirrors every other kernel subsystem's
-    // `*_global_init` contract).
-    KSpinlock::from_bindings(unsafe { (*KOBJECT_LOCK.get()).as_mut_ptr() })
-}
-
-// ---------------------------------------------------------------------------
-// Minimal intrusive-list primitives. `kernel/inc/list.h` defines these as
-// `static inline` (no external linkage), so they cannot be called from
-// Rust; reimplemented here for the two operations this file needs.
-// ---------------------------------------------------------------------------
-
-/// Mirrors `list_entry_init()`.
-///
-/// # Safety
-/// `e` must point to a live `list_node_t`.
-#[inline(always)]
-unsafe fn ln_init(e: *mut list_node_t) {
-    unsafe {
-        (*e).next = e;
-        (*e).prev = e;
+impl Kobject {
+    #[inline(always)]
+    fn kobject_list_head() -> *mut list_node_t {
+        KOBJECT_LIST.get()
     }
-}
 
-/// Mirrors `list_entry_detach()`.
-///
-/// # Safety
-/// `e` must point to a live, linked `list_node_t`.
-#[inline(always)]
-unsafe fn ln_detach(e: *mut list_node_t) {
-    unsafe {
-        let prev = (*e).prev;
-        let next = (*e).next;
-        (*prev).next = next;
-        (*next).prev = prev;
-        ln_init(e);
+    #[inline(always)]
+    fn kobject_lock() -> KSpinlock {
+        // SAFETY: `KOBJECT_LOCK` is initialised once by `kobject_global_init`,
+        // called before any other `kobject_*` entry point per the
+        // `start_kernel.c` init order (mirrors every other kernel subsystem's
+        // `*_global_init` contract).
+        KSpinlock::from_bindings(unsafe { (*KOBJECT_LOCK.get()).as_mut_ptr() })
     }
-}
 
-/// Mirrors `list_entry_push_front()` / `list_node_push_front(head, obj,
-/// list_entry)`.
-///
-/// # Safety
-/// `head` and `e` must point to live `list_node_t`s.
-#[inline(always)]
-unsafe fn ln_push_front(head: *mut list_node_t, e: *mut list_node_t) {
-    unsafe {
-        let next = (*head).next;
-        (*e).prev = head;
-        (*e).next = next;
-        (*head).next = e;
-        (*next).prev = e;
-    }
-}
+    // -----------------------------------------------------------------------
+    // Minimal intrusive-list primitives. `kernel/inc/list.h` defines these as
+    // `static inline` (no external linkage), so they cannot be called from
+    // Rust; reimplemented here for the two operations this file needs.
+    // -----------------------------------------------------------------------
 
-/// `kobject::list_entry` is the first field of `struct kobject` (offset
-/// 0), so this is a plain reinterpret cast, not `container_of` arithmetic.
-#[inline(always)]
-fn kobj_list_node(obj: *mut Kobject) -> *mut list_node_t {
-    obj as *mut list_node_t
-}
-
-#[inline(always)]
-fn refcount_atomic<'a>(obj: *mut Kobject) -> &'a AtomicI32 {
-    // SAFETY: caller ensures `obj` points to a live, aligned `struct
-    // kobject`; `refcount` is a plain C `int` field, same size and
-    // alignment as `AtomicI32`.
-    unsafe { &*(ptr::addr_of_mut!((*obj).refcount) as *const AtomicI32) }
-}
-
-/// Mirrors `__kobject_attach()`.
-///
-/// # Safety
-/// `obj` must point to a live, properly `list_entry`-initialised
-/// `struct kobject`.
-unsafe fn attach(obj: *mut Kobject) {
-    let _guard = kobject_lock().lock();
-    unsafe { ln_push_front(kobject_list_head(), kobj_list_node(obj)) };
-    // Relaxed: `KOBJECT_COUNT` is a pure diagnostic counter (see
-    // `kobject_count()`), and every mutation here already happens
-    // under `kobject_lock()`, which provides the real ordering for
-    // the registry list this counter tracks. No other memory access
-    // is synchronized *through* this counter.
-    let count = KOBJECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    unsafe { kassert!(count > 0, "kobject count underflow") };
-}
-
-/// Mirrors `__kobject_detach()`.
-///
-/// # Safety
-/// `obj` must point to a live `struct kobject` currently attached to the
-/// global registry.
-unsafe fn detach(obj: *mut Kobject) {
-    let _guard = kobject_lock().lock();
-    unsafe { ln_detach(kobj_list_node(obj)) };
-    // Relaxed: same rationale as `attach` — diagnostic counter, real
-    // ordering comes from `kobject_lock()`.
-    let count = KOBJECT_COUNT.fetch_sub(1, Ordering::Relaxed) - 1;
-    unsafe { kassert!(count >= 0, "kobject count underflow") };
-}
-
-// ---------------------------------------------------------------------------
-// Public C ABI — exact symbol/signature parity with `kernel/inc/kobject.h`.
-// ---------------------------------------------------------------------------
-
-/// # Safety
-/// Must be called exactly once, before any other `kobject_*` entry point
-/// (no concurrent access to the registry statics yet).
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) fn kobject_global_init() {
-    unsafe { ln_init(kobject_list_head()) };
-    kobject_lock().init(c"kobject_lock".as_ptr());
-}
-
-/// # Safety
-/// `obj` must be null or point to a live `struct kobject` whose
-/// `refcount` is currently zero (fresh/never-initialised, or fully
-/// dropped and being reused).
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn kobject_init(obj: *mut Kobject) {
-    unsafe {
-        kassert!(!obj.is_null(), "kobject_init: obj is NULL");
-        ln_init(kobj_list_node(obj));
-        // Relaxed: caller's contract guarantees `obj` is either fresh
-        // or fully dropped (refcount == 0, no other holder), so there
-        // is no concurrent writer to synchronize with here — mirrors
-        // `Arc`'s use of `Relaxed` for reference-count increments.
-        let expected = refcount_atomic(obj).fetch_add(1, Ordering::Relaxed);
-        kassert!(expected == 0, "kobject_init: obj->refcount is not zero");
-        attach(obj);
-    }
-}
-
-/// # Safety
-/// `obj` must be null or point to a live `struct kobject` with a
-/// currently-nonzero `refcount` (i.e. the caller already holds a
-/// reference).
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn kobject_get(obj: *mut Kobject) {
-    unsafe {
-        kassert!(!obj.is_null(), "kobject_get: obj is NULL");
-        // Relaxed: incrementing from an already-held reference needs no
-        // ordering — the caller's existing reference is itself proof
-        // the object (and anything it publishes) is already visible on
-        // this hart. Standard `Arc::clone` pattern.
-        let count = refcount_atomic(obj).fetch_add(1, Ordering::Relaxed) + 1;
-        kassert!(count > 0, "kobject_get: refcount underflow");
-    }
-}
-
-/// # Safety
-/// `obj` must be null or point to a live `struct kobject`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn kobject_try_get(obj: *mut Kobject) -> bool {
-    unsafe { kassert!(!obj.is_null(), "kobject_try_get: obj is NULL") };
-    let rc = refcount_atomic(obj);
-    let mut old = rc.load(Ordering::Relaxed);
-    loop {
-        if old == 0 {
-            return false;
-        }
-        // Acquire on success (mirrors `std::sync::Arc::upgrade`): this
-        // is a weak-style "upgrade" from a bare pointer whose liveness
-        // is guaranteed by the caller's RCU read-side section, not by
-        // an existing strong reference (contrast with `kobject_get`,
-        // which may use `Relaxed` because it always starts from an
-        // already-held reference). Acquire prevents any subsequent
-        // read of `*obj`'s data from being reordered before this CAS
-        // observes the object as still live, and synchronizes with the
-        // `Release` in `kobject_put`'s decrement. Failure ordering is
-        // `Relaxed`: a failed CAS only feeds back into the retry loop.
-        match rc.compare_exchange(old, old + 1, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => return true,
-            Err(cur) => old = cur,
+    /// Mirrors `list_entry_init()`.
+    ///
+    /// # Safety
+    /// `e` must point to a live `list_node_t`.
+    #[inline(always)]
+    unsafe fn ln_init(e: *mut list_node_t) {
+        unsafe {
+            (*e).next = e;
+            (*e).prev = e;
         }
     }
-}
 
-/// # Safety
-/// `obj` must be null or point to a live `struct kobject` with a
-/// currently-nonzero `refcount`. When the refcount reaches zero, `obj` is
-/// detached from the global registry and either freed via `kmm_free` (if
-/// `ops.release` is unset) or handed to `ops.release`, which must be safe
-/// to call with `obj` as its sole argument.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn kobject_put(obj: *mut Kobject) {
-    unsafe {
-        kassert!(!obj.is_null(), "kobject_put: obj is NULL");
-        // Release: must publish every write this hart made to `*obj`
-        // (and anything reachable through it) before a concurrent hart
-        // can observe the count reaching zero and proceed to free it.
-        // Paired with the `Acquire` fence below on the branch that
-        // actually reaches zero — standard `Arc`-style refcount-drop
-        // pattern.
-        let count = refcount_atomic(obj).fetch_sub(1, Ordering::Release) - 1;
-        kassert!(count >= 0, "kobject_put: refcount underflow");
-        if count == 0 {
-            // Acquire: synchronizes with every `Release` decrement
-            // (including this one and any from other harts that raced
-            // to decrement first) before we detach and free `obj` —
-            // without this, writes from a hart that decremented
-            // concurrently (but not to zero) could still be in flight
-            // when we free the object.
-            core::sync::atomic::fence(Ordering::Acquire);
-            detach(obj);
-            match (*obj).ops.release {
-                None => crate::mm::kalloc::Kmem::kmm_free(obj as *mut c_void),
-                Some(release) => release(obj),
+    /// Mirrors `list_entry_detach()`.
+    ///
+    /// # Safety
+    /// `e` must point to a live, linked `list_node_t`.
+    #[inline(always)]
+    unsafe fn ln_detach(e: *mut list_node_t) {
+        unsafe {
+            let prev = (*e).prev;
+            let next = (*e).next;
+            (*prev).next = next;
+            (*next).prev = prev;
+            Kobject::ln_init(e);
+        }
+    }
+
+    /// Mirrors `list_entry_push_front()` / `list_node_push_front(head, obj,
+    /// list_entry)`.
+    ///
+    /// # Safety
+    /// `head` and `e` must point to live `list_node_t`s.
+    #[inline(always)]
+    unsafe fn ln_push_front(head: *mut list_node_t, e: *mut list_node_t) {
+        unsafe {
+            let next = (*head).next;
+            (*e).prev = head;
+            (*e).next = next;
+            (*head).next = e;
+            (*next).prev = e;
+        }
+    }
+
+    /// `kobject::list_entry` is the first field of `struct kobject` (offset
+    /// 0), so this is a plain reinterpret cast, not `container_of` arithmetic.
+    #[inline(always)]
+    fn kobj_list_node(obj: *mut Kobject) -> *mut list_node_t {
+        obj as *mut list_node_t
+    }
+
+    #[inline(always)]
+    fn refcount_atomic<'a>(obj: *mut Kobject) -> &'a AtomicI32 {
+        // SAFETY: caller ensures `obj` points to a live, aligned `struct
+        // kobject`; `refcount` is a plain C `int` field, same size and
+        // alignment as `AtomicI32`.
+        unsafe { &*(ptr::addr_of_mut!((*obj).refcount) as *const AtomicI32) }
+    }
+
+    /// Mirrors `__kobject_attach()`.
+    ///
+    /// # Safety
+    /// `obj` must point to a live, properly `list_entry`-initialised
+    /// `struct kobject`.
+    unsafe fn attach(obj: *mut Kobject) {
+        let _guard = Kobject::kobject_lock().lock();
+        unsafe { Kobject::ln_push_front(Kobject::kobject_list_head(), Kobject::kobj_list_node(obj)) };
+        // Relaxed: `KOBJECT_COUNT` is a pure diagnostic counter (see
+        // `kobject_count()`), and every mutation here already happens
+        // under `kobject_lock()`, which provides the real ordering for
+        // the registry list this counter tracks. No other memory access
+        // is synchronized *through* this counter.
+        let count = KOBJECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        unsafe { kassert!(count > 0, "kobject count underflow") };
+    }
+
+    /// Mirrors `__kobject_detach()`.
+    ///
+    /// # Safety
+    /// `obj` must point to a live `struct kobject` currently attached to the
+    /// global registry.
+    unsafe fn detach(obj: *mut Kobject) {
+        let _guard = Kobject::kobject_lock().lock();
+        unsafe { Kobject::ln_detach(Kobject::kobj_list_node(obj)) };
+        // Relaxed: same rationale as `attach` — diagnostic counter, real
+        // ordering comes from `kobject_lock()`.
+        let count = KOBJECT_COUNT.fetch_sub(1, Ordering::Relaxed) - 1;
+        unsafe { kassert!(count >= 0, "kobject count underflow") };
+    }
+
+    // -----------------------------------------------------------------------
+    // Public C ABI — exact symbol/signature parity with `kernel/inc/kobject.h`.
+    // -----------------------------------------------------------------------
+
+    /// # Safety
+    /// Must be called exactly once, before any other `kobject_*` entry point
+    /// (no concurrent access to the registry statics yet).
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+    // by crate path now.
+    pub(crate) fn kobject_global_init() {
+        unsafe { Kobject::ln_init(Kobject::kobject_list_head()) };
+        Kobject::kobject_lock().init(c"kobject_lock".as_ptr());
+    }
+
+    /// # Safety
+    /// `obj` must be null or point to a live `struct kobject` whose
+    /// `refcount` is currently zero (fresh/never-initialised, or fully
+    /// dropped and being reused).
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+    // by crate path now.
+    pub(crate) unsafe fn kobject_init(obj: *mut Kobject) {
+        unsafe {
+            kassert!(!obj.is_null(), "kobject_init: obj is NULL");
+            Kobject::ln_init(Kobject::kobj_list_node(obj));
+            // Relaxed: caller's contract guarantees `obj` is either fresh
+            // or fully dropped (refcount == 0, no other holder), so there
+            // is no concurrent writer to synchronize with here — mirrors
+            // `Arc`'s use of `Relaxed` for reference-count increments.
+            let expected = Kobject::refcount_atomic(obj).fetch_add(1, Ordering::Relaxed);
+            kassert!(expected == 0, "kobject_init: obj->refcount is not zero");
+            Kobject::attach(obj);
+        }
+    }
+
+    /// # Safety
+    /// `obj` must be null or point to a live `struct kobject` with a
+    /// currently-nonzero `refcount` (i.e. the caller already holds a
+    /// reference).
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+    // by crate path now.
+    pub(crate) unsafe fn kobject_get(obj: *mut Kobject) {
+        unsafe {
+            kassert!(!obj.is_null(), "kobject_get: obj is NULL");
+            // Relaxed: incrementing from an already-held reference needs no
+            // ordering — the caller's existing reference is itself proof
+            // the object (and anything it publishes) is already visible on
+            // this hart. Standard `Arc::clone` pattern.
+            let count = Kobject::refcount_atomic(obj).fetch_add(1, Ordering::Relaxed) + 1;
+            kassert!(count > 0, "kobject_get: refcount underflow");
+        }
+    }
+
+    /// # Safety
+    /// `obj` must be null or point to a live `struct kobject`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+    // by crate path now.
+    pub(crate) unsafe fn kobject_try_get(obj: *mut Kobject) -> bool {
+        unsafe { kassert!(!obj.is_null(), "kobject_try_get: obj is NULL") };
+        let rc = Kobject::refcount_atomic(obj);
+        let mut old = rc.load(Ordering::Relaxed);
+        loop {
+            if old == 0 {
+                return false;
+            }
+            // Acquire on success (mirrors `std::sync::Arc::upgrade`): this
+            // is a weak-style "upgrade" from a bare pointer whose liveness
+            // is guaranteed by the caller's RCU read-side section, not by
+            // an existing strong reference (contrast with `kobject_get`,
+            // which may use `Relaxed` because it always starts from an
+            // already-held reference). Acquire prevents any subsequent
+            // read of `*obj`'s data from being reordered before this CAS
+            // observes the object as still live, and synchronizes with the
+            // `Release` in `kobject_put`'s decrement. Failure ordering is
+            // `Relaxed`: a failed CAS only feeds back into the retry loop.
+            match rc.compare_exchange(old, old + 1, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(cur) => old = cur,
             }
         }
     }
-}
 
-/// # Safety
-/// `obj` must be null or point to a live `struct kobject`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn kobject_refcount(obj: *mut Kobject) -> i64 {
-    unsafe {
-        kassert!(!obj.is_null(), "kobject_refcount: obj is NULL");
-        // Relaxed: diagnostic snapshot read only (mirrors
-        // `Arc::strong_count`'s use of `Relaxed`); callers needing a
-        // linearizable value must serialize externally.
-        refcount_atomic(obj).load(Ordering::Relaxed) as i64
+    /// # Safety
+    /// `obj` must be null or point to a live `struct kobject` with a
+    /// currently-nonzero `refcount`. When the refcount reaches zero, `obj` is
+    /// detached from the global registry and either freed via `kmm_free` (if
+    /// `ops.release` is unset) or handed to `ops.release`, which must be safe
+    /// to call with `obj` as its sole argument.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+    // by crate path now.
+    pub(crate) unsafe fn kobject_put(obj: *mut Kobject) {
+        unsafe {
+            kassert!(!obj.is_null(), "kobject_put: obj is NULL");
+            // Release: must publish every write this hart made to `*obj`
+            // (and anything reachable through it) before a concurrent hart
+            // can observe the count reaching zero and proceed to free it.
+            // Paired with the `Acquire` fence below on the branch that
+            // actually reaches zero — standard `Arc`-style refcount-drop
+            // pattern.
+            let count = Kobject::refcount_atomic(obj).fetch_sub(1, Ordering::Release) - 1;
+            kassert!(count >= 0, "kobject_put: refcount underflow");
+            if count == 0 {
+                // Acquire: synchronizes with every `Release` decrement
+                // (including this one and any from other harts that raced
+                // to decrement first) before we detach and free `obj` —
+                // without this, writes from a hart that decremented
+                // concurrently (but not to zero) could still be in flight
+                // when we free the object.
+                core::sync::atomic::fence(Ordering::Acquire);
+                Kobject::detach(obj);
+                match (*obj).ops.release {
+                    None => crate::mm::kalloc::Kmem::kmm_free(obj as *mut c_void),
+                    Some(release) => release(obj),
+                }
+            }
+        }
     }
-}
 
-pub(crate) fn kobject_count() -> i64 {
-    // Relaxed: diagnostic registry-size snapshot; real synchronization
-    // for the registry itself is `kobject_lock()` (see `attach`/`detach`).
-    KOBJECT_COUNT.load(Ordering::Relaxed)
+    /// # Safety
+    /// `obj` must be null or point to a live `struct kobject`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
+    // by crate path now.
+    pub(crate) unsafe fn kobject_refcount(obj: *mut Kobject) -> i64 {
+        unsafe {
+            kassert!(!obj.is_null(), "kobject_refcount: obj is NULL");
+            // Relaxed: diagnostic snapshot read only (mirrors
+            // `Arc::strong_count`'s use of `Relaxed`); callers needing a
+            // linearizable value must serialize externally.
+            Kobject::refcount_atomic(obj).load(Ordering::Relaxed) as i64
+        }
+    }
+
+    pub(crate) fn kobject_count() -> i64 {
+        // Relaxed: diagnostic registry-size snapshot; real synchronization
+        // for the registry itself is `kobject_lock()` (see `attach`/`detach`).
+        KOBJECT_COUNT.load(Ordering::Relaxed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,7 +518,7 @@ impl<T: HasKobject> KArc<T> {
         // this call; `T::kobj_ptr`'s contract (`HasKobject`) guarantees
         // the returned pointer is a live `Kobject` for as long as `*ptr`
         // is.
-        if unsafe { kobject_try_get(T::kobj_ptr(ptr)) } {
+        if unsafe { Kobject::kobject_try_get(T::kobj_ptr(ptr)) } {
             // SAFETY: `ptr` was just proven non-null-derived and live by
             // the successful `try_get` above.
             Some(KArc { ptr: unsafe { NonNull::new_unchecked(ptr) } })
@@ -547,7 +549,7 @@ impl<T: HasKobject> Clone for KArc<T> {
         // SAFETY: struct invariant -- `self` owns a currently-held
         // reference, so `kobject_get`'s precondition (an already-held
         // reference to increment from) holds.
-        unsafe { kobject_get(T::kobj_ptr(self.ptr.as_ptr())) };
+        unsafe { Kobject::kobject_get(T::kobj_ptr(self.ptr.as_ptr())) };
         KArc { ptr: self.ptr }
     }
 }
@@ -557,7 +559,7 @@ impl<T: HasKobject> Drop for KArc<T> {
         // SAFETY: struct invariant -- `self` owns exactly one held
         // reference, which this decrement gives up; `kobject_put` runs
         // the release path itself if this was the last one.
-        unsafe { kobject_put(T::kobj_ptr(self.ptr.as_ptr())) };
+        unsafe { Kobject::kobject_put(T::kobj_ptr(self.ptr.as_ptr())) };
     }
 }
 

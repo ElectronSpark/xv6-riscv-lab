@@ -39,7 +39,7 @@ use crate::kstd::{Errno, KResult};
 // ---------------------------------------------------------------------------
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
@@ -425,10 +425,10 @@ pub(crate) extern "C" fn init() {
     // `dev` fully initialised above.
     let errno = Blkdev::register(dev);
     if errno != 0 {
-        __panic_start();
+        Printf::__panic_start();
         // SAFETY: format string matches its one argument.
         crate::kprintln!("ramdisk_init: blkdev_register failed: {}", errno);
-        __panic_end();
+        Printf::__panic_end();
     }
 }
 } // impl Ramdisk (submit_bio/init)

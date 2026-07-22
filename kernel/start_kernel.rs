@@ -107,8 +107,8 @@ use crate::timer::sched_timer::SchedTimer;
 // P3-1C mesh sweep: printf.rs/vfs/tty/console.rs are in scope for this
 // wave, so these become plain crate-path imports instead of `extern "C"`
 // redeclarations (all no-arg/no-return, identical signatures).
-use crate::console::{consoledevinit, consoleinit};
-use crate::printf::printfinit;
+use crate::console::Console;
+use crate::printf::Printf;
 // NO-STANDALONE-FN: `ptmxinit` relocated to `PtyPair::init` (kernel/tty/ptmx.rs).
 use crate::tty::ptmx::PtyPair;
 use crate::tty::tty::Tty;
@@ -193,7 +193,7 @@ unsafe extern "C" {
 // the ctest suites only set `RWLOCK_TEST=1`-style env gates that become
 // cargo features).
 use crate::bufcache::BufCache;
-use crate::kobject::kobject_global_init;
+use crate::kobject::Kobject;
 use crate::lock::rwsem_test::rwsem_launch_tests;
 use crate::lock::semaphore_test::semaphore_launch_tests;
 use crate::mm::early_allocator::early_allocator_init;
@@ -217,7 +217,7 @@ use crate::lock::rcu::Rcu;
 // sbi.rs, backtrace.rs, pci.rs, virtio_disk.rs, ramdisk.rs, sysnet.rs are
 // all in scope for this wave; these become plain crate-path imports
 // instead of `extern "C"` redeclarations (identical signatures).
-use crate::backtrace::ksymbols_init;
+use crate::backtrace::Backtrace;
 use crate::dev::dev::DevTable;
 use crate::dev::fdt::Fdt;
 use crate::dev::netdev::Netdev;
@@ -234,6 +234,12 @@ use crate::virtio_disk::Disk;
 // Boot-hart subsystem bring-up.
 // ===========================================================================
 
+/// Zero-sized facade for the boot orchestrator's entry points (KERNEL-OO
+/// final wave): no per-instance state (everything is a module `static`),
+/// so these become associated fns, raw params, no `&self`.
+pub(crate) struct StartKernel;
+
+impl StartKernel {
 /// Ported from `kernel/start_kernel.c::__start_kernel_main_hart` — runs
 /// once, on the boot hart only, before any secondary hart is released.
 /// Order is a real invariant (see the module doc); every line below
@@ -261,8 +267,8 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
 
         // Early allocator uses memory after kernel end
         early_allocator_init(&raw const end as *mut c_void, __physical_memory_end as *mut c_void);
-        kobject_global_init();
-        printfinit();
+        Kobject::kobject_global_init();
+        Printf::printfinit();
         crate::kprintln!(
             "\nxv6 kernel booting (hart {})\n",
             hartid,
@@ -274,7 +280,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Fdt::fdt_apply_platform_config();
 
         Sbi::probe_extensions();
-        ksymbols_init(); // Initialize kernel symbols
+        Backtrace::ksymbols_init(); // Initialize kernel symbols
         crate::mm::kalloc::Kmem::kinit(); // physical page allocator
         PageTable::kvminit(); // create kernel page table
         crate::kprintln!("page table initialized");
@@ -295,7 +301,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Plic::plicinit(); // set up interrupt controller
         Plic::plicinithart(); // ask PLIC for device interrupts
         Ipi::init(); // inter-processor interrupts
-        consoleinit();
+        Console::consoleinit();
         Netdev::init();
         pci_init();
         crate::proc::Signal::init(); // signal handling initialization
@@ -362,9 +368,9 @@ pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: b
             Ipi::mycpu_init(hartid as u64, false);
         }
         machine::CpuLocal::current().flags_or(CPU_FLAG_BOOT_HART);
-        __start_kernel_main_hart(hartid, fdt_base);
+        StartKernel::__start_kernel_main_hart(hartid, fdt_base);
     } else {
-        __start_kernel_secondary_hart(hartid);
+        StartKernel::__start_kernel_secondary_hart(hartid);
     }
 
     // SAFETY: `mycpu()` (this hart's own per-CPU slot, already initialized
@@ -413,7 +419,7 @@ pub(crate) fn start_kernel_post_init() {
     // (`STARTED.store` below is the release point) — matches the C
     // original's call order 1:1.
     unsafe {
-        consoledevinit(); // Initialize and register the console character device
+        Console::consoledevinit(); // Initialize and register the console character device
         NullRandDev::init(); // Register /dev/null, /dev/random, /dev/zero
         TtyDev::init(); // Register /dev/tty (controlling terminal device)
         PtyPair::init(); // Register /dev/ptmx (PTY multiplexer)
@@ -510,6 +516,7 @@ pub(crate) fn start_kernel_post_init() {
     // void rq_test_run(void);
     // rq_test_run();
     // #endif
+}
 }
 
 // `end` — linker-provided "first address after kernel" label

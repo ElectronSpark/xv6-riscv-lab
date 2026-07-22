@@ -346,7 +346,7 @@ mod ffi {
 // (`printf.rs`) are plain safe Rust fns now that their `#[no_mangle]`
 // exports are gone; re-exported here so the module-wide `use ffi::*`
 // keeps resolving them (the extern redeclarations above are deleted).
-pub(crate) use crate::printf::{__panic_end, __panic_start};
+pub(crate) use crate::printf::Printf;
 pub(crate) use crate::timer::sched_timer::SchedTimer;
 pub(crate) use crate::timer::timer_core::TimerCore;
 pub(crate) use crate::lock::completion::RawCompletion;
@@ -628,14 +628,14 @@ fn pcache_assert(cond: bool, msg: &'static [u8]) {
 }
 #[inline(never)]
 fn xv6_pcache_panic(msg: *const c_char) -> ! {
-    __panic_start();
+    Printf::__panic_start();
     // SAFETY: `msg` is always a `'static` NUL-terminated byte-string
     // literal from this module's call sites, matching the `%s` format
     // spec.
     unsafe {
         crate::kprintln!("PANIC: {}", crate::printf::Cs(msg));
     }
-    __panic_end()
+    Printf::__panic_end()
 }
 
 // ---------------------------------------------------------------------------

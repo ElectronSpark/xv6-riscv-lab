@@ -49,7 +49,7 @@ use crate::machine;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 /// Zero-sized type gathering the SBI firmware-call wrappers as
 /// associated functions (`sbi_` prefix dropped: `Sbi::hart_start`,
@@ -457,7 +457,7 @@ impl Sbi {
     /// `__panic_start`/`printf`/`__panic_end` sequence the `assert()` macro
     /// in `kernel/inc/printf.h` expands to.
     fn required_extension_missing(idx: usize) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!(
             "ASSERTION_FAILURE {}:{}: In function '{}':",
             "kernel/sbi.rs",
@@ -468,7 +468,7 @@ impl Sbi {
             "Required SBI extension {} not available!",
             crate::printf::Cs(SBI_EXT_NAMES[idx].as_ptr()),
         );
-        __panic_end();
+        Printf::__panic_end();
     }
 
     // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via

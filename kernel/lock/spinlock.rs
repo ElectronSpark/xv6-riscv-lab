@@ -45,7 +45,7 @@ use crate::bindings::{cpu_local, spinlock_t};
 use crate::machine::{self, CpuLocal, Riscv, CPU_FLAG_CRASHED, SIE_SSIE};
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_state`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
-use crate::printf::panic_state;
+use crate::printf::Printf;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3A, nativized in Wave P3-N2.
@@ -99,7 +99,8 @@ const _: () = {
 // ---------------------------------------------------------------------------
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+// KERNEL-OO: reached via the `Printf` import above (`panic_state` moved
+// to the same type).
 
 unsafe extern "C" {
 }
@@ -182,20 +183,20 @@ impl RawSpinlock {
     #[inline(never)]
     #[cold]
     fn deadlock_panic(name: *mut c_char) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!(
             "spin_acquire: deadlock detected on lock {}",
             crate::printf::Cs(name)
         );
-        __panic_end()
+        Printf::__panic_end()
     }
 
     #[inline(never)]
     #[cold]
     fn fixed_msg_panic(msg: &'static [u8]) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
-        __panic_end()
+        Printf::__panic_end()
     }
 
     // -----------------------------------------------------------------
@@ -228,7 +229,7 @@ impl RawSpinlock {
             }
             if (count & 0xFFFF) == 0 {
                 let mut cpu = CpuLocal::current();
-                if (cpu.flags() & CPU_FLAG_CRASHED) == 0 && panic_state() != 0 {
+                if (cpu.flags() & CPU_FLAG_CRASHED) == 0 && Printf::panic_state() != 0 {
                     cpu.flags_or(CPU_FLAG_CRASHED);
                     Riscv::write_sie(SIE_SSIE);
                     Riscv::intr_on();

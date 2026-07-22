@@ -130,9 +130,16 @@ use crate::vfs::inode::VfsInode;
 /// through `proc`'s glob re-export besides -- `pgroup.rs`/`clone.rs` etc.
 /// each define their own same-named opaque marker); `as _` lets the
 /// compiler infer it from `raw_vfork_done`'s own signature instead.
-#[inline(always)]
-fn vfork_done(p: *mut thread) {
-    Proc::vfork_done(p as *mut c_void as *mut _);
+/// Zero-sized facade for `exec.rs`'s entry points + internal helpers
+/// (KERNEL-OO final wave): no per-instance state, so these become
+/// associated fns, raw params, no `&self`.
+pub(crate) struct Exec;
+
+impl Exec {
+    #[inline(always)]
+    fn vfork_done(p: *mut thread) {
+        Proc::vfork_done(p as *mut c_void as *mut _);
+    }
 }
 
 // ===========================================================================
@@ -167,15 +174,17 @@ use crate::mm::{Vm, Vma};
 // file's original extern declarations asserted `safe fn` (the usual
 // FFI-boilerplate-collapsing facade). Thin safe wrappers preserve that
 // facade, per the `cffi::raw`/`bufcache.rs` precedent.
-/// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
-#[inline]
-fn kalloc() -> *mut c_void {
-    unsafe { crate::mm::kalloc::Kmem::kalloc() }
-}
-/// SAFETY: `pa` must originate from `kalloc` above.
-#[inline]
-fn kfree(pa: *mut c_void) {
-    unsafe { crate::mm::kalloc::Kmem::kfree(pa) };
+impl Exec {
+    /// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
+    #[inline]
+    fn kalloc() -> *mut c_void {
+        unsafe { crate::mm::kalloc::Kmem::kalloc() }
+    }
+    /// SAFETY: `pa` must originate from `kalloc` above.
+    #[inline]
+    fn kfree(pa: *mut c_void) {
+        unsafe { crate::mm::kalloc::Kmem::kfree(pa) };
+    }
 }
 
 // ===========================================================================
@@ -330,15 +339,17 @@ const _: () = {
 // centralization).
 use crate::kstd::{is_err, is_err_or_null};
 
-/// Mirrors `riscv.h`'s `PGROUNDUP`.
-#[inline(always)]
-const fn pg_round_up(a: u64) -> u64 {
-    (a + PGSIZE as u64 - 1) & !(PGSIZE as u64 - 1)
-}
-/// Mirrors `riscv.h`'s `PGROUNDDOWN`.
-#[inline(always)]
-const fn pg_round_down(a: u64) -> u64 {
-    a & !(PGSIZE as u64 - 1)
+impl Exec {
+    /// Mirrors `riscv.h`'s `PGROUNDUP`.
+    #[inline(always)]
+    const fn pg_round_up(a: u64) -> u64 {
+        (a + PGSIZE as u64 - 1) & !(PGSIZE as u64 - 1)
+    }
+    /// Mirrors `riscv.h`'s `PGROUNDDOWN`.
+    #[inline(always)]
+    const fn pg_round_down(a: u64) -> u64 {
+        a & !(PGSIZE as u64 - 1)
+    }
 }
 
 impl Proghdr {
@@ -384,6 +395,7 @@ impl Proghdr {
 /// fallible step has succeeded).
 // P3-1B: only caller anywhere in the tree is `proc/thread.rs::init_entry`
 // (crate-path `use`, not an `extern` redeclaration) -- demoted.
+impl Exec {
 pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int {
     let stackbase = USTACKTOP - USERSTACK * PGSIZE as u64;
     let mut tmp_vm: *mut vm = ptr::null_mut();
@@ -511,9 +523,9 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         let memsz = ph.memsz;
         let file_off = ph.off;
         let vm_flags = ph.vmperm() | VMA_FLAG_USER as u64;
-        let total_end = pg_round_up(va + memsz);
+        let total_end = Exec::pg_round_up(va + memsz);
         // End of full pages entirely covered by file data.
-        let file_pg_end = if filesz > 0 { pg_round_down(va + filesz) } else { va };
+        let file_pg_end = if filesz > 0 { Exec::pg_round_down(va + filesz) } else { va };
 
         // Region 1: file-backed mmap - pages are demand-paged from the
         // file's page cache on the first instruction/load/store fault.
@@ -542,7 +554,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         // padzero).
         if has_boundary {
             let nbytes = ((va + filesz) - file_pg_end) as u32;
-            let pa = kalloc();
+            let pa = Exec::kalloc();
             if pa.is_null() {
                 bad_locked!();
             }
@@ -550,17 +562,17 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
 
             let foff = (file_off + (file_pg_end - va)) as loff_t;
             if VfsFile::vfs_filelseek(file, foff, SEEK_SET) != foff {
-                kfree(pa);
+                Exec::kfree(pa);
                 bad_locked!();
             }
             if VfsFile::vfs_fileread(file, pa, nbytes as usize, 0) != nbytes as isize {
-                kfree(pa);
+                Exec::kfree(pa);
                 bad_locked!();
             }
 
             let ret = Vm::vm_mmap_region_locked(tmp_vm, file_pg_end, PGSIZE as usize, vm_flags, ptr::null_mut(), 0, pa);
             if ret != 0 {
-                kfree(pa);
+                Exec::kfree(pa);
                 bad_locked!();
             }
         }
@@ -596,8 +608,8 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     let p = xv6_current_thread();
 
     // Create heap via mmap (grows-up, demand-paged zero-fill).
-    let heap_sz = pg_round_up(USERSTACK * PGSIZE as u64);
-    heap_start = pg_round_up(heap_start);
+    let heap_sz = Exec::pg_round_up(USERSTACK * PGSIZE as u64);
+    heap_start = Exec::pg_round_up(heap_start);
     if Vm::vm_mmap_region_locked(
         tmp_vm,
         heap_start,
@@ -619,7 +631,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     }
 
     // Create user stack via mmap (grows-down, demand-paged zero-fill).
-    let stack_sz = pg_round_up(USERSTACK * PGSIZE as u64);
+    let stack_sz = Exec::pg_round_up(USERSTACK * PGSIZE as u64);
     if Vm::vm_mmap_region_locked(
         tmp_vm,
         USTACKTOP - stack_sz,
@@ -645,7 +657,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // This is similar to Linux's fault-ahead in load_elf_binary().
     {
         const EXEC_PRELOAD_PAGES: u64 = 4;
-        let entry_start = pg_round_down(elf.entry);
+        let entry_start = Exec::pg_round_down(elf.entry);
         let preload_size = EXEC_PRELOAD_PAGES * PGSIZE as u64;
 
         Vm::vm_rlock(tmp_vm);
@@ -807,9 +819,10 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
 
     // Wake vfork parent - we've replaced our address space so parent can
     // resume.
-    vfork_done(p);
+    Exec::vfork_done(p);
 
     argc as c_int // this ends up in a0, the first argument to main(argc, argv)
+}
 }
 
 // ===========================================================================
@@ -838,10 +851,10 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
     macro_rules! cleanup_and_fail {
         () => {{
             for &p in argv.iter().take_while(|p| !p.is_null()) {
-                kfree(p as *mut c_void);
+                Exec::kfree(p as *mut c_void);
             }
             for &p in envp.iter().take_while(|p| !p.is_null()) {
-                kfree(p as *mut c_void);
+                Exec::kfree(p as *mut c_void);
             }
             return (-1_i32) as u64;
         }};
@@ -860,7 +873,7 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
             argv[i] = ptr::null_mut();
             break;
         }
-        let buf = kalloc();
+        let buf = Exec::kalloc();
         if buf.is_null() {
             cleanup_and_fail!();
         }
@@ -887,13 +900,13 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
                 envp[j] = ptr::null_mut();
                 break;
             }
-            let buf = kalloc();
+            let buf = Exec::kalloc();
             if buf.is_null() {
                 cleanup_and_fail!();
             }
             envp[j] = buf as *mut c_char;
             if Syscall::fetchstr(uenv, envp[j], PGSIZE as c_int) < 0 {
-                kfree(envp[j] as *mut c_void);
+                Exec::kfree(envp[j] as *mut c_void);
                 envp[j] = ptr::null_mut();
                 break; // invalid string, stop here
             }
@@ -903,17 +916,17 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
     }
     let _ = envc; // matches the C: `envc` is computed but only used for parsing bookkeeping.
 
-    let ret = exec(path.as_mut_ptr(), argv.as_mut_ptr(), envp.as_mut_ptr());
+    let ret = Exec::exec(path.as_mut_ptr(), argv.as_mut_ptr(), envp.as_mut_ptr());
 
     // Free every argv/envp buffer allocated above, stopping at the first
     // still-NULL slot (N-METH goal #2: the C `for (i=0; i<NELEM && arr[i];
     // i++) kfree(arr[i])` scan-until-null is now a `take_while` iterator
     // over the fixed stack array — same order, same stop point).
     for &p in argv.iter().take_while(|p| !p.is_null()) {
-        kfree(p as *mut c_void);
+        Exec::kfree(p as *mut c_void);
     }
     for &p in envp.iter().take_while(|p| !p.is_null()) {
-        kfree(p as *mut c_void);
+        Exec::kfree(p as *mut c_void);
     }
 
     ret as u64

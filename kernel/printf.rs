@@ -46,30 +46,11 @@ use crate::machine;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
 use crate::ipi::Ipi;
-use crate::backtrace::print_backtrace;
+use crate::backtrace::Backtrace;
 
 // ===========================================================================
 // Externs.
 // ===========================================================================
-
-// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
-// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
-// this file's original extern declarations asserted `safe fn` (usual
-// FFI-facade convention). Thin wrappers preserve that safe facade for the
-// unchanged call sites. (`name` cast: old redeclaration said
-// `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
-/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
-fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
-    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) }
-}
-/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::lock`]'s contract.
-fn spin_lock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::RawSpinlock::lock(lk) }
-}
-/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::unlock`]'s contract.
-fn spin_unlock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::RawSpinlock::unlock(lk) }
-}
 
 // P3-D3c: the FDT-configured kernel physical memory bounds
 // (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros) are
@@ -78,28 +59,56 @@ fn spin_unlock(lk: *mut spinlock_t) {
 // `unsafe` block (boot-write-once, read-only afterwards).
 use crate::start_kernel::{__physical_memory_end, __physical_memory_start};
 
-/// Read the frame pointer (`s0`). Mirrors the C `r_fp()` static inline
-/// (`kernel/inc/riscv.h`); no equivalent exists yet in `machine.rs`
-/// (only used by this file's panic path), so it's a local primitive
-/// following the same `core::arch::asm!` + SAFETY-comment convention
-/// as every other CSR/register read in the crate.
-#[inline(always)]
-fn read_fp() -> u64 {
-    let fp: u64;
-    // SAFETY: `mv {0}, s0` reads a general-purpose register with no
-    // memory effects and cannot trap.
-    unsafe {
-        core::arch::asm!("mv {0}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    fp
-}
-
 /// `IPI_REASON_CRASH` (`kernel/inc/smp/ipi.h`).
 const IPI_REASON_CRASH: c_int = 0;
 
 /// `PAGE_SHIFT` (`kernel/inc/param.h`), mirrored the same way
 /// `start.rs`/`machine.rs` already duplicate it locally.
 const PAGE_SHIFT: u32 = 12;
+
+/// Zero-sized facade for the printf/panic-plumbing C-ABI entry points and
+/// helpers (KERNEL-OO final wave): no per-instance state (everything is a
+/// module `static`), so these become associated fns on this ZST, raw
+/// params, no `&self` -- same shape as the root-drivers wave's `Uart`/
+/// `Net` singletons.
+pub(crate) struct Printf;
+
+impl Printf {
+    // P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
+    // `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
+    // this file's original extern declarations asserted `safe fn` (usual
+    // FFI-facade convention). Thin wrappers preserve that safe facade for the
+    // unchanged call sites. (`name` cast: old redeclaration said
+    // `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
+    /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
+    fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+        unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) }
+    }
+    /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::lock`]'s contract.
+    fn spin_lock(lk: *mut spinlock_t) {
+        unsafe { crate::lock::spinlock::RawSpinlock::lock(lk) }
+    }
+    /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::unlock`]'s contract.
+    fn spin_unlock(lk: *mut spinlock_t) {
+        unsafe { crate::lock::spinlock::RawSpinlock::unlock(lk) }
+    }
+
+    /// Read the frame pointer (`s0`). Mirrors the C `r_fp()` static inline
+    /// (`kernel/inc/riscv.h`); no equivalent exists yet in `machine.rs`
+    /// (only used by this file's panic path), so it's a local primitive
+    /// following the same `core::arch::asm!` + SAFETY-comment convention
+    /// as every other CSR/register read in the crate.
+    #[inline(always)]
+    fn read_fp() -> u64 {
+        let fp: u64;
+        // SAFETY: `mv {0}, s0` reads a general-purpose register with no
+        // memory effects and cannot trap.
+        unsafe {
+            core::arch::asm!("mv {0}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
+        }
+        fp
+    }
+}
 
 // ===========================================================================
 // panic_state -- global panic flag, checked by spinlock's deadlock path.
@@ -108,8 +117,10 @@ const PAGE_SHIFT: u32 = 12;
 /// Mirrors the C `static volatile int __global_panic_state`.
 static GLOBAL_PANIC_STATE: AtomicBool = AtomicBool::new(false);
 
-pub(crate) extern "C" fn panic_state() -> c_int {
-    GLOBAL_PANIC_STATE.load(Ordering::Acquire) as c_int
+impl Printf {
+    pub(crate) extern "C" fn panic_state() -> c_int {
+        GLOBAL_PANIC_STATE.load(Ordering::Acquire) as c_int
+    }
 }
 
 // ===========================================================================
@@ -180,7 +191,7 @@ impl core::fmt::Write for Console {
             // exactly `s.len()` bytes starting at `s.as_ptr()`, matching
             // the slice's own bounds.
             unsafe {
-                crate::console::consputs(s.as_ptr() as *const c_char, s.len() as c_int);
+                crate::console::Console::consputs(s.as_ptr() as *const c_char, s.len() as c_int);
             }
             // Mirrors printf_rust's per-byte `if cx == b'\n' {
             // NNEWLINE.store(false, ...) }` inside its format loop: ANY
@@ -196,30 +207,32 @@ impl core::fmt::Write for Console {
     }
 }
 
-/// Backend for the [`kprint!`]/[`kprintln!`] macros. Not normally called
-/// directly -- use the macros, which build the [`core::fmt::Arguments`]
-/// via `format_args!`.
-pub fn _kprint(args: core::fmt::Arguments<'_>) {
-    // Same locking discipline as printf_rust: skip the lock entirely
-    // before printfinit() / after a panic disables it (PR_LOCKING is
-    // cleared by __panic_start with Release ordering; this Acquire load
-    // observes that on any core).
-    let locking = PR_LOCKING.load(Ordering::Acquire);
-    if locking {
-        spin_lock(&raw mut PR_LOCK);
-    }
+impl Printf {
+    /// Backend for the [`kprint!`]/[`kprintln!`] macros. Not normally called
+    /// directly -- use the macros, which build the [`core::fmt::Arguments`]
+    /// via `format_args!`.
+    pub fn _kprint(args: core::fmt::Arguments<'_>) {
+        // Same locking discipline as printf_rust: skip the lock entirely
+        // before printfinit() / after a panic disables it (PR_LOCKING is
+        // cleared by __panic_start with Release ordering; this Acquire load
+        // observes that on any core).
+        let locking = PR_LOCKING.load(Ordering::Acquire);
+        if locking {
+            Printf::spin_lock(&raw mut PR_LOCK);
+        }
 
-    // Same fresh-line timestamp dance as printf_rust: print once per
-    // call, only if the previous call (on any core, thanks to the
-    // shared atomic) ended with a newline byte.
-    if !NNEWLINE.swap(true, Ordering::Acquire) {
-        let _ = write!(Console, "[{}] ", machine::Riscv::read_time());
-    }
+        // Same fresh-line timestamp dance as printf_rust: print once per
+        // call, only if the previous call (on any core, thanks to the
+        // shared atomic) ended with a newline byte.
+        if !NNEWLINE.swap(true, Ordering::Acquire) {
+            let _ = write!(Console, "[{}] ", machine::Riscv::read_time());
+        }
 
-    let _ = Console.write_fmt(args);
+        let _ = Console.write_fmt(args);
 
-    if locking {
-        spin_unlock(&raw mut PR_LOCK);
+        if locking {
+            Printf::spin_unlock(&raw mut PR_LOCK);
+        }
     }
 }
 
@@ -230,7 +243,7 @@ pub fn _kprint(args: core::fmt::Arguments<'_>) {
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => {
-        $crate::printf::_kprint(::core::format_args!($($arg)*))
+        $crate::printf::Printf::_kprint(::core::format_args!($($arg)*))
     };
 }
 
@@ -304,126 +317,128 @@ impl core::fmt::Display for Ptr {
 /// Mirrors the C `static int __bt_enabled = 1;`.
 static BT_ENABLED: AtomicBool = AtomicBool::new(true);
 
-pub(crate) extern "C" fn panic_disable_bt() {
-    BT_ENABLED.store(false, Ordering::Relaxed);
-}
+impl Printf {
+    pub(crate) extern "C" fn panic_disable_bt() {
+        BT_ENABLED.store(false, Ordering::Relaxed);
+    }
 
-// ===========================================================================
-// __panic_start / __panic_end / trigger_panic.
-// ===========================================================================
+    // -----------------------------------------------------------------------
+    // __panic_start / __panic_end / trigger_panic.
+    // -----------------------------------------------------------------------
 
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer (panic
-// plumbing across the whole crate) imports it by crate path now.
-pub(crate) fn __panic_start() {
-    // Set global panic state FIRST so other cores can see it.
-    GLOBAL_PANIC_STATE.store(true, Ordering::Release);
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer (panic
+    // plumbing across the whole crate) imports it by crate path now.
+    pub(crate) fn __panic_start() {
+        // Set global panic state FIRST so other cores can see it.
+        GLOBAL_PANIC_STATE.store(true, Ordering::Release);
 
-    // Disable printf locking FIRST, before anything else. This
-    // prevents recursive deadlock when panic is called due to a
-    // deadlock on PR_LOCK itself (spin_acquire timeout on the "pr"
-    // lock). Release semantics so other cores see it.
-    PR_LOCKING.store(false, Ordering::Release);
+        // Disable printf locking FIRST, before anything else. This
+        // prevents recursive deadlock when panic is called due to a
+        // deadlock on PR_LOCK itself (spin_acquire timeout on the "pr"
+        // lock). Release semantics so other cores see it.
+        PR_LOCKING.store(false, Ordering::Release);
 
-    // SET_CPU_CRASHED()
-    machine::CpuLocal::current().flags_or(machine::CPU_FLAG_CRASHED);
+        // SET_CPU_CRASHED()
+        machine::CpuLocal::current().flags_or(machine::CPU_FLAG_CRASHED);
 
-    panic_msg_lock();
-    let fp = read_fp();
-    let p = machine::Riscv::current_thread_ptr();
-    // SAFETY: `p` is checked non-null before every dereference below;
-    // `kstack`/`pid`/`name`/`kstack_order` are plain scalar/array
-    // fields of `struct thread`, valid for the lifetime of a live
-    // thread (this can only run on a thread that is currently
-    // executing, i.e. not yet freed).
-    unsafe {
-        if p.is_null() || (*p).kstack == 0 {
-            // No thread context - use kernel memory bounds for
-            // backtrace.
+        Printf::panic_msg_lock();
+        let fp = Printf::read_fp();
+        let p = machine::Riscv::current_thread_ptr();
+        // SAFETY: `p` is checked non-null before every dereference below;
+        // `kstack`/`pid`/`name`/`kstack_order` are plain scalar/array
+        // fields of `struct thread`, valid for the lifetime of a live
+        // thread (this can only run on a thread that is currently
+        // executing, i.e. not yet freed).
+        unsafe {
+            if p.is_null() || (*p).kstack == 0 {
+                // No thread context - use kernel memory bounds for
+                // backtrace.
+                crate::kprintln!(
+                    "[Core: {}] No thread context, fp={}",
+                    machine::Riscv::cpuid() as i64,
+                    Ptr(fp),
+                );
+                if BT_ENABLED.load(Ordering::Relaxed) {
+                    // Use KERNBASE to PHYSTOP as conservative stack bounds.
+                    Backtrace::print_backtrace(fp, __physical_memory_start, __physical_memory_end);
+                }
+                return;
+            }
             crate::kprintln!(
-                "[Core: {}] No thread context, fp={}",
+                "[Core: {}] In thread {} ({}) at {}",
                 machine::Riscv::cpuid() as i64,
+                (*p).pid,
+                Cs((*p).name.as_ptr()),
                 Ptr(fp),
             );
             if BT_ENABLED.load(Ordering::Relaxed) {
-                // Use KERNBASE to PHYSTOP as conservative stack bounds.
-                print_backtrace(fp, __physical_memory_start, __physical_memory_end);
+                let kstack_size = 1u64 << (PAGE_SHIFT + (*p).kstack_order as u32);
+                Backtrace::print_backtrace(fp, (*p).kstack, (*p).kstack + kstack_size);
             }
-            return;
-        }
-        crate::kprintln!(
-            "[Core: {}] In thread {} ({}) at {}",
-            machine::Riscv::cpuid() as i64,
-            (*p).pid,
-            Cs((*p).name.as_ptr()),
-            Ptr(fp),
-        );
-        if BT_ENABLED.load(Ordering::Relaxed) {
-            let kstack_size = 1u64 << (PAGE_SHIFT + (*p).kstack_order as u32);
-            print_backtrace(fp, (*p).kstack, (*p).kstack + kstack_size);
         }
     }
-}
 
-pub(crate) extern "C" fn trigger_panic() -> ! {
-    // SET_CPU_CRASHED()
-    machine::CpuLocal::current().flags_or(machine::CPU_FLAG_CRASHED);
+    pub(crate) extern "C" fn trigger_panic() -> ! {
+        // SET_CPU_CRASHED()
+        machine::CpuLocal::current().flags_or(machine::CPU_FLAG_CRASHED);
 
-    // Mask all interrupts except software interrupt (IPI).
-    machine::Riscv::write_sie(machine::SIE_SSIE);
+        // Mask all interrupts except software interrupt (IPI).
+        machine::Riscv::write_sie(machine::SIE_SSIE);
 
-    // Send IPI to all harts (including self) to crash. `ipi_send_all`
-    // takes a reason code; no preconditions beyond "callable from any
-    // context", which holds here (we are already committed to halting).
-    Ipi::send_all(IPI_REASON_CRASH);
+        // Send IPI to all harts (including self) to crash. `ipi_send_all`
+        // takes a reason code; no preconditions beyond "callable from any
+        // context", which holds here (we are already committed to halting).
+        Ipi::send_all(IPI_REASON_CRASH);
 
-    // Enable interrupts so IPI can be received.
-    machine::Riscv::intr_on();
+        // Enable interrupts so IPI can be received.
+        machine::Riscv::intr_on();
 
-    loop {
-        machine::Riscv::wfi();
+        loop {
+            machine::Riscv::wfi();
+        }
+    }
+
+    // P3-D3c: same demotion as `__panic_start` above.
+    pub(crate) fn __panic_end() -> ! {
+        Printf::panic_msg_unlock();
+        Printf::trigger_panic()
+    }
+
+    pub(crate) extern "C" fn printfinit() {
+        // SAFETY: runs once, from `start_kernel.c`'s single-hart init
+        // sequence, before any concurrent access to `PR_LOCK` is possible.
+        unsafe {
+            Printf::spin_init(&raw mut PR_LOCK, c"pr".as_ptr());
+        }
+        PR_LOCKING.store(true, Ordering::Release);
+    }
+
+    // -----------------------------------------------------------------------
+    // panic_msg_lock / panic_msg_unlock -- serialise panic output across
+    // multiple cores.
+    // -----------------------------------------------------------------------
+
+    pub(crate) extern "C" fn panic_msg_lock() {
+        // SAFETY: `PANIC_BT_LOCK` is a valid, compile-time-initialised
+        // spinlock (see its definition above).
+        unsafe {
+            Printf::spin_lock(&raw mut PANIC_BT_LOCK);
+        }
+    }
+
+    pub(crate) extern "C" fn panic_msg_unlock() {
+        // SAFETY: see `panic_msg_lock`.
+        unsafe {
+            Printf::spin_unlock(&raw mut PANIC_BT_LOCK);
+        }
     }
 }
-
-// P3-D3c: same demotion as `__panic_start` above.
-pub(crate) fn __panic_end() -> ! {
-    panic_msg_unlock();
-    trigger_panic()
-}
-
-pub(crate) extern "C" fn printfinit() {
-    // SAFETY: runs once, from `start_kernel.c`'s single-hart init
-    // sequence, before any concurrent access to `PR_LOCK` is possible.
-    unsafe {
-        spin_init(&raw mut PR_LOCK, c"pr".as_ptr());
-    }
-    PR_LOCKING.store(true, Ordering::Release);
-}
-
-// ===========================================================================
-// panic_msg_lock / panic_msg_unlock -- serialise panic output across
-// multiple cores.
-// ===========================================================================
 
 static mut PANIC_BT_LOCK: spinlock_t = spinlock_t {
     locked: 0,
     name: c"panic_bt_lock".as_ptr() as *mut c_char,
     cpu: core::ptr::null_mut(),
 };
-
-pub(crate) extern "C" fn panic_msg_lock() {
-    // SAFETY: `PANIC_BT_LOCK` is a valid, compile-time-initialised
-    // spinlock (see its definition above).
-    unsafe {
-        spin_lock(&raw mut PANIC_BT_LOCK);
-    }
-}
-
-pub(crate) extern "C" fn panic_msg_unlock() {
-    // SAFETY: see `panic_msg_lock`.
-    unsafe {
-        spin_unlock(&raw mut PANIC_BT_LOCK);
-    }
-}
 
 // ===========================================================================
 // puts / putchar.
@@ -452,14 +467,14 @@ pub unsafe extern "C" fn puts(s: *const c_char) {
     // SAFETY: caller guarantees `s` is NUL-terminated.
     unsafe {
         while *p != 0 {
-            crate::console::consputc(*p as c_int);
+            crate::console::Console::consputc(*p as c_int);
             p = p.add(1);
         }
     }
-    crate::console::consputc('\n' as c_int);
+    crate::console::Console::consputc('\n' as c_int);
 }
 
 #[no_mangle]
 pub extern "C" fn putchar(c: c_int) {
-    crate::console::consputc(c);
+    crate::console::Console::consputc(c);
 }

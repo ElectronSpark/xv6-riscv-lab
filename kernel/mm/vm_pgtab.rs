@@ -68,7 +68,8 @@ mod ffi {
     // `__panic_start`/`__panic_end` are plain crate-path re-exports
     // (P3-D3c: `printf.rs` dropped their `#[no_mangle]` exports, so
     // `cffi::raw`'s re-export is `pub(crate)` now -- match it here).
-    pub(crate) use crate::mm::cffi::raw::{__panic_start, __panic_end};
+    // KERNEL-OO: reached as `Printf::__panic_start`/`Printf::__panic_end`.
+    pub(crate) use crate::mm::cffi::raw::Printf;
 
     // P3-1C mesh sweep: `uart.rs` is in scope for this wave; its
     // `__uart0_mmio_base` is now referenced via crate path. It's a
@@ -206,9 +207,9 @@ pub(crate) use crate::mm::vm::{Vm, Vma};
 /// signature; its body is now a direct `printf` + panic instead of a
 /// round-trip through the deleted `vm_pgtab_shims.rs`.
 pub(crate) fn xv6_vm_panic(msg: *const c_char) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!("PANIC: {}", crate::printf::Cs(msg));
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 
 fn panic_vm(msg: &[u8]) -> ! {
@@ -222,38 +223,38 @@ fn panic_vm(msg: &[u8]) -> ! {
 // Only this module calls them, so they are plain private fns now.
 // ---------------------------------------------------------------------------
 fn panic_mappages_va(va: u64) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!("mappages: va not aligned, va {}", crate::printf::Ptr(va));
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 fn panic_mappages_size(va: u64, size: u64) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!(
         "mappages: size not aligned, va {}, size {}",
         crate::printf::Ptr(va),
         crate::printf::Ptr(size),
     );
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 fn panic_mappages_zero(va: u64) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!("mappages: size zero, va {}", crate::printf::Ptr(va));
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 fn panic_mappages_remap(a: u64) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!("mappages: remap, {}", crate::printf::Ptr(a));
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 fn panic_uvmunmap_notmapped(va: u64, pa: u64, flags: u64) -> ! {
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!(
         "uvmunmap: not mapped, va={}, pa={}, flags: {:x}",
         crate::printf::Ptr(va),
         crate::printf::Ptr(pa),
         flags,
     );
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 
 // ---------------------------------------------------------------------------

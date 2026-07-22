@@ -67,7 +67,8 @@ use crate::kobject::{HasKobject, Kobject};
 // their `#[no_mangle]` exports are gone; this file's original extern
 // declarations were plain (non-`safe`) `fn`s, so every call site already
 // sits in an `unsafe` context -- the plain `use` keeps them unchanged.
-use crate::kobject::{kobject_get, kobject_init, kobject_put, kobject_refcount};
+// KERNEL-OO: now reached as `Kobject::` assoc fns (`Kobject` already in
+// scope via the `HasKobject, Kobject` import above).
 
 unsafe extern "C" {
     // kernel/string.rs.
@@ -363,7 +364,7 @@ impl Bio {
             (*bio_ptr).private_data = private_data;
             (*bio_ptr).kobj.name = c"bio".as_ptr();
             (*bio_ptr).kobj.ops.release = Some(bio_release_kobj_cb);
-            kobject_init(&raw mut (*bio_ptr).kobj);
+            Kobject::kobject_init(&raw mut (*bio_ptr).kobj);
             RawCompletion::init(&raw mut (*bio_ptr).io_completion);
         }
         Ok(bio_ptr)
@@ -420,7 +421,7 @@ impl Bio {
         }
         // SAFETY: `bio_ptr` non-null, caller holds a reference (`Bio::dup`'s
         // documented precondition, `kernel/inc/dev/bio.h`).
-        unsafe { kobject_get(&raw mut (*bio_ptr).kobj) };
+        unsafe { Kobject::kobject_get(&raw mut (*bio_ptr).kobj) };
         0
     }
 
@@ -434,7 +435,7 @@ impl Bio {
             return neg(crate::bindings::EINVAL);
         }
         // SAFETY: `bio_ptr` non-null, caller holds a reference being given up.
-        unsafe { kobject_put(&raw mut (*bio_ptr).kobj) };
+        unsafe { Kobject::kobject_put(&raw mut (*bio_ptr).kobj) };
         0
     }
 
@@ -463,7 +464,7 @@ impl Bio {
             if (*bio_ptr).size > BIO_MAX_SIZE {
                 return neg(crate::bindings::EINVAL);
             }
-            if kobject_refcount(&raw mut (*bio_ptr).kobj) <= 0 {
+            if Kobject::kobject_refcount(&raw mut (*bio_ptr).kobj) <= 0 {
                 return neg(crate::bindings::EINVAL);
             }
             if (*bio_ptr).error != 0 {

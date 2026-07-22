@@ -63,7 +63,7 @@ use crate::machine::{self, PreemptGuard};
 use crate::sync::KSpinlock;
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
-use crate::printf::trigger_panic;
+use crate::printf::Printf;
 
 // ---------------------------------------------------------------------------
 // External C symbols
@@ -406,7 +406,7 @@ impl Rcu {
         // SAFETY: `trigger_panic` is a kernel C symbol with the declared ABI.
         crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
         unsafe {
-            trigger_panic();
+            Printf::trigger_panic();
         }
     }
 
@@ -428,7 +428,7 @@ impl Rcu {
             pid,
         );
         unsafe {
-            trigger_panic();
+            Printf::trigger_panic();
         }
     }
 

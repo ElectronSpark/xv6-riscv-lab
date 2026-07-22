@@ -29,7 +29,7 @@ use crate::kstd::{Errno, KResult};
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
 }
@@ -238,7 +238,7 @@ impl TtyDev {
 
             let ret = Cdev::register(cdev);
             if ret != 0 {
-                __panic_start();
+                Printf::__panic_start();
                 crate::kprintln!(
                     "ASSERTION_FAILURE {}:{}: In function '{}':",
                     "kernel/tty/tty_dev.rs",
@@ -246,7 +246,7 @@ impl TtyDev {
                     "TtyDev::init",
                 );
                 crate::kprintln!("TtyDev::init: cdev_register failed: {}", ret);
-                __panic_end();
+                Printf::__panic_end();
             }
         }
     }

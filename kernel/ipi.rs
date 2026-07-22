@@ -30,7 +30,7 @@
 //! | [`get_cpu_active_mask`] | any context (pure atomic load) | no |
 //!
 //! [`ipi_irq_handler`]'s five reason cases, individually:
-//! * `IPI_REASON_CRASH` — `panic_msg_lock()`/`panic_msg_unlock()` are a
+//! * `IPI_REASON_CRASH` — `Printf::panic_msg_lock()`/`Printf::panic_msg_unlock()` are a
 //!   spinlock (`kernel/printf.rs`), not a sleeping lock; `print_backtrace`
 //!   is documented panic-safe/alloc-free (`kernel/backtrace.rs`); the case
 //!   ends in an infinite `wfi()` loop and never returns — matches the C.
@@ -102,12 +102,12 @@ use crate::machine::{CPU_FLAG_CRASHED, SIE_SSIE};
 // P3-1C mesh sweep: printf.rs is in scope for this wave; both are thin
 // spinlock wrappers, unconditionally safe to call, so they become plain
 // crate-path imports instead of `extern "C"` redeclarations.
-use crate::printf::{panic_msg_lock, panic_msg_unlock};
+use crate::printf::Printf;
 // P3-1D mesh sweep: backtrace.rs/sbi.rs are in scope for this wave; both
 // are thin/panic-safe calls, unconditionally safe or already-unsafe at
 // their call sites here, so they become plain crate-path imports instead
 // of `extern "C"` redeclarations.
-use crate::backtrace::print_backtrace;
+use crate::backtrace::Backtrace;
 use crate::sbi::Sbi;
 
 /// Zero-sized type gathering the IPI mailbox + per-CPU bring-up
@@ -132,7 +132,6 @@ pub(crate) struct Ipi;
 // extern redeclarations that used to sit here are deleted). The bounds
 // are `pub(crate) static mut`s; the read below sits in its own `unsafe`
 // block with the usual boot-write-once justification.
-use crate::printf::{__panic_end, __panic_start};
 use crate::start_kernel::{__physical_memory_end, __physical_memory_start};
 
 use crate::irq::irq_core::{IrqCore, IrqDesc};
@@ -407,7 +406,7 @@ impl Ipi {
         if hartid < NCPU as u64 {
             return;
         }
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!(
             "ASSERTION_FAILURE {}:{}: In function '{}':",
             "kernel/ipi.rs",
@@ -415,7 +414,7 @@ impl Ipi {
             "mycpu_init",
         );
         crate::kprintln!("mycpu_init: invalid hartid {}", hartid);
-        __panic_end();
+        Printf::__panic_end();
     }
 
     /// `kernel/ipi/ipi.c`'s `void mycpu_init(uint64 hartid, bool trampoline)`.
@@ -612,16 +611,16 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
         match reason {
             IPI_REASON_CRASH => {
                 machine::CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
-                panic_msg_lock();
+                Printf::panic_msg_lock();
                 crate::kprintln!("[Core: {}] Received IPI_REASON_CRASH, crashing...", hartid);
                 // SAFETY: same as the removed `printf` call above; the
                 // physical-memory bounds are written only during
                 // single-hart early boot (start_kernel/fdt), read-only by
                 // the time any IPI can run.
                 unsafe {
-                    print_backtrace(Ipi::read_fp(), __physical_memory_start, __physical_memory_end);
+                    Backtrace::print_backtrace(Ipi::read_fp(), __physical_memory_start, __physical_memory_end);
                 }
-                panic_msg_unlock();
+                Printf::panic_msg_unlock();
                 Ipi::send_all_but_self(IPI_REASON_CRASH);
                 loop {
                     machine::Riscv::wfi();
@@ -679,7 +678,7 @@ impl Ipi {
         // duration of this call.
         let ret = unsafe { IrqCore::register_irq_handler(IRQ_S_SOFT, &raw mut ipi_desc) };
         if ret != 0 {
-            __panic_start();
+            Printf::__panic_start();
             crate::kprintln!(
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/ipi.rs",
@@ -687,7 +686,7 @@ impl Ipi {
                 "ipi_init",
             );
             crate::kprintln!("ipi_init: failed to register IPI handler: {}", ret);
-            __panic_end();
+            Printf::__panic_end();
         }
         crate::kprintln!("ipi_init: IPI subsystem initialized (IRQ {})", IRQ_S_SOFT);
     }

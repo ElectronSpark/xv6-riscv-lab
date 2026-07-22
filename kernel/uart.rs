@@ -200,8 +200,9 @@ fn spin_unlock(lk: *mut spinlock_t) {
 
 // P3-1C mesh sweep: console.rs is in scope for this wave, so
 // `consoleintr` becomes a plain crate-path import instead of an
-// `extern "C"` redeclaration (identical signature).
-use crate::console::consoleintr;
+// `extern "C"` redeclaration (identical signature). KERNEL-OO: now
+// reached as `Console::consoleintr`.
+use crate::console::Console;
 // P3-D2a: proc/sched.rs chan sleep/wake entry points, reached as plain
 // crate-path items instead of `extern "C"` redeclarations. N-R7c: both
 // the uninterruptible (`sleep_on`) and the interruptible
@@ -655,7 +656,7 @@ pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_
             let c = UART_RX_BUF[(UART_RX_R % UART_RX_BUF_SIZE as u64) as usize] as c_int;
             UART_RX_R += 1;
             Uart::spin_unlock(&raw mut UART_RX_LOCK);
-            consoleintr(c);
+            Console::consoleintr(c);
             Uart::spin_lock(&raw mut UART_RX_LOCK);
         }
         Uart::spin_unlock(&raw mut UART_RX_LOCK);

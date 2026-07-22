@@ -53,8 +53,9 @@ const PAGE_TYPE_ANON:       u64   = 0;
 // ---------------------------------------------------------------------------
 mod ffi {
     // P3-D3c: `printf.rs`'s panic plumbing -- plain crate-path re-exports
-    // now that the `#[no_mangle]` exports are gone.
-    pub(crate) use crate::printf::{__panic_end, __panic_start};
+    // now that the `#[no_mangle]` exports are gone. KERNEL-OO: reached as
+    // `Printf::__panic_start`/`Printf::__panic_end` now.
+    pub(crate) use crate::printf::Printf;
 
     use super::*;
 
@@ -245,9 +246,9 @@ impl Kmem {
 #[inline(never)]
 fn panic_kalloc(msg: &[u8]) -> ! {
     debug_assert!(msg.last() == Some(&0), "panic msg must be NUL-terminated");
-    ffi::__panic_start();
+    ffi::Printf::__panic_start();
     crate::kprintln!("PANIC kalloc: {}", crate::printf::Cs(msg.as_ptr() as *const c_char));
-    ffi::__panic_end()
+    ffi::Printf::__panic_end()
 }
 }
 

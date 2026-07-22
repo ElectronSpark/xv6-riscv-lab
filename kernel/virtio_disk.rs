@@ -150,7 +150,7 @@ use crate::proc::proc_shims::xv6_current_thread;
 
 // P3-D3c: `printf.rs`'s panic plumbing fns are plain (safe) Rust fns now
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
-use crate::printf::{__panic_end, __panic_start};
+use crate::printf::Printf;
 
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
@@ -756,9 +756,9 @@ impl Disk {
 // `&CStr`.
 macro_rules! panic_fmt_i32 {
     ($fmt:literal, $val:expr) => {{
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!($fmt, $val);
-        __panic_end()
+        Printf::__panic_end()
     }};
 }
 
@@ -766,9 +766,9 @@ impl Disk {
     #[cold]
     #[inline(never)]
     fn panic_fixed(msg: &str) -> ! {
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!("{}", msg);
-        __panic_end()
+        Printf::__panic_end()
     }
 
     #[cold]
@@ -781,9 +781,9 @@ impl Disk {
             "ERROR: id={} status={} buf={} blockno=0x{:x}",
             id, status, crate::printf::Ptr(bio_ptr as u64), blockno,
         );
-        __panic_start();
+        Printf::__panic_start();
         crate::kprintln!("virtio_disk_intr status: {}", status);
-        __panic_end()
+        Printf::__panic_end()
     }
 
     /// Mirrors `__thread_state_set(p, THREAD_UNINTERRUPTIBLE)`

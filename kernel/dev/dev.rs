@@ -259,8 +259,8 @@ const _: () = {
 // kobject* + caller-upheld refcount invariants) now that their
 // `#[no_mangle]` exports are gone; the old plain (non-`safe`) externs
 // meant every call site already sits in an `unsafe` context -- the plain
-// `use` keeps them unchanged.
-use crate::kobject::{kobject_init, kobject_put, kobject_try_get};
+// `use` keeps them unchanged. KERNEL-OO: now reached as `Kobject::` assoc
+// fns (already in scope via the `HasKobject, KArc, Kobject` import above).
 
 // P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
 // that its `#[no_mangle]` export is gone; reached by crate path (the call
@@ -818,7 +818,7 @@ impl DeviceInstance {
         // must succeed before we exit the RCU read-side critical section.
         // SAFETY: `device` is live for the duration of this RCU read-side
         // section (`_rcu` still held); `.kobj` is device_t's first field.
-        if !unsafe { kobject_try_get(&raw mut (*device).kobj) } {
+        if !unsafe { Kobject::kobject_try_get(&raw mut (*device).kobj) } {
             return Err(Errno::NoDev);
         }
 
@@ -838,7 +838,7 @@ impl DeviceInstance {
         }
         // SAFETY: caller-provided live `device_t*` (matches `DeviceInstance::
         // get`'s callers -- `DeviceInstance::dup`'s documented contract).
-        if !unsafe { kobject_try_get(&raw mut (*dev).kobj) } {
+        if !unsafe { Kobject::kobject_try_get(&raw mut (*dev).kobj) } {
             return neg(ENODEV);
         }
         0
@@ -853,7 +853,7 @@ impl DeviceInstance {
         }
         // SAFETY: caller-provided live `device_t*` with a currently-held
         // reference (`DeviceInstance::put`'s documented contract).
-        unsafe { kobject_put(&raw mut (*device).kobj) };
+        unsafe { Kobject::kobject_put(&raw mut (*device).kobj) };
         0
     }
 
@@ -909,7 +909,7 @@ impl DeviceInstance {
                 // minor, not the `0` auto-assign sentinel.
                 (*dev).minor = am;
                 (*dev).kobj.ops.release = Some(underlying_kobject_release);
-                kobject_init(&raw mut (*dev).kobj);
+                Kobject::kobject_init(&raw mut (*dev).kobj);
             }
             // SAFETY: `dm` is live and only ever mutated under
             // `DevTable::tab_lock()` (this guard).
@@ -981,7 +981,7 @@ impl DeviceInstance {
         // Drop the initial reference from registration. When the refcount
         // reaches 0, `underlying_kobject_release` runs.
         // SAFETY: `dev` is live; `.kobj` is device_t's first field.
-        unsafe { kobject_put(&raw mut (*dev).kobj) };
+        unsafe { Kobject::kobject_put(&raw mut (*dev).kobj) };
         0
     }
 
