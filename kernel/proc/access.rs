@@ -1954,7 +1954,7 @@ impl<'a> TtreeRef<'a> {
     #[inline] pub fn root_ptr(&self) -> *mut rb_root { raw_mut_ptr!(self, root) }
     #[inline] pub fn root_copy(&self) -> rb_root { raw_get!(self, root) }
     #[inline] pub fn set_root_node(&self, n: *mut rb_node) { raw_set!(self, root.node, n) }
-    #[inline] pub fn set_root_opts(&self, o: *mut crate::bindings::rb_root_opts) { raw_set!(self, root.opts, o) }
+    #[inline] pub fn set_root_opts(&self, o: Option<&'static dyn crate::bintree::RbOps>) { raw_set!(self, root.opts, o) }
     #[inline] pub fn counter(&self) -> c_int { raw_get!(self, counter) }
     #[inline] pub fn set_counter(&self, v: c_int) { raw_set!(self, counter, v) }
     #[inline] pub fn inc_counter(&self) { raw_add_assign!(self, counter, 1) }

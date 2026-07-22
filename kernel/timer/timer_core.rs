@@ -43,7 +43,8 @@ use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::bindings::{list_node_t, rb_node, rb_root, rb_root_opts, spinlock_t, timer_node, timer_root};
+use crate::bindings::{list_node_t, rb_node, rb_root, spinlock_t, timer_node, timer_root};
+use crate::bintree::RbOps;
 use crate::irq::irq_core::{IrqCore, IrqDesc};
 use crate::machine;
 use crate::sync::KSpinlock;
@@ -139,11 +140,15 @@ const _: () = {
     assert!(core::mem::size_of::<TimerRoot>() == 128, "timer_root size");
     assert!(core::mem::align_of::<TimerRoot>() == 64, "timer_root alignment");
     assert!(core::mem::offset_of!(TimerRoot, root) == 0, "timer_root.root offset");
-    assert!(core::mem::offset_of!(TimerRoot, list_head) == 16, "timer_root.list_head offset");
-    assert!(core::mem::offset_of!(TimerRoot, current_tick) == 32, "timer_root.current_tick offset");
-    assert!(core::mem::offset_of!(TimerRoot, next_tick) == 40, "timer_root.next_tick offset");
-    assert!(core::mem::offset_of!(TimerRoot, flags) == 48, "timer_root anonymous-bitfield offset");
-    assert!(core::mem::offset_of!(TimerRoot, lock) == 64, "timer_root.lock offset");
+    // TRAIT-OPS: `root` (`rb_root`) grew 16 -> 24 bytes (thin `opts`
+    // pointer -> `Option<&dyn RbOps>` fat pointer), so every following
+    // field shifts +8; the align(64) tail absorbs the growth (total size
+    // stays 128 -- see below).
+    assert!(core::mem::offset_of!(TimerRoot, list_head) == 24, "timer_root.list_head offset");
+    assert!(core::mem::offset_of!(TimerRoot, current_tick) == 40, "timer_root.current_tick offset");
+    assert!(core::mem::offset_of!(TimerRoot, next_tick) == 48, "timer_root.next_tick offset");
+    assert!(core::mem::offset_of!(TimerRoot, flags) == 56, "timer_root anonymous-bitfield offset");
+    assert!(core::mem::offset_of!(TimerRoot, lock) == 72, "timer_root.lock offset");
     assert!(core::mem::size_of::<TimerRootFlagBits>() == 8, "timer_root flags-shell size");
     assert!(core::mem::align_of::<TimerRootFlagBits>() == 8, "timer_root flags-shell alignment");
 
@@ -195,9 +200,10 @@ const CPU_FLAG_BOOT_HART: u64 = 2;
 /// at crate scope (P3-OO mesh sweep, see `git show 91ef670` for the
 /// established convention). No receiver: every fn below keeps its exact
 /// C-derived parameter list. `timer_root_keys_cmp_fun`/
-/// `timer_root_get_key_fun` (address-taken in [`TIMER_ROOT_OPTS`]) and
-/// `clockintr` (address-taken as an `IrqDesc::handler` value in
-/// [`TimerCore::timer_init`]) stay free functions below this impl block.
+/// `timer_root_get_key_fun` are gone -- TRAIT-OPS moved their bodies into
+/// the [`TimerRbOps`] `RbOps` impl. `clockintr` (address-taken as an
+/// `IrqDesc::handler` value in [`TimerCore::timer_init`]) stays a free
+/// function below this impl block.
 pub(crate) struct TimerCore;
 
 impl TimerCore {
@@ -275,65 +281,62 @@ impl TimerCore {
 }
 
 // ===========================================================================
-// rb_root_opts — key comparison / extraction callbacks for the timer tree.
+// TRAIT-OPS: `RbOps` impl for the timer tree (was the `rb_root_opts`
+// fn-pointer pair below).
 // ===========================================================================
 
-/// Rust port of `__timer_root_keys_cmp_fun`. Keys are `timer_node*` cast to
-/// `u64` (see `__timer_root_get_key_fun`); primary order is `expires`,
-/// ties are broken by node address so no two live nodes ever compare equal.
-/// Kept as a free fn: its address is taken (`Some(timer_root_keys_cmp_fun)`)
-/// in the static [`TIMER_ROOT_OPTS`].
-unsafe extern "C" fn timer_root_keys_cmp_fun(key1: u64, key2: u64) -> c_int {
-    let node1 = key1 as *const timer_node;
-    let node2 = key2 as *const timer_node;
-    // SAFETY: both keys are addresses of live `timer_node`s -- the only
-    // producer of tree keys is `timer_root_get_key_fun` below, which is
-    // only ever called by `rb_insert_color`/`rb_*` on nodes already linked
-    // (or being linked) into this tree by `timer_add`.
-    let (e1, e2) = unsafe { ((*node1).expires, (*node2).expires) };
-    if e1 < e2 {
-        -1
-    } else if e1 > e2 {
-        1
-    } else if key1 < key2 {
-        -1
-    } else if key1 > key2 {
-        1
-    } else {
-        0
+/// TRAIT-OPS: `RbOps` impl for the timer tree. Was the free-fn pair
+/// `timer_root_keys_cmp_fun`/`timer_root_get_key_fun` bound into the old
+/// `TIMER_ROOT_OPTS` fn-pointer table; bodies moved verbatim (`extern
+/// "C"` dropped -- no longer a fn-pointer-table slot).
+struct TimerRbOps;
+impl RbOps for TimerRbOps {
+    /// Keys are `timer_node*` cast to `u64`; primary order is `expires`,
+    /// ties are broken by node address so no two live nodes ever compare
+    /// equal.
+    unsafe fn keys_cmp(&self, key1: u64, key2: u64) -> c_int {
+        let node1 = key1 as *const timer_node;
+        let node2 = key2 as *const timer_node;
+        // SAFETY: both keys are addresses of live `timer_node`s -- the
+        // only producer of tree keys is `get_key` below, which is only
+        // ever called by `rb_insert_color`/`rb_*` on nodes already linked
+        // (or being linked) into this tree by `timer_add`.
+        let (e1, e2) = unsafe { ((*node1).expires, (*node2).expires) };
+        if e1 < e2 {
+            -1
+        } else if e1 > e2 {
+            1
+        } else if key1 < key2 {
+            -1
+        } else if key1 > key2 {
+            1
+        } else {
+            0
+        }
+    }
+
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        TimerCore::timer_assert(!node.is_null(), line!(), c"timer_root_get_key_fun", c"node is NULL");
+        // SAFETY: `node` is a live `rb_node` embedded in a `timer_node`
+        // (the only rb-tree this ops table is ever installed on),
+        // non-null per the assert above.
+        let tn = (node as *mut u8).wrapping_sub(offset_of!(timer_node, rb)) as *mut timer_node;
+        tn as u64
     }
 }
 
-/// Rust port of `__timer_root_get_key_fun`. Kept as a free fn: its address
-/// is taken (`Some(timer_root_get_key_fun)`) in the static
-/// [`TIMER_ROOT_OPTS`].
-unsafe extern "C" fn timer_root_get_key_fun(node: *mut rb_node) -> u64 {
-    TimerCore::timer_assert(!node.is_null(), line!(), c"timer_root_get_key_fun", c"node is NULL");
-    // SAFETY: `node` is a live `rb_node` embedded in a `timer_node` (the
-    // only rb-tree this callback is ever installed on), non-null per the
-    // assert above.
-    let tn = (node as *mut u8).wrapping_sub(offset_of!(timer_node, rb)) as *mut timer_node;
-    tn as u64
-}
-
-static TIMER_ROOT_OPTS: rb_root_opts = rb_root_opts {
-    keys_cmp_fun: Some(timer_root_keys_cmp_fun),
-    get_key_fun: Some(timer_root_get_key_fun),
-};
+static TIMER_ROOT_OPS: TimerRbOps = TimerRbOps;
 
 impl TimerCore {
     /// Rust port of `kernel/inc/bintree.h`'s `rb_root_init()` static inline
     /// (no external linkage in C, so unreachable from Rust; reimplemented here
     /// the same way `bintree.rs` reimplements the rest of that header's
     /// `static inline`s it needs).
-    unsafe fn rb_root_init(root: *mut crate::bindings::rb_root, opts: *mut rb_root_opts) -> *mut crate::bindings::rb_root {
-        if root.is_null() || opts.is_null() {
-            return ptr::null_mut();
-        }
-        // SAFETY: `opts` is `&raw const TIMER_ROOT_OPTS` at every call site
-        // below -- a live, fully-initialized 'static `rb_root_opts`.
-        let o = unsafe { &*opts };
-        if o.keys_cmp_fun.is_none() || o.get_key_fun.is_none() {
+    unsafe fn rb_root_init(
+        root: *mut crate::bindings::rb_root,
+        opts: Option<&'static dyn RbOps>,
+    ) -> *mut crate::bindings::rb_root {
+        if root.is_null() || opts.is_none() {
             return ptr::null_mut();
         }
         // SAFETY: `root` is caller-owned per this function's contract (mirrors
@@ -458,7 +461,7 @@ impl TimerCore {
 
         // SAFETY: `timer` was just zeroed above and is exclusively owned here.
         unsafe {
-            Self::rb_root_init(&raw mut (*timer).root, &raw const TIMER_ROOT_OPTS as *mut rb_root_opts);
+            Self::rb_root_init(&raw mut (*timer).root, Some(&TIMER_ROOT_OPS));
             machine::Riscv::list_entry_init(&raw mut (*timer).list_head);
             (*timer).next_tick = 0;
             (*timer).current_tick = 0;

@@ -29,7 +29,8 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use crate::bindings::{context, rb_node, rb_root, rb_root_opts};
+use crate::bindings::{context, rb_node, rb_root};
+use crate::bintree::RbOps;
 
 // ===========================================================================
 // Externs: printf/panic (`printf.rs`) and the linker-defined boundaries of
@@ -76,78 +77,89 @@ struct KSymEntry {
 // kept for exact behavioural parity with the original.
 // ---------------------------------------------------------------------------
 
-extern "C" fn ksym_keys_cmp(a: u64, b: u64) -> c_int {
-    let sym_a = a as *const KSymEntry;
-    let sym_b = b as *const KSymEntry;
-    // SAFETY: the rb-tree machinery only ever calls this with `a`/`b`
-    // equal to a live `KSymEntry` address: `a` from `ksym_get_key` (a
-    // pool entry already linked into the tree) or `b` from a caller-owned,
-    // still-live `KSymEntry`/dummy search key on the stack (see
-    // `bt_search_sym`).
-    unsafe {
-        let sa = (*sym_a).start_addr as u64;
-        let sb = (*sym_b).start_addr as u64;
-        if sa < sb {
-            -1
-        } else if sa > sb {
-            1
-        } else if a < b {
-            -1
-        } else if a > b {
-            1
-        } else {
-            0
-        }
-    }
-}
-
-extern "C" fn ksym_keys_cmp_rdown(a: u64, b: u64) -> c_int {
-    let sym_a = a as *const KSymEntry;
-    let sym_b = b as *const KSymEntry;
-    // SAFETY: see `ksym_keys_cmp`.
-    unsafe {
-        let sa = (*sym_a).start_addr as u64;
-        let sb = (*sym_b).start_addr as u64;
-        if sa < sb {
-            return -1;
-        }
-        if sa > sb {
-            return 1;
-        }
-    }
-    // Equal start_addr: return 1 to keep searching left (find the minimum
-    // entry with this start_addr).
-    if a == 0 {
-        0 // Dummy node comparison (see module doc above).
-    } else {
-        1
-    }
-}
-
-extern "C" fn ksym_get_key(node: *mut rb_node) -> u64 {
+/// Shared `get_key` body for both [`KsymRbOps`] and [`KsymRdownRbOps`]
+/// (was the single free fn `ksym_get_key`, address-taken in both of the
+/// old `rb_root_opts` tables).
+///
+/// # Safety
+/// `node` must be a live `rb_node` embedded in a `KSymEntry` (the only
+/// tree this ops table is ever installed on).
+unsafe fn ksym_get_key_impl(node: *mut rb_node) -> u64 {
     let entry: *mut KSymEntry =
         crate::mm::cffi::container_of(node, core::mem::offset_of!(KSymEntry, rb));
     entry as u64
 }
 
-/// `Sync` wrapper for the two file-scope `rb_root_opts` (function-pointer
-/// pairs, set once at compile time and never mutated) -- same rationale as
-/// `mm/vm.rs`'s `VmTreeOptsWrap`.
-#[repr(transparent)]
-struct RbOptsWrap(rb_root_opts);
-// SAFETY: `RbOptsWrap` values are only ever constructed as the two
-// `static`s below, whose fields are compile-time constants (no interior
-// mutability); sharing an immutable value across harts is data-race-free.
-unsafe impl Sync for RbOptsWrap {}
+/// TRAIT-OPS: `RbOps` impl for the forward (`bt_search_sym`'s primary)
+/// ksym lookup order. Was the free-fn pair `ksym_keys_cmp`/`ksym_get_key`
+/// bound into the old `KSYM_RB_OPTS` fn-pointer table; bodies moved
+/// verbatim.
+struct KsymRbOps;
+impl RbOps for KsymRbOps {
+    unsafe fn keys_cmp(&self, a: u64, b: u64) -> c_int {
+        let sym_a = a as *const KSymEntry;
+        let sym_b = b as *const KSymEntry;
+        // SAFETY: the rb-tree machinery only ever calls this with `a`/`b`
+        // equal to a live `KSymEntry` address: `a` from `get_key` (a pool
+        // entry already linked into the tree) or `b` from a caller-owned,
+        // still-live `KSymEntry`/dummy search key on the stack (see
+        // `bt_search_sym`).
+        unsafe {
+            let sa = (*sym_a).start_addr as u64;
+            let sb = (*sym_b).start_addr as u64;
+            if sa < sb {
+                -1
+            } else if sa > sb {
+                1
+            } else if a < b {
+                -1
+            } else if a > b {
+                1
+            } else {
+                0
+            }
+        }
+    }
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        unsafe { ksym_get_key_impl(node) }
+    }
+}
 
-static KSYM_RB_OPTS: RbOptsWrap = RbOptsWrap(rb_root_opts {
-    keys_cmp_fun: Some(ksym_keys_cmp),
-    get_key_fun: Some(ksym_get_key),
-});
-static KSYM_RB_RDOWN_OPTS: RbOptsWrap = RbOptsWrap(rb_root_opts {
-    keys_cmp_fun: Some(ksym_keys_cmp_rdown),
-    get_key_fun: Some(ksym_get_key),
-});
+/// TRAIT-OPS: `RbOps` impl for the "round-down" ksym lookup order (finds
+/// the greatest entry `<=` a search key). Was the free-fn pair
+/// `ksym_keys_cmp_rdown`/`ksym_get_key` bound into the old
+/// `KSYM_RB_RDOWN_OPTS` fn-pointer table; bodies moved verbatim.
+struct KsymRdownRbOps;
+impl RbOps for KsymRdownRbOps {
+    unsafe fn keys_cmp(&self, a: u64, b: u64) -> c_int {
+        let sym_a = a as *const KSymEntry;
+        let sym_b = b as *const KSymEntry;
+        // SAFETY: see `KsymRbOps::keys_cmp`.
+        unsafe {
+            let sa = (*sym_a).start_addr as u64;
+            let sb = (*sym_b).start_addr as u64;
+            if sa < sb {
+                return -1;
+            }
+            if sa > sb {
+                return 1;
+            }
+        }
+        // Equal start_addr: return 1 to keep searching left (find the
+        // minimum entry with this start_addr).
+        if a == 0 {
+            0 // Dummy node comparison (see module doc above).
+        } else {
+            1
+        }
+    }
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        unsafe { ksym_get_key_impl(node) }
+    }
+}
+
+static KSYM_RB_OPS: KsymRbOps = KsymRbOps;
+static KSYM_RB_RDOWN_OPS: KsymRdownRbOps = KsymRdownRbOps;
 
 // ===========================================================================
 // Global symbol-table state. Single-writer-during-`ksymbols_init`,
@@ -156,7 +168,7 @@ static KSYM_RB_RDOWN_OPTS: RbOptsWrap = RbOptsWrap(rb_root_opts {
 // (`__physical_memory_start`, `platform`, ...), just Rust-owned here
 // instead of C-owned.
 // ===========================================================================
-static mut KSYM_RB_ROOT: rb_root = rb_root { node: ptr::null_mut(), opts: ptr::null_mut() };
+static mut KSYM_RB_ROOT: rb_root = rb_root { node: ptr::null_mut(), opts: None };
 static mut KSYM_ENTRIES_BASE: *mut KSymEntry = ptr::null_mut();
 static mut KSYM_COUNT: i32 = -1;
 
@@ -222,8 +234,7 @@ impl Backtrace {
         let idx_end = &raw const ffi::_ksymbols_idx_end as *mut u8;
         KSYM_ENTRIES_BASE = idx_start as *mut KSymEntry;
         KSYM_COUNT = 0;
-        KSYM_RB_ROOT =
-            rb_root { node: ptr::null_mut(), opts: &raw const KSYM_RB_OPTS.0 as *mut rb_root_opts };
+        KSYM_RB_ROOT = rb_root { node: ptr::null_mut(), opts: Some(&KSYM_RB_OPS) };
 
         let sym_start = &raw const ffi::_ksymbols_start as *const u8;
         let sym_end = &raw const ffi::_ksymbols_end as *const u8;
@@ -325,7 +336,7 @@ fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
     // "round-down" comparator -- mirrors the C `search_root = __ksym_rb_root;
     // search_root.opts = &__ksym_rb_rdown_opts;`.
     let mut search_root = unsafe { KSYM_RB_ROOT };
-    search_root.opts = &raw const KSYM_RB_RDOWN_OPTS.0 as *mut rb_root_opts;
+    search_root.opts = Some(&KSYM_RB_RDOWN_OPS);
 
     // SAFETY: `search_root` is a valid (possibly-empty) `rb_root`;
     // `&dummy` is a live stack value for the duration of this call.

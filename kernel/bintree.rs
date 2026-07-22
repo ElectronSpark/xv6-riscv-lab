@@ -1,10 +1,10 @@
 //! Intrusive binary search tree — Rust port of `kernel/bintree.c`.
 //!
-//! `struct rb_node` / `struct rb_root` / `struct rb_root_opts` are the
-//! real bindgen-generated `crate::bindings::{rb_node, rb_root,
-//! rb_root_opts}` types (already allowlisted in `build.rs` and included
-//! via `wrapper.h`'s `rbtree.h` → `bintree.h` chain) — no opaque
-//! stand-ins.
+//! `struct rb_node` / `struct rb_root` are the real
+//! `crate::bindings::{rb_node, rb_root}` types — no opaque stand-ins.
+//! (The historical `struct rb_root_opts` fn-pointer table is gone —
+//! TRAIT-OPS replaced it with the [`RbOps`] trait below, storing
+//! `Option<&'static dyn RbOps>` directly in [`RawRbRoot::opts`].)
 //!
 //! This module implements the *uncolored* binary-search-tree operations
 //! (link/unlink, rotation, in-order successor/predecessor, key lookup).
@@ -37,19 +37,31 @@ pub type RbRoot = rb_root;
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3C, nativized in Wave P3-N1.
 //
-// `RawRbNode`/`RawRbRoot`/`RawRbRootOpts` ARE the kernel-wide Rust
-// definitions of `kernel/inc/bintree_type.h`'s `struct rb_node` /
-// `struct rb_root` / `struct rb_root_opts` now: `build.rs` blocklists
-// the bindgen-generated versions and injects `pub type rb_* =
-// crate::bintree::RawRb*;` raw-line aliases, so every remaining bindgen
-// struct that embeds one (`vma.rb_entry`, `timer_node`/`timer_root`,
-// `tnode`, `pcache_node`, ...) and every `crate::bindings::rb_*` path
-// across the ~15 consumer files (mm's `pcache.rs`/`vm.rs`, proc's
-// `thread_queue.rs`/`access.rs`, `timer/timer_core.rs`,
-// `vfs/xv6fs/block_cache.rs`, `backtrace.rs`, `dev/fdt.rs`, ...)
-// resolves here and compiles unchanged. The `RbNode`/`RbRoot` aliases
-// above likewise keep resolving through `crate::bindings`. Layout is
-// proven by the hardcoded `const _` asserts below.
+// `RawRbNode`/`RawRbRoot` ARE the kernel-wide Rust definitions of
+// `kernel/inc/bintree_type.h`'s `struct rb_node` / `struct rb_root` now:
+// `kernel/bindings.rs` re-exports `pub type rb_* = crate::bintree::RawRb*;`,
+// so every remaining struct that embeds one (`vma.rb_entry`,
+// `timer_node`/`timer_root`, `tnode`, `pcache_node`, ...) and every
+// `crate::bindings::rb_*` path across the ~15 consumer files (mm's
+// `pcache.rs`/`vm.rs`, proc's `thread_queue.rs`/`access.rs`,
+// `timer/timer_core.rs`, `vfs/xv6fs/block_cache.rs`, `backtrace.rs`,
+// `dev/fdt.rs`, ...) resolves here and compiles unchanged. The
+// `RbNode`/`RbRoot` aliases above likewise keep resolving through
+// `crate::bindings`. Layout is proven by the hardcoded `const _` asserts
+// below.
+//
+// TRAIT-OPS: `struct rb_root_opts` (2 function pointers, 16 bytes) is
+// GONE -- replaced by the [`RbOps`] trait below -- so `RawRbRoot::opts`
+// is now a 16-byte `Option<&'static dyn RbOps>` fat pointer instead of an
+// 8-byte thin `*mut RawRbRootOpts`; `RawRbRoot` grows 16 -> 24 bytes.
+// Every embedder (`Pcache::page_map`, `Vm::vm_tree`, `Ttree::root`,
+// `TimerRoot::root`, `FdtNode::children`/`FdtBlobInfo::root`,
+// `BlockCacheInner::extent_tree`) feels this growth in its OWN following-
+// field offsets -- each file's own layout-assert block documents its
+// honest new numbers (see `mm/pcache.rs`/`mm/vm.rs`/
+// `proc/thread_queue.rs`/`timer/timer_core.rs`/
+// `vfs/xv6fs/block_cache.rs`; `dev/fdt.rs`'s `FdtNode`/`FdtBlobInfo` have
+// no hardcoded offset asserts to update).
 //
 // Deliberately NOT wired into this file's own algorithm bodies today:
 // unlike `RawSpinlock` (which replaced ad-hoc `as *const AtomicU32`-style
@@ -71,26 +83,70 @@ pub struct RawRbNode {
     pub right: *mut RawRbNode,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct RawRbRootOpts {
-    pub keys_cmp_fun: Option<unsafe extern "C" fn(u64, u64) -> core::ffi::c_int>,
-    pub get_key_fun: Option<unsafe extern "C" fn(*mut RawRbNode) -> u64>,
+// ---------------------------------------------------------------------------
+// `RbOps` — TRAIT-OPS conversion of the old `rb_root_opts` fn-pointer
+// table (2 raw `Option<unsafe extern "C" fn(...)>` slots) into a single
+// trait, `HlistOps`/`PcacheOps` precedent.
+//
+// None-semantics: BOTH methods are REQUIRED (no defaulted body). Evidence
+// from every call site below: `RbRoot::is_initialized()` (the sole gate
+// `find_key_link`/`find_key_rup`/`find_key_rdown`/`find_key`/
+// `insert_node`/`delete_key` all run before touching `opts`) rejected a
+// root unless `keys_cmp_fun`/`get_key_fun` were BOTH `Some`. No table
+// anywhere in the tree (grep-confirmed: `mm/pcache.rs`, `mm/vm.rs`,
+// `backtrace.rs` x2, `timer/timer_core.rs`, `proc/thread_queue.rs` x2,
+// `dev/fdt.rs`, `vfs/xv6fs/block_cache.rs`) ever populated only one of the
+// two -- it was always "both or none". So the whole table collapses to a
+// single `Option<&'static dyn RbOps>` on [`RawRbRoot`]: `None` reproduces
+// the old all-`None`/null-`opts` (uninitialized) state exactly, and
+// `Some` reproduces the old all-`Some` (post-init) state exactly.
+pub trait RbOps: Sync {
+    /// Three-way key comparison (`0` iff equal, `< 0` iff `key1 < key2`,
+    /// `> 0` otherwise) — the tree's total order. Mirrors the old
+    /// `opts.keys_cmp_fun` slot.
+    ///
+    /// # Safety
+    /// `key1`/`key2` are opaque `u64` keys per this tree's own key
+    /// convention (often a node address, sometimes a plain integer field)
+    /// -- implementors that reinterpret a key as a pointer must uphold
+    /// their own contract (documented per impl) that it is a live node.
+    unsafe fn keys_cmp(&self, key1: u64, key2: u64) -> core::ffi::c_int;
+
+    /// Extract a node's key. Mirrors the old `opts.get_key_fun` slot.
+    ///
+    /// # Safety
+    /// `node` must be a live [`RawRbNode`] currently linked into (or
+    /// about to be linked into) the tree this ops table is installed on.
+    unsafe fn get_key(&self, node: *mut RawRbNode) -> u64;
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RawRbRoot {
     pub node: *mut RawRbNode,
-    pub opts: *mut RawRbRootOpts,
+    /// The tree's dispatch table -- a real Rust trait object,
+    /// `Option<&'static dyn RbOps>` (a 16-byte fat pointer; `None` is the
+    /// pre-init / zeroed placeholder state, matching the old all-`None`
+    /// `opts` value bit-for-bit: `Option<&dyn Trait>` niches on the data
+    /// pointer being null, so an all-zero `RawRbRoot` still reads back
+    /// `opts == None`, exactly like the old null `*mut RawRbRootOpts` did
+    /// for e.g. `backtrace.rs`'s `static mut KSYM_RB_ROOT` before
+    /// `ksymbols_init` runs). `Option<&'static dyn RbOps>` is itself
+    /// `Copy`/`Clone` (shared references always are), so `#[derive(Copy,
+    /// Clone)]` above keeps working unchanged -- every existing by-value
+    /// copy site (`proc/thread_queue.rs`'s `dummy_root: rb_root =
+    /// self.root_copy()`, `backtrace.rs`'s `let mut search_root =
+    /// KSYM_RB_ROOT`) compiles as before.
+    pub opts: Option<&'static dyn RbOps>,
 }
 
 // P3-N1 hardcoded layout proof — values captured from the pre-nativization
 // bindgen output (kernel_bindings.rs) for `kernel/inc/bintree_type.h`'s
 // `struct rb_node` (`__attribute__((aligned(8)))` == natural alignment:
-// u64 + 2 pointers), `struct rb_root_opts` (2 function pointers) and
-// `struct rb_root` (2 pointers). All 8-byte members, no padding, on
-// riscv64/lp64d.
+// u64 + 2 pointers) and `struct rb_root` (was 2 pointers; TRAIT-OPS grows
+// `opts` from an 8-byte thin pointer to a 16-byte `Option<&dyn RbOps>` fat
+// pointer, so `rb_root` itself grows 16 -> 24 bytes). All 8-byte members,
+// no padding, on riscv64/lp64d.
 const _: () = {
     assert!(core::mem::size_of::<RawRbNode>() == 24, "rb_node: u64 + 2 x 8-byte pointer");
     assert!(core::mem::align_of::<RawRbNode>() == 8, "rb_node: aligned(8)");
@@ -98,12 +154,10 @@ const _: () = {
     assert!(core::mem::offset_of!(RawRbNode, left) == 8, "rb_node.left offset");
     assert!(core::mem::offset_of!(RawRbNode, right) == 16, "rb_node.right offset");
 
-    assert!(core::mem::size_of::<RawRbRootOpts>() == 16, "rb_root_opts: 2 x 8-byte fn pointer");
-    assert!(core::mem::align_of::<RawRbRootOpts>() == 8, "rb_root_opts: natural pointer alignment");
-    assert!(core::mem::offset_of!(RawRbRootOpts, keys_cmp_fun) == 0, "rb_root_opts.keys_cmp_fun offset");
-    assert!(core::mem::offset_of!(RawRbRootOpts, get_key_fun) == 8, "rb_root_opts.get_key_fun offset");
+    assert!(core::mem::size_of::<Option<&'static dyn RbOps>>() == 16, "rb-tree ops fat pointer size");
+    assert!(core::mem::align_of::<Option<&'static dyn RbOps>>() == 8, "rb-tree ops fat pointer alignment");
 
-    assert!(core::mem::size_of::<RawRbRoot>() == 16, "rb_root: 2 x 8-byte pointer");
+    assert!(core::mem::size_of::<RawRbRoot>() == 24, "rb_root: 8-byte pointer + 16-byte ops fat pointer");
     assert!(core::mem::align_of::<RawRbRoot>() == 8, "rb_root: natural pointer alignment");
     assert!(core::mem::offset_of!(RawRbRoot, node) == 0, "rb_root.node offset");
     assert!(core::mem::offset_of!(RawRbRoot, opts) == 8, "rb_root.opts offset");
@@ -244,10 +298,7 @@ impl RbRoot {
         if root.is_null() {
             return false;
         }
-        unsafe {
-            let opts = (*root).opts;
-            !opts.is_null() && (*opts).keys_cmp_fun.is_some() && (*opts).get_key_fun.is_some()
-        }
+        unsafe { (*root).opts.is_some() }
     }
 
     /// Mirrors `rb_keys_cmp(root, key1, key2)`.
@@ -257,8 +308,8 @@ impl RbRoot {
     #[inline(always)]
     unsafe fn keys_cmp(root: *mut RbRoot, key1: u64, key2: u64) -> i32 {
         unsafe {
-            let cmp = (*(*root).opts).keys_cmp_fun.expect("BUG: rb_root: keys_cmp_fun is None");
-            cmp(key1, key2)
+            let ops = (*root).opts.expect("BUG: rb_root: opts is None");
+            ops.keys_cmp(key1, key2)
         }
     }
 
@@ -269,8 +320,8 @@ impl RbRoot {
     #[inline(always)]
     unsafe fn node_key(root: *mut RbRoot, node: *mut RbNode) -> u64 {
         unsafe {
-            let get_key = (*(*root).opts).get_key_fun.expect("BUG: rb_root: get_key_fun is None");
-            get_key(node)
+            let ops = (*root).opts.expect("BUG: rb_root: opts is None");
+            ops.get_key(node)
         }
     }
 }

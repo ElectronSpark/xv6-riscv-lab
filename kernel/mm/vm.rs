@@ -7,8 +7,8 @@
 //! sharing the same types.
 //!
 //! Functions ported here (V2 first slice):
-//!   * `__vma_cmp`         — rb-tree key comparator
-//!   * `__cma_get_key`     — rb-tree key extractor (returns vma->start)
+//!   * `VmaRbOps::keys_cmp` (was `__vma_cmp`)      — rb-tree key comparator
+//!   * `VmaRbOps::get_key` (was `__cma_get_key`)   — rb-tree key extractor (returns vma->start)
 //!   * `vm_cpu_online`     — mark a CPU as using this vm + update trapframe PTE
 //!   * `vm_cpu_offline`    — clear a CPU from this vm's cpumask
 //!   * `vm_get_cpumask`    — acquire-load of vm->cpumask
@@ -26,7 +26,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
 
 use crate::bindings::{
-    list_node_t, rb_node, rb_root, rb_root_opts, rwsem_t, slab_cache_t, spinlock_t, vfs_file,
+    list_node_t, rb_node, rb_root, rwsem_t, slab_cache_t, spinlock_t, vfs_file,
     vfs_inode, vfs_inode_ref, vm, vma, EACCES, EBADF, EFAULT, EINVAL, ENAMETOOLONG, ENOMEM,
     MADV_DONTNEED, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED, MAP_ANONYMOUS,
     MAP_FIXED, MAP_PRIVATE, MAP_SHARED, MAXUSTACK, MAXVA, MREMAP_FIXED, MREMAP_MAYMOVE, NCPU,
@@ -35,6 +35,7 @@ use crate::bindings::{
     UHEAP_MAX_TOP, USERSTACK_GROWTH, USTACK_MAX_BOTTOM, USTACKTOP, UVMBOTTOM, UVMTOP,
     VMA_FLAG_PROT_MASK, VMA_FLAG_USER,
 };
+use crate::bintree::RbOps;
 
 // ---------------------------------------------------------------------------
 // Native layouts — Wave P3-N6 (mm type family, vm slice).
@@ -118,17 +119,21 @@ const _: () = {
     assert!(core::mem::align_of::<Vm>() == 64, "vm align");
     assert!(core::mem::offset_of!(Vm, rw_lock) == 0, "vm.rw_lock");
     assert!(core::mem::offset_of!(Vm, vm_tree) == 192, "vm.vm_tree");
-    assert!(core::mem::offset_of!(Vm, trapframe_pte) == 208, "vm.trapframe_pte");
-    assert!(core::mem::offset_of!(Vm, stack) == 216, "vm.stack");
-    assert!(core::mem::offset_of!(Vm, stack_size) == 224, "vm.stack_size");
-    assert!(core::mem::offset_of!(Vm, heap) == 232, "vm.heap");
-    assert!(core::mem::offset_of!(Vm, heap_size) == 240, "vm.heap_size");
-    assert!(core::mem::offset_of!(Vm, vm_list) == 248, "vm.vm_list");
-    assert!(core::mem::offset_of!(Vm, vm_free_list) == 264, "vm.vm_free_list");
-    assert!(core::mem::offset_of!(Vm, cpumask) == 280, "vm.cpumask");
-    assert!(core::mem::offset_of!(Vm, spinlock) == 320, "vm.spinlock");
-    assert!(core::mem::offset_of!(Vm, pagetable) == 344, "vm.pagetable");
-    assert!(core::mem::offset_of!(Vm, refcount) == 352, "vm.refcount");
+    // TRAIT-OPS: `vm_tree` (`rb_root`) grew 16 -> 24 bytes (thin `opts`
+    // pointer -> `Option<&dyn RbOps>` fat pointer), so every following
+    // field shifts +8; the align(64) tail absorbs the growth (total size
+    // stays 384 -- see below).
+    assert!(core::mem::offset_of!(Vm, trapframe_pte) == 216, "vm.trapframe_pte");
+    assert!(core::mem::offset_of!(Vm, stack) == 224, "vm.stack");
+    assert!(core::mem::offset_of!(Vm, stack_size) == 232, "vm.stack_size");
+    assert!(core::mem::offset_of!(Vm, heap) == 240, "vm.heap");
+    assert!(core::mem::offset_of!(Vm, heap_size) == 248, "vm.heap_size");
+    assert!(core::mem::offset_of!(Vm, vm_list) == 256, "vm.vm_list");
+    assert!(core::mem::offset_of!(Vm, vm_free_list) == 272, "vm.vm_free_list");
+    assert!(core::mem::offset_of!(Vm, cpumask) == 288, "vm.cpumask");
+    assert!(core::mem::offset_of!(Vm, spinlock) == 328, "vm.spinlock");
+    assert!(core::mem::offset_of!(Vm, pagetable) == 352, "vm.pagetable");
+    assert!(core::mem::offset_of!(Vm, refcount) == 360, "vm.refcount");
 };
 
 // Constants not picked up by bindgen (defined in headers as #defines that
@@ -3064,50 +3069,43 @@ fn xv6_vm_warn_vma_already_freed(v: *mut c_void) {
 
 // --- assert (current == NULL || rwsem_is_write_holding(&vm->rw_lock)) ---
 
-/// rb-tree key comparator. Bound to `__vm_tree_opts.keys_cmp_fun`.
-///
-/// Returns 0 for equal, -1 if `a < b`, +1 otherwise — same contract as the
-/// original C implementation.
-///
-/// Kept `extern "C"`: passed *by value* as `Some(__vma_cmp)` into
-/// `bindings::rb_root::keys_cmp_fun`, a bindgen-generated `unsafe extern "C"
-/// fn` pointer field — the calling convention is part of the function's
-/// type here, not just a link-time symbol name, so it must stay even though
-/// `#[no_mangle]` (nothing looks this up by C symbol name) is dropped.
-pub(crate) extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
-    if a == b {
-        0
-    } else if a < b {
-        -1
-    } else {
-        1
+/// TRAIT-OPS: `RbOps` impl for `vm.vm_tree` (keyed by `vma.start`). Was
+/// the free-fn pair `__vma_cmp`/`__cma_get_key` bound into the old
+/// `__VM_TREE_OPTS` fn-pointer table; bodies moved verbatim (`extern
+/// "C"` dropped -- no longer a bindgen fn-pointer-table slot, so the
+/// calling convention no longer needs to be part of the type).
+pub(crate) struct VmaRbOps;
+impl RbOps for VmaRbOps {
+    /// Returns 0 for equal, -1 if `a < b`, +1 otherwise — same contract as
+    /// the original C implementation (`__vma_cmp`).
+    unsafe fn keys_cmp(&self, a: u64, b: u64) -> c_int {
+        if a == b {
+            0
+        } else if a < b {
+            -1
+        } else {
+            1
+        }
     }
-}
 
-/// rb-tree key extractor. Bound to `__vm_tree_opts.get_key_fun`.
-///
-/// Returns `container_of(node, vma_t, rb_entry)->start`. Implemented using
-/// `core::mem::offset_of!` against the bindgen-generated `vma` layout, which
-/// is guaranteed to match the C `vma_t` because both compilation units share
-/// the same header (`mm/vm_types.h`).
-///
-/// Kept `extern "C"` for the same reason as [`__vma_cmp`]: bound by value
-/// into `bindings::rb_root::get_key_fun`, a bindgen `unsafe extern "C" fn`
-/// pointer field.
-pub(crate) extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
-    if node.is_null() {
-        return 0;
+    /// Returns `container_of(node, vma_t, rb_entry)->start` (`__cma_get_key`).
+    /// Implemented using `core::mem::offset_of!` against the native `vma`
+    /// layout.
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        if node.is_null() {
+            return 0;
+        }
+        let offset = core::mem::offset_of!(vma, rb_entry);
+        // `container_of` itself is safe pointer arithmetic (see
+        // `crate::mm::cffi::container_of`).
+        let vma_ptr: *mut vma = crate::mm::cffi::container_of(node, offset);
+        // `node` is a live rb-tree node embedded in a `vma` (the rb-tree
+        // only ever stores `vma::rb_entry` nodes), so `vma_ptr` points at a
+        // valid `vma`; `machine::Riscv::vma_start` is the existing safe
+        // accessor for the one field this needs and carries its own
+        // soundness argument for the raw dereference behind it.
+        machine::Riscv::vma_start(vma_ptr)
     }
-    let offset = core::mem::offset_of!(vma, rb_entry);
-    // `container_of` itself is safe pointer arithmetic (see
-    // `crate::mm::cffi::container_of`).
-    let vma_ptr: *mut vma = crate::mm::cffi::container_of(node, offset);
-    // `node` is a live rb-tree node embedded in a `vma` (the rb-tree only
-    // ever stores `vma::rb_entry` nodes), so `vma_ptr` points at a valid
-    // `vma`; `machine::vma_start` is the existing safe accessor for the
-    // one field this needs and carries its own soundness argument for the
-    // raw dereference behind it, so this function stays fully safe.
-    machine::Riscv::vma_start(vma_ptr)
 }
 
 
@@ -3543,24 +3541,14 @@ fn pg_round_up(x: u64) -> u64 {
 // callers in other C translation units link unchanged.
 // ---------------------------------------------------------------------------
 
-// rb_root_opts static — replaces the C `__vm_tree_opts` global in vm.c.
-// rb_root_opts contains function pointers; wrap to assert Sync (the struct
-// is immutable for the lifetime of the kernel).
-// SAFETY: `VmTreeOptsWrap` is only ever constructed as the single
-// `const` `__VM_TREE_OPTS` below, whose fields are set once at
-// compile time and never mutated afterward (no interior mutability,
-// no `UnsafeCell`) — sharing an immutable value across harts is
-// inherently data-race-free.
-#[repr(transparent)]
-struct VmTreeOptsWrap(rb_root_opts);
-unsafe impl Sync for VmTreeOptsWrap {}
-static __VM_TREE_OPTS: VmTreeOptsWrap = VmTreeOptsWrap(rb_root_opts {
-    keys_cmp_fun: Some(__vma_cmp),
-    get_key_fun: Some(__cma_get_key),
-});
+// TRAIT-OPS: the `VmTreeOptsWrap` `Sync` wrapper around a `rb_root_opts`
+// fn-pointer pair is gone — `VmaRbOps` is a ZST that implements `RbOps:
+// Sync` directly, so no wrapper is needed (matches the `PcacheRbOps`/
+// `KsymRbOps` precedent).
+static __VM_TREE_OPS: VmaRbOps = VmaRbOps;
 
 /// Replacement for the C `xv6_vm_rb_init_vm_tree` shim. Initialises a
-/// `struct rb_root` with the static `__VM_TREE_OPTS` (vma key cmp/extract).
+/// `struct rb_root` with the static `__VM_TREE_OPS` (vma key cmp/extract).
 /// Inlines the body of `rb_root_init` (a `static inline` in bintree.h that
 /// merely validates and stores the opts pointer).
 pub(crate) fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
@@ -3571,7 +3559,7 @@ pub(crate) fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
     // `rb_root` about to be initialised.
     unsafe {
         (*root).node = core::ptr::null_mut();
-        (*root).opts = &__VM_TREE_OPTS.0 as *const rb_root_opts as *mut rb_root_opts;
+        (*root).opts = Some(&__VM_TREE_OPS);
     }
 }
 

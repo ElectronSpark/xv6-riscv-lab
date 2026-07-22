@@ -29,15 +29,15 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::null_mut;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::bindings::{
-    rb_node, rb_root, rb_root_opts, sleep_callback_t, spinlock as spinlock_t,
+    rb_node, rb_root, sleep_callback_t, spinlock as spinlock_t,
     thread, tnode as tnode_t, tq as tq_t, ttree as ttree_t, uint64, wakeup_callback_t,
 };
+use crate::bintree::RbOps;
 use crate::lock::spinlock::spin_sleep_cb;
 use crate::lock::spinlock::spin_wake_cb;
 use crate::machine::Riscv;
@@ -110,26 +110,37 @@ pub struct Ttree {
     pub(crate) flags: u64,
 }
 
-// P3-N2 hardcoded layout proof — values captured from the
+// P3-N2 hardcoded layout proof — values originally captured from the
 // pre-nativization bindgen output (`pub struct ttree { root: rb_root,
 // counter: c_int, name: *const c_char, lock: *mut spinlock_t, flags:
-// uint64 }`; `rb_root` is 16/8) and independently confirmed by the
-// cross-compiler `_Static_assert` probe against
-// `kernel/inc/proc/tq_type.h` (size 48, align 8, offsets 0/16/24/32/40).
+// uint64 }`) and independently confirmed by the cross-compiler
+// `_Static_assert` probe against `kernel/inc/proc/tq_type.h` (historical:
+// size 48, align 8, offsets 0/16/24/32/40, back when `rb_root` was 16/8).
+//
+// TRAIT-OPS: `root` (`rb_root`) grew 16 -> 24 bytes (thin `opts` pointer
+// -> `Option<&dyn RbOps>` fat pointer). `Ttree` has no `align(64)` tail to
+// absorb the growth (unlike `Pcache`/`Vm`/`TimerRoot`), so every
+// following field shifts +8 AND the struct's own total size genuinely
+// grows 48 -> 56 bytes: `counter` (24..28) leaves a 4-byte alignment gap
+// before the pointer-aligned `name` (32..40, was 24..32), then `lock`
+// (40..48, was 32..40) and `flags` (48..56, was 40..48). No embedder
+// stores `ttree_t`/`Ttree` by value with its own layout assert (verified
+// -- the sole consumer, `proc/sched.rs`'s `CHAN_QUEUE_ROOT`, is a
+// `SyncBuf<ttree_t>`/`MaybeUninit` wrapper with no hardcoded offsets), so
+// this file's own asserts are the only ones to update.
 // NOTE: the bindgen `ttree` derived no Copy/Clone (a bindgen
 // derive-analysis quirk around the blocklisted `rb_root` member); this
-// native has always derived both. Nothing in the remaining bindgen
-// output embeds `ttree_t` by value (verified), so the difference is
-// unobservable there, and `build.rs`'s `NativeTypeCallbacks` now
-// answers Copy=Yes for it, matching this real definition.
+// native has always derived both, and `Option<&'static dyn RbOps>` is
+// itself `Copy`/`Clone` (shared references always are), so the derive
+// keeps working unchanged.
 const _: () = {
-    assert!(core::mem::size_of::<Ttree>() == 48, "ttree_t size");
+    assert!(core::mem::size_of::<Ttree>() == 56, "ttree_t size");
     assert!(core::mem::align_of::<Ttree>() == 8, "ttree_t natural alignment");
     assert!(core::mem::offset_of!(Ttree, root) == 0, "ttree.root offset");
-    assert!(core::mem::offset_of!(Ttree, counter) == 16, "ttree.counter offset");
-    assert!(core::mem::offset_of!(Ttree, name) == 24, "ttree.name offset");
-    assert!(core::mem::offset_of!(Ttree, lock) == 32, "ttree.lock offset");
-    assert!(core::mem::offset_of!(Ttree, flags) == 40, "ttree.flags offset");
+    assert!(core::mem::offset_of!(Ttree, counter) == 24, "ttree.counter offset");
+    assert!(core::mem::offset_of!(Ttree, name) == 32, "ttree.name offset");
+    assert!(core::mem::offset_of!(Ttree, lock) == 40, "ttree.lock offset");
+    assert!(core::mem::offset_of!(Ttree, flags) == 48, "ttree.flags offset");
 };
 
 // `tnode_t`'s union is the one genuinely tricky part of this family: the
@@ -254,57 +265,63 @@ const TYPE_TREE: u32 = 2;
 use crate::proc::Scheduler;
 
 // ---------------------------------------------------------------------------
-// rb_root_opts: static comparator tables
+// TRAIT-OPS: `RbOps` impls for the tree queue (was the `rb_root_opts`
+// static comparator tables below).
 // ---------------------------------------------------------------------------
-extern "C" fn q_root_get_key(node: *mut rb_node) -> uint64 {
+
+/// Shared `get_key` body for both [`TqRbOps`] and [`TqRdownRbOps`] (was
+/// the single free fn `q_root_get_key`, address-taken in both of the old
+/// `rb_root_opts` tables).
+unsafe fn q_root_get_key_impl(node: *mut rb_node) -> uint64 {
     if node.is_null() {
         return 0;
     }
     tnode_from_tree_entry(node) as uint64
 }
 
-extern "C" fn q_root_keys_cmp(key1: uint64, key2: uint64) -> c_int {
-    let n1 = key1 as *mut tnode_t;
-    let n2 = key2 as *mut tnode_t;
-    let r1 = match TnodeRef::from_ptr(n1) { Some(r) => r, None => return 0 };
-    let r2 = match TnodeRef::from_ptr(n2) { Some(r) => r, None => return 0 };
-    let k1 = r1.tree_key();
-    let k2 = r2.tree_key();
-    if k1 < k2 { -1 } else if k1 > k2 { 1 }
-    else if key1 < key2 { -1 } else if key1 > key2 { 1 } else { 0 }
+/// TRAIT-OPS: `RbOps` impl for the forward tree-queue lookup order. Was
+/// the free-fn pair `q_root_keys_cmp`/`q_root_get_key` bound into the old
+/// `Q_ROOT_OPTS` fn-pointer table; bodies moved verbatim.
+struct TqRbOps;
+impl RbOps for TqRbOps {
+    unsafe fn keys_cmp(&self, key1: uint64, key2: uint64) -> c_int {
+        let n1 = key1 as *mut tnode_t;
+        let n2 = key2 as *mut tnode_t;
+        let r1 = match TnodeRef::from_ptr(n1) { Some(r) => r, None => return 0 };
+        let r2 = match TnodeRef::from_ptr(n2) { Some(r) => r, None => return 0 };
+        let k1 = r1.tree_key();
+        let k2 = r2.tree_key();
+        if k1 < k2 { -1 } else if k1 > k2 { 1 }
+        else if key1 < key2 { -1 } else if key1 > key2 { 1 } else { 0 }
+    }
+    unsafe fn get_key(&self, node: *mut rb_node) -> uint64 {
+        unsafe { q_root_get_key_impl(node) }
+    }
 }
 
-extern "C" fn q_root_keys_cmp_rdown(key1: uint64, key2: uint64) -> c_int {
-    let n1 = key1 as *mut tnode_t;
-    let n2 = key2 as *mut tnode_t;
-    let r1 = match TnodeRef::from_ptr(n1) { Some(r) => r, None => return 0 };
-    let r2 = match TnodeRef::from_ptr(n2) { Some(r) => r, None => return 0 };
-    let k1 = r1.tree_key();
-    let k2 = r2.tree_key();
-    if k1 < k2 { -1 } else if k1 > k2 { 1 }
-    else if key1 == 0 { 0 } else { 1 }
+/// TRAIT-OPS: `RbOps` impl for the "round-down" tree-queue lookup order
+/// (`find_key_min`). Was the free-fn pair `q_root_keys_cmp_rdown`/
+/// `q_root_get_key` bound into the old `Q_ROOT_RDOWN_OPTS` fn-pointer
+/// table; bodies moved verbatim.
+struct TqRdownRbOps;
+impl RbOps for TqRdownRbOps {
+    unsafe fn keys_cmp(&self, key1: uint64, key2: uint64) -> c_int {
+        let n1 = key1 as *mut tnode_t;
+        let n2 = key2 as *mut tnode_t;
+        let r1 = match TnodeRef::from_ptr(n1) { Some(r) => r, None => return 0 };
+        let r2 = match TnodeRef::from_ptr(n2) { Some(r) => r, None => return 0 };
+        let k1 = r1.tree_key();
+        let k2 = r2.tree_key();
+        if k1 < k2 { -1 } else if k1 > k2 { 1 }
+        else if key1 == 0 { 0 } else { 1 }
+    }
+    unsafe fn get_key(&self, node: *mut rb_node) -> uint64 {
+        unsafe { q_root_get_key_impl(node) }
+    }
 }
 
-#[repr(transparent)]
-struct OptsCell(UnsafeCell<rb_root_opts>);
-// SAFETY: `Q_ROOT_OPTS`/`Q_ROOT_RDOWN_OPTS` below are initialised once
-// at compile time (`static ... = OptsCell(UnsafeCell::new(rb_root_opts
-// { .. }))`) and never mutated afterward — the two `.0.get()` reads in
-// `TtreeRef::init`/`find_key_min` only ever read the function pointers
-// back via the raw pointer handed to `rb_root_init`. Sharing an immutable
-// value across harts is inherently data-race-free (mirrors `vm.rs`'s
-// `VmTreeOptsWrap`).
-unsafe impl Sync for OptsCell {}
-
-static Q_ROOT_OPTS: OptsCell = OptsCell(UnsafeCell::new(rb_root_opts {
-    keys_cmp_fun: Some(q_root_keys_cmp),
-    get_key_fun: Some(q_root_get_key),
-}));
-
-static Q_ROOT_RDOWN_OPTS: OptsCell = OptsCell(UnsafeCell::new(rb_root_opts {
-    keys_cmp_fun: Some(q_root_keys_cmp_rdown),
-    get_key_fun: Some(q_root_get_key),
-}));
+static TQ_RB_OPS: TqRbOps = TqRbOps;
+static TQ_RDOWN_RB_OPS: TqRdownRbOps = TqRdownRbOps;
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -594,7 +611,7 @@ impl<'a> TtreeRef<'a> {
     /// (former `ttree_init` delegator deleted).
     pub(super) fn init(&self, name: *const c_char, lock: *mut spinlock_t) {
         self.set_root_node(null_mut());
-        self.set_root_opts(Q_ROOT_OPTS.0.get());
+        self.set_root_opts(Some(&TQ_RB_OPS));
         self.set_counter(0);
         self.set_name(if name.is_null() { NULL_NAME.as_ptr() as *const c_char } else { name });
         self.set_lock_ptr(lock);
@@ -604,7 +621,7 @@ impl<'a> TtreeRef<'a> {
     /// `ttree_find_key_min`.)
     fn find_key_min(&self, key: uint64) -> *mut tnode_t {
         let mut dummy_root: rb_root = self.root_copy();
-        dummy_root.opts = Q_ROOT_RDOWN_OPTS.0.get();
+        dummy_root.opts = Some(&TQ_RDOWN_RB_OPS);
 
         let mut dummy: tnode_t = zeroed_tnode();
         TnodeRef::from_ptr(&raw mut dummy).unwrap().set_tree_key(key);
@@ -761,9 +778,9 @@ impl<'a> TtreeRef<'a> {
 // `NO-STANDALONE-FN` doc notes for the visibility each now carries.
 //
 // The former `xv6_tqport_*` C-ABI alias layer was collapsed in P3-1B2 and
-// the `#[no_mangle] extern "C"` export surface dismantled in P3-D2a; with
-// the delegators gone, the only remaining free fns are the `extern "C"`
-// comparator/get-key trampolines whose ADDRESS is stored in the static
-// `rb_root_opts` tables (`q_root_get_key`/`q_root_keys_cmp`/
-// `q_root_keys_cmp_rdown`) -- genuine floor.
+// the `#[no_mangle] extern "C"` export surface dismantled in P3-D2a; the
+// old comparator/get-key trampolines whose address used to be stored in
+// the static `rb_root_opts` tables (`q_root_get_key`/`q_root_keys_cmp`/
+// `q_root_keys_cmp_rdown`) are gone too -- TRAIT-OPS moved their bodies
+// into the [`TqRbOps`]/[`TqRdownRbOps`] `RbOps` impls above.
 // ---------------------------------------------------------------------------

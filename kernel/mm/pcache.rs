@@ -44,8 +44,7 @@
 //! directly.
 //!
 //! GENUINE FLOOR (still free fns, documented at each definition below):
-//! `pcache_rb_compare`/`pcache_rb_get_key` (address-taken in the
-//! `PCACHE_RB_OPTS` fn-ptr table), `pcache_flush_worker` (address-taken
+//! `pcache_flush_worker` (address-taken
 //! via `WorkStruct::init`), `flusher_thread` (address-taken via
 //! `kthread_create`), `sys_sync`/`sys_dumppcache` (address-taken in
 //! `irq/syscall.rs`'s dispatch table), the generic `list_node_t`
@@ -57,6 +56,9 @@
 //! (fn-pointer-ops-table -> trait dispatch campaign); `ops_call_optional`
 //! is gone, its old `None`-slot behavior now lives in the trait's own
 //! default method bodies (see `PcacheOps`'s doc comment below).
+//! `pcache_rb_compare`/`pcache_rb_get_key` (formerly address-taken in the
+//! `PCACHE_RB_OPTS` fn-ptr table) are gone too -- TRAIT-OPS moved their
+//! bodies verbatim into the [`PcacheRbOps`] `RbOps` impl.
 //!
 //! Locking order (matches C):
 //!   1. global pcache spinlock
@@ -70,11 +72,12 @@ use core::ptr::{self, addr_of, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::bindings::{
-    completion_t, list_node_t, page_t, rb_node, rb_root, rb_root_opts,
+    completion_t, list_node_t, page_t, rb_node, rb_root,
     rwlock, sleep_callback_t, slab_cache_t, spinlock_t, thread, thread_state_THREAD_UNINTERRUPTIBLE,
     tq_t, wakeup_callback_t, work_struct, workqueue, EAGAIN, EBUSY, EINPROGRESS, EINTR, EINVAL,
     EIO, SLAB_FLAG_EMBEDDED,
 };
+use crate::bintree::RbOps;
 use crate::machine;
 use crate::mm::mm_safe::{SlabBox, SlabCacheRef};
 
@@ -337,17 +340,21 @@ const _: () = {
     assert!(core::mem::offset_of!(Pcache, flags) == 328, "pcache.flags");
     assert!(core::mem::offset_of!(Pcache, tree_lock) == 384, "pcache.tree_lock");
     assert!(core::mem::offset_of!(Pcache, page_map) == 448, "pcache.page_map");
-    assert!(core::mem::offset_of!(Pcache, gfp_flags) == 464, "pcache.gfp_flags");
+    // TRAIT-OPS: `page_map` (`rb_root`) grew 16 -> 24 bytes (thin `opts`
+    // pointer -> `Option<&dyn RbOps>` fat pointer), so every following
+    // field shifts +8; the align(64) tail absorbs the growth (total size
+    // stays 576 -- see below).
+    assert!(core::mem::offset_of!(Pcache, gfp_flags) == 472, "pcache.gfp_flags");
     // `ops` widened from an 8-byte `*mut PcacheOps` to a 16-byte
     // `Option<&'static dyn PcacheOps>` fat pointer (trait-ification);
     // every field after it shifts by +8. The struct's overall size stays
     // 576 (the existing tail padding to the `align(64)` boundary
     // absorbs the growth) but `flush_work`/`flush_error`/`wait_refcount`
     // move.
-    assert!(core::mem::offset_of!(Pcache, ops) == 472, "pcache.ops");
-    assert!(core::mem::offset_of!(Pcache, flush_work) == 488, "pcache.flush_work");
-    assert!(core::mem::offset_of!(Pcache, flush_error) == 536, "pcache.flush_error");
-    assert!(core::mem::offset_of!(Pcache, wait_refcount) == 540, "pcache.wait_refcount");
+    assert!(core::mem::offset_of!(Pcache, ops) == 480, "pcache.ops");
+    assert!(core::mem::offset_of!(Pcache, flush_work) == 496, "pcache.flush_work");
+    assert!(core::mem::offset_of!(Pcache, flush_error) == 544, "pcache.flush_error");
+    assert!(core::mem::offset_of!(Pcache, wait_refcount) == 548, "pcache.wait_refcount");
 
     assert!(core::mem::size_of::<PcacheNode>() == 160, "pcache_node size");
     assert!(core::mem::align_of::<PcacheNode>() == 8, "pcache_node align");
@@ -712,25 +719,29 @@ fn xv6_pcache_panic(msg: *const c_char) -> ! {
 // ---------------------------------------------------------------------------
 // rb tree comparator for `pcache.page_map` (keyed by `pcache_node.blkno`).
 // ---------------------------------------------------------------------------
-extern "C" fn pcache_rb_compare(k1: u64, k2: u64) -> c_int {
-    if k1 < k2 {
-        -1
-    } else if k1 > k2 {
-        1
-    } else {
-        0
+/// TRAIT-OPS: `RbOps` impl for `pcache.page_map` (keyed by
+/// `pcache_node.blkno`). Was the free-fn pair `pcache_rb_compare`/
+/// `pcache_rb_get_key` bound into the old `PCACHE_RB_OPTS` fn-pointer
+/// table; bodies moved verbatim.
+struct PcacheRbOps;
+impl RbOps for PcacheRbOps {
+    unsafe fn keys_cmp(&self, k1: u64, k2: u64) -> c_int {
+        if k1 < k2 {
+            -1
+        } else if k1 > k2 {
+            1
+        } else {
+            0
+        }
+    }
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        let pcnode = PcacheNode::from_tree_entry(node);
+        // SAFETY: `node` is a live `tree_entry` embedded in a valid, still
+        // rb-tree-linked `PcacheNode`.
+        unsafe { (*pcnode).blkno }
     }
 }
-extern "C" fn pcache_rb_get_key(node: *mut rb_node) -> u64 {
-    let pcnode = PcacheNode::from_tree_entry(node);
-    // SAFETY: `node` is a live `tree_entry` embedded in a valid, still
-    // rb-tree-linked `PcacheNode`.
-    unsafe { (*pcnode).blkno }
-}
-static PCACHE_RB_OPTS: SyncCell<rb_root_opts> = SyncCell::new(rb_root_opts {
-    keys_cmp_fun: Some(pcache_rb_compare),
-    get_key_fun: Some(pcache_rb_get_key),
-});
+static PCACHE_RB_OPS: PcacheRbOps = PcacheRbOps;
 
 // ===========================================================================
 // PcacheHandle — non-owning handle over `*mut Pcache`.
@@ -1016,7 +1027,7 @@ impl PcacheHandle {
     fn rb_init(self) {
         unsafe {
             (*self.raw()).page_map.node = ptr::null_mut();
-            (*self.raw()).page_map.opts = PCACHE_RB_OPTS.get();
+            (*self.raw()).page_map.opts = Some(&PCACHE_RB_OPS);
         }
     }
     fn rb_find(self, blkno: u64) -> *mut PcacheNode {

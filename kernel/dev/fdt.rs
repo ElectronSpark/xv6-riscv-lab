@@ -117,9 +117,10 @@ use core::mem::{align_of, offset_of, size_of};
 use core::ptr;
 
 use crate::bindings::{
-    list_node_t, mem_region, platform_info, rb_node, rb_root, rb_root_opts, EMAC_MAX, N_VIRTIO,
+    list_node_t, mem_region, platform_info, rb_node, rb_root, EMAC_MAX, N_VIRTIO,
     PCIE_REG_MAX, SDHCI_MAX,
 };
+use crate::bintree::RbOps;
 use crate::hlist::{Hlist, HlistEntry, HlistOps, HtHash};
 use crate::machine;
 
@@ -1017,59 +1018,63 @@ unsafe fn hlist_hash_str(s: *const c_char, len: usize) -> HtHash {
 }
 
 // ===========================================================================
-// fdt_rb_opts -- shared rb_root_opts for every `FdtNode::children` tree
-// AND `FdtBlobInfo::root` (mirrors the C original using one static
-// `fdt_rb_opts` everywhere).
+// TRAIT-OPS: `FdtRbOps` -- shared `RbOps` impl for every `FdtNode::children`
+// tree AND `FdtBlobInfo::root` (mirrors the C original using one static
+// `fdt_rb_opts` everywhere). Was the free-fn pair `fdt_rb_compare`/
+// `fdt_rb_get_key` bound into the old `FDT_RB_OPTS` fn-pointer table;
+// bodies moved verbatim (`extern "C"` dropped -- no longer a fn-pointer-
+// table slot).
 // ===========================================================================
 
-/// Mirrors `__fdt_rb_compare()`.
-unsafe extern "C" fn fdt_rb_compare(a: u64, b: u64) -> c_int {
-    let node_a = a as *mut FdtNode;
-    let node_b = b as *mut FdtNode;
-    // SAFETY: both keys are live `FdtNode*` (the only producer of tree
-    // keys is `fdt_rb_get_key` below, called only on already-linked
-    // nodes, or a caller-supplied dummy in the lookup helpers).
-    unsafe {
-        if (*node_a).hash > (*node_b).hash {
-            return 1;
-        }
-        if (*node_a).hash < (*node_b).hash {
-            return -1;
-        }
-        let str_cmp = strcmp((*node_a).name, (*node_b).name);
-        if str_cmp != 0 {
-            return str_cmp;
-        }
-        if (*node_a).has_addr == (*node_b).has_addr {
-            if (*node_a).has_addr {
-                return if (*node_a).addr > (*node_b).addr {
-                    1
-                } else if (*node_a).addr < (*node_b).addr {
-                    -1
-                } else {
-                    0
-                };
+struct FdtRbOps;
+impl RbOps for FdtRbOps {
+    /// Mirrors `__fdt_rb_compare()`.
+    unsafe fn keys_cmp(&self, a: u64, b: u64) -> c_int {
+        let node_a = a as *mut FdtNode;
+        let node_b = b as *mut FdtNode;
+        // SAFETY: both keys are live `FdtNode*` (the only producer of
+        // tree keys is `get_key` below, called only on already-linked
+        // nodes, or a caller-supplied dummy in the lookup helpers).
+        unsafe {
+            if (*node_a).hash > (*node_b).hash {
+                return 1;
             }
-            return 0;
+            if (*node_a).hash < (*node_b).hash {
+                return -1;
+            }
+            let str_cmp = strcmp((*node_a).name, (*node_b).name);
+            if str_cmp != 0 {
+                return str_cmp;
+            }
+            if (*node_a).has_addr == (*node_b).has_addr {
+                if (*node_a).has_addr {
+                    return if (*node_a).addr > (*node_b).addr {
+                        1
+                    } else if (*node_a).addr < (*node_b).addr {
+                        -1
+                    } else {
+                        0
+                    };
+                }
+                return 0;
+            }
+            if (*node_a).has_addr {
+                1
+            } else {
+                -1
+            }
         }
-        if (*node_a).has_addr {
-            1
-        } else {
-            -1
-        }
+    }
+
+    /// Mirrors `__fdt_rb_get_key()`. `rb_entry` is `FdtNode`'s first
+    /// field, so `container_of(node, FdtNode, rb_entry)` is the identity
+    /// cast.
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        node as u64
     }
 }
 
-/// Mirrors `__fdt_rb_get_key()`. `rb_entry` is `FdtNode`'s first field,
-/// so `container_of(node, FdtNode, rb_entry)` is the identity cast.
-unsafe extern "C" fn fdt_rb_get_key(node: *mut rb_node) -> u64 {
-    node as u64
-}
-
-static FDT_RB_OPTS: rb_root_opts = rb_root_opts {
-    keys_cmp_fun: Some(fdt_rb_compare),
-    get_key_fun: Some(fdt_rb_get_key),
-};
+static FDT_RB_OPS: FdtRbOps = FdtRbOps;
 
 impl Fdt {
 /// Mirrors `kernel/inc/bintree.h`'s `rb_root_init()` static inline (no
@@ -1079,10 +1084,10 @@ impl Fdt {
 /// # Safety
 /// `root` must point to caller-owned, writable `rb_root` storage.
 unsafe fn fdt_rb_root_init(root: *mut rb_root) {
-    // SAFETY: caller contract; `FDT_RB_OPTS` is a live 'static.
+    // SAFETY: caller contract; `FDT_RB_OPS` is a live 'static.
     unsafe {
         (*root).node = ptr::null_mut();
-        (*root).opts = &raw const FDT_RB_OPTS as *mut rb_root_opts;
+        (*root).opts = Some(&FDT_RB_OPS);
     }
 }
 }

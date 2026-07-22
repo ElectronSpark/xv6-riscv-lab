@@ -29,9 +29,9 @@
 //! parent-pointer chain (`__rb_node_link`), not a fresh key search, so it
 //! needs no key-comparison setup at all.
 //!
-//! This means [`extent_keys_cmp`]/[`extent_get_key`] genuinely are wired
-//! into `xv6fs_block_cache.tree_opts` and exercised by every insert; they
-//! are not dead ABI ceremony.
+//! This means [`ExtentRbOps`] genuinely is wired into
+//! `xv6fs_block_cache.extent_tree.opts` and exercised by every insert; it
+//! is not dead ABI ceremony.
 //!
 //! # Wave B free-fn -> associated-fn sweep
 //!
@@ -50,14 +50,17 @@
 //! own same-named `Xv6fsSuperblock::sb_dev` (a second inherent method of
 //! that name would collide). The intrusive rb-tree wrappers
 //! (`rb_first_node`/`rb_last_node`/`rb_next_node`/`rb_insert_color`/
-//! `rb_delete_node_color`), the slab facade (`slab_cache_init`/
-//! `slab_alloc`/`slab_free`), and the `extern "C"` rb-tree comparator
-//! callbacks (`extent_keys_cmp`/`extent_get_key`, wired into
-//! `tree_opts.keys_cmp_fun`/`get_key_fun` as raw fn pointers) stay FLOOR
-//! free fns -- addr-taken/fn-pointer-table entries and thin C-ABI
-//! facades, matching this crate's established precedent for both
-//! classes. Every relocated body is byte-identical to its old free-fn
-//! form; no raw-pointer first param became `&self`/`&T`.
+//! `rb_delete_node_color`) and the slab facade (`slab_cache_init`/
+//! `slab_alloc`/`slab_free`) stay FLOOR free fns -- thin C-ABI facades,
+//! matching this crate's established precedent. The former `extern "C"`
+//! rb-tree comparator callbacks (`extent_keys_cmp`/`extent_get_key`,
+//! wired into `tree_opts.keys_cmp_fun`/`get_key_fun` as raw fn pointers)
+//! are gone -- TRAIT-OPS moved their bodies verbatim into the
+//! [`ExtentRbOps`] `RbOps` impl (see below), and the per-mount
+//! `tree_opts` storage field they were wired into is deleted outright
+//! (the ops are stateless, so one `'static EXTENT_RB_OPS` now serves
+//! every mount). Every relocated body is byte-identical to its old
+//! free-fn form; no raw-pointer first param became `&self`/`&T`.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
@@ -67,6 +70,7 @@ use core::ptr;
 use crate::bindings::{
     buf, free_extent, rb_node, rb_root, slab_cache_t, xv6fs_superblock, EINVAL, ENOSPC,
 };
+use crate::bintree::RbOps;
 // N-R7d: the block-cache metadata is now a data-owning
 // `SpinLock<BlockCacheInner>` (lock-owns-data). `spinlock_t` /
 // `xv6fs_block_cache` are no longer named here -- the embedded lock lives
@@ -171,14 +175,14 @@ const _: () = {
 /// spinlock — the block-cache analogue of the log's single-threaded
 /// recovery.
 ///
-/// `extent_tree.opts` is a self-pointer into this struct's own
-/// `tree_opts`; the struct is embedded in the slab-allocated, never-moved
-/// superblock, so the pointer that `xv6fs_bcache_init` installs stays
-/// valid for the mount's lifetime.
+/// TRAIT-OPS: the old `tree_opts` field (an embedded `rb_root_opts`
+/// fn-pointer pair) is GONE -- [`ExtentRbOps`] below is a stateless ZST
+/// (no per-mount data the comparator needs), so `extent_tree.opts` now
+/// points directly at the single `'static EXTENT_RB_OPS`, and this struct
+/// no longer needs to store its own copy of the ops table at all.
 #[repr(C)]
 pub struct BlockCacheInner {
     pub extent_tree: rb_root,
-    pub tree_opts: crate::bindings::rb_root_opts,
     pub nblocks: crate::bindings::uint32,
     pub data_start: crate::bindings::uint32,
     pub alloc_cursor: crate::bindings::uint32,
@@ -188,16 +192,24 @@ pub struct BlockCacheInner {
 
 // N-R7d interior-layout proof for the de-locked inner metadata (align 8,
 // no align-64 member now that the slab lives outside — see below).
+//
+// TRAIT-OPS: `extent_tree` (`rb_root`) grew 16 -> 24 bytes (thin `opts`
+// pointer -> `Option<&dyn RbOps>` fat pointer), but the `tree_opts` field
+// (16 bytes) is deleted outright, so `BlockCacheInner` net-SHRINKS
+// 56 -> 48 bytes; the outer `Xv6fsBlockCache::cache` (a
+// `SpinLock<BlockCacheInner>`) simply gets a larger tail-padding gap
+// before the align-64 `extent_cache` field, so `Xv6fsBlockCache`'s own
+// size/offsets (1472 / 0 / 128 / 1408) are UNCHANGED -- see that
+// struct's own assert block below.
 const _: () = {
-    assert!(core::mem::size_of::<BlockCacheInner>() == 56, "BlockCacheInner size");
+    assert!(core::mem::size_of::<BlockCacheInner>() == 48, "BlockCacheInner size");
     assert!(core::mem::align_of::<BlockCacheInner>() == 8, "BlockCacheInner alignment");
     assert!(core::mem::offset_of!(BlockCacheInner, extent_tree) == 0, "inner.extent_tree offset");
-    assert!(core::mem::offset_of!(BlockCacheInner, tree_opts) == 16, "inner.tree_opts offset");
-    assert!(core::mem::offset_of!(BlockCacheInner, nblocks) == 32, "inner.nblocks offset");
-    assert!(core::mem::offset_of!(BlockCacheInner, data_start) == 36, "inner.data_start offset");
-    assert!(core::mem::offset_of!(BlockCacheInner, alloc_cursor) == 40, "inner.alloc_cursor offset");
-    assert!(core::mem::offset_of!(BlockCacheInner, free_count) == 44, "inner.free_count offset");
-    assert!(core::mem::offset_of!(BlockCacheInner, extent_count) == 48, "inner.extent_count offset");
+    assert!(core::mem::offset_of!(BlockCacheInner, nblocks) == 24, "inner.nblocks offset");
+    assert!(core::mem::offset_of!(BlockCacheInner, data_start) == 28, "inner.data_start offset");
+    assert!(core::mem::offset_of!(BlockCacheInner, alloc_cursor) == 32, "inner.alloc_cursor offset");
+    assert!(core::mem::offset_of!(BlockCacheInner, free_count) == 36, "inner.free_count offset");
+    assert!(core::mem::offset_of!(BlockCacheInner, extent_count) == 40, "inner.extent_count offset");
 };
 
 /// Native `struct xv6fs_block_cache` (`kernel/vfs/xv6fs/block_cache.h`)
@@ -366,43 +378,52 @@ impl Xv6fs {
 }
 
 // ===========================================================================
-// Red-Black Tree callbacks for insertion/deletion
+// TRAIT-OPS: `RbOps` impl for the per-mount free-extent tree. Was the
+// free-fn pair `extent_keys_cmp`/`extent_get_key` bound into the old
+// per-instance `tree_opts` fn-pointer table; bodies moved verbatim
+// (`extern "C"` dropped -- no longer a fn-pointer-table slot). Stateless
+// -- shared by every mount via the single `'static EXTENT_RB_OPS` below.
 // ===========================================================================
 
-/// Mirrors `extent_keys_cmp()`. Compares two extent keys (both are
-/// addresses of live `free_extent`s, reinterpreted as `u64` -- see the
-/// module doc) by start block number, tie-broken by address.
-extern "C" fn extent_keys_cmp(key1: u64, key2: u64) -> c_int {
-    let ext1 = key1 as *const free_extent;
-    let ext2 = key2 as *const free_extent;
-    // SAFETY: both keys are addresses of live `free_extent`s (this
-    // module's own `rb_root_opts` callback contract -- every key that
-    // reaches here originated from `extent_get_key` or a live node being
-    // inserted).
-    unsafe {
-        if (*ext1).start < (*ext2).start {
-            return -1;
+struct ExtentRbOps;
+impl RbOps for ExtentRbOps {
+    /// Mirrors `extent_keys_cmp()`. Compares two extent keys (both are
+    /// addresses of live `free_extent`s, reinterpreted as `u64` -- see the
+    /// module doc) by start block number, tie-broken by address.
+    unsafe fn keys_cmp(&self, key1: u64, key2: u64) -> c_int {
+        let ext1 = key1 as *const free_extent;
+        let ext2 = key2 as *const free_extent;
+        // SAFETY: both keys are addresses of live `free_extent`s (this
+        // module's own `RbOps` callback contract -- every key that
+        // reaches here originated from `get_key` or a live node being
+        // inserted).
+        unsafe {
+            if (*ext1).start < (*ext2).start {
+                return -1;
+            }
+            if (*ext1).start > (*ext2).start {
+                return 1;
+            }
         }
-        if (*ext1).start > (*ext2).start {
-            return 1;
+        if key1 < key2 {
+            -1
+        } else if key1 > key2 {
+            1
+        } else {
+            0
         }
     }
-    if key1 < key2 {
-        -1
-    } else if key1 > key2 {
-        1
-    } else {
-        0
+
+    /// Mirrors `extent_get_key()`. Get key from rb_node -- returns the
+    /// extent pointer as key. `rb_node` is the first field of
+    /// `free_extent` (offset 0), so `node as u64` is numerically
+    /// identical to `container_of(node, free_extent, rb_node) as u64`.
+    unsafe fn get_key(&self, node: *mut rb_node) -> u64 {
+        node as u64
     }
 }
 
-/// Mirrors `extent_get_key()`. Get key from rb_node -- returns the extent
-/// pointer as key. `rb_node` is the first field of `free_extent` (offset
-/// 0), so `node as u64` is numerically identical to
-/// `container_of(node, free_extent, rb_node) as u64`.
-extern "C" fn extent_get_key(node: *mut rb_node) -> u64 {
-    node as u64
-}
+static EXTENT_RB_OPS: ExtentRbOps = ExtentRbOps;
 
 // ===========================================================================
 // Extent allocation helpers
@@ -783,10 +804,8 @@ impl Xv6fsSuperblock {
             );
 
             // Initialize rb-tree.
-            (*bc).tree_opts.keys_cmp_fun = Some(extent_keys_cmp);
-            (*bc).tree_opts.get_key_fun = Some(extent_get_key);
             (*bc).extent_tree.node = ptr::null_mut();
-            (*bc).extent_tree.opts = ptr::addr_of_mut!((*bc).tree_opts);
+            (*bc).extent_tree.opts = Some(&EXTENT_RB_OPS);
 
             // Scan on-disk bitmap and build extent tree.
             let mut last_bitmap_block: u32 = u32::MAX;

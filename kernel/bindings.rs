@@ -45,7 +45,7 @@ pub type hlist_t = crate::hlist::RawHlist;
 // kernel/inc/rbtree_type.h -> kernel/bintree.rs
 pub type rb_node = crate::bintree::RawRbNode;
 pub type rb_root = crate::bintree::RawRbRoot;
-pub type rb_root_opts = crate::bintree::RawRbRootOpts;
+// TRAIT-OPS: `rb_root_opts` is gone -- see `crate::bintree::RbOps`.
 // lock primitives (P3-N2)
 pub use crate::lock::spinlock::RawSpinlock as spinlock;
 pub use crate::lock::spinlock::RawSpinlock as spinlock_t;
