@@ -79,7 +79,7 @@ use crate::sync::SpinLock;
 // genuinely `unsafe fn` (`crate::mm::kalloc`); its one call site below
 // already sits in an `unsafe` block, so the plain `use` keeps it
 // unchanged too.
-use crate::mm::{kfree, vm_copyin, vm_copyout};
+use crate::mm::{kfree, Vm};
 // P3-1D mesh sweep: net.rs is in scope for this wave; signatures are
 // identical, so these become plain crate-path imports instead of `extern
 // "C"` redeclarations.
@@ -266,7 +266,7 @@ pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> 
     }
     // SAFETY: `pr` live; `m` live; `(*pr).vm` is the current thread's
     // live address space.
-    if unsafe { vm_copyout((*pr).vm, addr, (*m).head as *const c_void, len as u64) } < 0 {
+    if unsafe { Vm::vm_copyout((*pr).vm, addr, (*m).head as *const c_void, len as u64) } < 0 {
         unsafe { mbuffree(m) };
         return neg(EFAULT);
     }
@@ -294,7 +294,7 @@ pub(crate) unsafe extern "C" fn sockwrite(si: *mut sock, addr: u64, n: c_int) ->
 
     // SAFETY: `m` live; `pr` is the live current thread.
     let dst = unsafe { mbufput(m, n as core::ffi::c_uint) };
-    if unsafe { vm_copyin((*pr).vm, dst as *mut c_void, addr, n as u64) } < 0 {
+    if unsafe { Vm::vm_copyin((*pr).vm, dst as *mut c_void, addr, n as u64) } < 0 {
         unsafe { mbuffree(m) };
         return neg(EFAULT);
     }

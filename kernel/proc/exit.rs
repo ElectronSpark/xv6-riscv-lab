@@ -142,7 +142,7 @@ mod raw {
     // `sigacts_put` above).
     #[inline]
     pub fn vm_put(vm: *mut Vm) {
-        crate::mm::vm_put(vm as *mut crate::bindings::vm)
+        crate::mm::vm::Vm::vm_put(vm as *mut crate::bindings::vm)
     }
 
     // P3-1C mesh sweep: tty/session.rs and vfs/{fdtable,fs}.rs are in

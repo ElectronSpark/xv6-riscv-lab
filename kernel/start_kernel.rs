@@ -197,7 +197,7 @@ use crate::lock::rwsem_test::rwsem_launch_tests;
 use crate::lock::semaphore_test::semaphore_launch_tests;
 use crate::mm::early_allocator::early_allocator_init;
 use crate::mm::pcache_test::pcache_launch_tests;
-use crate::mm::{kvminit, kvminithart};
+use crate::mm::PageTable;
 use crate::timer::sched_timer::sleep_ms;
 
 // P3-D3a: `pcache_global_init` (mm/pcache.rs, an ordinary safe Rust fn
@@ -275,9 +275,9 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         sbi_probe_extensions();
         ksymbols_init(); // Initialize kernel symbols
         kinit(); // physical page allocator
-        kvminit(); // create kernel page table
+        PageTable::kvminit(); // create kernel page table
         crate::kprintln!("page table initialized");
-        kvminithart(); // turn on paging
+        PageTable::kvminithart(); // turn on paging
         crate::kprintln!("paging enabled");
         pipe_init(); // initialize pipe subsystem
         mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
@@ -336,7 +336,7 @@ fn __start_kernel_secondary_hart(hartid: c_int) {
         }
 
         // First turn on paging (still using physical TP)
-        kvminithart(); // turn on paging
+        PageTable::kvminithart(); // turn on paging
         // Now switch TP to trampoline virtual address (paging is now on)
         mycpu_init(hartid as u64, true);
         Thread::idle_init();

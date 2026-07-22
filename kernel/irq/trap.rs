@@ -380,7 +380,7 @@ unsafe extern "C" {
 // 0) replaces the old `#[link_name = "cpus"] static mut CPUS` typed view;
 // `trapinit` below casts the wrapper's base address to `*mut cpu_local`
 // exactly as `proc/rq.rs`/`lock/rcu.rs` do.
-use crate::mm::kvmmap;
+use crate::mm::PageTable;
 use crate::printf::{__panic_end, __panic_start};
 use crate::proc::Proc;
 
@@ -390,10 +390,7 @@ use crate::proc::Proc;
 // block above (signatures identical). `page_alloc` stays a genuinely
 // `unsafe fn` (`crate::mm::page`); its one call site below already sits
 // in an `unsafe` block, so the plain `use` keeps it unchanged too.
-use crate::mm::{
-    page_alloc, vm_copyin, vm_copyout, vm_cpu_offline, vm_cpu_online, vm_find_area, vm_rlock,
-    vm_runlock, vm_try_growstack, vma_validate,
-};
+use crate::mm::{page_alloc, Vm, Vma};
 
 /// `trampoline_userret = TRAMPOLINE + (userret - trampoline)`, computed
 /// once by [`trapinit`]. `None` until then; every real call site runs
@@ -661,7 +658,7 @@ pub(crate) extern "C" fn trapinit() {
                 c"trapinit: page_alloc for intr_stacks failed"
             );
             memset(stack_mem, 0, INTR_STACK_SIZE as usize);
-            kvmmap(
+            PageTable::kvmmap(
                 kpgtbl,
                 kirqstack(i),
                 stack_mem as u64,
@@ -825,7 +822,7 @@ pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
         );
 
         // Mark the current CPU as offline for this process's VM.
-        vm_cpu_offline((*p).vm, machine::cpuid());
+        Vm::vm_cpu_offline((*p).vm, machine::cpuid());
 
         // redirect traps to kerneltrap() -- since we are on kernel stack
         trapinithart();
@@ -888,7 +885,7 @@ pub extern "C" fn usertrap() {
         );
 
         // Mark the current CPU as offline for this process's VM.
-        vm_cpu_offline((*p).vm, machine::cpuid());
+        Vm::vm_cpu_offline((*p).vm, machine::cpuid());
 
         // redirect traps to kerneltrap() -- since we are on kernel stack
         trapinithart();
@@ -911,15 +908,15 @@ pub extern "C" fn usertrap() {
             }
             RISCV_INSTRUCTION_PAGE_FAULT => {
                 let va = (*(*p).trapframe).trapframe.stval;
-                vm_rlock((*p).vm);
-                let vma = vm_find_area((*p).vm, va);
+                Vm::vm_rlock((*p).vm);
+                let vma = Vm::vm_find_area((*p).vm, va);
                 if !vma.is_null()
-                    && vma_validate(vma, va, 1, (VMA_FLAG_USER | PROT_EXEC | PROT_READ) as u64)
+                    && Vma::vma_validate(vma, va, 1, (VMA_FLAG_USER | PROT_EXEC | PROT_READ) as u64)
                         == 0
                 {
-                    vm_runlock((*p).vm);
+                    Vm::vm_runlock((*p).vm);
                 } else {
-                    vm_runlock((*p).vm);
+                    Vm::vm_runlock((*p).vm);
                     kassert!((*p).pid != 1, c"usertrap", c"init exiting");
                     crate::proc::Signal::kill((*p).pid, SIGSEGV);
                 }
@@ -929,18 +926,18 @@ pub extern "C" fn usertrap() {
                 let va = (*(*p).trapframe).trapframe.stval;
                 // First try to grow stack if the address is in stack
                 // region.
-                vm_try_growstack((*p).vm, va);
+                Vm::vm_try_growstack((*p).vm, va);
                 // Now find the VMA (may be stack that just grew, or
                 // existing VMA needing demand paging). Hold vm_rlock to
                 // protect VMA tree traversal.
-                vm_rlock((*p).vm);
-                let vma = vm_find_area((*p).vm, va);
+                Vm::vm_rlock((*p).vm);
+                let vma = Vm::vm_find_area((*p).vm, va);
                 if !vma.is_null()
-                    && vma_validate(vma, va, 1, (VMA_FLAG_USER | PROT_READ) as u64) == 0
+                    && Vma::vma_validate(vma, va, 1, (VMA_FLAG_USER | PROT_READ) as u64) == 0
                 {
-                    vm_runlock((*p).vm);
+                    Vm::vm_runlock((*p).vm);
                 } else {
-                    vm_runlock((*p).vm);
+                    Vm::vm_runlock((*p).vm);
                     kassert!((*p).pid != 1, c"usertrap", c"init exiting");
                     crate::proc::Signal::kill((*p).pid, SIGSEGV);
                 }
@@ -949,15 +946,15 @@ pub extern "C" fn usertrap() {
                 // Store page fault - handle demand paging for write
                 // access.
                 let va = (*(*p).trapframe).trapframe.stval;
-                vm_try_growstack((*p).vm, va);
-                vm_rlock((*p).vm);
-                let vma = vm_find_area((*p).vm, va);
+                Vm::vm_try_growstack((*p).vm, va);
+                Vm::vm_rlock((*p).vm);
+                let vma = Vm::vm_find_area((*p).vm, va);
                 if !vma.is_null()
-                    && vma_validate(vma, va, 1, (VMA_FLAG_USER | PROT_WRITE) as u64) == 0
+                    && Vma::vma_validate(vma, va, 1, (VMA_FLAG_USER | PROT_WRITE) as u64) == 0
                 {
-                    vm_runlock((*p).vm);
+                    Vm::vm_runlock((*p).vm);
                 } else {
-                    vm_runlock((*p).vm);
+                    Vm::vm_runlock((*p).vm);
                     kassert!((*p).pid != 1, c"usertrap", c"init exiting");
                     crate::proc::Signal::kill((*p).pid, SIGSEGV);
                 }
@@ -1111,7 +1108,7 @@ pub(crate) extern "C" fn push_sigframe(
             if (*p).vm.is_null() {
                 Proc::exit(-1); // No stack area available
             }
-            if vm_try_growstack((*p).vm, new_sp) != 0 {
+            if Vm::vm_try_growstack((*p).vm, new_sp) != 0 {
                 Proc::exit(-1); // No stack area available
             }
         }
@@ -1160,7 +1157,7 @@ pub(crate) extern "C" fn push_sigframe(
         // enabled (matches the C original's TODO).
 
         // Copy the trap frame to the signal trap frame.
-        if vm_copyout(
+        if Vm::vm_copyout(
             (*p).vm,
             new_ucontext,
             &uc as *const Ucontext as *const c_void,
@@ -1170,7 +1167,7 @@ pub(crate) extern "C" fn push_sigframe(
             return -1; // Copy failed
         }
         if ((*sa).sa_flags & SA_SIGINFO) != 0 {
-            if vm_copyout(
+            if Vm::vm_copyout(
                 (*p).vm,
                 user_siginfo,
                 &(*info).info as *const siginfo_t as *const c_void,
@@ -1216,7 +1213,7 @@ pub(crate) extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext)
         }
 
         // Copy the signal trap frame back to the user trap frame.
-        if vm_copyin(
+        if Vm::vm_copyin(
             (*p).vm,
             ret_uc as *mut c_void,
             sig_ucontext,
@@ -1332,7 +1329,7 @@ pub(crate) extern "C" fn usertrapret() {
     // CPU.
     // SAFETY: `p` is the current thread; `vm` is its live address space.
     let (trapframe_base, satp) = unsafe {
-        let base = vm_cpu_online((*p).vm, machine::cpuid());
+        let base = Vm::vm_cpu_online((*p).vm, machine::cpuid());
         let satp = make_satp((*(*p).vm).pagetable);
         (base, satp)
     };

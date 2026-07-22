@@ -118,7 +118,7 @@ unsafe extern "C" {
 // them as `SyscallFn` (`extern "C" fn() -> u64`) fn-pointer values.
 use crate::mm::{
     sys_dumppcache, sys_madvise, sys_memstat, sys_mincore, sys_mmap, sys_mprotect, sys_mremap,
-    sys_msync, sys_munmap, sys_sync, vm_copyin, vm_copyinstr,
+    sys_msync, sys_munmap, sys_sync, Vm,
 };
 
 // ===========================================================================
@@ -142,7 +142,7 @@ pub(crate) fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
     // `syscall()` below); `ip` is caller-owned space for one `u64`, per this
     // function's C-ABI out-parameter contract.
     unsafe {
-        if vm_copyin((*p).vm, ip as *mut c_void, addr, size_of::<u64>() as u64) != 0 {
+        if Vm::vm_copyin((*p).vm, ip as *mut c_void, addr, size_of::<u64>() as u64) != 0 {
             return -1;
         }
     }
@@ -161,7 +161,7 @@ pub(crate) fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
     // nul-terminates `buf` on success (0 return), so `strlen` below reads a
     // valid nul-terminated string.
     unsafe {
-        if vm_copyinstr((*p).vm, buf, addr, max as u64) < 0 {
+        if Vm::vm_copyinstr((*p).vm, buf, addr, max as u64) < 0 {
             return -1;
         }
         strlen(buf) as c_int

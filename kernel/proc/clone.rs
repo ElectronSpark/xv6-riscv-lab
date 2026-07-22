@@ -127,11 +127,11 @@ use crate::lock::rcu::rcu_check_callbacks;
 // site discards the "return value", so the adapter returns `()`.
 #[inline]
 fn vm_dup(vm: *mut Vm) {
-    crate::mm::vm_dup(vm as *mut crate::bindings::vm)
+    crate::mm::vm::Vm::vm_dup(vm as *mut crate::bindings::vm)
 }
 #[inline]
 fn vm_copy(vm: *mut Vm) -> *mut Vm {
-    crate::mm::vm_copy(vm as *mut crate::bindings::vm) as *mut Vm
+    crate::mm::vm::Vm::vm_copy(vm as *mut crate::bindings::vm) as *mut Vm
 }
 
 // P3-D2b: the signal/thread-group/pgroup entry points (proc/{signal,

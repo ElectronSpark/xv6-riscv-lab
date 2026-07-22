@@ -161,10 +161,7 @@ use crate::irq::syscall::{argaddr, argstr, fetchaddr, fetchstr};
 // their `#[no_mangle]` exports are gone; reached as crate-path items
 // instead of the `extern "C"` redeclarations that used to sit in the
 // block above. Signatures are identical to the old redeclarations.
-use crate::mm::{
-    vm_copyout, vm_find_area, vm_init, vm_mmap_region_locked, vm_put, vm_rlock, vm_runlock,
-    vm_wlock, vm_wunlock, vma_validate,
-};
+use crate::mm::{Vm, Vma};
 
 // `kalloc`/`kfree` are genuinely `unsafe fn` in `crate::mm::kalloc`; this
 // file's original extern declarations asserted `safe fn` (the usual
@@ -404,7 +401,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // `macro_rules!` name resolution, not a hygiene violation).
     macro_rules! bad {
         () => {{
-            vm_put(tmp_vm);
+            Vm::vm_put(tmp_vm);
             if !file.is_null() {
                 vfs_fput(file);
             }
@@ -413,7 +410,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     }
     macro_rules! bad_locked {
         () => {{
-            vm_wunlock(tmp_vm);
+            Vm::vm_wunlock(tmp_vm);
             bad!();
         }};
     }
@@ -452,7 +449,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         bad!();
     }
 
-    tmp_vm = vm_init();
+    tmp_vm = Vm::vm_init();
     if tmp_vm.is_null() {
         bad!();
     }
@@ -460,8 +457,8 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // Because by this time no one else can see tmp_vm, we don't need to
     // worry about lock contention. But we still need to hold the write
     // lock to suppress assertions in vma_alloc() called by
-    // vm_mmap_region_locked().
-    vm_wlock(tmp_vm);
+    // Vm::vm_mmap_region_locked().
+    Vm::vm_wlock(tmp_vm);
 
     // Load program into memory using mmap for lazy demand paging.
     //
@@ -521,7 +518,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         // Region 1: file-backed mmap - pages are demand-paged from the
         // file's page cache on the first instruction/load/store fault.
         if file_pg_end > va {
-            let ret = vm_mmap_region_locked(
+            let ret = Vm::vm_mmap_region_locked(
                 tmp_vm,
                 va,
                 (file_pg_end - va) as usize,
@@ -561,7 +558,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
                 bad_locked!();
             }
 
-            let ret = vm_mmap_region_locked(tmp_vm, file_pg_end, PGSIZE as usize, vm_flags, ptr::null_mut(), 0, pa);
+            let ret = Vm::vm_mmap_region_locked(tmp_vm, file_pg_end, PGSIZE as usize, vm_flags, ptr::null_mut(), 0, pa);
             if ret != 0 {
                 kfree(pa);
                 bad_locked!();
@@ -571,7 +568,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         // Region 3: anonymous mmap for the remaining BSS pages. Faulted
         // in lazily as zero-filled pages.
         if total_end > anon_start {
-            let ret = vm_mmap_region_locked(
+            let ret = Vm::vm_mmap_region_locked(
                 tmp_vm,
                 anon_start,
                 (total_end - anon_start) as usize,
@@ -601,7 +598,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // Create heap via mmap (grows-up, demand-paged zero-fill).
     let heap_sz = pg_round_up(USERSTACK * PGSIZE as u64);
     heap_start = pg_round_up(heap_start);
-    if vm_mmap_region_locked(
+    if Vm::vm_mmap_region_locked(
         tmp_vm,
         heap_start,
         heap_sz as usize,
@@ -617,13 +614,13 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // published to any other thread/CPU — see the comment above
     // `vm_wlock` above); `heap`/`heap_size` are plain embedded fields.
     unsafe {
-        (*tmp_vm).heap = vm_find_area(tmp_vm, heap_start);
+        (*tmp_vm).heap = Vm::vm_find_area(tmp_vm, heap_start);
         (*tmp_vm).heap_size = heap_sz as usize;
     }
 
     // Create user stack via mmap (grows-down, demand-paged zero-fill).
     let stack_sz = pg_round_up(USERSTACK * PGSIZE as u64);
-    if vm_mmap_region_locked(
+    if Vm::vm_mmap_region_locked(
         tmp_vm,
         USTACKTOP - stack_sz,
         stack_sz as usize,
@@ -637,11 +634,11 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     }
     // SAFETY: see the heap field-write above.
     unsafe {
-        (*tmp_vm).stack = vm_find_area(tmp_vm, USTACKTOP - stack_sz);
+        (*tmp_vm).stack = Vm::vm_find_area(tmp_vm, USTACKTOP - stack_sz);
         (*tmp_vm).stack_size = stack_sz as usize;
     }
 
-    vm_wunlock(tmp_vm);
+    Vm::vm_wunlock(tmp_vm);
     let mut sp: u64 = USTACKTOP;
 
     // Preload pages near the entry point to avoid initial page faults.
@@ -651,8 +648,8 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         let entry_start = pg_round_down(elf.entry);
         let preload_size = EXEC_PRELOAD_PAGES * PGSIZE as u64;
 
-        vm_rlock(tmp_vm);
-        let entry_vma = vm_find_area(tmp_vm, entry_start);
+        Vm::vm_rlock(tmp_vm);
+        let entry_vma = Vm::vm_find_area(tmp_vm, entry_start);
         if !entry_vma.is_null() {
             // Clamp to VMA bounds.
             let mut preload_end = entry_start + preload_size;
@@ -663,9 +660,9 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
             if preload_end > vma_end {
                 preload_end = vma_end;
             }
-            vma_validate(entry_vma, entry_start, preload_end - entry_start, (PROT_READ | VMA_FLAG_USER) as u64);
+            Vma::vma_validate(entry_vma, entry_start, preload_end - entry_start, (PROT_READ | VMA_FLAG_USER) as u64);
         }
-        vm_runlock(tmp_vm);
+        Vm::vm_runlock(tmp_vm);
     }
 
     // Push argument strings, prepare rest of stack in ustack.
@@ -692,7 +689,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         if sp < stackbase {
             bad!();
         }
-        if vm_copyout(tmp_vm, sp, a as *const c_void, alen + 1) < 0 {
+        if Vm::vm_copyout(tmp_vm, sp, a as *const c_void, alen + 1) < 0 {
             bad!();
         }
         ustack[argc] = sp;
@@ -718,7 +715,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
             if sp < stackbase {
                 bad!();
             }
-            if vm_copyout(tmp_vm, sp, e as *const c_void, elen + 1) < 0 {
+            if Vm::vm_copyout(tmp_vm, sp, e as *const c_void, elen + 1) < 0 {
                 bad!();
             }
             ustack[argc + 2 + envc] = sp;
@@ -746,7 +743,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     if sp < stackbase {
         bad!();
     }
-    if vm_copyout(tmp_vm, sp, ustack.as_ptr() as *const c_void, (nslots * size_of::<u64>()) as u64) < 0 {
+    if Vm::vm_copyout(tmp_vm, sp, ustack.as_ptr() as *const c_void, (nslots * size_of::<u64>()) as u64) < 0 {
         bad!();
     }
 
@@ -788,7 +785,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // has passed every fallible step above and is about to become the
     // sole owner of the new address space.
     unsafe {
-        vm_put((*p).vm); // Destroy the old VM.
+        Vm::vm_put((*p).vm); // Destroy the old VM.
         (*p).vm = ptr::null_mut();
         (*p).vm = tmp_vm; // Set the new VM.
         (*(*p).trapframe).trapframe.sepc = elf.entry; // initial pc = _start

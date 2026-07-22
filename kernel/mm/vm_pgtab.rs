@@ -166,7 +166,8 @@ mod ffi {
 
         // printf is variadic, so it cannot be declared `safe`.
     }
-pub(crate) use crate::mm::vm::{__vm_pool_init, __vma_pool_init, xv6_vm_cpuid};
+pub(crate) use crate::mm::vm::xv6_vm_cpuid;
+pub(crate) use crate::mm::vm::{Vm, Vma};
 
     // The functions below are genuinely `unsafe fn`/`unsafe extern "C" fn`
     // in `crate::mm::{page,string}`; this file's original extern
@@ -393,12 +394,12 @@ fn page_is_pgtable(p: *mut Page) -> bool {
 pub(crate) static mut kernel_pagetable: *mut u64 = core::ptr::null_mut();
 
 fn kernel_pagetable_get() -> *mut u64 {
-    // SAFETY: addr-of read of a `static mut`; written once by `kvminit()`
+    // SAFETY: addr-of read of a `static mut`; written once by `PageTable::kvminit()`
     // on the single boot CPU before any other hart can observe it.
     unsafe { *(&raw const kernel_pagetable) }
 }
 fn kernel_pagetable_set(pt: *mut u64) {
-    // SAFETY: only `kvminit()` writes this, once, at boot.
+    // SAFETY: only `PageTable::kvminit()` writes this, once, at boot.
     unsafe { (&raw mut kernel_pagetable).write(pt) };
 }
 
@@ -462,7 +463,7 @@ impl Pte {
 // `PageTable` — typed handle around a 512-entry, page-aligned u64 array.
 // ---------------------------------------------------------------------------
 #[derive(Copy, Clone)]
-struct PageTable(NonNull<u64>);
+pub(crate) struct PageTable(NonNull<u64>);
 
 impl PageTable {
     /// SAFETY: `ptr` must point to a PGSIZE-aligned page of 512 u64 entries
@@ -501,388 +502,733 @@ impl PageTable {
         ffi::memset(self.0.as_ptr() as *mut c_void, 0, PGSIZE as usize);
     }
 }
+// ===========================================================================
+// impl PageTable (continued) — KERNEL-OO wave: former page-table free fns
+// (`walk`/`mappages`/`uvm*`/`kvm*` C-ABI entry points plus their private
+// `PageTable`-taking internal helpers) namespaced as associated fns
+// (8283168 strategy: bodies byte-identical, raw `*mut u64`/`PageTable`
+// params kept as-is -- not rebound to `self` -- PTE writes stay raw, the
+// hardware floor). A second `impl PageTable` block (Rust permits several
+// per type in one module); kept separate from the pre-existing accessor
+// block above to keep this wave's diff self-contained.
+// ===========================================================================
+impl PageTable {
+    fn pgtab_alloc() -> Option<PageTable> {
+        let pa = ffi::page_alloc(0, PAGE_TYPE_PGTABLE);
+        if pa.is_null() {
+            return None;
+        }
+        ffi::memset(pa, 0, PGSIZE as usize);
+        // SAFETY: `pa` was just checked non-null and is a freshly allocated,
+        // zeroed, PGSIZE page from `page_alloc`.
+        Some(unsafe { PageTable::from_raw(pa as *mut u64) })
+    }
+
+    fn pgtab_free(pt: PageTable) {
+        let pa = pt.as_ptr() as *mut c_void;
+        let page = ffi::__pa_to_page(pa as u64) as *mut Page;
+        if page.is_null() {
+            panic_vm(b"__pgtab_free: invalid page table address\0");
+        }
+            ffi::page_lock_acquire(page);
+            let is_pgtable = page_is_pgtable(page);
+            ffi::page_lock_release(page);
+            if !is_pgtable {
+                panic_vm(b"__pgtab_free: trying to free a non-pagetable page\0");
+            }
+            ffi::page_free(pa, 0);
+    }
+
+    /// Walk `va` through the Sv39 page table. Returns the L0 PTE pointer plus
+    /// the L2/L1 PTE pointers that led to it. With `alloc = false`, returns
+    /// `None` if any level is unmapped.
+    fn walk_internal(
+        root: PageTable,
+        va: u64,
+        alloc: bool,
+    ) -> Option<(*mut u64, *mut u64, *mut u64)> {
+        if va >= crate::bindings::MAXVA {
+            panic_vm(b"walk: va out of range\0");
+        }
+
+        let mut pt = root;
+        let mut l2_ptr: *mut u64 = core::ptr::null_mut();
+        let mut l1_ptr: *mut u64 = core::ptr::null_mut();
+
+        for level in (1..=2).rev() {
+            let idx = px(level as u32, va);
+            let pte_ptr = pt.entry_ptr(idx);
+            match level {
+                2 => l2_ptr = pte_ptr,
+                1 => l1_ptr = pte_ptr,
+                _ => {}
+            }
+            let pte = Pte(machine::pte_read(pte_ptr));
+            if pte.valid() {
+                // SAFETY: `pte.pa()` is a physical address extracted from a
+                // valid (`pte.valid()`) non-leaf PTE, i.e. it points at a
+                // page-table page previously installed by this same walk.
+                pt = unsafe { PageTable::from_pa(pte.pa()) };
+            } else if !alloc {
+                return None;
+            } else {
+                let new_pt = PageTable::pgtab_alloc()?;
+                new_pt.zero();
+                machine::pte_write(pte_ptr, pa2pte(new_pt.as_ptr() as u64) | PTE_V);
+                pt = new_pt;
+            }
+        }
+
+        Some((pt.entry_ptr(px(0, va)), l2_ptr, l1_ptr))
+    }
+
+    fn map_pages(root: PageTable, va: u64, size: u64, mut pa: u64, perm: i32) -> Result<(), crate::mm::cffi::Errno> {
+        if va % PGSIZE != 0 {
+            panic_mappages_va(va);
+        }
+        if size % PGSIZE != 0 {
+            panic_mappages_size(va, size);
+        }
+        if size == 0 {
+            panic_mappages_zero(va);
+        }
+
+        let last = va + size - PGSIZE;
+        let mut a = va;
+        loop {
+            let Some((pte_ptr, _, _)) = PageTable::walk_internal(root, a, true) else {
+                // ENOMEM partway through the range: `[va, a)` already has valid
+                // leaf PTEs installed by the loop iterations above, and the
+                // failed `PageTable::walk_internal(root, a, true)` call itself may have
+                // allocated (and linked in) an intermediate L1/L0 page-table
+                // page before failing one level deeper. Unwind both, instead of
+                // leaving live-but-unowned mappings plus orphaned page-table
+                // pages behind for the rest of this address space's lifetime.
+                PageTable::unwind_partial_map(root, va, a);
+                return Err(crate::mm::cffi::Errno::NoMem);
+            };
+            let pte = Pte(machine::pte_read(pte_ptr));
+            if pte.valid() {
+                panic_mappages_remap(a);
+            }
+            machine::pte_write(pte_ptr, pa2pte(pa) | (perm as u64) | PTE_V | PTE_A | PTE_D);
+            if a == last { break; }
+            a  += PGSIZE;
+            pa += PGSIZE;
+        }
+        Ok(())
+    }
+
+    /// Undo a failed `PageTable::map_pages(root, va, ..)` call: `fail_va` is the address
+    /// at which `walk_internal` first failed, so `[va, fail_va)` holds leaf
+    /// PTEs this same call installed successfully.
+    ///
+    /// Two things need cleaning up:
+    ///  1. The already-installed leaf PTEs in `[va, fail_va)`. These are
+    ///     cleared (not "freed" -- `map_pages` never owns the physical pages
+    ///     backing them; that's the caller's `pa` argument) so the range goes
+    ///     back to fully unmapped, matching what a caller would see had the
+    ///     call failed immediately.
+    ///  2. Any intermediate (L1/L0) page-table pages that are now completely
+    ///     empty as a result of step 1, including one that `walk_internal`
+    ///     may have allocated for `fail_va` itself before failing one level
+    ///     deeper (never linked to a leaf, but already linked into its own
+    ///     parent table).
+    ///
+    /// Freeing is gated purely on "now empty", not on "did this call allocate
+    /// it": an intermediate table can only be non-empty if something still
+    /// references one of its entries, so a table that reads back all-zero
+    /// after step 1 cannot be shared with any mapping outside this call -- pre-
+    /// existing neighbouring mappings in a boundary table simply keep it
+    /// non-empty and it is left untouched.
+    ///
+    /// No TLB/`sfence.vma` is needed: this whole range was never installed
+    /// successfully (that's why we're unwinding), so no hart -- this one
+    /// included -- could have translated through any of it yet.
+    fn unwind_partial_map(root: PageTable, va: u64, fail_va: u64) {
+        let mut a = va;
+        while a < fail_va {
+            // SAFETY-relevant invariant: every page in `[va, fail_va)` was
+            // just mapped by the loop in `map_pages` above, so this walk is
+            // guaranteed to resolve to the leaf PTE it wrote.
+            if let Some((pte_ptr, _, _)) = PageTable::walk_internal(root, a, false) {
+                machine::pte_write(pte_ptr, 0);
+            }
+            a += PGSIZE;
+        }
+
+        // Sweep every L0-table-sized (2MiB) region touched by this call --
+        // `[va, fail_va]`, inclusive of `fail_va` so the partially-built branch
+        // left behind by the failing walk (if any) is covered too.
+        const L0_SPAN: u64 = 1u64 << 21; // pxshift(1) == PGSHIFT + 9 == 21.
+        let mut region = va & !(L0_SPAN - 1);
+        let last_region = fail_va & !(L0_SPAN - 1);
+        loop {
+            PageTable::prune_empty_region(root, region);
+            if region >= last_region { break; }
+            region += L0_SPAN;
+        }
+    }
+
+    /// Free the L0 table covering `region` (a 2MiB-aligned VA) if every entry
+    /// in it now reads zero, then re-check its parent L1 table on the same
+    /// basis. No-op if nothing was ever walked down to `region`.
+    fn prune_empty_region(root: PageTable, region: u64) {
+        let l2_idx = px(2, region);
+        let l2_pte = root.entry(l2_idx);
+        if !l2_pte.valid() { return; }
+        // SAFETY: `l2_pte.pa()` is the pa of a valid, non-leaf L2 entry (xv6
+        // never installs Sv39 superpage leaves at this level), i.e. a live L1
+        // page-table page.
+        let l1_table = unsafe { PageTable::from_pa(l2_pte.pa()) };
+
+        let l1_idx = px(1, region);
+        let l1_pte = l1_table.entry(l1_idx);
+        if l1_pte.valid() {
+            // SAFETY: same reasoning one level down -- a valid, non-leaf L1
+            // entry, i.e. a live L0 page-table page.
+            let l0_table = unsafe { PageTable::from_pa(l1_pte.pa()) };
+            if PageTable::table_is_empty(l0_table) {
+                l1_table.set_entry(l1_idx, 0);
+                PageTable::pgtab_free(l0_table);
+            }
+        }
+        if PageTable::table_is_empty(l1_table) {
+            root.set_entry(l2_idx, 0);
+            PageTable::pgtab_free(l1_table);
+        }
+    }
+
+    fn table_is_empty(pt: PageTable) -> bool {
+        (0..512).all(|i| pt.entry(i).raw() == 0)
+    }
+
+    fn unmap_pages(root: PageTable, va: u64, npages: u64, do_free: bool) {
+        if va % PGSIZE != 0 {
+            panic_vm(b"uvmunmap: not aligned\0");
+        }
+        let end = va + npages * PGSIZE;
+        let mut a = va;
+        while a < end {
+            let Some((pte_ptr, _, _)) = PageTable::walk_internal(root, a, false) else {
+                panic_vm(b"uvmunmap: walk\0");
+            };
+            let pte = Pte(machine::pte_read(pte_ptr));
+            if !pte.valid() {
+                panic_uvmunmap_notmapped(a, pte.pa(), pte.flags());
+            }
+            if !pte.is_leaf() {
+                panic_vm(b"uvmunmap: not a leaf\0");
+            }
+            let pa = pte.pa();
+            machine::pte_write(pte_ptr, 0);
+            if do_free {
+                // SAFETY: `pa` is the physical address extracted from a valid
+                // leaf PTE (checked via `pte.valid()`/`pte.is_leaf()` above),
+                // i.e. a live mapped physical page; `pgtab_free` itself
+                // re-validates the page type and panics if it isn't a
+                // page-table page before freeing it.
+                PageTable::pgtab_free(unsafe { PageTable::from_pa(pa) });
+            }
+            a += PGSIZE;
+        }
+    }
+
+    fn freewalk_internal(pt: PageTable, skip_idx: Option<usize>) {
+        for i in 0..512usize {
+            if Some(i) == skip_idx { continue; }
+            let pte = pt.entry(i);
+            if pte.valid() && pte.0 & (PTE_R | PTE_W | PTE_RSW_W | PTE_X) == 0 {
+                // SAFETY: `pte.pa()` comes from a valid PTE with no R/W/X/COW
+                // bits set, i.e. a non-leaf entry pointing at a child
+                // page-table page.
+                let child = unsafe { PageTable::from_pa(pte.pa()) };
+                PageTable::freewalk_internal(child, None);
+                pt.set_entry(i, 0);
+            } else if pte.valid() {
+                panic_vm(b"freewalk: leaf\0");
+            }
+        }
+        PageTable::pgtab_free(pt);
+    }
+
+    pub(crate) fn walk(
+        pagetable: *mut u64,
+        va: u64,
+        alloc: c_int,
+        retl2: *mut *mut u64,
+        retl1: *mut *mut u64,
+    ) -> *mut u64 {
+        if pagetable.is_null() {
+            panic_vm(b"walk: pagetable is null\0");
+        }
+        // SAFETY: `pagetable` was just checked non-null; callers pass a live
+        // page-table root (kernel or a `PageTable::uvmcreate()`d user root).
+        let root = unsafe { PageTable::from_raw(pagetable) };
+        let Some((l0, l2, l1)) = PageTable::walk_internal(root, va, alloc != 0) else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: `retl2`/`retl1` are out-parameters from C; null-checked
+        // before each write, and when non-null they are valid `*mut u64`
+        // slots owned by the caller for the duration of this call.
+        unsafe {
+            if !retl2.is_null() { *retl2 = l2; }
+            if !retl1.is_null() { *retl1 = l1; }
+        }
+        l0
+    }
+
+    pub(crate) fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
+        if va >= crate::bindings::MAXVA {
+            return 0;
+        }
+        // SAFETY: `pagetable` is a live page-table root supplied by C (walk's
+        // C callers never pass a dangling/null root for a live process).
+        let root = unsafe { PageTable::from_raw(pagetable) };
+        let Some((pte_ptr, _, _)) = PageTable::walk_internal(root, va, false) else {
+            return 0;
+        };
+        // SAFETY: `pte_ptr` is the L0 PTE pointer `walk_internal` just
+        // resolved from `root`; it is valid for a read.
+        let pte = Pte(unsafe { *pte_ptr });
+        if !pte.valid() || !pte.user() { return 0; }
+        pte.pa()
+    }
+
+    pub(crate) fn kvmmap(
+        kpgtbl: *mut u64,
+        va: u64,
+        pa: u64,
+        sz: u64,
+        perm: c_int,
+    ) {
+        // SAFETY: `kpgtbl` is always the kernel pagetable root, live for the
+        // whole kernel lifetime once `kvminit` has allocated it.
+        let root = unsafe { PageTable::from_raw(kpgtbl) };
+        if PageTable::map_pages(root, va, sz, pa, perm).is_err() {
+            panic_vm(b"kvmmap\0");
+        }
+    }
+
+    pub(crate) fn mappages(
+        pagetable: *mut u64,
+        va: u64,
+        size: u64,
+        pa: u64,
+        perm: c_int,
+    ) -> c_int {
+        // SAFETY: caller supplies a live page-table root.
+        let root = unsafe { PageTable::from_raw(pagetable) };
+        // C-ABI boundary: convert `Result<(), Errno>` to a negative-errno
+        // `c_int` exactly once, here.
+        crate::mm::cffi::result_to_neg_errno(PageTable::map_pages(root, va, size, pa, perm))
+    }
+
+    pub(crate) fn uvmunmap(
+        pagetable: *mut u64,
+        va: u64,
+        npages: u64,
+        do_free: c_int,
+    ) {
+        // SAFETY: caller supplies a live page-table root.
+        let root = unsafe { PageTable::from_raw(pagetable) };
+        PageTable::unmap_pages(root, va, npages, do_free != 0);
+    }
+
+    pub(crate) fn uvmcreate() -> *mut u64 {
+        let Some(pt) = PageTable::pgtab_alloc() else { return core::ptr::null_mut() };
+        pt.zero();
+
+        // Copy trampoline PTE from kernel pagetable.
+        // SAFETY: `kernel_pagetable_get()` returns the kernel root set once by
+        // `PageTable::kvminit()` before any user pagetable can be created.
+        let kpt = unsafe { PageTable::from_raw(kernel_pagetable_get()) };
+        let idx = trampoline_pte_idx();
+        pt.set_entry(idx, kpt.entry(idx).raw());
+        pt.as_ptr()
+    }
+
+    pub(crate) fn freewalk(pagetable: *mut u64) {
+        // SAFETY: caller supplies a live page-table root about to be torn
+        // down (no more live mappings/refs into it).
+        let root = unsafe { PageTable::from_raw(pagetable) };
+        PageTable::freewalk_internal(root, Some(trampoline_pte_idx()));
+    }
+
+    pub(crate) fn uvmfree(pagetable: *mut u64, _sz: u64) {
+        PageTable::freewalk(pagetable);
+    }
+
+    pub(crate) fn kvminit() {
+        ffi::Vma::__vma_pool_init();
+        ffi::Vm::__vm_pool_init();
+        let kpt = PageTable::kvmmake();
+        kernel_pagetable_set(kpt);
+        set_trampoline_ksatp(make_satp(kpt));
+    }
+
+    pub(crate) fn kvminithart() {
+        xv6_vm_sfence_vma();
+        let satp = get_trampoline_ksatp();
+        w_satp(satp);
+        xv6_vm_sfence_vma();
+        printf_kvminithart(ffi::xv6_vm_cpuid() as u64, satp);
+    }
+
+    pub(crate) fn dump_pagetable(
+        pagetable: *mut u64,
+        level: c_int,
+        indent: c_int,
+        va_base: u64,
+        va_end: u64,
+        omit_pa: bool,
+    ) {
+        if !(0..=2).contains(&level) {
+            printf_invalid_level(level);
+            return;
+        }
+        // SAFETY: caller supplies a live page-table root (or, in the
+        // recursive call below, a `pa()` reached from a valid non-leaf PTE).
+        let pt = unsafe { PageTable::from_raw(pagetable) };
+        let kernbase = kernbase();
+        let physstop = physstop();
+
+        let idx_start = px(2, va_base) as i32;
+        let mut idx_end = 512i32;
+        if level == 2 && va_end != 0 {
+            idx_end = px(2, va_end) as i32;
+        }
+
+        if level == 0 {
+            let mut chunk_start: i32 = -1;
+            let mut chunk_va_start: u64 = 0;
+            let mut chunk_pa_start: u64 = 0;
+            let mut chunk_flags: u32 = 0;
+            let mut chunk_count: i32 = 0;
+
+            let mut i = idx_start;
+            while i <= idx_end {
+                let raw = if i < idx_end { pt.entry(i as usize).raw() } else { 0 };
+                let pte = Pte(raw);
+                let va = va_base | ((i as u64) << 12);
+                let pa = pte.pa();
+                let flags = (pte.flags() as u32)
+                    | (if pte.cow() { PTE_V as u32 } else { 0 });
+
+                let valid_entry = (i < idx_end)
+                    && (raw & (PTE_V | PTE_RSW_W)) != 0
+                    && !(omit_pa && va >= kernbase && va < physstop);
+
+                if valid_entry && chunk_start == -1 {
+                    chunk_start    = i;
+                    chunk_va_start = va;
+                    chunk_pa_start = pa;
+                    chunk_flags    = flags;
+                    chunk_count    = 1;
+                } else if valid_entry
+                    && chunk_start != -1
+                    && pa == chunk_pa_start + (chunk_count as u64 * PGSIZE)
+                    && flags == chunk_flags
+                {
+                    chunk_count += 1;
+                } else {
+                    if chunk_start != -1 {
+                        let cf = chunk_flags as u64;
+                        let sv  = flag_str(cf & PTE_V     != 0, b"V\0");
+                        let su  = flag_str(cf & PTE_U     != 0, b"U\0");
+                        let sw  = flag_str(cf & PTE_W     != 0, b"W\0");
+                        let sx  = flag_str(cf & PTE_X     != 0, b"X\0");
+                        let sr  = flag_str(cf & PTE_R     != 0, b"R\0");
+                        let src = flag_str(cf & PTE_RSW_W != 0, b"C\0");
+                        let flags_no_v = (chunk_flags as u64) & !PTE_V;
+
+                        if chunk_count == 1 {
+                            printf_dump_pte_single(
+                                indent, chunk_start,
+                                pt.entry_ptr(i as usize) as *mut c_void,
+                                flags_no_v, sv, su, sw, sx, sr, src,
+                                chunk_va_start, chunk_pa_start,
+                            );
+                        } else {
+                            printf_dump_pte_range(
+                                indent, chunk_start, chunk_start + chunk_count - 1,
+                                flags_no_v, sv, su, sw, sx, sr, src,
+                                chunk_va_start,
+                                chunk_va_start + (chunk_count as u64 - 1) * PGSIZE,
+                                chunk_pa_start,
+                                chunk_pa_start + (chunk_count as u64 - 1) * PGSIZE,
+                                chunk_count,
+                            );
+                        }
+                    }
+                    if valid_entry {
+                        chunk_start    = i;
+                        chunk_va_start = va;
+                        chunk_pa_start = pa;
+                        chunk_flags    = flags;
+                        chunk_count    = 1;
+                    } else {
+                        chunk_start = -1;
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            for i in idx_start..idx_end {
+                let pte = pt.entry(i as usize);
+                if pte.raw() & (PTE_V | PTE_RSW_W) == 0 { continue; }
+                let va = va_base | ((i as u64) << (12 + 9 * level));
+                if omit_pa && va >= kernbase && va < physstop { continue; }
+
+                let sv  = flag_str(pte.raw() & PTE_V     != 0, b"V\0");
+                let su  = flag_str(pte.raw() & PTE_U     != 0, b"U\0");
+                let sw  = flag_str(pte.raw() & PTE_W     != 0, b"W\0");
+                let sx  = flag_str(pte.raw() & PTE_X     != 0, b"X\0");
+                let sr  = flag_str(pte.raw() & PTE_R     != 0, b"R\0");
+                let src = flag_str(pte.raw() & PTE_RSW_W != 0, b"C\0");
+                printf_dump_pte_inner(
+                    indent, i, pt.entry_ptr(i as usize) as *mut c_void,
+                    pte.flags() as u32, sv, su, sw, sx, sr, src,
+                    va, pte.pa() as *mut c_void,
+                );
+                if level > 0 && pte.flags() == PTE_V {
+                    printf_colon_newline();
+                    PageTable::dump_pagetable(pte.pa() as *mut u64, level - 1, indent + 2, va, 0, omit_pa);
+                } else {
+                    printf_newline();
+                }
+            }
+        }
+    }
+
+    fn kvmmap_safe(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int) {
+        let mut off: u64 = 0;
+        while off < sz {
+            let pte = PageTable::walk(kpgtbl, va + off, 0, core::ptr::null_mut(), core::ptr::null_mut());
+            // SAFETY: `pte`, when non-null, is the L0 PTE pointer `walk` just
+            // resolved from the live kernel pagetable `kpgtbl`.
+            let already_mapped = !pte.is_null() && (unsafe { *pte } & PTE_V) != 0;
+            if already_mapped {
+                off += PGSIZE;
+                continue;
+            }
+            PageTable::kvmmap(kpgtbl, va + off, pa + off, PGSIZE, perm);
+            off += PGSIZE;
+        }
+    }
+
+    fn kvmmake() -> *mut u64 {
+        let kpgtbl = &raw const ffi::_data_ktlb as *mut u64;
+
+        ffi::memset(kpgtbl as *mut c_void, 0, PGSIZE as usize);
+
+        // UART.
+        let uart_page = pgrounddown(ffi::__uart0_mmio_base());
+        PageTable::kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, (PTE_R | PTE_W) as c_int);
+
+        // Goldfish RTC.
+        if ffi::__goldfish_rtc_mmio_base() != 0 {
+            PageTable::kvmmap(
+                kpgtbl, ffi::__goldfish_rtc_mmio_base(), ffi::__goldfish_rtc_mmio_base(),
+                PGSIZE, (PTE_R | PTE_W) as c_int,
+            );
+        }
+
+        // VirtIO devices.
+        if ffi::platform().has_virtio != 0 && ffi::platform().virtio_count > 0 {
+            let n = core::cmp::min(ffi::platform().virtio_count as usize, crate::bindings::N_VIRTIO as usize);
+            let limit = core::cmp::min(n, ffi::platform().virtio_base.len());
+            for i in 0..limit {
+                let base = ffi::platform().virtio_base[i];
+                if base != 0 {
+                    PageTable::kvmmap(kpgtbl, base, base, PGSIZE, (PTE_R | PTE_W) as c_int);
+                }
+            }
+        }
+
+        // PCIe regions.
+        if ffi::platform().has_pcie != 0 && ffi::__pcie_ecam_mmio_base() != 0 {
+            for i in 0..(ffi::platform().pcie_reg_count as usize) {
+                let reg = &ffi::platform().pcie_reg[i];
+                let base = reg.base;
+                let size = reg.size;
+                if base == 0 || size == 0 { continue; }
+                let aligned_base = pgrounddown(base);
+                let aligned_size = pgroundup(base + size) - aligned_base;
+                PageTable::kvmmap_safe(
+                    kpgtbl, aligned_base, aligned_base, aligned_size,
+                    (PTE_R | PTE_W) as c_int,
+                );
+            }
+            if ffi::platform().has_virtio != 0 && ffi::__e1000_pci_mmio_base() != 0 {
+                PageTable::kvmmap(
+                    kpgtbl, ffi::__e1000_pci_mmio_base(), ffi::__e1000_pci_mmio_base(),
+                    0x20000, (PTE_R | PTE_W) as c_int,
+                );
+            }
+        }
+
+        // PLIC.
+        if ffi::platform().plic_base != 0 && ffi::platform().plic_size != 0 {
+            PageTable::kvmmap(
+                kpgtbl, ffi::__plic_mmio_base(), ffi::__plic_mmio_base(),
+                ffi::platform().plic_size, (PTE_R | PTE_W) as c_int,
+            );
+        }
+
+        // EMAC.
+        if ffi::platform().has_emac != 0 {
+            let n = core::cmp::min(ffi::platform().emac_count as usize, crate::bindings::EMAC_MAX as usize);
+            let limit = core::cmp::min(n, ffi::platform().emac.len());
+            for i in 0..limit {
+                let e = &ffi::platform().emac[i];
+                if e.base != 0 && e.size != 0 {
+                    let base = pgrounddown(e.base);
+                    let size = pgroundup(e.base + e.size) - base;
+                    PageTable::kvmmap_safe(kpgtbl, base, base, size, (PTE_R | PTE_W) as c_int);
+                }
+                if e.apmu_base != 0 && e.ctrl_reg != 0 {
+                    let pg = pgrounddown(e.apmu_base as u64 + e.ctrl_reg as u64);
+                    PageTable::kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
+                }
+                if e.apmu_base != 0 && e.dline_reg != 0 {
+                    let pg = pgrounddown(e.apmu_base as u64 + e.dline_reg as u64);
+                    PageTable::kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
+                }
+            }
+        }
+
+        // SDHCI.
+        if ffi::platform().has_sdhci != 0 {
+            let n = core::cmp::min(ffi::platform().sdhci_count as usize, crate::bindings::SDHCI_MAX as usize);
+            let limit = core::cmp::min(n, ffi::platform().sdhci.len());
+            for i in 0..limit {
+                let s = &ffi::platform().sdhci[i];
+                if s.base != 0 && s.size != 0 {
+                    let base = pgrounddown(s.base);
+                    let size = pgroundup(s.base + s.size) - base;
+                    PageTable::kvmmap_safe(kpgtbl, base, base, size, (PTE_R | PTE_W) as c_int);
+                }
+                if s.apmu_base != 0 && s.apmu_offset != 0 {
+                    let pg = pgrounddown(s.apmu_base as u64 + s.apmu_offset as u64);
+                    PageTable::kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
+                }
+            }
+            if ffi::platform().sdhci_count > 0 && ffi::platform().sdhci[0].apbc_base != 0 {
+                let apbc_aib = ffi::platform().sdhci[0].apbc_base as u64 + 0x3C;
+                let pg = pgrounddown(apbc_aib);
+                PageTable::kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
+            }
+        }
+
+        // Kernel text.
+        let entry_addr = &raw const ffi::_entry as u64;
+        let etext_addr = &raw const ffi::etext as u64;
+        PageTable::kvmmap(
+            kpgtbl, entry_addr, entry_addr,
+            etext_addr - entry_addr,
+            (PTE_R | PTE_X) as c_int,
+        );
+
+        // Trampoline / per-cpu mapping.
+        let trampoline_addr = &raw const ffi::trampoline as u64;
+        let tramp_data_addr = &raw const ffi::_trampoline_data as u64;
+        let sig_tramp_addr  = &raw const ffi::sig_trampoline as u64;
+        let cpus_addr       = ffi::cpus_base();
+
+        PageTable::kvmmap(kpgtbl, TRAMPOLINE, trampoline_addr, PGSIZE, (PTE_R | PTE_X) as c_int);
+        PageTable::kvmmap(kpgtbl, TRAMPOLINE_DATA, tramp_data_addr, PGSIZE, PTE_R as c_int);
+        PageTable::kvmmap(kpgtbl, tramp_data_addr, tramp_data_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
+        PageTable::kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, cpus_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
+        PageTable::kvmmap(kpgtbl, cpus_addr, cpus_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
+        PageTable::kvmmap(
+            kpgtbl, SIG_TRAMPOLINE, sig_tramp_addr, PGSIZE,
+            (PTE_R | PTE_X | PTE_U) as c_int,
+        );
+
+        crate::kprintln!("trampoline 0x{:x} -> {}", TRAMPOLINE, crate::printf::Ptr(trampoline_addr));
+        crate::kprintln!("trampoline data 0x{:x} -> {}", TRAMPOLINE_DATA, crate::printf::Ptr(tramp_data_addr));
+        crate::kprintln!("trampoline cpu local 0x{:x} -> {}", TRAMPOLINE_CPULOCAL, crate::printf::Ptr(cpus_addr));
+        crate::kprintln!("signal trampoline 0x{:x} -> {}", SIG_TRAMPOLINE, crate::printf::Ptr(sig_tramp_addr));
+
+        // rodata / data / bss / remainder of physical memory.
+        let rodata_addr = &raw const ffi::_rodata as u64;
+        let rodata_end_addr = &raw const ffi::_rodata_end as u64;
+        let data_ktlb_addr = &raw const ffi::_data_ktlb as u64;
+        let data_addr = &raw const ffi::_data as u64;
+        let data_end_addr = &raw const ffi::_data_end as u64;
+        let bss_addr = &raw const ffi::_bss as u64;
+        let bss_end_addr = &raw const ffi::_bss_end as u64;
+
+        PageTable::kvmmap(kpgtbl, rodata_addr, rodata_addr, rodata_end_addr - rodata_addr, PTE_R as c_int);
+        PageTable::kvmmap(kpgtbl, data_ktlb_addr, data_ktlb_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
+        PageTable::kvmmap(kpgtbl, data_addr, data_addr, data_end_addr - data_addr, (PTE_R | PTE_W) as c_int);
+        PageTable::kvmmap(kpgtbl, bss_addr, bss_addr, bss_end_addr - bss_addr, (PTE_R | PTE_W) as c_int);
+        PageTable::kvmmap(
+            kpgtbl, bss_end_addr, bss_end_addr,
+            ffi::__physical_memory_end() - bss_end_addr,
+            (PTE_R | PTE_W) as c_int,
+        );
+
+        // Kernel symbols sections.
+        let ksym_start = &raw const ffi::_ksymbols_start as u64;
+        let ksym_end = &raw const ffi::_ksymbols_end as u64;
+        let ksym_size = ksym_end - ksym_start;
+        if ksym_size > 0 {
+            PageTable::kvmmap(kpgtbl, ksym_start, ksym_start, ksym_size, PTE_R as c_int);
+            crate::kprintln!("kernel symbols 0x{:x} - 0x{:x} (size: {})", ksym_start, ksym_end, ksym_size);
+        }
+
+        let ksym_idx_start = &raw const ffi::_ksymbols_idx_start as u64;
+        let ksym_idx_end = &raw const ffi::_ksymbols_idx_end as u64;
+        let ksym_idx_size = ksym_idx_end - ksym_idx_start;
+        if ksym_idx_size > 0 {
+            crate::kprintln!("kernel symbols index 0x{:x} - 0x{:x} (size: {})", ksym_idx_start, ksym_idx_end, ksym_idx_size);
+        }
+
+        kpgtbl
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Pagetable-page (de)allocation.
 // ---------------------------------------------------------------------------
-fn pgtab_alloc() -> Option<PageTable> {
-    let pa = ffi::page_alloc(0, PAGE_TYPE_PGTABLE);
-    if pa.is_null() {
-        return None;
-    }
-    ffi::memset(pa, 0, PGSIZE as usize);
-    // SAFETY: `pa` was just checked non-null and is a freshly allocated,
-    // zeroed, PGSIZE page from `page_alloc`.
-    Some(unsafe { PageTable::from_raw(pa as *mut u64) })
-}
 
-fn pgtab_free(pt: PageTable) {
-    let pa = pt.as_ptr() as *mut c_void;
-    let page = ffi::__pa_to_page(pa as u64) as *mut Page;
-    if page.is_null() {
-        panic_vm(b"__pgtab_free: invalid page table address\0");
-    }
-        ffi::page_lock_acquire(page);
-        let is_pgtable = page_is_pgtable(page);
-        ffi::page_lock_release(page);
-        if !is_pgtable {
-            panic_vm(b"__pgtab_free: trying to free a non-pagetable page\0");
-        }
-        ffi::page_free(pa, 0);
-}
 
 // ---------------------------------------------------------------------------
 // Walk implementation.
 // ---------------------------------------------------------------------------
 
-/// Walk `va` through the Sv39 page table. Returns the L0 PTE pointer plus
-/// the L2/L1 PTE pointers that led to it. With `alloc = false`, returns
-/// `None` if any level is unmapped.
-fn walk_internal(
-    root: PageTable,
-    va: u64,
-    alloc: bool,
-) -> Option<(*mut u64, *mut u64, *mut u64)> {
-    if va >= crate::bindings::MAXVA {
-        panic_vm(b"walk: va out of range\0");
-    }
-
-    let mut pt = root;
-    let mut l2_ptr: *mut u64 = core::ptr::null_mut();
-    let mut l1_ptr: *mut u64 = core::ptr::null_mut();
-
-    for level in (1..=2).rev() {
-        let idx = px(level as u32, va);
-        let pte_ptr = pt.entry_ptr(idx);
-        match level {
-            2 => l2_ptr = pte_ptr,
-            1 => l1_ptr = pte_ptr,
-            _ => {}
-        }
-        let pte = Pte(machine::pte_read(pte_ptr));
-        if pte.valid() {
-            // SAFETY: `pte.pa()` is a physical address extracted from a
-            // valid (`pte.valid()`) non-leaf PTE, i.e. it points at a
-            // page-table page previously installed by this same walk.
-            pt = unsafe { PageTable::from_pa(pte.pa()) };
-        } else if !alloc {
-            return None;
-        } else {
-            let new_pt = pgtab_alloc()?;
-            new_pt.zero();
-            machine::pte_write(pte_ptr, pa2pte(new_pt.as_ptr() as u64) | PTE_V);
-            pt = new_pt;
-        }
-    }
-
-    Some((pt.entry_ptr(px(0, va)), l2_ptr, l1_ptr))
-}
 
 // ---------------------------------------------------------------------------
 // Internal mapping helpers (safe variants).
 // ---------------------------------------------------------------------------
 
-fn map_pages(root: PageTable, va: u64, size: u64, mut pa: u64, perm: i32) -> Result<(), crate::mm::cffi::Errno> {
-    if va % PGSIZE != 0 {
-        panic_mappages_va(va);
-    }
-    if size % PGSIZE != 0 {
-        panic_mappages_size(va, size);
-    }
-    if size == 0 {
-        panic_mappages_zero(va);
-    }
 
-    let last = va + size - PGSIZE;
-    let mut a = va;
-    loop {
-        let Some((pte_ptr, _, _)) = walk_internal(root, a, true) else {
-            // ENOMEM partway through the range: `[va, a)` already has valid
-            // leaf PTEs installed by the loop iterations above, and the
-            // failed `walk_internal(root, a, true)` call itself may have
-            // allocated (and linked in) an intermediate L1/L0 page-table
-            // page before failing one level deeper. Unwind both, instead of
-            // leaving live-but-unowned mappings plus orphaned page-table
-            // pages behind for the rest of this address space's lifetime.
-            unwind_partial_map(root, va, a);
-            return Err(crate::mm::cffi::Errno::NoMem);
-        };
-        let pte = Pte(machine::pte_read(pte_ptr));
-        if pte.valid() {
-            panic_mappages_remap(a);
-        }
-        machine::pte_write(pte_ptr, pa2pte(pa) | (perm as u64) | PTE_V | PTE_A | PTE_D);
-        if a == last { break; }
-        a  += PGSIZE;
-        pa += PGSIZE;
-    }
-    Ok(())
-}
 
-/// Undo a failed `map_pages(root, va, ..)` call: `fail_va` is the address
-/// at which `walk_internal` first failed, so `[va, fail_va)` holds leaf
-/// PTEs this same call installed successfully.
-///
-/// Two things need cleaning up:
-///  1. The already-installed leaf PTEs in `[va, fail_va)`. These are
-///     cleared (not "freed" -- `map_pages` never owns the physical pages
-///     backing them; that's the caller's `pa` argument) so the range goes
-///     back to fully unmapped, matching what a caller would see had the
-///     call failed immediately.
-///  2. Any intermediate (L1/L0) page-table pages that are now completely
-///     empty as a result of step 1, including one that `walk_internal`
-///     may have allocated for `fail_va` itself before failing one level
-///     deeper (never linked to a leaf, but already linked into its own
-///     parent table).
-///
-/// Freeing is gated purely on "now empty", not on "did this call allocate
-/// it": an intermediate table can only be non-empty if something still
-/// references one of its entries, so a table that reads back all-zero
-/// after step 1 cannot be shared with any mapping outside this call -- pre-
-/// existing neighbouring mappings in a boundary table simply keep it
-/// non-empty and it is left untouched.
-///
-/// No TLB/`sfence.vma` is needed: this whole range was never installed
-/// successfully (that's why we're unwinding), so no hart -- this one
-/// included -- could have translated through any of it yet.
-fn unwind_partial_map(root: PageTable, va: u64, fail_va: u64) {
-    let mut a = va;
-    while a < fail_va {
-        // SAFETY-relevant invariant: every page in `[va, fail_va)` was
-        // just mapped by the loop in `map_pages` above, so this walk is
-        // guaranteed to resolve to the leaf PTE it wrote.
-        if let Some((pte_ptr, _, _)) = walk_internal(root, a, false) {
-            machine::pte_write(pte_ptr, 0);
-        }
-        a += PGSIZE;
-    }
 
-    // Sweep every L0-table-sized (2MiB) region touched by this call --
-    // `[va, fail_va]`, inclusive of `fail_va` so the partially-built branch
-    // left behind by the failing walk (if any) is covered too.
-    const L0_SPAN: u64 = 1u64 << 21; // pxshift(1) == PGSHIFT + 9 == 21.
-    let mut region = va & !(L0_SPAN - 1);
-    let last_region = fail_va & !(L0_SPAN - 1);
-    loop {
-        prune_empty_region(root, region);
-        if region >= last_region { break; }
-        region += L0_SPAN;
-    }
-}
 
-/// Free the L0 table covering `region` (a 2MiB-aligned VA) if every entry
-/// in it now reads zero, then re-check its parent L1 table on the same
-/// basis. No-op if nothing was ever walked down to `region`.
-fn prune_empty_region(root: PageTable, region: u64) {
-    let l2_idx = px(2, region);
-    let l2_pte = root.entry(l2_idx);
-    if !l2_pte.valid() { return; }
-    // SAFETY: `l2_pte.pa()` is the pa of a valid, non-leaf L2 entry (xv6
-    // never installs Sv39 superpage leaves at this level), i.e. a live L1
-    // page-table page.
-    let l1_table = unsafe { PageTable::from_pa(l2_pte.pa()) };
 
-    let l1_idx = px(1, region);
-    let l1_pte = l1_table.entry(l1_idx);
-    if l1_pte.valid() {
-        // SAFETY: same reasoning one level down -- a valid, non-leaf L1
-        // entry, i.e. a live L0 page-table page.
-        let l0_table = unsafe { PageTable::from_pa(l1_pte.pa()) };
-        if table_is_empty(l0_table) {
-            l1_table.set_entry(l1_idx, 0);
-            pgtab_free(l0_table);
-        }
-    }
-    if table_is_empty(l1_table) {
-        root.set_entry(l2_idx, 0);
-        pgtab_free(l1_table);
-    }
-}
-
-fn table_is_empty(pt: PageTable) -> bool {
-    (0..512).all(|i| pt.entry(i).raw() == 0)
-}
-
-fn unmap_pages(root: PageTable, va: u64, npages: u64, do_free: bool) {
-    if va % PGSIZE != 0 {
-        panic_vm(b"uvmunmap: not aligned\0");
-    }
-    let end = va + npages * PGSIZE;
-    let mut a = va;
-    while a < end {
-        let Some((pte_ptr, _, _)) = walk_internal(root, a, false) else {
-            panic_vm(b"uvmunmap: walk\0");
-        };
-        let pte = Pte(machine::pte_read(pte_ptr));
-        if !pte.valid() {
-            panic_uvmunmap_notmapped(a, pte.pa(), pte.flags());
-        }
-        if !pte.is_leaf() {
-            panic_vm(b"uvmunmap: not a leaf\0");
-        }
-        let pa = pte.pa();
-        machine::pte_write(pte_ptr, 0);
-        if do_free {
-            // SAFETY: `pa` is the physical address extracted from a valid
-            // leaf PTE (checked via `pte.valid()`/`pte.is_leaf()` above),
-            // i.e. a live mapped physical page; `pgtab_free` itself
-            // re-validates the page type and panics if it isn't a
-            // page-table page before freeing it.
-            pgtab_free(unsafe { PageTable::from_pa(pa) });
-        }
-        a += PGSIZE;
-    }
-}
-
-fn freewalk_internal(pt: PageTable, skip_idx: Option<usize>) {
-    for i in 0..512usize {
-        if Some(i) == skip_idx { continue; }
-        let pte = pt.entry(i);
-        if pte.valid() && pte.0 & (PTE_R | PTE_W | PTE_RSW_W | PTE_X) == 0 {
-            // SAFETY: `pte.pa()` comes from a valid PTE with no R/W/X/COW
-            // bits set, i.e. a non-leaf entry pointing at a child
-            // page-table page.
-            let child = unsafe { PageTable::from_pa(pte.pa()) };
-            freewalk_internal(child, None);
-            pt.set_entry(i, 0);
-        } else if pte.valid() {
-            panic_vm(b"freewalk: leaf\0");
-        }
-    }
-    pgtab_free(pt);
-}
 
 // ---------------------------------------------------------------------------
 // Public C ABI — thin wrappers.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn walk(
-    pagetable: *mut u64,
-    va: u64,
-    alloc: c_int,
-    retl2: *mut *mut u64,
-    retl1: *mut *mut u64,
-) -> *mut u64 {
-    if pagetable.is_null() {
-        panic_vm(b"walk: pagetable is null\0");
-    }
-    // SAFETY: `pagetable` was just checked non-null; callers pass a live
-    // page-table root (kernel or a `uvmcreate()`d user root).
-    let root = unsafe { PageTable::from_raw(pagetable) };
-    let Some((l0, l2, l1)) = walk_internal(root, va, alloc != 0) else {
-        return core::ptr::null_mut();
-    };
-    // SAFETY: `retl2`/`retl1` are out-parameters from C; null-checked
-    // before each write, and when non-null they are valid `*mut u64`
-    // slots owned by the caller for the duration of this call.
-    unsafe {
-        if !retl2.is_null() { *retl2 = l2; }
-        if !retl1.is_null() { *retl1 = l1; }
-    }
-    l0
-}
 
-pub(crate) fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
-    if va >= crate::bindings::MAXVA {
-        return 0;
-    }
-    // SAFETY: `pagetable` is a live page-table root supplied by C (walk's
-    // C callers never pass a dangling/null root for a live process).
-    let root = unsafe { PageTable::from_raw(pagetable) };
-    let Some((pte_ptr, _, _)) = walk_internal(root, va, false) else {
-        return 0;
-    };
-    // SAFETY: `pte_ptr` is the L0 PTE pointer `walk_internal` just
-    // resolved from `root`; it is valid for a read.
-    let pte = Pte(unsafe { *pte_ptr });
-    if !pte.valid() || !pte.user() { return 0; }
-    pte.pa()
-}
 
 // P3-D3c: `#[no_mangle] extern "C"` dropped -- callers (`irq/trap.rs` and
 // this file) reach it by crate path now.
-pub(crate) fn kvmmap(
-    kpgtbl: *mut u64,
-    va: u64,
-    pa: u64,
-    sz: u64,
-    perm: c_int,
-) {
-    // SAFETY: `kpgtbl` is always the kernel pagetable root, live for the
-    // whole kernel lifetime once `kvminit` has allocated it.
-    let root = unsafe { PageTable::from_raw(kpgtbl) };
-    if map_pages(root, va, sz, pa, perm).is_err() {
-        panic_vm(b"kvmmap\0");
-    }
-}
 
-pub(crate) fn mappages(
-    pagetable: *mut u64,
-    va: u64,
-    size: u64,
-    pa: u64,
-    perm: c_int,
-) -> c_int {
-    // SAFETY: caller supplies a live page-table root.
-    let root = unsafe { PageTable::from_raw(pagetable) };
-    // C-ABI boundary: convert `Result<(), Errno>` to a negative-errno
-    // `c_int` exactly once, here.
-    crate::mm::cffi::result_to_neg_errno(map_pages(root, va, size, pa, perm))
-}
 
-pub(crate) fn uvmunmap(
-    pagetable: *mut u64,
-    va: u64,
-    npages: u64,
-    do_free: c_int,
-) {
-    // SAFETY: caller supplies a live page-table root.
-    let root = unsafe { PageTable::from_raw(pagetable) };
-    unmap_pages(root, va, npages, do_free != 0);
-}
 
-pub(crate) fn uvmcreate() -> *mut u64 {
-    let Some(pt) = pgtab_alloc() else { return core::ptr::null_mut() };
-    pt.zero();
 
-    // Copy trampoline PTE from kernel pagetable.
-    // SAFETY: `kernel_pagetable_get()` returns the kernel root set once by
-    // `kvminit()` before any user pagetable can be created.
-    let kpt = unsafe { PageTable::from_raw(kernel_pagetable_get()) };
-    let idx = trampoline_pte_idx();
-    pt.set_entry(idx, kpt.entry(idx).raw());
-    pt.as_ptr()
-}
 
-pub(crate) fn freewalk(pagetable: *mut u64) {
-    // SAFETY: caller supplies a live page-table root about to be torn
-    // down (no more live mappings/refs into it).
-    let root = unsafe { PageTable::from_raw(pagetable) };
-    freewalk_internal(root, Some(trampoline_pte_idx()));
-}
-
-pub(crate) fn uvmfree(pagetable: *mut u64, _sz: u64) {
-    freewalk(pagetable);
-}
 
 // P3-D3c: `#[no_mangle] extern "C"` dropped -- the only external caller
 // (`start_kernel.rs`) imports it by crate path.
-pub(crate) fn kvminit() {
-    ffi::__vma_pool_init();
-    ffi::__vm_pool_init();
-    let kpt = kvmmake();
-    kernel_pagetable_set(kpt);
-    set_trampoline_ksatp(make_satp(kpt));
-}
 
 // P3-D3c: same demotion as `kvminit` above.
-pub(crate) fn kvminithart() {
-    xv6_vm_sfence_vma();
-    let satp = get_trampoline_ksatp();
-    w_satp(satp);
-    xv6_vm_sfence_vma();
-    printf_kvminithart(ffi::xv6_vm_cpuid() as u64, satp);
-}
 
 pub(crate) fn vm_dump_flags(
     flags: u64,
@@ -910,131 +1256,6 @@ fn flag_str(flag_set: bool, letter: &'static [u8]) -> *const c_char {
     if flag_set { letter.as_ptr() as *const c_char } else { b" \0".as_ptr() as *const c_char }
 }
 
-pub(crate) fn dump_pagetable(
-    pagetable: *mut u64,
-    level: c_int,
-    indent: c_int,
-    va_base: u64,
-    va_end: u64,
-    omit_pa: bool,
-) {
-    if !(0..=2).contains(&level) {
-        printf_invalid_level(level);
-        return;
-    }
-    // SAFETY: caller supplies a live page-table root (or, in the
-    // recursive call below, a `pa()` reached from a valid non-leaf PTE).
-    let pt = unsafe { PageTable::from_raw(pagetable) };
-    let kernbase = kernbase();
-    let physstop = physstop();
-
-    let idx_start = px(2, va_base) as i32;
-    let mut idx_end = 512i32;
-    if level == 2 && va_end != 0 {
-        idx_end = px(2, va_end) as i32;
-    }
-
-    if level == 0 {
-        let mut chunk_start: i32 = -1;
-        let mut chunk_va_start: u64 = 0;
-        let mut chunk_pa_start: u64 = 0;
-        let mut chunk_flags: u32 = 0;
-        let mut chunk_count: i32 = 0;
-
-        let mut i = idx_start;
-        while i <= idx_end {
-            let raw = if i < idx_end { pt.entry(i as usize).raw() } else { 0 };
-            let pte = Pte(raw);
-            let va = va_base | ((i as u64) << 12);
-            let pa = pte.pa();
-            let flags = (pte.flags() as u32)
-                | (if pte.cow() { PTE_V as u32 } else { 0 });
-
-            let valid_entry = (i < idx_end)
-                && (raw & (PTE_V | PTE_RSW_W)) != 0
-                && !(omit_pa && va >= kernbase && va < physstop);
-
-            if valid_entry && chunk_start == -1 {
-                chunk_start    = i;
-                chunk_va_start = va;
-                chunk_pa_start = pa;
-                chunk_flags    = flags;
-                chunk_count    = 1;
-            } else if valid_entry
-                && chunk_start != -1
-                && pa == chunk_pa_start + (chunk_count as u64 * PGSIZE)
-                && flags == chunk_flags
-            {
-                chunk_count += 1;
-            } else {
-                if chunk_start != -1 {
-                    let cf = chunk_flags as u64;
-                    let sv  = flag_str(cf & PTE_V     != 0, b"V\0");
-                    let su  = flag_str(cf & PTE_U     != 0, b"U\0");
-                    let sw  = flag_str(cf & PTE_W     != 0, b"W\0");
-                    let sx  = flag_str(cf & PTE_X     != 0, b"X\0");
-                    let sr  = flag_str(cf & PTE_R     != 0, b"R\0");
-                    let src = flag_str(cf & PTE_RSW_W != 0, b"C\0");
-                    let flags_no_v = (chunk_flags as u64) & !PTE_V;
-
-                    if chunk_count == 1 {
-                        printf_dump_pte_single(
-                            indent, chunk_start,
-                            pt.entry_ptr(i as usize) as *mut c_void,
-                            flags_no_v, sv, su, sw, sx, sr, src,
-                            chunk_va_start, chunk_pa_start,
-                        );
-                    } else {
-                        printf_dump_pte_range(
-                            indent, chunk_start, chunk_start + chunk_count - 1,
-                            flags_no_v, sv, su, sw, sx, sr, src,
-                            chunk_va_start,
-                            chunk_va_start + (chunk_count as u64 - 1) * PGSIZE,
-                            chunk_pa_start,
-                            chunk_pa_start + (chunk_count as u64 - 1) * PGSIZE,
-                            chunk_count,
-                        );
-                    }
-                }
-                if valid_entry {
-                    chunk_start    = i;
-                    chunk_va_start = va;
-                    chunk_pa_start = pa;
-                    chunk_flags    = flags;
-                    chunk_count    = 1;
-                } else {
-                    chunk_start = -1;
-                }
-            }
-            i += 1;
-        }
-    } else {
-        for i in idx_start..idx_end {
-            let pte = pt.entry(i as usize);
-            if pte.raw() & (PTE_V | PTE_RSW_W) == 0 { continue; }
-            let va = va_base | ((i as u64) << (12 + 9 * level));
-            if omit_pa && va >= kernbase && va < physstop { continue; }
-
-            let sv  = flag_str(pte.raw() & PTE_V     != 0, b"V\0");
-            let su  = flag_str(pte.raw() & PTE_U     != 0, b"U\0");
-            let sw  = flag_str(pte.raw() & PTE_W     != 0, b"W\0");
-            let sx  = flag_str(pte.raw() & PTE_X     != 0, b"X\0");
-            let sr  = flag_str(pte.raw() & PTE_R     != 0, b"R\0");
-            let src = flag_str(pte.raw() & PTE_RSW_W != 0, b"C\0");
-            printf_dump_pte_inner(
-                indent, i, pt.entry_ptr(i as usize) as *mut c_void,
-                pte.flags() as u32, sv, su, sw, sx, sr, src,
-                va, pte.pa() as *mut c_void,
-            );
-            if level > 0 && pte.flags() == PTE_V {
-                printf_colon_newline();
-                dump_pagetable(pte.pa() as *mut u64, level - 1, indent + 2, va, 0, omit_pa);
-            } else {
-                printf_newline();
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // kvmmap_safe + kvmmake -- previously in the deleted `vm_pgtab_shims.rs`.
@@ -1049,190 +1270,4 @@ const TRAMPOLINE_DATA: u64 = TRAMPOLINE - PGSIZE;
 const TRAMPOLINE_CPULOCAL: u64 = TRAMPOLINE - PGSIZE * 2;
 const SIG_TRAMPOLINE: u64 = TRAMPOLINE - PGSIZE * 3;
 
-fn kvmmap_safe(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int) {
-    let mut off: u64 = 0;
-    while off < sz {
-        let pte = walk(kpgtbl, va + off, 0, core::ptr::null_mut(), core::ptr::null_mut());
-        // SAFETY: `pte`, when non-null, is the L0 PTE pointer `walk` just
-        // resolved from the live kernel pagetable `kpgtbl`.
-        let already_mapped = !pte.is_null() && (unsafe { *pte } & PTE_V) != 0;
-        if already_mapped {
-            off += PGSIZE;
-            continue;
-        }
-        kvmmap(kpgtbl, va + off, pa + off, PGSIZE, perm);
-        off += PGSIZE;
-    }
-}
 
-fn kvmmake() -> *mut u64 {
-    let kpgtbl = &raw const ffi::_data_ktlb as *mut u64;
-
-    ffi::memset(kpgtbl as *mut c_void, 0, PGSIZE as usize);
-
-    // UART.
-    let uart_page = pgrounddown(ffi::__uart0_mmio_base());
-    kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, (PTE_R | PTE_W) as c_int);
-
-    // Goldfish RTC.
-    if ffi::__goldfish_rtc_mmio_base() != 0 {
-        kvmmap(
-            kpgtbl, ffi::__goldfish_rtc_mmio_base(), ffi::__goldfish_rtc_mmio_base(),
-            PGSIZE, (PTE_R | PTE_W) as c_int,
-        );
-    }
-
-    // VirtIO devices.
-    if ffi::platform().has_virtio != 0 && ffi::platform().virtio_count > 0 {
-        let n = core::cmp::min(ffi::platform().virtio_count as usize, crate::bindings::N_VIRTIO as usize);
-        let limit = core::cmp::min(n, ffi::platform().virtio_base.len());
-        for i in 0..limit {
-            let base = ffi::platform().virtio_base[i];
-            if base != 0 {
-                kvmmap(kpgtbl, base, base, PGSIZE, (PTE_R | PTE_W) as c_int);
-            }
-        }
-    }
-
-    // PCIe regions.
-    if ffi::platform().has_pcie != 0 && ffi::__pcie_ecam_mmio_base() != 0 {
-        for i in 0..(ffi::platform().pcie_reg_count as usize) {
-            let reg = &ffi::platform().pcie_reg[i];
-            let base = reg.base;
-            let size = reg.size;
-            if base == 0 || size == 0 { continue; }
-            let aligned_base = pgrounddown(base);
-            let aligned_size = pgroundup(base + size) - aligned_base;
-            kvmmap_safe(
-                kpgtbl, aligned_base, aligned_base, aligned_size,
-                (PTE_R | PTE_W) as c_int,
-            );
-        }
-        if ffi::platform().has_virtio != 0 && ffi::__e1000_pci_mmio_base() != 0 {
-            kvmmap(
-                kpgtbl, ffi::__e1000_pci_mmio_base(), ffi::__e1000_pci_mmio_base(),
-                0x20000, (PTE_R | PTE_W) as c_int,
-            );
-        }
-    }
-
-    // PLIC.
-    if ffi::platform().plic_base != 0 && ffi::platform().plic_size != 0 {
-        kvmmap(
-            kpgtbl, ffi::__plic_mmio_base(), ffi::__plic_mmio_base(),
-            ffi::platform().plic_size, (PTE_R | PTE_W) as c_int,
-        );
-    }
-
-    // EMAC.
-    if ffi::platform().has_emac != 0 {
-        let n = core::cmp::min(ffi::platform().emac_count as usize, crate::bindings::EMAC_MAX as usize);
-        let limit = core::cmp::min(n, ffi::platform().emac.len());
-        for i in 0..limit {
-            let e = &ffi::platform().emac[i];
-            if e.base != 0 && e.size != 0 {
-                let base = pgrounddown(e.base);
-                let size = pgroundup(e.base + e.size) - base;
-                kvmmap_safe(kpgtbl, base, base, size, (PTE_R | PTE_W) as c_int);
-            }
-            if e.apmu_base != 0 && e.ctrl_reg != 0 {
-                let pg = pgrounddown(e.apmu_base as u64 + e.ctrl_reg as u64);
-                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
-            }
-            if e.apmu_base != 0 && e.dline_reg != 0 {
-                let pg = pgrounddown(e.apmu_base as u64 + e.dline_reg as u64);
-                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
-            }
-        }
-    }
-
-    // SDHCI.
-    if ffi::platform().has_sdhci != 0 {
-        let n = core::cmp::min(ffi::platform().sdhci_count as usize, crate::bindings::SDHCI_MAX as usize);
-        let limit = core::cmp::min(n, ffi::platform().sdhci.len());
-        for i in 0..limit {
-            let s = &ffi::platform().sdhci[i];
-            if s.base != 0 && s.size != 0 {
-                let base = pgrounddown(s.base);
-                let size = pgroundup(s.base + s.size) - base;
-                kvmmap_safe(kpgtbl, base, base, size, (PTE_R | PTE_W) as c_int);
-            }
-            if s.apmu_base != 0 && s.apmu_offset != 0 {
-                let pg = pgrounddown(s.apmu_base as u64 + s.apmu_offset as u64);
-                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
-            }
-        }
-        if ffi::platform().sdhci_count > 0 && ffi::platform().sdhci[0].apbc_base != 0 {
-            let apbc_aib = ffi::platform().sdhci[0].apbc_base as u64 + 0x3C;
-            let pg = pgrounddown(apbc_aib);
-            kvmmap_safe(kpgtbl, pg, pg, PGSIZE, (PTE_R | PTE_W) as c_int);
-        }
-    }
-
-    // Kernel text.
-    let entry_addr = &raw const ffi::_entry as u64;
-    let etext_addr = &raw const ffi::etext as u64;
-    kvmmap(
-        kpgtbl, entry_addr, entry_addr,
-        etext_addr - entry_addr,
-        (PTE_R | PTE_X) as c_int,
-    );
-
-    // Trampoline / per-cpu mapping.
-    let trampoline_addr = &raw const ffi::trampoline as u64;
-    let tramp_data_addr = &raw const ffi::_trampoline_data as u64;
-    let sig_tramp_addr  = &raw const ffi::sig_trampoline as u64;
-    let cpus_addr       = ffi::cpus_base();
-
-    kvmmap(kpgtbl, TRAMPOLINE, trampoline_addr, PGSIZE, (PTE_R | PTE_X) as c_int);
-    kvmmap(kpgtbl, TRAMPOLINE_DATA, tramp_data_addr, PGSIZE, PTE_R as c_int);
-    kvmmap(kpgtbl, tramp_data_addr, tramp_data_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
-    kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, cpus_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
-    kvmmap(kpgtbl, cpus_addr, cpus_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
-    kvmmap(
-        kpgtbl, SIG_TRAMPOLINE, sig_tramp_addr, PGSIZE,
-        (PTE_R | PTE_X | PTE_U) as c_int,
-    );
-
-    crate::kprintln!("trampoline 0x{:x} -> {}", TRAMPOLINE, crate::printf::Ptr(trampoline_addr));
-    crate::kprintln!("trampoline data 0x{:x} -> {}", TRAMPOLINE_DATA, crate::printf::Ptr(tramp_data_addr));
-    crate::kprintln!("trampoline cpu local 0x{:x} -> {}", TRAMPOLINE_CPULOCAL, crate::printf::Ptr(cpus_addr));
-    crate::kprintln!("signal trampoline 0x{:x} -> {}", SIG_TRAMPOLINE, crate::printf::Ptr(sig_tramp_addr));
-
-    // rodata / data / bss / remainder of physical memory.
-    let rodata_addr = &raw const ffi::_rodata as u64;
-    let rodata_end_addr = &raw const ffi::_rodata_end as u64;
-    let data_ktlb_addr = &raw const ffi::_data_ktlb as u64;
-    let data_addr = &raw const ffi::_data as u64;
-    let data_end_addr = &raw const ffi::_data_end as u64;
-    let bss_addr = &raw const ffi::_bss as u64;
-    let bss_end_addr = &raw const ffi::_bss_end as u64;
-
-    kvmmap(kpgtbl, rodata_addr, rodata_addr, rodata_end_addr - rodata_addr, PTE_R as c_int);
-    kvmmap(kpgtbl, data_ktlb_addr, data_ktlb_addr, PGSIZE, (PTE_R | PTE_W) as c_int);
-    kvmmap(kpgtbl, data_addr, data_addr, data_end_addr - data_addr, (PTE_R | PTE_W) as c_int);
-    kvmmap(kpgtbl, bss_addr, bss_addr, bss_end_addr - bss_addr, (PTE_R | PTE_W) as c_int);
-    kvmmap(
-        kpgtbl, bss_end_addr, bss_end_addr,
-        ffi::__physical_memory_end() - bss_end_addr,
-        (PTE_R | PTE_W) as c_int,
-    );
-
-    // Kernel symbols sections.
-    let ksym_start = &raw const ffi::_ksymbols_start as u64;
-    let ksym_end = &raw const ffi::_ksymbols_end as u64;
-    let ksym_size = ksym_end - ksym_start;
-    if ksym_size > 0 {
-        kvmmap(kpgtbl, ksym_start, ksym_start, ksym_size, PTE_R as c_int);
-        crate::kprintln!("kernel symbols 0x{:x} - 0x{:x} (size: {})", ksym_start, ksym_end, ksym_size);
-    }
-
-    let ksym_idx_start = &raw const ffi::_ksymbols_idx_start as u64;
-    let ksym_idx_end = &raw const ffi::_ksymbols_idx_end as u64;
-    let ksym_idx_size = ksym_idx_end - ksym_idx_start;
-    if ksym_idx_size > 0 {
-        crate::kprintln!("kernel symbols index 0x{:x} - 0x{:x} (size: {})", ksym_idx_start, ksym_idx_end, ksym_idx_size);
-    }
-
-    kpgtbl
-}

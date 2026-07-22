@@ -77,9 +77,7 @@ unsafe extern "C" {
 // are aliases of the same bindgen `pcache`/`page_t`/`pcache_node` this
 // file already uses) — plain `use` instead of the `extern "C"`
 // redeclarations that used to sit in the block above.
-use crate::mm::{
-    vm_copyin, vm_copyout, Pcache,
-};
+use crate::mm::{Pcache, Vm};
 
 // `page_alloc`/`page_free` are genuinely `unsafe fn` in
 // `crate::mm::page`; this file's original extern declarations asserted
@@ -203,7 +201,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
             // SAFETY: `current()` is the live running thread; `buf +
             // bytes_read` is a user-space destination checked by
             // `vm_copyout` itself.
-            if vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, n as u64) < 0 {
+            if Vm::vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, n as u64) < 0 {
                 Pcache::put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_read == 0 {
@@ -350,7 +348,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
 
             if user {
                 // SAFETY: `current()` is the live running thread.
-                if vm_copyin(
+                if Vm::vm_copyin(
                     unsafe { (*current()).vm },
                     data as *mut c_void,
                     unsafe { buf.add(bytes_written + chunk_written) } as u64,

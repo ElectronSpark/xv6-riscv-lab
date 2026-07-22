@@ -51,38 +51,38 @@ mod ffi {
         vm_ptr: *mut c_void, addr: u64, length: usize, prot: c_int, flags: c_int, fd: c_int,
         offset: u64,
     ) -> u64 {
-        crate::mm::vm::vm_mmap(vm_ptr as *mut crate::bindings::vm, addr, length, prot, flags, fd, offset)
+        crate::mm::vm::Vm::vm_mmap(vm_ptr as *mut crate::bindings::vm, addr, length, prot, flags, fd, offset)
     }
     #[inline]
     pub fn vm_munmap(vm_ptr: *mut c_void, addr: u64, length: usize) -> c_int {
-        crate::mm::vm::vm_munmap(vm_ptr as *mut crate::bindings::vm, addr, length)
+        crate::mm::vm::Vm::vm_munmap(vm_ptr as *mut crate::bindings::vm, addr, length)
     }
     #[inline]
     pub fn vm_mprotect(vm_ptr: *mut c_void, addr: u64, size: usize, prot: c_int) -> c_int {
-        crate::mm::vm::vm_mprotect(vm_ptr as *mut crate::bindings::vm, addr, size, prot)
+        crate::mm::vm::Vm::vm_mprotect(vm_ptr as *mut crate::bindings::vm, addr, size, prot)
     }
     #[inline]
     pub fn vm_mremap(
         vm_ptr: *mut c_void, old_addr: u64, old_size: usize, new_size: usize, flags: c_int,
         new_addr: u64,
     ) -> u64 {
-        crate::mm::vm::vm_mremap(vm_ptr as *mut crate::bindings::vm, old_addr, old_size, new_size, flags, new_addr)
+        crate::mm::vm::Vm::vm_mremap(vm_ptr as *mut crate::bindings::vm, old_addr, old_size, new_size, flags, new_addr)
     }
     #[inline]
     pub fn vm_msync(vm_ptr: *mut c_void, addr: u64, size: usize, flags: c_int) -> c_int {
-        crate::mm::vm::vm_msync(vm_ptr as *mut crate::bindings::vm, addr, size, flags)
+        crate::mm::vm::Vm::vm_msync(vm_ptr as *mut crate::bindings::vm, addr, size, flags)
     }
     #[inline]
     pub fn vm_mincore(vm_ptr: *mut c_void, addr: u64, size: usize, vec: *mut c_uchar) -> c_int {
-        crate::mm::vm::vm_mincore(vm_ptr as *mut crate::bindings::vm, addr, size, vec)
+        crate::mm::vm::Vm::vm_mincore(vm_ptr as *mut crate::bindings::vm, addr, size, vec)
     }
     #[inline]
     pub fn vm_madvise(vm_ptr: *mut c_void, addr: u64, size: usize, advice: c_int) -> c_int {
-        crate::mm::vm::vm_madvise(vm_ptr as *mut crate::bindings::vm, addr, size, advice)
+        crate::mm::vm::Vm::vm_madvise(vm_ptr as *mut crate::bindings::vm, addr, size, advice)
     }
     #[inline]
     pub fn vm_copyout(vm_ptr: *mut c_void, dstva: u64, src: *const c_void, len: u64) -> c_int {
-        crate::mm::vm::vm_copyout(vm_ptr as *mut crate::bindings::vm, dstva, src, len)
+        crate::mm::vm::Vm::vm_copyout(vm_ptr as *mut crate::bindings::vm, dstva, src, len)
     }
 }
 

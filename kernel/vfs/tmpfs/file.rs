@@ -61,9 +61,7 @@ unsafe extern "C" {
 // are aliases of the same bindgen `pcache`/`page_t`/`pcache_node` this
 // file already uses) — plain `use` instead of the `extern "C"`
 // redeclarations that used to sit in the block above.
-use crate::mm::{
-    vm_copyin, vm_copyout, Pcache,
-};
+use crate::mm::{Pcache, Vm};
 
 // `page_alloc`/`page_free` are genuinely `unsafe fn` in
 // `crate::mm::page`; this file's original extern declarations asserted
@@ -216,7 +214,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
         let src = unsafe { super::inode::embedded_data(ti).add(pos as usize) };
         if user {
             // SAFETY: `current()` is the live running thread.
-            if vm_copyout(unsafe { (*current()).vm }, buf as u64, src as *const c_void, count as u64) < 0 {
+            if Vm::vm_copyout(unsafe { (*current()).vm }, buf as u64, src as *const c_void, count as u64) < 0 {
                 vfs_iunlock(inode);
                 return Err(Errno::Fault);
             }
@@ -266,7 +264,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
 
         if user {
             // SAFETY: `current()` is the live running thread.
-            if vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, chunk as u64) < 0 {
+            if Vm::vm_copyout(unsafe { (*current()).vm }, unsafe { buf.add(bytes_read) } as u64, data as *const c_void, chunk as u64) < 0 {
                 Pcache::put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_read == 0 {
@@ -322,7 +320,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
             let dst = unsafe { super::inode::embedded_data(ti).add(pos as usize) };
             if user {
                 // SAFETY: `current()` is the live running thread.
-                if vm_copyin(unsafe { (*current()).vm }, dst as *mut c_void, buf as u64, count as u64) < 0 {
+                if Vm::vm_copyin(unsafe { (*current()).vm }, dst as *mut c_void, buf as u64, count as u64) < 0 {
                     vfs_iunlock(inode);
                     return Err(Errno::Fault);
                 }
@@ -393,7 +391,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
 
         if user {
             // SAFETY: `current()` is the live running thread.
-            if vm_copyin(unsafe { (*current()).vm }, data as *mut c_void, unsafe { buf.add(bytes_written) } as u64, chunk as u64) < 0 {
+            if Vm::vm_copyin(unsafe { (*current()).vm }, data as *mut c_void, unsafe { buf.add(bytes_written) } as u64, chunk as u64) < 0 {
                 Pcache::put_page(pc, page);
                 vfs_iunlock(inode);
                 if bytes_written == 0 {

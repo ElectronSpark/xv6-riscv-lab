@@ -127,7 +127,7 @@ use crate::proc::Proc;
 // gone; reached as crate-path items instead of the `extern "C"`
 // redeclarations that used to sit in the block above (identical
 // signatures).
-use crate::mm::{either_copyin, vm_copyin, vm_growheap};
+use crate::mm::{either_copyin, Vm};
 
 // Divergence the old `either_copyout` redeclaration papered over: it
 // typed `src` as `*const c_void`, while the real fn takes `*mut c_void`
@@ -278,7 +278,7 @@ pub(crate) extern "C" fn sys_clone() -> u64 {
         // `xv6_current_thread()`/`current()`) is a kernel-wide invariant:
         // always non-null while executing kernel code on behalf of a thread.
         let cta = unsafe { crate::proc::access::ThreadAccess::assume(current()) };
-        if vm_copyin(cta.vm_ptr(),
+        if Vm::vm_copyin(cta.vm_ptr(),
                      &mut args as *mut _ as *mut c_void,
                      uargs,
                      core::mem::size_of::<CloneArgs>() as u64) < 0 {
@@ -323,7 +323,7 @@ pub(crate) extern "C" fn sys_sbrk() -> u64 {
     // non-null while executing kernel code on behalf of a thread.
     let cta = unsafe { crate::proc::access::ThreadAccess::assume(current()) };
     if let Some(addr) = cta.get_heap_addr() {
-        if vm_growheap(cta.vm_ptr(), n) < 0 {
+        if Vm::vm_growheap(cta.vm_ptr(), n) < 0 {
             return (-1i64) as u64;
         }
         addr

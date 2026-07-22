@@ -622,7 +622,7 @@ use crate::lock::rcu::call_rcu;
 // an `unsafe` context) are reached as crate-path items instead of the
 // `extern "C"` redeclarations that used to sit in the block above
 // (the old decls' `vm_t` was this file's alias for `crate::bindings::vm`).
-use crate::mm::{page_alloc, vm_init, vm_put};
+use crate::mm::{page_alloc, Vm};
 
 // NO-STANDALONE-FN: the former `page_free` FFI facade (a thin forward to
 // `crate::mm::page_free`) had a single call site (`thread_destroy_rcu_callback`)
@@ -1140,7 +1140,7 @@ impl<'a> ThreadAccess<'a> {
                 self.set_sigacts(ptr::null_mut());
             }
             if !self.vm_ptr().is_null() {
-                vm_put(self.vm_ptr());
+                Vm::vm_put(self.vm_ptr());
                 self.set_vm(ptr::null_mut());
             }
             if !self.fdtable_ptr().is_null() {
@@ -1221,7 +1221,7 @@ impl Thread {
 
             crate::kprintln!("Init process kernel stack size order: {}", (*p).kstack_order);
 
-            let vm = vm_init();
+            let vm = Vm::vm_init();
             kassert!(!is_err_or_null(vm), "userinit: vm_init failed");
             let ta_u = crate::proc::access::ThreadAccess::from_raw(p).unwrap_unchecked();
             ta_u.set_vm(vm);

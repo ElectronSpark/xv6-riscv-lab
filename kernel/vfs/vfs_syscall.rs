@@ -134,7 +134,7 @@ use crate::irq::syscall::{argaddr, argint, argint64, argstr};
 // thin safe wrappers (identical signatures) preserve the `safe fn`
 // facade the old redeclarations asserted.
 use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
-use crate::mm::{either_copyin, either_copyout, vm_copyout};
+use crate::mm::{either_copyin, either_copyout, Vm};
 
 // P3-1C mesh sweep: vfs/{inode,file,fdtable,fs}.rs are in scope for this
 // wave; converted from `extern "C"` redeclarations to plain crate-path
@@ -638,7 +638,7 @@ fn fstat_inner(fd: c_int, st_addr: u64) -> KResult<()> {
         return Err(Errno::Raw(ret));
     }
 
-    if vm_copyout(
+    if Vm::vm_copyout(
         unsafe { (*current()).vm },
         st_addr,
         &kst as *const stat as *const c_void,
@@ -1777,7 +1777,7 @@ fn getcwd_inner(buf_addr: u64, size: c_int) -> KResult<u64> {
         return Err(Errno::Range);
     }
 
-    if vm_copyout(unsafe { (*p).vm }, buf_addr, path.as_ptr() as *const c_void, (pathlen + 1) as u64) < 0 {
+    if Vm::vm_copyout(unsafe { (*p).vm }, buf_addr, path.as_ptr() as *const c_void, (pathlen + 1) as u64) < 0 {
         return Err(Errno::Fault);
     }
 
@@ -1844,8 +1844,8 @@ fn pipe_inner(fdarray: u64) -> KResult<()> {
     // the running thread's address space is stable across this call.
     // SAFETY: `p` is the live running thread; `.vm` is a plain field.
     let vm = unsafe { (*p).vm };
-    if vm_copyout(vm, fdarray, &fd0 as *const c_int as *const c_void, core::mem::size_of::<c_int>() as u64) < 0
-        || vm_copyout(
+    if Vm::vm_copyout(vm, fdarray, &fd0 as *const c_int as *const c_void, core::mem::size_of::<c_int>() as u64) < 0
+        || Vm::vm_copyout(
             vm,
             fdarray + core::mem::size_of::<c_int>() as u64,
             &fd1 as *const c_int as *const c_void,
@@ -2028,7 +2028,7 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
     }
 
     if bytes_written > 0 {
-        if vm_copyout(unsafe { (*current()).vm }, dirp, kbuf, bytes_written as u64) < 0 {
+        if Vm::vm_copyout(unsafe { (*current()).vm }, dirp, kbuf, bytes_written as u64) < 0 {
             kmm_free(kbuf);
             vfs_fput(f);
             return Err(Errno::Fault);

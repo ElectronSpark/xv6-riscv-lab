@@ -214,7 +214,7 @@ fn spin_init(l: *mut crate::bindings::spinlock_t, name: *mut c_char) {
 // fns now that their `#[no_mangle]` exports are gone; reached as
 // crate-path items instead of the `extern "C"` redeclarations that used
 // to sit in the block above (identical signatures).
-use crate::mm::{vm_copyin, vm_copyout};
+use crate::mm::Vm;
 
 // `kalloc`/`kfree` and the slab entry points are genuinely `unsafe fn`
 // in `crate::mm::{kalloc,slab}`; this file's original extern
@@ -661,7 +661,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
                 // validity, matching every other `user`-gated copy in
                 // this crate.
                 let ret = unsafe {
-                    vm_copyout(
+                    Vm::vm_copyout(
                         (*pr).vm,
                         (buf as u64).wrapping_add(total as u64),
                         tmp.as_ptr().add(tmp_pos) as *const c_void,
@@ -721,7 +721,7 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
                     // SAFETY: see `pipe_read`'s identical `vm_copyout`
                     // rationale.
                     let ret = unsafe {
-                        vm_copyin(
+                        Vm::vm_copyin(
                             (*pr).vm,
                             tmp.as_mut_ptr() as *mut c_void,
                             (buf as u64).wrapping_add(total as u64),
