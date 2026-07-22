@@ -58,7 +58,7 @@ use crate::bindings::{
 // `extern "C"` redeclaration. P3-10c: `CdevOps` is the ops-table trait
 // this file's `ConsoleCdevOps` implements.
 use crate::dev::cdev::{Cdev, CdevOps};
-use crate::kstd::{cint_result, Errno, KResult};
+use crate::kstd::{Errno, KResult};
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
 // crate-path items instead of `extern "C"` redeclarations. `sleep` is
 // now reached through `SpinLockGuard::sleep_on` (lock-owns-data), so
@@ -551,13 +551,13 @@ impl CdevOps for ConsoleCdevOps {
     unsafe fn read(&self, cdev: *mut cdev_t, user: bool, buf: *mut c_void, count: usize)
         -> KResult<c_int> {
         // SAFETY: forwarded caller contract (see `consoleread`'s doc).
-        cint_result(unsafe { consoleread(cdev, user as crate::bindings::bool_, buf, count) })
+        Errno::cint_result(unsafe { consoleread(cdev, user as crate::bindings::bool_, buf, count) })
     }
 
     unsafe fn write(&self, cdev: *mut cdev_t, user: bool, buf: *const c_void, count: usize)
         -> KResult<c_int> {
         // SAFETY: forwarded caller contract (see `consolewrite`'s doc).
-        cint_result(unsafe { consolewrite(cdev, user as crate::bindings::bool_, buf, count) })
+        Errno::cint_result(unsafe { consolewrite(cdev, user as crate::bindings::bool_, buf, count) })
     }
 
     /// Console ioctl -- delegates to the TTY layer for
@@ -570,7 +570,7 @@ impl CdevOps for ConsoleCdevOps {
         // SAFETY: `tty_ptr` is a live, permanently-allocated TTY once
         // published (see `console_tty`); `arg`'s validity is forwarded
         // from the dispatch contract.
-        cint_result(unsafe { Tty::ioctl(tty_ptr, cmd, arg) })
+        Errno::cint_result(unsafe { Tty::ioctl(tty_ptr, cmd, arg) })
     }
 
     /// Console poll -- check whether console has data ready for

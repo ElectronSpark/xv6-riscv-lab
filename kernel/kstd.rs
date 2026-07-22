@@ -48,7 +48,8 @@
 //!
 //! # Contents
 //!
-//! * [`Errno`] / [`KResult`] / [`result_to_neg_errno`] / [`neg_errno`] —
+//! * [`Errno`] / [`KResult`] / [`result_to_neg_errno`] / [`neg_errno`] /
+//!   [`Errno::cint_result`] —
 //!   this crate's canonical fallible-return vocabulary. `KResult<T>` is
 //!   the target shape for Rust-internal fallible functions; `Errno` only
 //!   enumerates the handful of values `mm` originally needed —
@@ -355,19 +356,26 @@ pub fn neg_errno(e: i32) -> u64 {
     (-e) as i64 as u64
 }
 
-/// Decode a raw "value on success, negative errno on failure" `c_int`
-/// (obtained from a cross-file boundary this cluster doesn't own, e.g.
-/// `tty_ioctl`/`tty_read`) into a [`KResult<c_int>`]. The negative value
-/// is carried verbatim in [`Errno::Raw`] (`Raw(n).neg() == n`), so
-/// re-encoding at a dispatch boundary reproduces the original `c_int`
-/// exactly — the `c_int` twin of `tty/ptmx.rs`'s isize-flavored
-/// `count_result` (added for P3-10c, the device ops-table trait wave).
-#[inline]
-pub fn cint_result(ret: c_int) -> KResult<c_int> {
-    if ret < 0 {
-        Err(Errno::Raw(ret))
-    } else {
-        Ok(ret)
+impl Errno {
+    /// Decode a raw "value on success, negative errno on failure" `c_int`
+    /// (obtained from a cross-file boundary this cluster doesn't own, e.g.
+    /// `tty_ioctl`/`tty_read`) into a [`KResult<c_int>`]. The negative value
+    /// is carried verbatim in [`Errno::Raw`] (`Raw(n).neg() == n`), so
+    /// re-encoding at a dispatch boundary reproduces the original `c_int`
+    /// exactly — the `c_int` twin of `tty/ptmx.rs`'s isize-flavored
+    /// `count_result` (added for P3-10c, the device ops-table trait wave).
+    ///
+    /// KERNEL-OO: relocated from the free fn `cint_result` — this
+    /// constructs an [`Errno`] value on the error path, so `Errno` is its
+    /// natural subject (unlike the `ERR_PTR`-family/generic helpers above,
+    /// which stay free per the module doc's transitional-shim floor).
+    #[inline]
+    pub fn cint_result(ret: c_int) -> KResult<c_int> {
+        if ret < 0 {
+            Err(Errno::Raw(ret))
+        } else {
+            Ok(ret)
+        }
     }
 }
 

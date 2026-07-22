@@ -192,7 +192,7 @@ unsafe extern "C" {
 // from any external harness (verified against test/cmake/QemuTests.cmake:
 // the ctest suites only set `RWLOCK_TEST=1`-style env gates that become
 // cargo features).
-use crate::bufcache::binit;
+use crate::bufcache::BufCache;
 use crate::kobject::kobject_global_init;
 use crate::lock::rwsem_test::rwsem_launch_tests;
 use crate::lock::semaphore_test::semaphore_launch_tests;
@@ -299,7 +299,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Netdev::init();
         pci_init();
         crate::proc::Signal::init(); // signal handling initialization
-        binit(); // buffer cache
+        BufCache::init(); // buffer cache
         // Legacy iinit() and fileinit() removed - VFS handles these
         Thread::userinit(); // first user thread
         // idle_thread_init must be called before sched_timer_init (or any

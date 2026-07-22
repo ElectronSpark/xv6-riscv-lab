@@ -610,9 +610,9 @@ impl<'a> TtreeRef<'a> {
         TnodeRef::from_ptr(&raw mut dummy).unwrap().set_tree_key(key);
 
         // Former safe-facade `rb_find_key_rup`; SAFETY per
-        // [`crate::bintree::rb_find_key_rup`]'s contract (valid `dummy_root`
+        // [`crate::bintree::RbRoot::find_key_rup`]'s contract (valid `dummy_root`
         // with `rdown` opts, `dummy` keyed above).
-        let node = unsafe { crate::bintree::rb_find_key_rup(&raw mut dummy_root, &raw const dummy as uint64) };
+        let node = unsafe { crate::bintree::RbRoot::find_key_rup(&raw mut dummy_root, &raw const dummy as uint64) };
         if node.is_null() { return null_mut(); }
         let target = tnode_from_tree_entry(node);
         match TnodeRef::from_ptr(target) {
@@ -630,8 +630,8 @@ impl<'a> TtreeRef<'a> {
         nr.set_tree_queue(self.as_ptr());
         let entry = nr.tree_entry_ptr();
         // Former safe-facade `rb_insert_color`; SAFETY per
-        // [`crate::rbtree::rb_insert_color`]'s contract.
-        let inserted = unsafe { crate::rbtree::rb_insert_color(self.root_ptr(), entry) };
+        // [`crate::rbtree::RbRoot::insert_color`]'s contract.
+        let inserted = unsafe { crate::rbtree::RbRoot::insert_color(self.root_ptr(), entry) };
         if inserted != entry {
             xv6_panic(c"Failed to insert node into tree".as_ptr());
         }
@@ -645,8 +645,8 @@ impl<'a> TtreeRef<'a> {
     fn do_remove(&self, node: *mut tnode_t) -> c_int {
         let Some(nr) = TnodeRef::from_ptr(node) else { return -EINVAL };
         // Former safe-facade `rb_delete_node_color`; SAFETY per
-        // [`crate::rbtree::rb_delete_node_color`]'s contract.
-        let removed = unsafe { crate::rbtree::rb_delete_node_color(self.root_ptr(), nr.tree_entry_ptr()) };
+        // [`crate::rbtree::RbRoot::delete_node_color`]'s contract.
+        let removed = unsafe { crate::rbtree::RbRoot::delete_node_color(self.root_ptr(), nr.tree_entry_ptr()) };
         if removed.is_null() { return -ENOENT; }
         nr.to_none();
         self.dec_counter();

@@ -1333,7 +1333,7 @@ const NR_THREAD: i64 = 10000;
 // sits in an `unsafe` context -- the plain `use` keeps them unchanged
 // (`hlist_t`/`hlist_func_t` are the same bindgen types as hlist.rs's
 // `Hlist`/`HlistFunc` aliases).
-use crate::hlist::{hlist_get, hlist_get_rcu, hlist_init, hlist_pop_rcu, hlist_put_rcu};
+use crate::hlist::Hlist;
 
 // Direct crate-path imports (kernel/lock/rwlock.rs) — these used to be
 // C-ABI symbol redeclarations; the `#[no_mangle]` exports are gone. All
@@ -1538,7 +1538,7 @@ pub(super) fn xv6_proctab_init_storage() {
             get_entry: Some(proctab_hash_get_entry),
             cmp_node: Some(proctab_hash_cmp),
         };
-        hlist_init(
+        Hlist::init(
             &raw mut t.procs,
             NR_THREAD_HASH_BUCKETS as u64,
             &raw mut funcs,
@@ -1679,7 +1679,7 @@ pub(super) fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
     u! {
         let mut dummy: MaybeUninit<thread> = MaybeUninit::zeroed();
         (*dummy.as_mut_ptr()).pid = pid;
-        hlist_get(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread
+        Hlist::get(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread
     }
 }
 pub(super) fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
@@ -1689,7 +1689,7 @@ pub(super) fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
     u! {
         let mut dummy: MaybeUninit<thread> = MaybeUninit::zeroed();
         (*dummy.as_mut_ptr()).pid = pid;
-        hlist_get_rcu(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread
+        Hlist::get_rcu(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread
     }
 }
 pub(super) fn xv6_proctab_put_rcu(p: *mut thread) -> *mut thread {
@@ -1697,11 +1697,11 @@ pub(super) fn xv6_proctab_put_rcu(p: *mut thread) -> *mut thread {
     // being published into the table. Structural mutation of the hlist
     // requires the caller hold `pid_lock` (writer) even though readers use
     // RCU, matching the C convention for `hlist_put_rcu`.
-    u! { hlist_put_rcu(&raw mut (*pt()).procs, p as *mut c_void, false) as *mut thread }
+    u! { Hlist::put_rcu(&raw mut (*pt()).procs, p as *mut c_void, false) as *mut thread }
 }
 pub(super) fn xv6_proctab_pop_rcu(p: *mut thread) -> *mut thread {
     // SAFETY: see `xv6_proctab_put_rcu`.
-    u! { hlist_pop_rcu(&raw mut (*pt()).procs, p as *mut c_void) as *mut thread }
+    u! { Hlist::pop_rcu(&raw mut (*pt()).procs, p as *mut c_void) as *mut thread }
 }
 
 // --- procs_list (RCU-safe doubly linked list for procdump iteration) ------
@@ -2247,7 +2247,7 @@ pub(super) fn xv6_procdump_bt_pid(pid: c_int) {
         let _rcu = crate::lock::rcu::KRcuRead::new();
         let mut dummy: MaybeUninit<thread> = MaybeUninit::zeroed();
         (*dummy.as_mut_ptr()).pid = pid;
-        let p = hlist_get_rcu(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread;
+        let p = Hlist::get_rcu(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread;
         if p.is_null() {
             crate::kprintln!("Process {} not found", pid);
             return;

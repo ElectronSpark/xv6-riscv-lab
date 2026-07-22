@@ -242,7 +242,7 @@ unsafe extern "C" {
 
 // P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
-use crate::bufcache::{bpin, bread, brelse, bsync, bunpin, bwrite, bwrite_async};
+use crate::bufcache::{Buf, BufCache};
 
 // Wave B free-fn -> associated-fn sweep pulls in the superblock type: the
 // `xv6fs_begin_op`/`xv6fs_end_op`/`xv6fs_log_write`/`xv6fs_initlog` family
@@ -310,24 +310,24 @@ impl LogInner {
             // bread/memmove/bwrite disk op stays byte-identical (e3cb8a0 precedent).
             let n = (*log).lh.n;
             for tail in 0..n {
-                let lbuf = bread((*log).dev as u32, ((*log).start + tail + 1) as u32); // read log block
-                let dbuf = bread((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // read dst
+                let lbuf = Buf::read((*log).dev as u32, ((*log).start + tail + 1) as u32); // read log block
+                let dbuf = Buf::read((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // read dst
                 memmove((*dbuf).data as *mut c_void, (*lbuf).data as *const c_void, super::BSIZE as usize); // copy block to dst
                 if recovering {
                     // During recovery, use synchronous writes for safety.
-                    bwrite(dbuf);
+                    Buf::write(dbuf);
                 } else {
                     // Normal operation: use async writes, sync at end.
-                    bwrite_async(dbuf);
-                    bunpin(dbuf);
+                    Buf::write_async(dbuf);
+                    Buf::unpin(dbuf);
                 }
-                brelse(lbuf);
-                brelse(dbuf);
+                Buf::release(lbuf);
+                Buf::release(dbuf);
             }
 
             // Flush all async writes to disk.
             if !recovering && n > 0 {
-                bsync();
+                BufCache::sync();
             }
         }
     }
@@ -339,14 +339,14 @@ impl LogInner {
     /// `log` must point to a live `LogInner`.
     unsafe fn read_head(log: *mut LogInner) {
         unsafe {
-            let b = bread((*log).dev as u32, (*log).start as u32);
+            let b = Buf::read((*log).dev as u32, (*log).start as u32);
             let lh = (*b).data as *const xv6fs_logheader;
             (*log).lh.n = (*lh).n;
             // `lh.n` just set from disk and invariant for this copy -> range walk.
             for i in 0..(*log).lh.n as usize {
                 (*log).lh.block[i] = (*lh).block[i];
             }
-            brelse(b);
+            Buf::release(b);
         }
     }
 
@@ -357,15 +357,15 @@ impl LogInner {
     /// `log` must point to a live `LogInner`.
     unsafe fn write_head(log: *mut LogInner) {
         unsafe {
-            let b = bread((*log).dev as u32, (*log).start as u32);
+            let b = Buf::read((*log).dev as u32, (*log).start as u32);
             let hb = (*b).data as *mut xv6fs_logheader;
             (*hb).n = (*log).lh.n;
             // `lh.n` invariant for this copy -> range walk (structure only).
             for i in 0..(*log).lh.n as usize {
                 (*hb).block[i] = (*log).lh.block[i];
             }
-            bwrite(b);
-            brelse(b);
+            Buf::write(b);
+            Buf::release(b);
         }
     }
 
@@ -391,17 +391,17 @@ impl LogInner {
             // accessor) -> capture once, walk the tail range. Structure only.
             let n = (*log).lh.n;
             for tail in 0..n {
-                let to = bread((*log).dev as u32, ((*log).start + tail + 1) as u32); // log block
-                let from = bread((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // cache block
+                let to = Buf::read((*log).dev as u32, ((*log).start + tail + 1) as u32); // log block
+                let from = Buf::read((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // cache block
                 memmove((*to).data as *mut c_void, (*from).data as *const c_void, super::BSIZE as usize);
-                bwrite_async(to); // mark dirty, will flush at end
-                brelse(from);
-                brelse(to);
+                Buf::write_async(to); // mark dirty, will flush at end
+                Buf::release(from);
+                Buf::release(to);
             }
 
             // Flush all log writes before writing header.
             if n > 0 {
-                bsync();
+                BufCache::sync();
             }
         }
     }
@@ -652,7 +652,7 @@ impl Xv6fsSuperblock {
             log.lh.block[i] = blockno;
             if i == n {
                 // Add new block to log?
-                bpin(b);
+                Buf::pin(b);
                 log.lh.n += 1;
             }
             // guard dropped -> spin_unlock

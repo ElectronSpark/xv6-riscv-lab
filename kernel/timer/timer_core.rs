@@ -558,7 +558,7 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
 
     // SAFETY: `timer`/`node` are live per the caller contract; `node` is
     // not linked into any tree yet (also part of the caller contract).
-    let inserted = unsafe { crate::rbtree::rb_insert_color(&raw mut (*timer).root, &raw mut (*node).rb) };
+    let inserted = unsafe { crate::rbtree::RbRoot::insert_color(&raw mut (*timer).root, &raw mut (*node).rb) };
     if inserted.is_null() {
         return Self::neg(crate::bindings::ETXTBSY);
     }
@@ -568,7 +568,7 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
     }
 
     // SAFETY: `node` is now linked into `timer`'s tree by the insert above.
-    let prev = unsafe { crate::bintree::rb_prev_node(&raw mut (*node).rb) };
+    let prev = unsafe { crate::bintree::RbNode::prev(&raw mut (*node).rb) };
     if prev.is_null() {
         // SAFETY: `timer`/`node` are live; `list_head` is a valid list
         // sentinel (initialized by `timer_init`).
@@ -599,7 +599,7 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
 unsafe fn timer_remove_unlocked(timer: *mut timer_root, node: *mut timer_node) {
     // SAFETY: caller contract.
     unsafe {
-        crate::rbtree::rb_delete_node_color(&raw mut (*timer).root, &raw mut (*node).rb);
+        crate::rbtree::RbRoot::delete_node_color(&raw mut (*timer).root, &raw mut (*node).rb);
         machine::Riscv::list_entry_detach(&raw mut (*node).list_entry);
         (*node).timer = ptr::null_mut();
         Self::update_next_tick(timer);

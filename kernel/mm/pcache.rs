@@ -965,7 +965,7 @@ impl PcacheHandle {
         }
     }
     fn rb_find(self, blkno: u64) -> *mut PcacheNode {
-        let node = unsafe { crate::bintree::rb_find_key(self.page_map_ptr(), blkno) };
+        let node = unsafe { crate::bintree::RbRoot::find_key(self.page_map_ptr(), blkno) };
         if node.is_null() {
             ptr::null_mut()
         } else {
@@ -974,7 +974,7 @@ impl PcacheHandle {
     }
     fn rb_insert(self, pcnode: *mut PcacheNode) -> *mut PcacheNode {
         let entry = unsafe { addr_of_mut!((*pcnode).tree_entry) };
-        let node = unsafe { crate::rbtree::rb_insert_color(self.page_map_ptr(), entry) };
+        let node = unsafe { crate::rbtree::RbRoot::insert_color(self.page_map_ptr(), entry) };
         if node.is_null() {
             ptr::null_mut()
         } else {
@@ -983,11 +983,11 @@ impl PcacheHandle {
     }
     fn rb_delete(self, pcnode: *mut PcacheNode) {
         let entry = unsafe { addr_of_mut!((*pcnode).tree_entry) };
-        let removed = unsafe { crate::rbtree::rb_delete_node_color(self.page_map_ptr(), entry) };
+        let removed = unsafe { crate::rbtree::RbRoot::delete_node_color(self.page_map_ptr(), entry) };
         pcache_assert(removed == entry, b"xv6_pcache_rb_delete: removed mismatch\0");
     }
     fn rb_first(self) -> *mut PcacheNode {
-        let node = unsafe { crate::bintree::rb_first_node(self.page_map_ptr()) };
+        let node = unsafe { crate::bintree::RbRoot::first_node(self.page_map_ptr()) };
         if node.is_null() {
             ptr::null_mut()
         } else {

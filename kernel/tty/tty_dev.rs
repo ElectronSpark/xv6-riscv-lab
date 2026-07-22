@@ -21,7 +21,7 @@ use core::ffi::{c_char, c_int, c_short, c_void};
 use core::mem::MaybeUninit;
 
 use crate::bindings::{cdev_t, mode_t, session, tty};
-use crate::kstd::{cint_result, Errno, KResult};
+use crate::kstd::{Errno, KResult};
 
 // ===========================================================================
 // Externs.
@@ -176,7 +176,7 @@ impl CdevOps for TtyCdevOps {
         // SAFETY: forwarded straight to `Tty::read`, which validates
         // `buf` itself per the userspace/kernel split encoded by `user`
         // (dispatch contract).
-        cint_result(unsafe { Tty::read(t, buf as *mut c_char, count as u64, user as c_int) as c_int })
+        Errno::cint_result(unsafe { Tty::read(t, buf as *mut c_char, count as u64, user as c_int) as c_int })
     }
 
     unsafe fn write(&self, _cdev: *mut cdev_t, user: bool, buf: *const c_void, count: usize)
@@ -186,7 +186,7 @@ impl CdevOps for TtyCdevOps {
             return Err(Errno::NxIo);
         }
         // SAFETY: see `read` above.
-        cint_result(unsafe {
+        Errno::cint_result(unsafe {
             Tty::write(t, buf as *const c_char, count as u64, user as c_int) as c_int
         })
     }
@@ -198,7 +198,7 @@ impl CdevOps for TtyCdevOps {
         }
         // SAFETY: `t` live; `arg`'s validity forwarded from the
         // dispatch contract.
-        cint_result(unsafe { Tty::ioctl(t, cmd, arg) })
+        Errno::cint_result(unsafe { Tty::ioctl(t, cmd, arg) })
     }
 
     unsafe fn poll(&self, _cdev: *mut cdev_t, events: c_short) -> Option<c_int> {

@@ -266,7 +266,7 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
                             (*entry).filename_len = current_file.len() as u16;
 
                             crate::machine::Riscv::rb_node_init(&raw mut (*entry).rb);
-                            crate::rbtree::rb_insert_color(&raw mut KSYM_RB_ROOT, &raw mut (*entry).rb);
+                            crate::rbtree::RbRoot::insert_color(&raw mut KSYM_RB_ROOT, &raw mut (*entry).rb);
                             KSYM_COUNT += 1;
                         }
                     }
@@ -319,7 +319,7 @@ fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
     // SAFETY: `search_root` is a valid (possibly-empty) `rb_root`;
     // `&dummy` is a live stack value for the duration of this call.
     let node = unsafe {
-        crate::bintree::rb_find_key_rdown(&raw mut search_root, &dummy as *const KSymEntry as u64)
+        crate::bintree::RbRoot::find_key_rdown(&raw mut search_root, &dummy as *const KSymEntry as u64)
     };
     if node.is_null() {
         return None;

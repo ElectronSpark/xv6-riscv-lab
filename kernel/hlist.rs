@@ -314,14 +314,18 @@ mod llist {
 // `hlist_entry_t::list_entry` is at offset 0 -> trivial reinterpret casts.
 // ---------------------------------------------------------------------------
 
-#[inline(always)]
-fn entry_from_node(n: *mut HlistBucket) -> *mut HlistEntry {
-    n as *mut HlistEntry
+impl HlistEntry {
+    #[inline(always)]
+    fn from_node(n: *mut HlistBucket) -> *mut HlistEntry {
+        n as *mut HlistEntry
+    }
 }
 
-#[inline(always)]
-fn node_from_entry(e: *mut HlistEntry) -> *mut HlistBucket {
-    e as *mut HlistBucket
+impl HlistBucket {
+    #[inline(always)]
+    fn from_entry(e: *mut HlistEntry) -> *mut HlistBucket {
+        e as *mut HlistBucket
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +369,7 @@ impl Iterator for BucketIter {
         if self.cur == self.head {
             return None;
         }
-        let entry = entry_from_node(self.cur);
+        let entry = HlistEntry::from_node(self.cur);
         // SAFETY: `cur != head`, so it is a live entry node currently linked
         // into the bucket ring; advancing to its `.next` under the caller's
         // writer-serialization contract (see `BucketIter::new`).
@@ -378,554 +382,556 @@ impl Iterator for BucketIter {
 // hlist_entry_{add,del,replace}_rcu — `static inline` in `kernel/inc/hlist.h`
 // (no external linkage); reimplemented on top of `llist` for `hlist_c`'s
 // own RCU write paths (`hlist_put_rcu`/`hlist_pop_rcu`).
+//
+// KERNEL-OO: relocated onto `impl Hlist`/`impl HlistEntry` (raw params, no
+// `&self` — `Hlist`/`HlistEntry` are `Freeze`, intrusively linked, and
+// mutated cross-hart under external locking, same rule as every other
+// method below).
 // ---------------------------------------------------------------------------
 
-/// # Safety
-/// `hlist`, `bucket`, `entry` must all point to live values; caller holds
-/// the writer-side lock.
-unsafe fn hlist_entry_add_rcu(hlist: *mut Hlist, bucket: *mut HlistBucket, entry: *mut HlistEntry) {
-    unsafe {
-        llist::add_rcu(bucket, node_from_entry(entry));
-        ptr::write_volatile(ptr::addr_of_mut!((*entry).bucket), bucket);
-        (*hlist).elem_cnt += 1;
-    }
-}
-
-/// # Safety
-/// `hlist` and `entry` must point to live values; caller holds the
-/// writer-side lock. Does not clear `entry->bucket` (matches C: readers
-/// may still be checking it).
-unsafe fn hlist_entry_del_rcu(hlist: *mut Hlist, entry: *mut HlistEntry) {
-    unsafe {
-        llist::del_rcu(node_from_entry(entry));
-        (*hlist).elem_cnt -= 1;
-    }
-}
-
-/// # Safety
-/// `old` and `new` must point to live entries; caller holds the
-/// writer-side lock.
-unsafe fn hlist_entry_replace_rcu(old: *mut HlistEntry, new: *mut HlistEntry) {
-    unsafe {
-        llist::replace_rcu(node_from_entry(old), node_from_entry(new));
-        ptr::write_volatile(ptr::addr_of_mut!((*new).bucket), (*old).bucket);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Callback dispatch through `hlist->func`.
-// ---------------------------------------------------------------------------
-
-/// # Safety
-/// `hlist` must point to a live, `hash`-having `Hlist`; `node` per the
-/// callback's own contract (non-null, caller-supplied).
-#[inline(always)]
-unsafe fn call_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
-    unsafe { ((*hlist).func.hash.expect("BUG: hlist: func.hash is None"))(node) }
-}
-
-/// # Safety
-/// Same contract as [`call_hash`], for `func.get_node`.
-#[inline(always)]
-unsafe fn call_get_node(hlist: *mut Hlist, entry: *mut HlistEntry) -> *mut c_void {
-    unsafe { ((*hlist).func.get_node.expect("BUG: hlist: func.get_node is None"))(entry) }
-}
-
-/// # Safety
-/// Same contract as [`call_hash`], for `func.get_entry`.
-#[inline(always)]
-unsafe fn call_get_entry(hlist: *mut Hlist, node: *mut c_void) -> *mut HlistEntry {
-    unsafe { ((*hlist).func.get_entry.expect("BUG: hlist: func.get_entry is None"))(node) }
-}
-
-/// # Safety
-/// Same contract as [`call_hash`], for `func.cmp_node`.
-#[inline(always)]
-unsafe fn call_cmp_node(hlist: *mut Hlist, n1: *mut c_void, n2: *mut c_void) -> i32 {
-    unsafe { ((*hlist).func.cmp_node.expect("BUG: hlist: func.cmp_node is None"))(hlist, n1, n2) }
-}
-
-// ---------------------------------------------------------------------------
-// Bucket-array helpers.
-// ---------------------------------------------------------------------------
-
-/// # Safety
-/// `hlist` must point to a live `Hlist` whose `buckets` flexible-array
-/// member has been sized to at least `idx + 1` entries.
-#[inline(always)]
-unsafe fn bucket_at(hlist: *mut Hlist, idx: u64) -> *mut HlistBucket {
-    unsafe { (*hlist).buckets.as_mut_ptr().add(idx as usize) }
-}
-
-/// Mirrors `__hlist_is_bucket_of` with the `||` -> `&&` fix (see module
-/// doc comment): `Some(index)` iff `bucket` is one of `hlist`'s own
-/// buckets.
-///
-/// # Safety
-/// `hlist` must point to a live `Hlist`.
-unsafe fn bucket_index(hlist: *mut Hlist, bucket: *mut HlistBucket) -> Option<u64> {
-    unsafe {
-        let base = (*hlist).buckets.as_mut_ptr() as usize;
-        let b = bucket as usize;
-        let elem_size = core::mem::size_of::<HlistBucket>();
-        if b < base {
-            return None;
+impl Hlist {
+    /// # Safety
+    /// `hlist`, `bucket`, `entry` must all point to live values; caller holds
+    /// the writer-side lock.
+    unsafe fn entry_add_rcu(hlist: *mut Hlist, bucket: *mut HlistBucket, entry: *mut HlistEntry) {
+        unsafe {
+            llist::add_rcu(bucket, HlistBucket::from_entry(entry));
+            ptr::write_volatile(ptr::addr_of_mut!((*entry).bucket), bucket);
+            (*hlist).elem_cnt += 1;
         }
-        let byte_diff = b - base;
-        if byte_diff % elem_size != 0 {
-            return None;
-        }
-        let idx = (byte_diff / elem_size) as u64;
-        if idx < (*hlist).bucket_cnt {
-            Some(idx)
-        } else {
-            None
+    }
+
+    /// # Safety
+    /// `hlist` and `entry` must point to live values; caller holds the
+    /// writer-side lock. Does not clear `entry->bucket` (matches C: readers
+    /// may still be checking it).
+    unsafe fn entry_del_rcu(hlist: *mut Hlist, entry: *mut HlistEntry) {
+        unsafe {
+            llist::del_rcu(HlistBucket::from_entry(entry));
+            (*hlist).elem_cnt -= 1;
         }
     }
 }
 
-/// # Safety
-/// `hlist` must point to a live `Hlist`; `bucket` must be null or point
-/// to a live `HlistBucket` (not necessarily one of `hlist`'s own).
-#[inline(always)]
-unsafe fn is_bucket_of(hlist: *mut Hlist, bucket: *mut HlistBucket) -> bool {
-    unsafe { bucket_index(hlist, bucket).is_some() }
+impl HlistEntry {
+    /// # Safety
+    /// `old` and `new` must point to live entries; caller holds the
+    /// writer-side lock.
+    unsafe fn replace_rcu(old: *mut HlistEntry, new: *mut HlistEntry) {
+        unsafe {
+            llist::replace_rcu(HlistBucket::from_entry(old), HlistBucket::from_entry(new));
+            ptr::write_volatile(ptr::addr_of_mut!((*new).bucket), (*old).bucket);
+        }
+    }
 }
 
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`.
-unsafe fn validate(hlist: *mut Hlist) -> bool {
-    if hlist.is_null() {
-        return false;
+// ---------------------------------------------------------------------------
+// Callback dispatch through `hlist->func`, and the bucket-array/lookup
+// helpers below it — all relocated onto `impl Hlist` (raw params, no
+// `&self`; see the doc comment on the RCU-entry impl blocks above).
+// ---------------------------------------------------------------------------
+
+impl Hlist {
+    /// # Safety
+    /// `hlist` must point to a live, `hash`-having `Hlist`; `node` per the
+    /// callback's own contract (non-null, caller-supplied).
+    #[inline(always)]
+    unsafe fn call_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
+        unsafe { ((*hlist).func.hash.expect("BUG: hlist: func.hash is None"))(node) }
     }
-    unsafe {
-        if (*hlist).bucket_cnt == 0 {
+
+    /// # Safety
+    /// Same contract as [`Hlist::call_hash`], for `func.get_node`.
+    #[inline(always)]
+    unsafe fn call_get_node(hlist: *mut Hlist, entry: *mut HlistEntry) -> *mut c_void {
+        unsafe { ((*hlist).func.get_node.expect("BUG: hlist: func.get_node is None"))(entry) }
+    }
+
+    /// # Safety
+    /// Same contract as [`Hlist::call_hash`], for `func.get_entry`.
+    #[inline(always)]
+    unsafe fn call_get_entry(hlist: *mut Hlist, node: *mut c_void) -> *mut HlistEntry {
+        unsafe { ((*hlist).func.get_entry.expect("BUG: hlist: func.get_entry is None"))(node) }
+    }
+
+    /// # Safety
+    /// Same contract as [`Hlist::call_hash`], for `func.cmp_node`.
+    #[inline(always)]
+    unsafe fn call_cmp_node(hlist: *mut Hlist, n1: *mut c_void, n2: *mut c_void) -> i32 {
+        unsafe { ((*hlist).func.cmp_node.expect("BUG: hlist: func.cmp_node is None"))(hlist, n1, n2) }
+    }
+
+    /// # Safety
+    /// `hlist` must point to a live `Hlist` whose `buckets` flexible-array
+    /// member has been sized to at least `idx + 1` entries.
+    #[inline(always)]
+    unsafe fn bucket_at(hlist: *mut Hlist, idx: u64) -> *mut HlistBucket {
+        unsafe { (*hlist).buckets.as_mut_ptr().add(idx as usize) }
+    }
+
+    /// Mirrors `__hlist_is_bucket_of` with the `||` -> `&&` fix (see module
+    /// doc comment): `Some(index)` iff `bucket` is one of `hlist`'s own
+    /// buckets.
+    ///
+    /// # Safety
+    /// `hlist` must point to a live `Hlist`.
+    unsafe fn bucket_index(hlist: *mut Hlist, bucket: *mut HlistBucket) -> Option<u64> {
+        unsafe {
+            let base = (*hlist).buckets.as_mut_ptr() as usize;
+            let b = bucket as usize;
+            let elem_size = core::mem::size_of::<HlistBucket>();
+            if b < base {
+                return None;
+            }
+            let byte_diff = b - base;
+            if byte_diff % elem_size != 0 {
+                return None;
+            }
+            let idx = (byte_diff / elem_size) as u64;
+            if idx < (*hlist).bucket_cnt {
+                Some(idx)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// # Safety
+    /// `hlist` must point to a live `Hlist`; `bucket` must be null or point
+    /// to a live `HlistBucket` (not necessarily one of `hlist`'s own).
+    #[inline(always)]
+    unsafe fn is_bucket_of(hlist: *mut Hlist, bucket: *mut HlistBucket) -> bool {
+        unsafe { Self::bucket_index(hlist, bucket).is_some() }
+    }
+
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`.
+    unsafe fn validate(hlist: *mut Hlist) -> bool {
+        if hlist.is_null() {
             return false;
         }
-        let f = &(*hlist).func;
-        f.cmp_node.is_some() && f.get_node.is_some() && f.hash.is_some() && f.get_entry.is_some()
-    }
-}
-
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`; `node` must be null
-/// or a live caller-owned node.
-unsafe fn get_node_bucket(hlist: *mut Hlist, node: *mut c_void) -> *mut HlistBucket {
-    unsafe {
-        if hlist.is_null() || node.is_null() {
-            return ptr::null_mut();
-        }
-        let entry = call_get_entry(hlist, node);
-        if entry.is_null() {
-            return ptr::null_mut();
-        }
-        (*entry).bucket
-    }
-}
-
-/// # Safety
-/// `hlist` must point to a valid, non-zero-bucket-count `Hlist`; `hash`
-/// need not be validated beyond that (`hash % bucket_cnt` is always
-/// in-range).
-#[inline(always)]
-unsafe fn calc_hash_bucket(hlist: *mut Hlist, hash: HtHash) -> *mut HlistBucket {
-    unsafe { bucket_at(hlist, hash % (*hlist).bucket_cnt) }
-}
-
-/// Mirrors `__hlist_find_entry_in_bucket` (non-RCU `list_foreach_node_safe`
-/// walk).
-///
-/// # Safety
-/// `hlist` must be validated; `bucket` must be a live bucket head of
-/// `*hlist`; `node` is passed through to `func.cmp_node`/`func.get_node`.
-unsafe fn find_entry_in_bucket(hlist: *mut Hlist, bucket: *mut HlistBucket, node: *mut c_void) -> *mut HlistEntry {
-    // SAFETY: caller contract — `bucket` is a live bucket head of `*hlist`,
-    // walked under the writer-serialization the non-RCU path assumes. The
-    // find is read-only (no node is unlinked mid-walk), so the C original's
-    // "_safe" capture-next is behaviourally redundant here and the plain
-    // forward `BucketIter` reproduces it exactly.
-    unsafe { BucketIter::new(bucket) }
-        .find(|&entry| {
-            // SAFETY: `entry` is a live linked entry from `bucket`'s chain;
-            // `func.get_node`/`func.cmp_node` are the hlist's validated
-            // callbacks (checked by `validate` before this is reached).
-            let node1 = unsafe { call_get_node(hlist, entry) };
-            unsafe { call_cmp_node(hlist, node1, node) == 0 }
-        })
-        .unwrap_or(ptr::null_mut())
-}
-
-/// Mirrors `__hlist_find_entry_in_bucket_rcu`.
-///
-/// # Safety
-/// Same contract as [`find_entry_in_bucket`], but must be called from
-/// within an RCU read-side critical section.
-unsafe fn find_entry_in_bucket_rcu(hlist: *mut Hlist, bucket: *mut HlistBucket, node: *mut c_void) -> *mut HlistEntry {
-    unsafe {
-        let mut cur = llist::next_rcu(bucket);
-        while !cur.is_null() && cur != bucket {
-            let entry = entry_from_node(cur);
-            let node1 = call_get_node(hlist, entry);
-            if call_cmp_node(hlist, node1, node) == 0 {
-                return entry;
+        unsafe {
+            if (*hlist).bucket_cnt == 0 {
+                return false;
             }
-            cur = llist::next_rcu(cur);
+            let f = &(*hlist).func;
+            f.cmp_node.is_some() && f.get_node.is_some() && f.hash.is_some() && f.get_entry.is_some()
         }
-        ptr::null_mut()
     }
-}
 
-/// Mirrors `__hlist_get` (returns `(bucket, entry)` instead of writing
-/// through two out-params — internal-only, so no ABI to preserve here).
-///
-/// # Safety
-/// `hlist` must be validated; `node` is passed through to `func.hash`.
-unsafe fn get_bucket_entry(hlist: *mut Hlist, node: *mut c_void) -> (*mut HlistBucket, *mut HlistEntry) {
-    unsafe {
-        let hash_val = call_hash(hlist, node);
-        if hash_val == 0 {
-            return (ptr::null_mut(), ptr::null_mut());
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`; `node` must be null
+    /// or a live caller-owned node.
+    unsafe fn node_bucket(hlist: *mut Hlist, node: *mut c_void) -> *mut HlistBucket {
+        unsafe {
+            if hlist.is_null() || node.is_null() {
+                return ptr::null_mut();
+            }
+            let entry = Self::call_get_entry(hlist, node);
+            if entry.is_null() {
+                return ptr::null_mut();
+            }
+            (*entry).bucket
         }
-        let bucket = calc_hash_bucket(hlist, hash_val);
-        let entry = find_entry_in_bucket(hlist, bucket, node);
-        (bucket, entry)
     }
-}
 
-/// Mirrors `__hlist_get_rcu`.
-///
-/// # Safety
-/// Same contract as [`get_bucket_entry`], RCU read-side.
-unsafe fn get_bucket_entry_rcu(hlist: *mut Hlist, node: *mut c_void) -> (*mut HlistBucket, *mut HlistEntry) {
-    unsafe {
-        let hash_val = call_hash(hlist, node);
-        if hash_val == 0 {
-            return (ptr::null_mut(), ptr::null_mut());
+    /// # Safety
+    /// `hlist` must point to a valid, non-zero-bucket-count `Hlist`; `hash`
+    /// need not be validated beyond that (`hash % bucket_cnt` is always
+    /// in-range).
+    #[inline(always)]
+    unsafe fn hash_bucket(hlist: *mut Hlist, hash: HtHash) -> *mut HlistBucket {
+        unsafe { Self::bucket_at(hlist, hash % (*hlist).bucket_cnt) }
+    }
+
+    /// Mirrors `__hlist_find_entry_in_bucket` (non-RCU `list_foreach_node_safe`
+    /// walk).
+    ///
+    /// # Safety
+    /// `hlist` must be validated; `bucket` must be a live bucket head of
+    /// `*hlist`; `node` is passed through to `func.cmp_node`/`func.get_node`.
+    unsafe fn find_entry_in_bucket(hlist: *mut Hlist, bucket: *mut HlistBucket, node: *mut c_void) -> *mut HlistEntry {
+        // SAFETY: caller contract — `bucket` is a live bucket head of `*hlist`,
+        // walked under the writer-serialization the non-RCU path assumes. The
+        // find is read-only (no node is unlinked mid-walk), so the C original's
+        // "_safe" capture-next is behaviourally redundant here and the plain
+        // forward `BucketIter` reproduces it exactly.
+        unsafe { BucketIter::new(bucket) }
+            .find(|&entry| {
+                // SAFETY: `entry` is a live linked entry from `bucket`'s chain;
+                // `func.get_node`/`func.cmp_node` are the hlist's validated
+                // callbacks (checked by `validate` before this is reached).
+                let node1 = unsafe { Self::call_get_node(hlist, entry) };
+                unsafe { Self::call_cmp_node(hlist, node1, node) == 0 }
+            })
+            .unwrap_or(ptr::null_mut())
+    }
+
+    /// Mirrors `__hlist_find_entry_in_bucket_rcu`.
+    ///
+    /// # Safety
+    /// Same contract as [`Hlist::find_entry_in_bucket`], but must be called
+    /// from within an RCU read-side critical section.
+    unsafe fn find_entry_in_bucket_rcu(hlist: *mut Hlist, bucket: *mut HlistBucket, node: *mut c_void) -> *mut HlistEntry {
+        unsafe {
+            let mut cur = llist::next_rcu(bucket);
+            while !cur.is_null() && cur != bucket {
+                let entry = HlistEntry::from_node(cur);
+                let node1 = Self::call_get_node(hlist, entry);
+                if Self::call_cmp_node(hlist, node1, node) == 0 {
+                    return entry;
+                }
+                cur = llist::next_rcu(cur);
+            }
+            ptr::null_mut()
         }
-        let bucket = calc_hash_bucket(hlist, hash_val);
-        let entry = find_entry_in_bucket_rcu(hlist, bucket, node);
-        (bucket, entry)
+    }
+
+    /// Mirrors `__hlist_get` (returns `(bucket, entry)` instead of writing
+    /// through two out-params — internal-only, so no ABI to preserve here).
+    ///
+    /// # Safety
+    /// `hlist` must be validated; `node` is passed through to `func.hash`.
+    unsafe fn bucket_entry(hlist: *mut Hlist, node: *mut c_void) -> (*mut HlistBucket, *mut HlistEntry) {
+        unsafe {
+            let hash_val = Self::call_hash(hlist, node);
+            if hash_val == 0 {
+                return (ptr::null_mut(), ptr::null_mut());
+            }
+            let bucket = Self::hash_bucket(hlist, hash_val);
+            let entry = Self::find_entry_in_bucket(hlist, bucket, node);
+            (bucket, entry)
+        }
+    }
+
+    /// Mirrors `__hlist_get_rcu`.
+    ///
+    /// # Safety
+    /// Same contract as [`Hlist::bucket_entry`], RCU read-side.
+    unsafe fn bucket_entry_rcu(hlist: *mut Hlist, node: *mut c_void) -> (*mut HlistBucket, *mut HlistEntry) {
+        unsafe {
+            let hash_val = Self::call_hash(hlist, node);
+            if hash_val == 0 {
+                return (ptr::null_mut(), ptr::null_mut());
+            }
+            let bucket = Self::hash_bucket(hlist, hash_val);
+            let entry = Self::find_entry_in_bucket_rcu(hlist, bucket, node);
+            (bucket, entry)
+        }
+    }
+
+    /// # Safety
+    /// `hlist` must point to a live `Hlist`; `bucket` must be a live bucket
+    /// head of `*hlist`; `entry` must point to a live, detached `HlistEntry`.
+    unsafe fn insert_node_entry(hlist: *mut Hlist, bucket: *mut HlistBucket, entry: *mut HlistEntry) {
+        unsafe {
+            llist::push_front(bucket, HlistBucket::from_entry(entry));
+            (*entry).bucket = bucket;
+            (*hlist).elem_cnt += 1;
+        }
+    }
+
+    /// # Safety
+    /// `hlist` must point to a live `Hlist`; `entry` must point to a live,
+    /// linked `HlistEntry`.
+    unsafe fn remove_node_entry(hlist: *mut Hlist, entry: *mut HlistEntry) {
+        unsafe {
+            llist::detach(HlistBucket::from_entry(entry));
+            (*entry).bucket = ptr::null_mut();
+            (*hlist).elem_cnt -= 1;
+        }
     }
 }
 
-/// # Safety
-/// `hlist` must point to a live `Hlist`; `bucket` must be a live bucket
-/// head of `*hlist`; `entry` must point to a live, detached `HlistEntry`.
-unsafe fn insert_node_entry(hlist: *mut Hlist, bucket: *mut HlistBucket, entry: *mut HlistEntry) {
-    unsafe {
-        llist::push_front(bucket, node_from_entry(entry));
-        (*entry).bucket = bucket;
-        (*hlist).elem_cnt += 1;
-    }
-}
-
-/// # Safety
-/// `hlist` must point to a live `Hlist`; `entry` must point to a live,
-/// linked `HlistEntry`.
-unsafe fn remove_node_entry(hlist: *mut Hlist, entry: *mut HlistEntry) {
-    unsafe {
-        llist::detach(node_from_entry(entry));
-        (*entry).bucket = ptr::null_mut();
-        (*hlist).elem_cnt -= 1;
-    }
-}
-
-/// Mirrors `__hlist_replace_node_entry`: replace `old` in its bucket with
-/// `new` (non-RCU).
-///
-/// # Safety
-/// `old` must point to a live, linked `HlistEntry`; `new` must point to a
-/// live, detached `HlistEntry`.
-unsafe fn replace_node_entry(old: *mut HlistEntry, new: *mut HlistEntry) {
-    unsafe {
-        llist::replace(node_from_entry(old), node_from_entry(new));
-        (*new).bucket = (*old).bucket;
-        (*old).bucket = ptr::null_mut();
+impl HlistEntry {
+    /// Mirrors `__hlist_replace_node_entry`: replace `old` in its bucket with
+    /// `new` (non-RCU).
+    ///
+    /// # Safety
+    /// `old` must point to a live, linked `HlistEntry`; `new` must point to a
+    /// live, detached `HlistEntry`.
+    unsafe fn replace_node(old: *mut HlistEntry, new: *mut HlistEntry) {
+        unsafe {
+            llist::replace(HlistBucket::from_entry(old), HlistBucket::from_entry(new));
+            (*new).bucket = (*old).bucket;
+            (*old).bucket = ptr::null_mut();
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Public C ABI — exact symbol/signature parity with `kernel/inc/hlist.h`.
+// Every `hlist_*` free fn here relocates onto `impl Hlist` with its
+// redundant `hlist_` prefix dropped (`hlist_init` -> `Hlist::init`, ...),
+// matching the crate-wide convention (see e.g. `SessionTable`/`Session` in
+// `tty/session.rs`). No `#[no_mangle]`/`extern "C"` remains on any of
+// these (already dropped in wave P3-D3c, verified by grep — see report).
 // ---------------------------------------------------------------------------
 
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`; `node` must be null
-/// or a live caller-owned node whose `func.get_entry` callback is safe to
-/// invoke.
-pub(crate) unsafe fn hlist_node_in_list(hlist: *mut Hlist, node: *mut c_void) -> bool {
-    unsafe {
-        let bucket = get_node_bucket(hlist, node);
-        if bucket.is_null() || hlist.is_null() {
-            return false;
+impl Hlist {
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`; `node` must be null
+    /// or a live caller-owned node whose `func.get_entry` callback is safe to
+    /// invoke.
+    pub(crate) unsafe fn node_in_list(hlist: *mut Hlist, node: *mut c_void) -> bool {
+        unsafe {
+            let bucket = Self::node_bucket(hlist, node);
+            if bucket.is_null() || hlist.is_null() {
+                return false;
+            }
+            Self::is_bucket_of(hlist, bucket)
         }
-        is_bucket_of(hlist, bucket)
     }
-}
 
-/// # Safety
-/// `hlist` must be null or point to writable, zero-or-more-buckets-sized
-/// storage; `func` must be null or point to a live `HlistFunc`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_init(hlist: *mut Hlist, bucket_cnt: u64, func: *mut HlistFunc) -> i32 {
-    unsafe {
-        if hlist.is_null() || func.is_null() {
-            return -1;
-        }
-        if (*func).get_entry.is_none()
-            || (*func).get_node.is_none()
-            || (*func).hash.is_none()
-            || (*func).cmp_node.is_none()
-        {
-            return -1;
-        }
-        if bucket_cnt == 0 || bucket_cnt > HLIST_BUCKET_CNT_MAX {
-            return -1;
-        }
+    /// # Safety
+    /// `hlist` must be null or point to writable, zero-or-more-buckets-sized
+    /// storage; `func` must be null or point to a live `HlistFunc`.
+    pub(crate) unsafe fn init(hlist: *mut Hlist, bucket_cnt: u64, func: *mut HlistFunc) -> i32 {
+        unsafe {
+            if hlist.is_null() || func.is_null() {
+                return -1;
+            }
+            if (*func).get_entry.is_none()
+                || (*func).get_node.is_none()
+                || (*func).hash.is_none()
+                || (*func).cmp_node.is_none()
+            {
+                return -1;
+            }
+            if bucket_cnt == 0 || bucket_cnt > HLIST_BUCKET_CNT_MAX {
+                return -1;
+            }
 
-        for i in 0..bucket_cnt {
-            llist::init(bucket_at(hlist, i));
+            for i in 0..bucket_cnt {
+                llist::init(Self::bucket_at(hlist, i));
+            }
+
+            (*hlist).bucket_cnt = bucket_cnt;
+            (*hlist).func = *func;
+            (*hlist).elem_cnt = 0;
+
+            0
         }
-
-        (*hlist).bucket_cnt = bucket_cnt;
-        (*hlist).func = *func;
-        (*hlist).elem_cnt = 0;
-
-        0
     }
-}
 
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`; `node` must be null
-/// or a live caller-owned node.
-pub(crate) unsafe fn hlist_get_node_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
-    unsafe {
-        if hlist.is_null() || node.is_null() {
-            return 0;
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`; `node` must be null
+    /// or a live caller-owned node.
+    pub(crate) unsafe fn get_node_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
+        unsafe {
+            if hlist.is_null() || node.is_null() {
+                return 0;
+            }
+            if (*hlist).func.hash.is_none() {
+                return 0;
+            }
+            Self::call_hash(hlist, node)
         }
-        if (*hlist).func.hash.is_none() {
-            return 0;
-        }
-        call_hash(hlist, node)
     }
-}
 
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`; `node` must be null
-/// or a live caller-owned node.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_get(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
-    unsafe {
-        if node.is_null() {
-            return ptr::null_mut();
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`; `node` must be null
+    /// or a live caller-owned node.
+    pub(crate) unsafe fn get(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+        unsafe {
+            if node.is_null() {
+                return ptr::null_mut();
+            }
+            if !Self::validate(hlist) {
+                return ptr::null_mut();
+            }
+            let (_, entry) = Self::bucket_entry(hlist, node);
+            if entry.is_null() {
+                return ptr::null_mut();
+            }
+            Self::call_get_node(hlist, entry)
         }
-        if !validate(hlist) {
-            return ptr::null_mut();
-        }
-        let (_, entry) = get_bucket_entry(hlist, node);
-        if entry.is_null() {
-            return ptr::null_mut();
-        }
-        call_get_node(hlist, entry)
     }
-}
 
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`; `node` must be a live
-/// caller-owned node.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_put(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
-    unsafe {
-        if !validate(hlist) {
-            return node;
-        }
-        let new_entry = call_get_entry(hlist, node);
-        if new_entry.is_null() {
-            return node;
-        }
-        if !(*new_entry).bucket.is_null() {
-            // HLIST_ENTRY_ATTACHED: cannot insert an already-attached node.
-            return node;
-        }
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`; `node` must be a live
+    /// caller-owned node.
+    pub(crate) unsafe fn put(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
+        unsafe {
+            if !Self::validate(hlist) {
+                return node;
+            }
+            let new_entry = Self::call_get_entry(hlist, node);
+            if new_entry.is_null() {
+                return node;
+            }
+            if !(*new_entry).bucket.is_null() {
+                // HLIST_ENTRY_ATTACHED: cannot insert an already-attached node.
+                return node;
+            }
 
-        let (bucket, entry) = get_bucket_entry(hlist, node);
-        if bucket.is_null() {
-            return node;
-        }
+            let (bucket, entry) = Self::bucket_entry(hlist, node);
+            if bucket.is_null() {
+                return node;
+            }
 
-        if entry.is_null() {
-            insert_node_entry(hlist, bucket, new_entry);
-            return ptr::null_mut();
-        }
+            if entry.is_null() {
+                Self::insert_node_entry(hlist, bucket, new_entry);
+                return ptr::null_mut();
+            }
 
-        let old_node = call_get_node(hlist, entry);
-        if old_node.is_null() {
-            return node;
-        } else if node == old_node {
-            return node;
+            let old_node = Self::call_get_node(hlist, entry);
+            if old_node.is_null() {
+                return node;
+            } else if node == old_node {
+                return node;
+            }
+            if replace {
+                HlistEntry::replace_node(entry, new_entry);
+            }
+            old_node
         }
-        if replace {
-            replace_node_entry(entry, new_entry);
-        }
-        old_node
     }
-}
 
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`; `node` must be null
-/// or a live caller-owned node.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_pop(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
-    unsafe {
-        if !validate(hlist) {
-            return ptr::null_mut();
-        }
-        if (*hlist).elem_cnt == 0 {
-            return ptr::null_mut();
-        }
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`; `node` must be null
+    /// or a live caller-owned node.
+    pub(crate) unsafe fn pop(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+        unsafe {
+            if !Self::validate(hlist) {
+                return ptr::null_mut();
+            }
+            if (*hlist).elem_cnt == 0 {
+                return ptr::null_mut();
+            }
 
-        if node.is_null() {
-            for i in 0..(*hlist).bucket_cnt {
-                let bucket = bucket_at(hlist, i);
-                if !llist::is_self_linked(bucket) {
-                    let entry = entry_from_node((*bucket).next);
-                    let ret_node = call_get_node(hlist, entry);
-                    remove_node_entry(hlist, entry);
-                    return ret_node;
+            if node.is_null() {
+                for i in 0..(*hlist).bucket_cnt {
+                    let bucket = Self::bucket_at(hlist, i);
+                    if !llist::is_self_linked(bucket) {
+                        let entry = HlistEntry::from_node((*bucket).next);
+                        let ret_node = Self::call_get_node(hlist, entry);
+                        Self::remove_node_entry(hlist, entry);
+                        return ret_node;
+                    }
                 }
+                return ptr::null_mut();
             }
-            return ptr::null_mut();
-        }
 
-        let (_, entry) = get_bucket_entry(hlist, node);
-        if !entry.is_null() {
-            let ret_node = call_get_node(hlist, entry);
-            if !ret_node.is_null() {
-                remove_node_entry(hlist, entry);
-            }
-            ret_node
-        } else {
-            ptr::null_mut()
-        }
-    }
-}
-
-/// # Safety
-/// `hlist` must be null or point to a live `Hlist`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_len(hlist: *mut Hlist) -> usize {
-    unsafe {
-        if !validate(hlist) {
-            return 0;
-        }
-        (*hlist).elem_cnt as usize
-    }
-}
-
-/// # Safety
-/// Same contract as [`hlist_get`]; caller holds `rcu_read_lock()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_get_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
-    unsafe {
-        if node.is_null() {
-            return ptr::null_mut();
-        }
-        if !validate(hlist) {
-            return ptr::null_mut();
-        }
-        let (_, entry) = get_bucket_entry_rcu(hlist, node);
-        if entry.is_null() {
-            return ptr::null_mut();
-        }
-        call_get_node(hlist, entry)
-    }
-}
-
-/// # Safety
-/// Same contract as [`hlist_put`]; caller serializes writers externally
-/// (e.g. holds a lock) and defers freeing any replaced node past the next
-/// RCU grace period.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_put_rcu(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
-    unsafe {
-        if !validate(hlist) {
-            return node;
-        }
-        let new_entry = call_get_entry(hlist, node);
-        if new_entry.is_null() {
-            return node;
-        }
-        if !(*new_entry).bucket.is_null() {
-            return node;
-        }
-
-        // Non-RCU lookup: the writer already holds whatever lock
-        // serializes writers (matches the C comment on `hlist_put_rcu`).
-        let (bucket, entry) = get_bucket_entry(hlist, node);
-        if bucket.is_null() {
-            return node;
-        }
-
-        if entry.is_null() {
-            hlist_entry_add_rcu(hlist, bucket, new_entry);
-            return ptr::null_mut();
-        }
-
-        let old_node = call_get_node(hlist, entry);
-        if old_node.is_null() {
-            return node;
-        } else if node == old_node {
-            return node;
-        }
-        if replace {
-            hlist_entry_replace_rcu(entry, new_entry);
-        }
-        old_node
-    }
-}
-
-/// # Safety
-/// Same contract as [`hlist_pop`]; caller serializes writers externally
-/// and defers freeing the returned node past the next RCU grace period.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer reaches it
-// by crate path now.
-pub(crate) unsafe fn hlist_pop_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
-    unsafe {
-        if !validate(hlist) {
-            return ptr::null_mut();
-        }
-        if (*hlist).elem_cnt == 0 {
-            return ptr::null_mut();
-        }
-
-        if node.is_null() {
-            for i in 0..(*hlist).bucket_cnt {
-                let bucket = bucket_at(hlist, i);
-                if !llist::is_self_linked(bucket) {
-                    let entry = entry_from_node((*bucket).next);
-                    let ret_node = call_get_node(hlist, entry);
-                    hlist_entry_del_rcu(hlist, entry);
-                    return ret_node;
+            let (_, entry) = Self::bucket_entry(hlist, node);
+            if !entry.is_null() {
+                let ret_node = Self::call_get_node(hlist, entry);
+                if !ret_node.is_null() {
+                    Self::remove_node_entry(hlist, entry);
                 }
+                ret_node
+            } else {
+                ptr::null_mut()
             }
-            return ptr::null_mut();
         }
+    }
 
-        let (_, entry) = get_bucket_entry(hlist, node);
-        if !entry.is_null() {
-            let ret_node = call_get_node(hlist, entry);
-            if !ret_node.is_null() {
-                hlist_entry_del_rcu(hlist, entry);
+    /// # Safety
+    /// `hlist` must be null or point to a live `Hlist`.
+    pub(crate) unsafe fn len(hlist: *mut Hlist) -> usize {
+        unsafe {
+            if !Self::validate(hlist) {
+                return 0;
             }
-            ret_node
-        } else {
-            ptr::null_mut()
+            (*hlist).elem_cnt as usize
+        }
+    }
+
+    /// # Safety
+    /// Same contract as [`Hlist::get`]; caller holds `rcu_read_lock()`.
+    pub(crate) unsafe fn get_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+        unsafe {
+            if node.is_null() {
+                return ptr::null_mut();
+            }
+            if !Self::validate(hlist) {
+                return ptr::null_mut();
+            }
+            let (_, entry) = Self::bucket_entry_rcu(hlist, node);
+            if entry.is_null() {
+                return ptr::null_mut();
+            }
+            Self::call_get_node(hlist, entry)
+        }
+    }
+
+    /// # Safety
+    /// Same contract as [`Hlist::put`]; caller serializes writers externally
+    /// (e.g. holds a lock) and defers freeing any replaced node past the next
+    /// RCU grace period.
+    pub(crate) unsafe fn put_rcu(hlist: *mut Hlist, node: *mut c_void, replace: bool) -> *mut c_void {
+        unsafe {
+            if !Self::validate(hlist) {
+                return node;
+            }
+            let new_entry = Self::call_get_entry(hlist, node);
+            if new_entry.is_null() {
+                return node;
+            }
+            if !(*new_entry).bucket.is_null() {
+                return node;
+            }
+
+            // Non-RCU lookup: the writer already holds whatever lock
+            // serializes writers (matches the C comment on `hlist_put_rcu`).
+            let (bucket, entry) = Self::bucket_entry(hlist, node);
+            if bucket.is_null() {
+                return node;
+            }
+
+            if entry.is_null() {
+                Self::entry_add_rcu(hlist, bucket, new_entry);
+                return ptr::null_mut();
+            }
+
+            let old_node = Self::call_get_node(hlist, entry);
+            if old_node.is_null() {
+                return node;
+            } else if node == old_node {
+                return node;
+            }
+            if replace {
+                HlistEntry::replace_rcu(entry, new_entry);
+            }
+            old_node
+        }
+    }
+
+    /// # Safety
+    /// Same contract as [`Hlist::pop`]; caller serializes writers externally
+    /// and defers freeing the returned node past the next RCU grace period.
+    pub(crate) unsafe fn pop_rcu(hlist: *mut Hlist, node: *mut c_void) -> *mut c_void {
+        unsafe {
+            if !Self::validate(hlist) {
+                return ptr::null_mut();
+            }
+            if (*hlist).elem_cnt == 0 {
+                return ptr::null_mut();
+            }
+
+            if node.is_null() {
+                for i in 0..(*hlist).bucket_cnt {
+                    let bucket = Self::bucket_at(hlist, i);
+                    if !llist::is_self_linked(bucket) {
+                        let entry = HlistEntry::from_node((*bucket).next);
+                        let ret_node = Self::call_get_node(hlist, entry);
+                        Self::entry_del_rcu(hlist, entry);
+                        return ret_node;
+                    }
+                }
+                return ptr::null_mut();
+            }
+
+            let (_, entry) = Self::bucket_entry(hlist, node);
+            if !entry.is_null() {
+                let ret_node = Self::call_get_node(hlist, entry);
+                if !ret_node.is_null() {
+                    Self::entry_del_rcu(hlist, entry);
+                }
+                ret_node
+            } else {
+                ptr::null_mut()
+            }
         }
     }
 }

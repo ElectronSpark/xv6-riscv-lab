@@ -243,7 +243,7 @@ unsafe extern "C" {
 
 // P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
-use crate::bufcache::{bread, brelse, bwrite};
+use crate::bufcache::Buf;
 
 // P3-D3a: `pcache_init`/`xv6_page_pcache_get_node` (mm/pcache.rs) are
 // ordinary (safe) Rust fns now that their `#[no_mangle]` exports are
@@ -646,7 +646,7 @@ impl OndiskSuperblock {
     /// `&mut self` receiver -- purely receiver plumbing, the memmove disk
     /// bytes are byte-identical (P3-4 on-disk-format scrutiny class).
     fn read_from_disk(&mut self, dev: u32) -> KResult<()> {
-        let bp = bread(dev, 1);
+        let bp = Buf::read(dev, 1);
         if bp.is_null() {
             return Err(Errno::Io);
         }
@@ -654,7 +654,7 @@ impl OndiskSuperblock {
         // borrowed (`&mut`), so the memmove target is uniquely owned.
         unsafe {
             memmove(self as *mut OndiskSuperblock as *mut c_void, (*bp).data as *const c_void, core::mem::size_of::<OndiskSuperblock>());
-            brelse(bp);
+            Buf::release(bp);
         }
         if self.magic != FSMAGIC {
             return Err(Errno::Inval);
@@ -666,7 +666,7 @@ impl OndiskSuperblock {
     /// record back to block 1 of `dev`. N-METH sweep (goal #1): `disk_sb`
     /// param -> `&self` receiver; disk bytes byte-identical.
     fn write_to_disk(&self, dev: u32) -> KResult<()> {
-        let bp = bread(dev, 1);
+        let bp = Buf::read(dev, 1);
         if bp.is_null() {
             return Err(Errno::Io);
         }
@@ -674,8 +674,8 @@ impl OndiskSuperblock {
         // the memmove source only.
         unsafe {
             memmove((*bp).data as *mut c_void, self as *const OndiskSuperblock as *const c_void, core::mem::size_of::<OndiskSuperblock>());
-            bwrite(bp);
-            brelse(bp);
+            Buf::write(bp);
+            Buf::release(bp);
         }
         Ok(())
     }
@@ -723,7 +723,7 @@ impl Xv6fs {
             let ninodes = (*disk_sb).ninodes as u64;
             let inodestart = (*disk_sb).inodestart;
             for inum in 1..ninodes {
-                let bp = bread(dev, super::Xv6fs::iblock(inum, inodestart));
+                let bp = Buf::read(dev, super::Xv6fs::iblock(inum, inodestart));
                 if bp.is_null() {
                     return Err(Errno::Io);
                 }
@@ -733,7 +733,7 @@ impl Xv6fs {
                     ptr::write_bytes(dip as *mut u8, 0, core::mem::size_of::<dinode>());
                     // Mark as allocated but type will be set by caller.
                     Xv6fsSuperblock::log_write(xv6_sb, bp);
-                    brelse(bp);
+                    Buf::release(bp);
 
                     let xi = Xv6fsInode::alloc_structure();
                     if xi.is_null() {
@@ -747,7 +747,7 @@ impl Xv6fs {
 
                     return Ok(ptr::addr_of_mut!((*xi).vfs_inode));
                 }
-                brelse(bp);
+                Buf::release(bp);
             }
         }
 
@@ -777,20 +777,20 @@ impl Xv6fs {
                 return Err(Errno::NoEnt);
             }
 
-            let bp = bread(dev, super::Xv6fs::iblock(ino, (*disk_sb).inodestart));
+            let bp = Buf::read(dev, super::Xv6fs::iblock(ino, (*disk_sb).inodestart));
             if bp.is_null() {
                 return Err(Errno::Io);
             }
 
             let dip = ((*bp).data as *mut dinode).add((ino % IPB) as usize);
             if (*dip).type_ == 0 {
-                brelse(bp);
+                Buf::release(bp);
                 return Err(Errno::NoEnt);
             }
 
             let xi = Xv6fsInode::alloc_structure();
             if xi.is_null() {
-                brelse(bp);
+                Buf::release(bp);
                 return Err(Errno::NoMem);
             }
 
@@ -816,7 +816,7 @@ impl Xv6fs {
                 (*xi).vfs_inode.dev_mnt.cdev = devno;
             }
 
-            brelse(bp);
+            Buf::release(bp);
             Ok(ptr::addr_of_mut!((*xi).vfs_inode))
         }
     }

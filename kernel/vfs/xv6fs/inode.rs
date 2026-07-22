@@ -26,14 +26,14 @@
 //! opened a transaction before that lock chain, per the class-level
 //! "hybrid approach" documented in `superblock.rs`'s module doc.
 //!
-//! # Fidelity note: NULL-`bread()` deref safety fix
+//! # Fidelity note: NULL-`Buf::read()` deref safety fix
 //!
 //! The C original's directory-entry scan helpers are inconsistent about
-//! checking `bread()`'s result for `NULL` before dereferencing it:
+//! checking `Buf::read()`'s result for `NULL` before dereferencing it:
 //! `xv6fs_lookup`/`xv6fs_dir_iter` check (`if (bp == NULL) continue;`);
 //! `__xv6fs_dir_name_exists`/`__xv6fs_dirlink`/`xv6fs_create`'s
 //! existing-name scan/`xv6fs_unlink` do **not** — a latent NULL-pointer
-//! dereference on an out-of-memory `bread()` failure (bread only returns
+//! dereference on an out-of-memory `Buf::read()` failure (bread only returns
 //! NULL on OOM; see `kernel/bio.c`'s own doc comment). This port
 //! consolidates every read-only directory-entry scan through one
 //! [`read_dirent`] helper that **always** checks, converting the latent
@@ -45,7 +45,7 @@
 //! tmpfs `__tmpfs_move` use-after-free fix). The two call sites that
 //! *write* a directory entry after finding its offset (`__xv6fs_dirlink`'s
 //! final write, `xv6fs_unlink`'s clear-entry write) keep their own
-//! `bread()` + explicit NULL check inline (not via `read_dirent`, which is
+//! `Buf::read()` + explicit NULL check inline (not via `read_dirent`, which is
 //! read-only), matching the C's re-read-for-write structure exactly.
 //!
 //! # Wave A free-fn -> associated-fn sweep
@@ -293,7 +293,7 @@ unsafe extern "C" {
 
 // P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
-use crate::bufcache::{bread, brelse};
+use crate::bufcache::Buf;
 
 // P3-D3a: `pcache_teardown` (mm/pcache.rs) is an ordinary (safe) Rust fn
 // now that its `#[no_mangle]` export is gone; identical signature, plain
@@ -397,7 +397,7 @@ impl Xv6fsInode {
             }
             let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
 
-            let bp = bread((*ip).dev, super::Xv6fs::iblock((*ip).vfs_inode.ino, (*disk_sb).inodestart));
+            let bp = Buf::read((*ip).dev, super::Xv6fs::iblock((*ip).vfs_inode.ino, (*disk_sb).inodestart));
             if bp.is_null() {
                 // C original does not NULL-check here either -- but an
                 // unconditional deref of a NULL `bp` below would be
@@ -420,7 +420,7 @@ impl Xv6fsInode {
             dip.addrs = (*ip).addrs;
 
             Xv6fsSuperblock::log_write(xv6_sb, bp);
-            brelse(bp);
+            Buf::release(bp);
         }
     }
 }
@@ -472,7 +472,7 @@ impl Xv6fsInode {
             if addr == 0 {
                 return None;
             }
-            let bp = bread((*dp).dev, addr);
+            let bp = Buf::read((*dp).dev, addr);
             if bp.is_null() {
                 return None;
             }
@@ -481,7 +481,7 @@ impl Xv6fsInode {
             // page-aligned, initialized bytes borrowed only here until `brelse`.
             let view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
             let de = *view.get::<dirent>(block_off);
-            brelse(bp);
+            Buf::release(bp);
             Some(de)
         }
     }
@@ -678,7 +678,7 @@ impl Xv6fsInode {
             if addr == 0 {
                 return Err(Errno::NoSpc);
             }
-            let bp = bread((*dp).dev, addr);
+            let bp = Buf::read((*dp).dev, addr);
             if bp.is_null() {
                 // See the module doc's "Fidelity note": C does not NULL-check
                 // here, but an unconditional deref would be Rust UB.
@@ -695,7 +695,7 @@ impl Xv6fsInode {
             strncpy(de.name.as_mut_ptr(), name, DIRSIZ);
             de.inum = inum as u16;
             Xv6fsSuperblock::log_write(xv6_sb, bp);
-            brelse(bp);
+            Buf::release(bp);
 
             if off as i64 >= (*dp).vfs_inode.size {
                 (*dp).vfs_inode.size = (off + DIRENT_SIZE) as i64;
@@ -857,7 +857,7 @@ impl Xv6fs {
                             let bn = off / super::BSIZE;
                             let block_off = (off % super::BSIZE) as usize;
                             let addr = Xv6fsInode::bmap(dp, bn);
-                            let bp = bread((*dp).dev, addr);
+                            let bp = Buf::read((*dp).dev, addr);
                             if bp.is_null() {
                                 // See the module doc's "Fidelity note".
                                 return Err(Errno::Io);
@@ -872,7 +872,7 @@ impl Xv6fs {
                             *view.get_mut::<dirent>(block_off) = core::mem::zeroed();
                             let xv6_sb = (*dentry).sb as *mut xv6fs_superblock;
                             Xv6fsSuperblock::log_write(xv6_sb, bp);
-                            brelse(bp);
+                            Buf::release(bp);
 
                             // inode is already locked by vfs_get_inode.
                             (*target).n_links -= 1;
@@ -987,7 +987,7 @@ impl Xv6fs {
                 return Err(Errno::Io);
             }
             // SAFETY: `ip` is live.
-            let bp = bread(unsafe { (*ip).dev }, addr);
+            let bp = Buf::read(unsafe { (*ip).dev }, addr);
             if bp.is_null() {
                 return Err(Errno::Io);
             }
@@ -998,7 +998,7 @@ impl Xv6fs {
                     (*bp).data.add(off as usize) as *const c_void,
                     n as usize,
                 );
-                brelse(bp);
+                Buf::release(bp);
             }
 
             bytes_read += n as usize;
@@ -1066,7 +1066,7 @@ impl Xv6fs {
             }
 
             // SAFETY: `ip` is live.
-            let bp = bread(unsafe { (*ip).dev }, addr);
+            let bp = Buf::read(unsafe { (*ip).dev }, addr);
             if bp.is_null() {
                 Xv6fsInode::itrunc(ip);
                 VfsInode::vfs_iunlock(new_inode);
@@ -1081,7 +1081,7 @@ impl Xv6fs {
                 );
             }
             Xv6fsSuperblock::log_write(xv6_sb, bp);
-            brelse(bp);
+            Buf::release(bp);
 
             bytes_written += n as usize;
         }
@@ -1188,7 +1188,7 @@ impl Xv6fs {
             Xv6fsInode::itrunc(ip);
 
             // Mark inode as free on disk.
-            let bp = bread((*ip).dev, super::Xv6fs::iblock((*inode).ino, (*xv6_sb).disk_sb.inodestart));
+            let bp = Buf::read((*ip).dev, super::Xv6fs::iblock((*inode).ino, (*xv6_sb).disk_sb.inodestart));
             if bp.is_null() {
                 // See the module doc's "Fidelity note": the C original does
                 // not NULL-check here either, but an unconditional deref
@@ -1201,7 +1201,7 @@ impl Xv6fs {
             let mut view = BlockView::from_raw_parts_mut((*bp).data, super::BSIZE as usize);
             view.nth_mut::<dinode>(((*inode).ino % super::IPB) as usize).type_ = 0;
             Xv6fsSuperblock::log_write(xv6_sb, bp);
-            brelse(bp);
+            Buf::release(bp);
         }
     }
 

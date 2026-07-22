@@ -267,30 +267,30 @@ const _: () = {
 // are gone — the cache lock is now embedded in `SpinLock<BlockCacheInner>`,
 // so every acquire/release is the guard's `lock()`/`Drop`, and the
 // diagnostic name is set once by `SpinLock::new`.
-/// SAFETY: see [`crate::bintree::rb_first_node`]'s contract.
+/// SAFETY: see [`crate::bintree::RbRoot::first_node`]'s contract.
 fn rb_first_node(root: *mut rb_root) -> *mut rb_node {
-    unsafe { crate::bintree::rb_first_node(root) }
+    unsafe { crate::bintree::RbRoot::first_node(root) }
 }
-/// SAFETY: see [`crate::bintree::rb_last_node`]'s contract.
+/// SAFETY: see [`crate::bintree::RbRoot::last_node`]'s contract.
 fn rb_last_node(root: *mut rb_root) -> *mut rb_node {
-    unsafe { crate::bintree::rb_last_node(root) }
+    unsafe { crate::bintree::RbRoot::last_node(root) }
 }
-/// SAFETY: see [`crate::bintree::rb_next_node`]'s contract.
+/// SAFETY: see [`crate::bintree::RbNode::next`]'s contract.
 fn rb_next_node(node: *mut rb_node) -> *mut rb_node {
-    unsafe { crate::bintree::rb_next_node(node) }
+    unsafe { crate::bintree::RbNode::next(node) }
 }
-/// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
+/// SAFETY: see [`crate::rbtree::RbRoot::insert_color`]'s contract.
 fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
-    unsafe { crate::rbtree::rb_insert_color(root, node) }
+    unsafe { crate::rbtree::RbRoot::insert_color(root, node) }
 }
-/// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
+/// SAFETY: see [`crate::rbtree::RbRoot::delete_node_color`]'s contract.
 fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
-    unsafe { crate::rbtree::rb_delete_node_color(root, node) }
+    unsafe { crate::rbtree::RbRoot::delete_node_color(root, node) }
 }
 
 // P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
-use crate::bufcache::{bread, brelse};
+use crate::bufcache::Buf;
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -808,9 +808,9 @@ impl Xv6fsSuperblock {
 
                 if bitmap_block != last_bitmap_block {
                     if !bp.is_null() {
-                        brelse(bp);
+                        Buf::release(bp);
                     }
-                    bp = bread(dev, bitmap_block);
+                    bp = Buf::read(dev, bitmap_block);
                     if bp.is_null() {
                         last_bitmap_block = u32::MAX;
                         // Treat read errors as used blocks.
@@ -849,7 +849,7 @@ impl Xv6fsSuperblock {
             }
 
             if !bp.is_null() {
-                brelse(bp);
+                Buf::release(bp);
             }
 
             // Publish: set the lock-free lifecycle flag last (after the tree is

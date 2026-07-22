@@ -803,7 +803,7 @@ impl Iterator for FdtChildIter {
         // SAFETY: `self.cur` is a live rb_node in the tree (seeded by
         // `rb_first_node`, only ever advanced by `rb_next_node`); the tree
         // is immutable for the walk's duration (boot-time, single hart).
-        self.cur = unsafe { crate::bintree::rb_next_node(self.cur) };
+        self.cur = unsafe { crate::bintree::RbNode::next(self.cur) };
         Some(node)
     }
 }
@@ -866,7 +866,7 @@ impl FdtNode {
         // only reads it. The `*const -> *mut` cast matches the C
         // `rb_first_node` signature (the walk never mutates the tree).
         let cur =
-            unsafe { crate::bintree::rb_first_node(&self.children as *const rb_root as *mut rb_root) };
+            unsafe { crate::bintree::RbRoot::first_node(&self.children as *const rb_root as *mut rb_root) };
         FdtChildIter { cur }
     }
 
@@ -1146,7 +1146,7 @@ impl FdtNode {
         // established `first_child_named`/`children` precedent (lookup
         // does not mutate the tree).
         let node = unsafe {
-            crate::bintree::rb_find_key(&self.children as *const rb_root as *mut rb_root, &raw mut dummy as u64)
+            crate::bintree::RbRoot::find_key(&self.children as *const rb_root as *mut rb_root, &raw mut dummy as u64)
         };
         if node.is_null() {
             return ptr::null_mut();
@@ -1175,7 +1175,7 @@ impl FdtNode {
         // `*const -> *mut` cast matches `rb_find_key_rup`'s signature
         // (lookup does not mutate the tree).
         let node = unsafe {
-            crate::bintree::rb_find_key_rup(
+            crate::bintree::RbRoot::find_key_rup(
                 &self.children as *const rb_root as *mut rb_root,
                 &raw mut dummy as u64,
             )
@@ -1207,7 +1207,7 @@ unsafe fn fdt_node_next_same_name(parent: *mut FdtNode, current: *mut FdtNode) -
         return ptr::null_mut();
     }
     // SAFETY: `current` live per caller contract.
-    let next = unsafe { crate::bintree::rb_next_node(&raw mut (*current).rb_entry) };
+    let next = unsafe { crate::bintree::RbNode::next(&raw mut (*current).rb_entry) };
     if next.is_null() {
         return ptr::null_mut();
     }
@@ -1303,7 +1303,7 @@ pub(crate) unsafe extern "C" fn fdt_path_lookup(blob: *mut FdtBlobInfo, path: *c
                 dummy.addr = addr;
 
                 let node =
-                    crate::bintree::rb_find_key(&raw mut (*current).children, &raw mut dummy as u64);
+                    crate::bintree::RbRoot::find_key(&raw mut (*current).children, &raw mut dummy as u64);
                 child = if node.is_null() { ptr::null_mut() } else { node as *mut FdtNode };
             } else {
                 let mut name_buf = [0u8; 64];
@@ -1349,7 +1349,7 @@ impl FdtBlobInfo {
         unsafe { machine::Riscv::rb_node_init(&raw mut (*new_node).rb_entry) };
         // SAFETY: `parent`/`new_node` live per caller contract.
         let inserted =
-            unsafe { crate::rbtree::rb_insert_color(&raw mut (*parent).children, &raw mut (*new_node).rb_entry) };
+            unsafe { crate::rbtree::RbRoot::insert_color(&raw mut (*parent).children, &raw mut (*new_node).rb_entry) };
         if inserted != unsafe { &raw mut (*new_node).rb_entry } {
             return false;
         }
@@ -1995,7 +1995,7 @@ unsafe fn index_compat_string(&self, fdt_node: *mut FdtNode, compat: *const c_ch
     key.compat_len = len;
     // SAFETY: `self` live; `key` local.
     let mut hash_node =
-        unsafe { crate::hlist::hlist_get(self.compat_table as *mut c_void as *mut Hlist, &raw mut key as *mut c_void) }
+        unsafe { crate::hlist::Hlist::get(self.compat_table as *mut c_void as *mut Hlist, &raw mut key as *mut c_void) }
             as *mut FdtCompatHashNode;
 
     if hash_node.is_null() {
@@ -2006,7 +2006,7 @@ unsafe fn index_compat_string(&self, fdt_node: *mut FdtNode, compat: *const c_ch
         }
         // SAFETY: `self`/`hash_node` live.
         let ret = unsafe {
-            crate::hlist::hlist_put(self.compat_table, hash_node as *mut c_void, false)
+            crate::hlist::Hlist::put(self.compat_table, hash_node as *mut c_void, false)
         } as *mut FdtCompatHashNode;
         if ret != hash_node && !ret.is_null() {
             hash_node = ret;
@@ -2058,7 +2058,7 @@ unsafe fn index_node_phandle(&self, fdt_node: *mut FdtNode) {
         return;
     }
     // SAFETY: `self`/`hash_node` live.
-    unsafe { crate::hlist::hlist_put(self.phandle_table, hash_node as *mut c_void, false) };
+    unsafe { crate::hlist::Hlist::put(self.phandle_table, hash_node as *mut c_void, false) };
 }
 }
 
@@ -2077,7 +2077,7 @@ unsafe fn fdt_alloc_hlist(bucket_cnt: u64, func: *const HlistFunc) -> *mut Hlist
 
     // SAFETY: `hlist` sized for `bucket_cnt` buckets above; `func` is a
     // live 'static.
-    let ret = unsafe { crate::hlist::hlist_init(hlist, bucket_cnt, func as *mut HlistFunc) };
+    let ret = unsafe { crate::hlist::Hlist::init(hlist, bucket_cnt, func as *mut HlistFunc) };
     if ret != 0 {
         return ptr::null_mut();
     }
@@ -2154,7 +2154,7 @@ pub(crate) unsafe extern "C" fn fdt_compat_lookup(blob: *mut FdtBlobInfo, compat
     key.compat_len = unsafe { strlen(compat) };
     // SAFETY: `blob` live; `key` local.
     let hash_node =
-        unsafe { crate::hlist::hlist_get((*blob).compat_table, &raw mut key as *mut c_void) } as *mut FdtCompatHashNode;
+        unsafe { crate::hlist::Hlist::get((*blob).compat_table, &raw mut key as *mut c_void) } as *mut FdtCompatHashNode;
     if hash_node.is_null() {
         return ptr::null_mut();
     }
@@ -2216,7 +2216,7 @@ pub(crate) unsafe extern "C" fn fdt_phandle_lookup(blob: *mut FdtBlobInfo, phand
     key.phandle = phandle;
     // SAFETY: `blob` live; `key` local.
     let hash_node =
-        unsafe { crate::hlist::hlist_get((*blob).phandle_table, &raw mut key as *mut c_void) } as *mut FdtPhandleHashNode;
+        unsafe { crate::hlist::Hlist::get((*blob).phandle_table, &raw mut key as *mut c_void) } as *mut FdtPhandleHashNode;
     if hash_node.is_null() {
         return ptr::null_mut();
     }

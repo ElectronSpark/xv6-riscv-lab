@@ -1510,7 +1510,7 @@ impl VfsSuperblock {
         unsafe {
             let mut key: vfs_inode = core::mem::zeroed();
             key.ino = ino;
-            crate::hlist::hlist_get(
+            crate::hlist::Hlist::get(
                 &raw mut (*sb).inodes,
                 (&raw mut key) as *mut c_void,
             ) as *mut vfs_inode
@@ -1520,7 +1520,7 @@ impl VfsSuperblock {
     /// Mirrors `__vfs_inode_hash_add()`.
     unsafe fn inode_hash_add(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut vfs_inode {
         unsafe {
-            crate::hlist::hlist_put(
+            crate::hlist::Hlist::put(
                 &raw mut (*sb).inodes,
                 inode as *mut c_void,
                 false,
@@ -1533,7 +1533,7 @@ impl VfsSuperblock {
         unsafe {
             ln_init(&raw mut (*sb).siblings);
             ln_init(&raw mut (*sb).orphan_list);
-            crate::hlist::hlist_init(
+            crate::hlist::Hlist::init(
                 &raw mut (*sb).inodes,
                 SB_HASH_BUCKETS as u64,
                 &SB_INODE_HLIST_FUNCS as *const hlist_func_t as *mut hlist_func_t,
@@ -2109,7 +2109,7 @@ impl VfsSuperblock {
             if existing != inode {
                 return neg(ENOENT);
             }
-            let popped = crate::hlist::hlist_pop(
+            let popped = crate::hlist::Hlist::pop(
                 &raw mut (*sb).inodes,
                 inode as *mut c_void,
             ) as *mut vfs_inode;
@@ -2554,7 +2554,7 @@ impl VfsInode {
             VfsSuperblock::evict_unused_inodes(sb);
 
             // Superblock should have no active inodes except the root inode.
-            let remaining_inodes = crate::hlist::hlist_len(&raw mut (*sb).inodes);
+            let remaining_inodes = crate::hlist::Hlist::len(&raw mut (*sb).inodes);
             if remaining_inodes > 1 {
                 crate::kprintln!(
                     "VfsInode::vfs_unmount: remaining inodes={} (expected 1 for root)",

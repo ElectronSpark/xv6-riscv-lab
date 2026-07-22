@@ -85,21 +85,21 @@ unsafe extern "C" {
 // `hlist_first_entry`/`hlist_next_entry` below still reimplement the two
 // non-exported `static inline` walk helpers `hlist.h` never turns into
 // real symbols, same precedent as `hlist.rs`'s own module doc.
-/// SAFETY: see [`crate::hlist::hlist_init`]'s contract.
+/// SAFETY: see [`crate::hlist::Hlist::init`]'s contract.
 fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_struct) -> c_int {
-    unsafe { crate::hlist::hlist_init(hlist, bucket_cnt, func) }
+    unsafe { crate::hlist::Hlist::init(hlist, bucket_cnt, func) }
 }
-/// SAFETY: see [`crate::hlist::hlist_get`]'s contract.
+/// SAFETY: see [`crate::hlist::Hlist::get`]'s contract.
 fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
-    unsafe { crate::hlist::hlist_get(hlist, node) }
+    unsafe { crate::hlist::Hlist::get(hlist, node) }
 }
-/// SAFETY: see [`crate::hlist::hlist_put`]'s contract.
+/// SAFETY: see [`crate::hlist::Hlist::put`]'s contract.
 fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void {
-    unsafe { crate::hlist::hlist_put(hlist, node, replace) }
+    unsafe { crate::hlist::Hlist::put(hlist, node, replace) }
 }
-/// SAFETY: see [`crate::hlist::hlist_pop`]'s contract.
+/// SAFETY: see [`crate::hlist::Hlist::pop`]'s contract.
 fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void {
-    unsafe { crate::hlist::hlist_pop(hlist, node) }
+    unsafe { crate::hlist::Hlist::pop(hlist, node) }
 }
 
 // P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in

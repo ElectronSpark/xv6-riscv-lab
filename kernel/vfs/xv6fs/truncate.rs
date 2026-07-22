@@ -81,7 +81,7 @@ unsafe extern "C" {
 
 // P3-D3c: `bufcache.rs`'s entry points are plain (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; identical signatures, plain `use`.
-use crate::bufcache::{bread, brelse};
+use crate::bufcache::Buf;
 
 /// ZST marker (Wave A free-fn -> associated-fn sweep, this file only) --
 /// see the module doc. Private to this file except `truncate` itself,
@@ -135,7 +135,7 @@ impl Xv6fsSuperblock {
                     // Block already removed from cache by find_free_block.
 
                     // Mark in on-disk bitmap.
-                    let bp = bread(dev, Xv6fs::bblock_ptr(blockno, (*disk_sb).bmapstart));
+                    let bp = Buf::read(dev, Xv6fs::bblock_ptr(blockno, (*disk_sb).bmapstart));
                     if bp.is_null() {
                         // Revert cache state on error.
                         Xv6fsSuperblock::mark_free(xv6_sb, blockno);
@@ -146,16 +146,16 @@ impl Xv6fsSuperblock {
                     let m: u8 = 1 << (bi % 8);
                     *(*bp).data.add(bi / 8) |= m;
                     Xv6fsSuperblock::log_write(xv6_sb, bp);
-                    brelse(bp);
+                    Buf::release(bp);
 
                     // Zero the block.
-                    let zbp = bread(dev, blockno);
+                    let zbp = Buf::read(dev, blockno);
                     if zbp.is_null() {
                         return 0;
                     }
                     memset((*zbp).data as *mut c_void, 0, super::BSIZE as usize);
                     Xv6fsSuperblock::log_write(xv6_sb, zbp);
-                    brelse(zbp);
+                    Buf::release(zbp);
 
                     return blockno;
                 }
@@ -191,7 +191,7 @@ impl Xv6fsSuperblock {
                 *entry = addr;
             }
 
-            let bp = bread(dev, *entry);
+            let bp = Buf::read(dev, *entry);
             if bp.is_null() {
                 return 0;
             }
@@ -204,7 +204,7 @@ impl Xv6fsSuperblock {
                 let locality_hint = *entry; // Use indirect block as hint for locality.
                 addr = Xv6fsSuperblock::balloc(xv6_sb, dev, locality_hint);
                 if addr == 0 {
-                    brelse(bp);
+                    Buf::release(bp);
                     return 0;
                 }
 
@@ -212,7 +212,7 @@ impl Xv6fsSuperblock {
                 Xv6fsSuperblock::log_write(xv6_sb, bp);
             }
 
-            brelse(bp);
+            Buf::release(bp);
             addr
         }
     }
@@ -240,12 +240,12 @@ impl Xv6fsInode {
                 if (*ip).addrs[super::NDIRECT as usize] == 0 {
                     return 0;
                 }
-                let bp = bread(dev, (*ip).addrs[super::NDIRECT as usize]);
+                let bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize]);
                 if bp.is_null() {
                     return 0;
                 }
                 let addr = *((*bp).data as *mut u32).add(bn as usize);
-                brelse(bp);
+                Buf::release(bp);
                 return addr;
             }
             bn -= super::NINDIRECT;
@@ -255,7 +255,7 @@ impl Xv6fsInode {
                 if (*ip).addrs[super::NDIRECT as usize + 1] == 0 {
                     return 0;
                 }
-                let bp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                let bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                 if bp.is_null() {
                     return 0;
                 }
@@ -266,18 +266,18 @@ impl Xv6fsInode {
 
                 let l1_val = *a.add(l1_idx as usize);
                 if l1_val == 0 {
-                    brelse(bp);
+                    Buf::release(bp);
                     return 0;
                 }
                 let l1_addr = l1_val;
-                brelse(bp);
+                Buf::release(bp);
 
-                let bp = bread(dev, l1_addr);
+                let bp = Buf::read(dev, l1_addr);
                 if bp.is_null() {
                     return 0;
                 }
                 let addr = *((*bp).data as *mut u32).add(l2_idx as usize);
-                brelse(bp);
+                Buf::release(bp);
                 return addr;
             }
 
@@ -336,7 +336,7 @@ impl Xv6fsInode {
                     (*ip).addrs[super::NDIRECT as usize + 1] = addr;
                 }
 
-                let bp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                let bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                 if bp.is_null() {
                     return 0;
                 }
@@ -349,7 +349,7 @@ impl Xv6fsInode {
                 if *a.add(l1_idx as usize) != 0 {
                     Xv6fsSuperblock::log_write(xv6_sb, bp);
                 }
-                brelse(bp);
+                Buf::release(bp);
                 return addr;
             }
 
@@ -371,10 +371,10 @@ impl Xv6fsSuperblock {
     unsafe fn bfree(xv6_sb: *mut xv6fs_superblock, dev: u32, b: u32) {
         unsafe {
             let disk_sb = ptr::addr_of!((*xv6_sb).disk_sb);
-            let bp = bread(dev, Xv6fs::bblock_ptr(b, (*disk_sb).bmapstart));
+            let bp = Buf::read(dev, Xv6fs::bblock_ptr(b, (*disk_sb).bmapstart));
             if bp.is_null() {
                 // See `inode.rs`'s module doc "Fidelity note": the C original
-                // does not NULL-check `bread()` results uniformly either, but
+                // does not NULL-check `Buf::read()` results uniformly either, but
                 // an unconditional deref here would be Rust UB.
                 xv6_panic(c"xv6fs_bfree: bread failed".as_ptr());
             }
@@ -385,7 +385,7 @@ impl Xv6fsSuperblock {
             }
             *(*bp).data.add(bi / 8) &= !m;
             Xv6fsSuperblock::log_write(xv6_sb, bp);
-            brelse(bp);
+            Buf::release(bp);
 
             // Update the block cache.
             Xv6fsSuperblock::mark_free(xv6_sb, b);
@@ -405,7 +405,7 @@ impl Xv6fsSuperblock {
                 return 0;
             }
 
-            let bp = bread(dev, *entry);
+            let bp = Buf::read(dev, *entry);
             if bp.is_null() {
                 xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
             }
@@ -425,7 +425,7 @@ impl Xv6fsSuperblock {
             if freed > 0 {
                 Xv6fsSuperblock::log_write(xv6_sb, bp);
             }
-            brelse(bp);
+            Buf::release(bp);
 
             // If we freed from the beginning, free the indirect block itself.
             if start_idx == 0 {
@@ -489,7 +489,7 @@ impl Xv6fsInode {
 
             // Free indirect blocks.
             if (*ip).addrs[super::NDIRECT as usize] != 0 {
-                let mut bp = bread(dev, (*ip).addrs[super::NDIRECT as usize]);
+                let mut bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize]);
                 if bp.is_null() {
                     xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                 }
@@ -506,12 +506,12 @@ impl Xv6fsInode {
 
                         if freed_this_batch >= ITRUNC_BATCH_SIZE {
                             Xv6fsSuperblock::log_write(xv6_sb, bp);
-                            brelse(bp);
+                            Buf::release(bp);
                             Xv6fsInode::iupdate(ip);
                             Xv6fsSuperblock::end_op(xv6_sb);
                             Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                             freed_this_batch = 0;
-                            bp = bread(dev, (*ip).addrs[super::NDIRECT as usize]);
+                            bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize]);
                             if bp.is_null() {
                                 xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                             }
@@ -520,7 +520,7 @@ impl Xv6fsInode {
                     }
                 }
                 Xv6fsSuperblock::log_write(xv6_sb, bp);
-                brelse(bp);
+                Buf::release(bp);
                 Xv6fsSuperblock::bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize]);
                 (*ip).addrs[super::NDIRECT as usize] = 0;
                 freed_this_batch += 1;
@@ -535,7 +535,7 @@ impl Xv6fsInode {
 
             // Free double indirect blocks.
             if (*ip).addrs[super::NDIRECT as usize + 1] != 0 {
-                let mut dbp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                let mut dbp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                 if dbp.is_null() {
                     xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                 }
@@ -546,7 +546,7 @@ impl Xv6fsInode {
                 for j in 0..super::NINDIRECT {
                     let dv = *da.add(j as usize);
                     if dv != 0 {
-                        let mut bp = bread(dev, dv);
+                        let mut bp = Buf::read(dev, dv);
                         if bp.is_null() {
                             xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                         }
@@ -562,19 +562,19 @@ impl Xv6fsInode {
 
                                 if freed_this_batch >= ITRUNC_BATCH_SIZE {
                                     Xv6fsSuperblock::log_write(xv6_sb, bp);
-                                    brelse(bp);
+                                    Buf::release(bp);
                                     Xv6fsSuperblock::log_write(xv6_sb, dbp);
-                                    brelse(dbp);
+                                    Buf::release(dbp);
                                     Xv6fsInode::iupdate(ip);
                                     Xv6fsSuperblock::end_op(xv6_sb);
                                     Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                                     freed_this_batch = 0;
-                                    dbp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                                    dbp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                                     if dbp.is_null() {
                                         xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                                     }
                                     da = (*dbp).data as *mut u32;
-                                    bp = bread(dev, *da.add(j as usize));
+                                    bp = Buf::read(dev, *da.add(j as usize));
                                     if bp.is_null() {
                                         xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                                     }
@@ -583,19 +583,19 @@ impl Xv6fsInode {
                             }
                         }
                         Xv6fsSuperblock::log_write(xv6_sb, bp);
-                        brelse(bp);
+                        Buf::release(bp);
                         Xv6fsSuperblock::bfree(xv6_sb, dev, *da.add(j as usize));
                         *da.add(j as usize) = 0;
                         freed_this_batch += 1;
 
                         if freed_this_batch >= ITRUNC_BATCH_SIZE {
                             Xv6fsSuperblock::log_write(xv6_sb, dbp);
-                            brelse(dbp);
+                            Buf::release(dbp);
                             Xv6fsInode::iupdate(ip);
                             Xv6fsSuperblock::end_op(xv6_sb);
                             Xv6fsSuperblock::begin_op_nointr(xv6_sb);
                             freed_this_batch = 0;
-                            dbp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                            dbp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                             if dbp.is_null() {
                                 xv6_panic(c"xv6fs_itrunc: bread failed".as_ptr());
                             }
@@ -604,7 +604,7 @@ impl Xv6fsInode {
                     }
                 }
                 Xv6fsSuperblock::log_write(xv6_sb, dbp);
-                brelse(dbp);
+                Buf::release(dbp);
                 Xv6fsSuperblock::bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                 (*ip).addrs[super::NDIRECT as usize + 1] = 0;
             }
@@ -650,7 +650,7 @@ impl Xv6fsInode {
             if first_block <= dind_threshold {
                 // All double indirect blocks need to be freed.
                 if (*ip).addrs[super::NDIRECT as usize + 1] != 0 {
-                    let bp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                    let bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                     if bp.is_null() {
                         xv6_panic(c"xv6fs_truncate: bread failed".as_ptr());
                     }
@@ -663,7 +663,7 @@ impl Xv6fsInode {
                             Xv6fsSuperblock::itrunc_ind(xv6_sb, a.add(j as usize), dev);
                         }
                     }
-                    brelse(bp);
+                    Buf::release(bp);
                     Xv6fsSuperblock::bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                     (*ip).addrs[super::NDIRECT as usize + 1] = 0;
                 }
@@ -674,7 +674,7 @@ impl Xv6fsInode {
                     let mut l1_start = rel_block / super::NINDIRECT;
                     let l2_start = rel_block % super::NINDIRECT;
 
-                    let bp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                    let bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                     if bp.is_null() {
                         xv6_panic(c"xv6fs_truncate: bread failed".as_ptr());
                     }
@@ -700,17 +700,17 @@ impl Xv6fsInode {
                     if modified {
                         Xv6fsSuperblock::log_write(xv6_sb, bp);
                     }
-                    brelse(bp);
+                    Buf::release(bp);
 
                     // Check if all L1 entries are now zero; free the dind block.
-                    let bp = bread(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
+                    let bp = Buf::read(dev, (*ip).addrs[super::NDIRECT as usize + 1]);
                     if bp.is_null() {
                         xv6_panic(c"xv6fs_truncate: bread failed".as_ptr());
                     }
                     let a = (*bp).data as *mut u32;
                     // (Goal #2) all-L1-entries-zero scan -> `.any()`.
                     let all_zero = !(0..super::NINDIRECT).any(|j| *a.add(j as usize) != 0);
-                    brelse(bp);
+                    Buf::release(bp);
 
                     if all_zero {
                         Xv6fsSuperblock::bfree(xv6_sb, dev, (*ip).addrs[super::NDIRECT as usize + 1]);

@@ -2787,25 +2787,25 @@ pub(crate) use crate::sbi::Sbi;
     // genuinely `unsafe extern "C" fn`; this file's original extern
     // declaration asserted `pub safe fn` (usual FFI facade) for every one
     // of them. Thin safe wrappers preserve that facade.
-    /// SAFETY: see [`crate::bintree::rb_find_key_rdown`]'s contract.
+    /// SAFETY: see [`crate::bintree::RbRoot::find_key_rdown`]'s contract.
     pub fn rb_find_key_rdown(root: *mut crate::bindings::rb_root, key: u64) -> *mut rb_node {
-        unsafe { crate::bintree::rb_find_key_rdown(root, key) }
+        unsafe { crate::bintree::RbRoot::find_key_rdown(root, key) }
     }
-    /// SAFETY: see [`crate::bintree::rb_next_node`]'s contract.
+    /// SAFETY: see [`crate::bintree::RbNode::next`]'s contract.
     pub fn rb_next_node(node: *mut rb_node) -> *mut rb_node {
-        unsafe { crate::bintree::rb_next_node(node) }
+        unsafe { crate::bintree::RbNode::next(node) }
     }
-    /// SAFETY: see [`crate::bintree::rb_prev_node`]'s contract.
+    /// SAFETY: see [`crate::bintree::RbNode::prev`]'s contract.
     pub fn rb_prev_node(node: *mut rb_node) -> *mut rb_node {
-        unsafe { crate::bintree::rb_prev_node(node) }
+        unsafe { crate::bintree::RbNode::prev(node) }
     }
-    /// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
+    /// SAFETY: see [`crate::rbtree::RbRoot::insert_color`]'s contract.
     pub fn rb_insert_color(root: *mut crate::bindings::rb_root, node: *mut rb_node) -> *mut rb_node {
-        unsafe { crate::rbtree::rb_insert_color(root, node) }
+        unsafe { crate::rbtree::RbRoot::insert_color(root, node) }
     }
-    /// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
+    /// SAFETY: see [`crate::rbtree::RbRoot::delete_node_color`]'s contract.
     pub fn rb_delete_node_color(root: *mut crate::bindings::rb_root, node: *mut rb_node) -> *mut rb_node {
-        unsafe { crate::rbtree::rb_delete_node_color(root, node) }
+        unsafe { crate::rbtree::RbRoot::delete_node_color(root, node) }
     }
     /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
     pub fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
