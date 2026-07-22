@@ -32,7 +32,7 @@ use crate::bindings;
 // signature is `(buf: *mut u8, count: usize)`, not this file's former
 // `len: c_int` mirror (ABI-truth drift -- `chunk` is bounds-checked
 // non-negative at every call site, so `chunk as usize` is exact).
-use crate::dev::nullrand::random_fill_bytes;
+use crate::dev::nullrand::NullRandDev;
 use crate::proc::proc_shims::xv6_current_thread;
 
 // ---------------------------------------------------------------------------
@@ -506,7 +506,7 @@ pub(crate) extern "C" fn sys_getrandom() -> u64 {
     // (was a manual `while done < len { ...; done += chunk }` accumulator).
     for done in (0..len).step_by(kbuf.len()) {
         let chunk = core::cmp::min(len - done, kbuf.len() as c_int);
-        random_fill_bytes(kbuf.as_mut_ptr(), chunk as usize);
+        NullRandDev::random_fill_bytes(kbuf.as_mut_ptr(), chunk as usize);
         if either_copyout(1, ubuf + done as u64,
                           kbuf.as_ptr() as *const c_void,
                           chunk as u64) < 0 {

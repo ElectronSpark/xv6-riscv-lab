@@ -46,7 +46,7 @@ use super::tty::load_acquire_u32;
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signatures are
 // identical, so these become plain crate-path imports instead of `extern
 // "C"` redeclarations.
-use crate::dev::cdev::{cdev_register, cdev_unregister, CdevOps};
+use crate::dev::cdev::{Cdev, CdevOps};
 
 // ===========================================================================
 // Externs.
@@ -593,7 +593,7 @@ impl PtyPair {
         // Existing slave fds continue to work because they use
         // `FileOps` directly.
         if do_unregister {
-            unsafe { cdev_unregister(&raw mut (*pair).slave_cdev) };
+            unsafe { Cdev::unregister(&raw mut (*pair).slave_cdev) };
         }
 
         // Drop the pair ref -- may destroy.
@@ -762,7 +762,7 @@ impl PtyPair {
             (*pair).slave_cdev.dev.devmode = (S_IFCHR | 0o620) as mode_t;
         }
 
-        let ret = unsafe { cdev_register(&raw mut (*pair).slave_cdev) };
+        let ret = unsafe { Cdev::register(&raw mut (*pair).slave_cdev) };
         if ret != 0 {
             crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
             unsafe { Tty::unref(slave) };
@@ -821,7 +821,7 @@ impl PtyPair {
             (*cdev).flags.set_writable(1);
             (*cdev).ops = Some(&PTMX_CDEV_OPS);
 
-            let ret = cdev_register(cdev);
+            let ret = Cdev::register(cdev);
             ptmx_assert_errno!(ret == 0, "PtyPair::init: cdev_register failed: {}", ret);
         }
 

@@ -234,8 +234,8 @@ const _: () = {
 // P3-1D mesh sweep: kernel/dev/{dev,blkdev,bio}.rs are in scope for this
 // wave; signatures are identical, so these become plain crate-path
 // imports instead of `extern "C"` redeclarations.
-use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
-use crate::dev::bio::{bio_add_seg, bio_alloc, bio_release};
+use crate::dev::blkdev::Blkdev;
+use crate::dev::bio::Bio;
 pub(crate) use crate::hlist::{hlist_get, hlist_init, hlist_pop, hlist_put};
 pub(crate) use crate::lock::completion::RawCompletion;
 pub(crate) use crate::lock::mutex::RawMutex;
@@ -489,7 +489,7 @@ fn bio_await(bio_ptr: *mut bio) -> c_int {
 // ---------------------------------------------------------------------------
 
 fn buf_alloc_bio(b: *mut buf, blkdev: *mut blkdev_t, write: bool) -> *mut bio {
-    let bio_ptr = bio_alloc(blkdev, 1, write as bool_, None, core::ptr::null_mut());
+    let bio_ptr = Bio::alloc(blkdev, 1, write as bool_, None, core::ptr::null_mut());
     if is_err_or_null(bio_ptr) {
         return core::ptr::null_mut();
     }
@@ -500,9 +500,9 @@ fn buf_alloc_bio(b: *mut buf, blkdev: *mut blkdev_t, write: bool) -> *mut bio {
         let data = (*b).data as u64;
         let page = __pa_to_page(data & !PAGE_MASK);
         let page_offset = (data & PAGE_MASK) as u16;
-        let ret = bio_add_seg(bio_ptr, page, 0, BSIZE as u16, page_offset);
+        let ret = Bio::add_seg(bio_ptr, page, 0, BSIZE as u16, page_offset);
         if ret != 0 {
-            bio_release(bio_ptr);
+            Bio::release(bio_ptr);
             return core::ptr::null_mut();
         }
     }
@@ -511,7 +511,7 @@ fn buf_alloc_bio(b: *mut buf, blkdev: *mut blkdev_t, write: bool) -> *mut bio {
 
 fn buf_bio_cleanup(bio_ptr: *mut bio) {
     if !bio_ptr.is_null() {
-        bio_release(bio_ptr);
+        Bio::release(bio_ptr);
     }
 }
 
@@ -711,7 +711,7 @@ pub(crate) fn bread(dev: u32, blockno: u32) -> *mut buf {
     // postcondition) for the remainder of this function.
     let valid = unsafe { (*b).valid } != 0;
     if !valid {
-        let blkdev = blkdev_get(dev_major(unsafe { (*b).dev }), dev_minor(unsafe { (*b).dev }));
+        let blkdev = Blkdev::get(dev_major(unsafe { (*b).dev }), dev_minor(unsafe { (*b).dev }));
         if is_err(blkdev) {
             xv6_panic(c"bread: blkdev_get failed".as_ptr());
         }
@@ -719,17 +719,17 @@ pub(crate) fn bread(dev: u32, blockno: u32) -> *mut buf {
         if is_err_or_null(bio_ptr) {
             // OOM during bio allocation -- release buffer and return
             // NULL. Callers should handle this gracefully.
-            let ret = blkdev_put(blkdev);
+            let ret = Blkdev::put(blkdev);
             assert_blkdev_put_ok(ret);
             brelse(b);
             return core::ptr::null_mut();
         }
-        let mut err = blkdev_submit_bio(blkdev, bio_ptr);
+        let mut err = Blkdev::submit_bio(blkdev, bio_ptr);
         if err == 0 {
             err = bio_await(bio_ptr);
         }
         buf_bio_cleanup(bio_ptr);
-        let ret = blkdev_put(blkdev);
+        let ret = Blkdev::put(blkdev);
         assert_blkdev_put_ok(ret);
         if err != 0 {
             // I/O error or interrupted -- don't mark valid, release
@@ -753,7 +753,7 @@ pub(crate) fn bwrite(b: *mut buf) {
     }
     // SAFETY: `b` caller-owned and locked (just checked above).
     let dev = unsafe { (*b).dev };
-    let blkdev = blkdev_get(dev_major(dev), dev_minor(dev));
+    let blkdev = Blkdev::get(dev_major(dev), dev_minor(dev));
     if is_err(blkdev) {
         xv6_panic(c"bwrite: blkdev_get failed".as_ptr());
     }
@@ -761,7 +761,7 @@ pub(crate) fn bwrite(b: *mut buf) {
     if is_err_or_null(bio_ptr) {
         xv6_panic(c"bwrite: bio_alloc failed".as_ptr());
     }
-    blkdev_submit_bio(blkdev, bio_ptr);
+    Blkdev::submit_bio(blkdev, bio_ptr);
     bio_await(bio_ptr);
     buf_bio_cleanup(bio_ptr);
 
@@ -783,7 +783,7 @@ pub(crate) fn bwrite(b: *mut buf) {
         }
     }
 
-    let ret = blkdev_put(blkdev);
+    let ret = Blkdev::put(blkdev);
     assert_blkdev_put_ok(ret);
 }
 
@@ -847,15 +847,15 @@ pub(crate) fn bsync() {
         if valid {
             // SAFETY: `b` locked.
             let dev = unsafe { (*b).dev };
-            let blkdev = blkdev_get(dev_major(dev), dev_minor(dev));
+            let blkdev = Blkdev::get(dev_major(dev), dev_minor(dev));
             if !is_err(blkdev) {
                 let bio_ptr = buf_alloc_bio(b, blkdev, true);
                 if !is_err_or_null(bio_ptr) {
-                    blkdev_submit_bio(blkdev, bio_ptr);
+                    Blkdev::submit_bio(blkdev, bio_ptr);
                     bio_await(bio_ptr);
                     buf_bio_cleanup(bio_ptr);
                 }
-                blkdev_put(blkdev);
+                Blkdev::put(blkdev);
             }
         }
 

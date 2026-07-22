@@ -26,9 +26,7 @@ use crate::bindings::{
 use crate::kobject::KArc;
 use crate::kstd::{Errno, KResult};
 
-use super::dev::{
-    device_dup, device_get, device_put, device_register, device_unregister, DeviceOps,
-};
+use super::dev::{DeviceInstance, DeviceOps};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -301,147 +299,154 @@ impl DeviceOps for CdevDeviceOps {
 
 // ---------------------------------------------------------------------------
 // Public C ABI.
+//
+// KERNEL-OO: relocated onto `impl Cdev` -- behavior-preserving only: raw
+// `*mut cdev_t` params kept (`Cdev` is Freeze and shared cross-hart via
+// the device table's refcount/RCU, so no `&self` receiver), bodies
+// byte-identical, `unsafe extern "C"` signatures preserved exactly.
 // ---------------------------------------------------------------------------
 
-/// Get a character device by its major and minor numbers. Returns the
-/// cdev on success, or `ERR_PTR` on error.
-// P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-// P3-9: converted to `KArc<device_t>` -- was a manual
-// `device_get()`/conditional-`device_put()` pair (see git history); the
-// `device_put` on the "wrong type" branch was easy to forget if a third
-// branch were ever added, and easy to double-call by accident. Now the
-// KArc's `Drop` releases the reference automatically on every exit path
-// except the one that hands it back out via `into_raw`.
-pub(crate) extern "C" fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t {
-    let device = device_get(major, minor);
-    if is_err(device) {
-        return device as *mut cdev_t; // propagate error from device_get
-    }
-    // SAFETY: `device` is non-null and not an error-pointer here --
-    // `device_get`'s success postcondition (one held kobject reference)
-    // is exactly `KArc::from_raw`'s precondition.
-    let device = unsafe { KArc::<device_t>::from_raw(device) };
-    if device.type_ != dev_type_e_DEV_TYPE_CHAR {
-        // `device` (the KArc) drops here, releasing the reference --
-        // no manual `device_put` call needed.
-        return err_ptr(neg(ENODEV)); // not a character device
-    }
-    KArc::into_raw(device) as *mut cdev_t
-}
-
-// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
-// grep) -- demoted; `#[allow(dead_code)]` documents the gap rather than
-// deleting still-plausible public API, matching this crate's established
-// precedent (e.g. `ipi.rs`'s `get_cpu_active_mask`).
-#[allow(dead_code)]
-pub(crate) extern "C" fn cdev_dup(dev: *mut cdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    device_dup(dev as *mut device_t)
-}
-
-// P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn cdev_put(dev: *mut cdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    device_put(dev as *mut device_t);
-    0
-}
-
-// P3-1D mesh sweep: callers (`console.rs`, `tty/tty_dev.rs`, `tty/ptmx.rs`,
-// `dev/nullrand.rs`) now import this via crate-path `use` instead of an
-// `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn cdev_register(dev: *mut cdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    // Ops validation (was `cdev_opts_validate`): the old open/release
-    // `Some` checks are unrepresentable-by-construction now that both
-    // are required trait methods -- only "no table at all" remains
-    // rejectable.
-    // SAFETY: `dev` is caller-provided; reading `.ops` is a plain field
-    // read of caller-owned data.
-    if unsafe { (*dev).ops }.is_none() {
-        return neg(EINVAL); // invalid character device operations
-    }
-    let device = dev as *mut device_t;
-    // SAFETY: `dev` is caller-exclusive, not yet published (device_register
-    // is the point of publication).
-    unsafe {
-        (*device).type_ = dev_type_e_DEV_TYPE_CHAR;
-        (*device).ops = Some(&CDEV_DEVICE_OPS); // set underlying device operations
-    }
-    device_register(device)
-}
-
-// P3-1D mesh sweep: callers (`tty/ptmx.rs`, `tty/pty.rs`) now import this
-// via crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn cdev_unregister(dev: *mut cdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    device_unregister(dev as *mut device_t)
-}
-
-// P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn cdev_read(cdev: *mut cdev_t, user: bool_, buf: *mut c_void, count: usize) -> c_int {
-    if cdev.is_null() || buf.is_null() || count == 0 {
-        return neg(EINVAL); // invalid arguments
-    }
-    // SAFETY: `cdev` is caller-provided; caller (VFS layer) guarantees
-    // liveness for the duration of this call (cdev_read has no
-    // refcounting of its own, matching the C original).
-    unsafe {
-        if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
-            return neg(ENODEV); // not a character device
+impl Cdev {
+    /// Get a character device by its major and minor numbers. Returns the
+    /// cdev on success, or `ERR_PTR` on error.
+    // P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    // P3-9: converted to `KArc<device_t>` -- was a manual
+    // `device_get()`/conditional-`device_put()` pair (see git history); the
+    // `device_put` on the "wrong type" branch was easy to forget if a third
+    // branch were ever added, and easy to double-call by accident. Now the
+    // KArc's `Drop` releases the reference automatically on every exit path
+    // except the one that hands it back out via `into_raw`.
+    pub(crate) extern "C" fn get(major: c_int, minor: c_int) -> *mut cdev_t {
+        let device = DeviceInstance::get(major, minor);
+        if is_err(device) {
+            return device as *mut cdev_t; // propagate error from device_get
         }
-        // A missing table and the trait's default `Err(NoSys)` `read`
-        // both reproduce the old `None`-slot `neg(ENOSYS)`.
-        if (*cdev).flags.readable() == 0 {
-            return neg(ENOSYS); // read operation not supported
+        // SAFETY: `device` is non-null and not an error-pointer here --
+        // `DeviceInstance::get`'s success postcondition (one held kobject
+        // reference) is exactly `KArc::from_raw`'s precondition.
+        let device = unsafe { KArc::<device_t>::from_raw(device) };
+        if device.type_ != dev_type_e_DEV_TYPE_CHAR {
+            // `device` (the KArc) drops here, releasing the reference --
+            // no manual `device_put` call needed.
+            return err_ptr(neg(ENODEV)); // not a character device
         }
-        let Some(ops) = (*cdev).ops else {
-            return neg(ENOSYS);
-        };
-        match ops.read(cdev, user != 0, buf, count) {
-            Ok(n) => n,
-            Err(e) => e.neg(),
-        }
+        KArc::into_raw(device) as *mut cdev_t
     }
-}
 
-// P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn cdev_write(
-    cdev: *mut cdev_t,
-    user: bool_,
-    buf: *const c_void,
-    count: usize,
-) -> c_int {
-    if cdev.is_null() || buf.is_null() || count == 0 {
-        return neg(EINVAL); // invalid arguments
+    // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+    // grep) -- demoted; `#[allow(dead_code)]` documents the gap rather than
+    // deleting still-plausible public API, matching this crate's established
+    // precedent (e.g. `ipi.rs`'s `get_cpu_active_mask`).
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn dup(dev: *mut cdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
+        }
+        DeviceInstance::dup(dev as *mut device_t)
     }
-    // SAFETY: see `cdev_read`.
-    unsafe {
-        if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
-            return neg(ENODEV); // not a character device
+
+    // P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn put(dev: *mut cdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
         }
-        // Same `None`-table / default-`Err(NoSys)` mapping as
-        // `cdev_read`.
-        if (*cdev).flags.writable() == 0 {
-            return neg(ENOSYS); // write operation not supported
+        DeviceInstance::put(dev as *mut device_t);
+        0
+    }
+
+    // P3-1D mesh sweep: callers (`console.rs`, `tty/tty_dev.rs`, `tty/ptmx.rs`,
+    // `dev/nullrand.rs`) now import this via crate-path `use` instead of an
+    // `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn register(dev: *mut cdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
         }
-        let Some(ops) = (*cdev).ops else {
-            return neg(ENOSYS);
-        };
-        match ops.write(cdev, user != 0, buf, count) {
-            Ok(n) => n,
-            Err(e) => e.neg(),
+        // Ops validation (was `cdev_opts_validate`): the old open/release
+        // `Some` checks are unrepresentable-by-construction now that both
+        // are required trait methods -- only "no table at all" remains
+        // rejectable.
+        // SAFETY: `dev` is caller-provided; reading `.ops` is a plain field
+        // read of caller-owned data.
+        if unsafe { (*dev).ops }.is_none() {
+            return neg(EINVAL); // invalid character device operations
+        }
+        let device = dev as *mut device_t;
+        // SAFETY: `dev` is caller-exclusive, not yet published
+        // (`DeviceInstance::register` is the point of publication).
+        unsafe {
+            (*device).type_ = dev_type_e_DEV_TYPE_CHAR;
+            (*device).ops = Some(&CDEV_DEVICE_OPS); // set underlying device operations
+        }
+        DeviceInstance::register(device)
+    }
+
+    // P3-1D mesh sweep: callers (`tty/ptmx.rs`, `tty/pty.rs`) now import this
+    // via crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn unregister(dev: *mut cdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
+        }
+        DeviceInstance::unregister(dev as *mut device_t)
+    }
+
+    // P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn read(cdev: *mut cdev_t, user: bool_, buf: *mut c_void, count: usize) -> c_int {
+        if cdev.is_null() || buf.is_null() || count == 0 {
+            return neg(EINVAL); // invalid arguments
+        }
+        // SAFETY: `cdev` is caller-provided; caller (VFS layer) guarantees
+        // liveness for the duration of this call (`Cdev::read` has no
+        // refcounting of its own, matching the C original).
+        unsafe {
+            if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
+                return neg(ENODEV); // not a character device
+            }
+            // A missing table and the trait's default `Err(NoSys)` `read`
+            // both reproduce the old `None`-slot `neg(ENOSYS)`.
+            if (*cdev).flags.readable() == 0 {
+                return neg(ENOSYS); // read operation not supported
+            }
+            let Some(ops) = (*cdev).ops else {
+                return neg(ENOSYS);
+            };
+            match ops.read(cdev, user != 0, buf, count) {
+                Ok(n) => n,
+                Err(e) => e.neg(),
+            }
+        }
+    }
+
+    // P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn write(
+        cdev: *mut cdev_t,
+        user: bool_,
+        buf: *const c_void,
+        count: usize,
+    ) -> c_int {
+        if cdev.is_null() || buf.is_null() || count == 0 {
+            return neg(EINVAL); // invalid arguments
+        }
+        // SAFETY: see `Cdev::read`.
+        unsafe {
+            if (*cdev).dev.type_ != dev_type_e_DEV_TYPE_CHAR {
+                return neg(ENODEV); // not a character device
+            }
+            // Same `None`-table / default-`Err(NoSys)` mapping as
+            // `Cdev::read`.
+            if (*cdev).flags.writable() == 0 {
+                return neg(ENOSYS); // write operation not supported
+            }
+            let Some(ops) = (*cdev).ops else {
+                return neg(ENOSYS);
+            };
+            match ops.write(cdev, user != 0, buf, count) {
+                Ok(n) => n,
+                Err(e) => e.neg(),
+            }
         }
     }
 }

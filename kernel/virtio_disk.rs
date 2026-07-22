@@ -191,7 +191,7 @@ fn __page_to_pa(page: *mut page_t) -> u64 {
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use crate::dev::blkdev::blkdev_register;
+use crate::dev::blkdev::Blkdev;
 
 // ===========================================================================
 // virtio-mmio register offsets/bits, virtqueue constants -- redeclared
@@ -1202,7 +1202,7 @@ fn virtio_blkdev_init(diskno: usize) {
     }
 
     // `dev` fully initialised above.
-    let errno = blkdev_register(dev);
+    let errno = Blkdev::register(dev);
     if errno != 0 {
         panic_fmt_i32!("virtio_blkdev_init: blkdev_register failed: {}", errno);
     }

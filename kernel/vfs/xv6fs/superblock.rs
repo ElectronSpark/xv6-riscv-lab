@@ -294,8 +294,8 @@ fn slab_free(obj: *mut c_void) {
 // P3-1D mesh sweep: dev/bio.rs + dev/blkdev.rs (block I/O submission
 // path) are in scope for this wave; signatures are identical, so these
 // become plain crate-path imports instead of `extern "C"` redeclarations.
-use crate::dev::bio::{bio_add_seg, bio_alloc};
-use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
+use crate::dev::bio::Bio;
+use crate::dev::blkdev::Blkdev;
 // P3-D3b: lock/completion.rs's wait entry points are plain safe Rust fns
 // now that their `#[no_mangle]` exports are gone; reached by crate path.
 use crate::lock::completion::RawCompletion;
@@ -433,7 +433,7 @@ extern "C" fn xv6fs_pcache_read_page(pc: *mut pcache, page: *mut page_t) -> c_in
                 continue;
             }
 
-            let b = bio_alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, false as crate::bindings::bool_, None, ptr::null_mut());
+            let b = Bio::alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, false as crate::bindings::bool_, None, ptr::null_mut());
             if is_err_or_null(b) {
                 return Xv6fs::neg(ENOMEM);
             }
@@ -448,11 +448,11 @@ extern "C" fn xv6fs_pcache_read_page(pc: *mut pcache, page: *mut page_t) -> c_in
             let b = KArc::<bio>::from_raw(b);
             let bp = KArc::as_ptr(&b);
             (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
-            let ret = bio_add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
+            let ret = Bio::add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
             if ret != 0 {
                 return ret; // `b` drops here, releasing the reference.
             }
-            let ret = blkdev_submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
+            let ret = Blkdev::submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
             if ret != 0 {
                 return ret; // `b` drops here, releasing the reference.
             }
@@ -491,7 +491,7 @@ extern "C" fn xv6fs_pcache_write_page(pc: *mut pcache, page: *mut page_t) -> c_i
                 continue; // Sparse / beyond file -- nothing to write back.
             }
 
-            let b = bio_alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, true as crate::bindings::bool_, None, ptr::null_mut());
+            let b = Bio::alloc(Xv6fsSuperblock::sb_blkdev(xv6_sb), 1, true as crate::bindings::bool_, None, ptr::null_mut());
             if is_err_or_null(b) {
                 return Xv6fs::neg(ENOMEM);
             }
@@ -501,11 +501,11 @@ extern "C" fn xv6fs_pcache_write_page(pc: *mut pcache, page: *mut page_t) -> c_i
             let b = KArc::<bio>::from_raw(b);
             let bp = KArc::as_ptr(&b);
             (*bp).blkno = addr as u64 * BLK512_PER_BSIZE;
-            let ret = bio_add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
+            let ret = Bio::add_seg(bp, page, 0, super::BSIZE as u16, (i * super::BSIZE as u64) as u16);
             if ret != 0 {
                 return ret; // `b` drops here, releasing the reference.
             }
-            let ret = blkdev_submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
+            let ret = Blkdev::submit_bio(Xv6fsSuperblock::sb_blkdev(xv6_sb), bp);
             if ret != 0 {
                 return ret; // `b` drops here, releasing the reference.
             }
@@ -882,14 +882,14 @@ impl FsTypeOps for Xv6fsFsTypeOps {
     // `blkdev_get` is a dev-layer ERR_PTR boundary this driver does not
     // own — decode it once here (`Errno::Raw` passthrough, kstd's
     // sanctioned cross-family case).
-    let blkdev = blkdev_get(Xv6fs::major(dev_num), Xv6fs::minor(dev_num));
+    let blkdev = Blkdev::get(Xv6fs::major(dev_num), Xv6fs::minor(dev_num));
     if is_err(blkdev) {
         return Err(Errno::Raw(ptr_err(blkdev)));
     }
 
     let xv6_sb = slab_alloc(Xv6fsSuperblock::cache()) as *mut xv6fs_superblock;
     if xv6_sb.is_null() {
-        blkdev_put(blkdev);
+        Blkdev::put(blkdev);
         return Err(Errno::NoMem);
     }
     // SAFETY: `xv6_sb` is a freshly allocated, exclusively-owned block.
@@ -899,7 +899,7 @@ impl FsTypeOps for Xv6fsFsTypeOps {
 
         let dev = Xv6fsSuperblock::sb_dev(xv6_sb);
         if let Err(e) = (*xv6_sb).disk_sb.read_from_disk(dev) {
-            blkdev_put(blkdev);
+            Blkdev::put(blkdev);
             slab_free(xv6_sb as *mut c_void);
             return Err(e);
         }
@@ -935,7 +935,7 @@ impl FsTypeOps for Xv6fsFsTypeOps {
         let root_inode = match Xv6fs::get_inode_inner(ptr::addr_of_mut!((*xv6_sb).vfs_sb), ROOTINO) {
             Ok(i) => i,
             Err(e) => {
-                blkdev_put(blkdev);
+                Blkdev::put(blkdev);
                 slab_free(xv6_sb as *mut c_void);
                 return Err(e);
             }
@@ -954,7 +954,7 @@ impl FsTypeOps for Xv6fsFsTypeOps {
         unsafe {
             Xv6fsSuperblock::bcache_destroy(xv6_sb);
             if !(*xv6_sb).blkdev.is_null() {
-                blkdev_put((*xv6_sb).blkdev);
+                Blkdev::put((*xv6_sb).blkdev);
             }
         }
         slab_free(xv6_sb as *mut c_void);
@@ -1091,7 +1091,7 @@ impl Xv6fs {
         };
 
         // Select root device: prefer ramdisk if available.
-        let ramdisk = blkdev_get(Xv6fs::major(RAMDISK_DEV), Xv6fs::minor(RAMDISK_DEV));
+        let ramdisk = Blkdev::get(Xv6fs::major(RAMDISK_DEV), Xv6fs::minor(RAMDISK_DEV));
         let root_dev = if !ramdisk.is_null() && !is_err(ramdisk) { RAMDISK_DEV } else { ROOTDEV };
 
         // Create a block device inode for root device. (P3-10b:

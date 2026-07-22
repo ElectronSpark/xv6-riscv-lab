@@ -102,7 +102,7 @@ unsafe extern "C" {
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
 use crate::net::{mbufalloc, mbuffree, net_rx};
-use crate::dev::netdev::netdev_register;
+use crate::dev::netdev::Netdev;
 
 // ===========================================================================
 // Register offsets/bits -- redeclared locally from `kernel/inc/dev/
@@ -658,7 +658,7 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
         E1000_NDEV.full_duplex = 1;
         E1000_NDEV.ops = &E1000_NETDEV_OPS as *const netdev_ops as *mut netdev_ops;
         E1000_NDEV.priv_ = REGS as *mut c_void;
-        netdev_register(&raw mut E1000_NDEV);
+        Netdev::register(&raw mut E1000_NDEV);
     }
 }
 

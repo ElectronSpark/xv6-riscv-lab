@@ -218,10 +218,10 @@ use crate::lock::rcu::Rcu;
 // all in scope for this wave; these become plain crate-path imports
 // instead of `extern "C"` redeclarations (identical signatures).
 use crate::backtrace::ksymbols_init;
-use crate::dev::dev::dev_table_init;
+use crate::dev::dev::DevTable;
 use crate::dev::fdt::Fdt;
-use crate::dev::netdev::netdev_init;
-use crate::dev::nullrand::nullranddevinit;
+use crate::dev::netdev::Netdev;
+use crate::dev::nullrand::NullRandDev;
 use crate::dev::x1_emac::x1_emac_init;
 use crate::dev::x1_sdhci::x1_sdhci_init;
 use crate::pci::pci_init;
@@ -284,7 +284,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
         crate::kprintln!("mycpu initialized");
         Rcu::init(); // RCU subsystem initialization
-        dev_table_init(); // Initialize the device table
+        DevTable::init(); // Initialize the device table
         Thread::proctab_init(); // process table
         Tty::init(); // Initialize TTY subsystem
         Scheduler::init(); // initialize the scheduler
@@ -296,7 +296,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         plicinithart(); // ask PLIC for device interrupts
         ipi_init(); // inter-processor interrupts
         consoleinit();
-        netdev_init();
+        Netdev::init();
         pci_init();
         crate::proc::Signal::init(); // signal handling initialization
         binit(); // buffer cache
@@ -414,7 +414,7 @@ pub(crate) fn start_kernel_post_init() {
     // original's call order 1:1.
     unsafe {
         consoledevinit(); // Initialize and register the console character device
-        nullranddevinit(); // Register /dev/null, /dev/random, /dev/zero
+        NullRandDev::init(); // Register /dev/null, /dev/random, /dev/zero
         TtyDev::init(); // Register /dev/tty (controlling terminal device)
         PtyPair::init(); // Register /dev/ptmx (PTY multiplexer)
         virtio_disk_init(); // emulated hard disk (QEMU)

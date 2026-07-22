@@ -483,9 +483,9 @@ fn kfree(pa: *mut c_void) {
 // file's former locally-declared view) — the two call sites below now
 // cast, matching the `ops.read`/`ops.write` custom-fn call sites right
 // next to them, which already did `user as bool_`.
-use crate::dev::cdev::{cdev_get, cdev_put, cdev_read, cdev_write};
-use crate::dev::blkdev::{blkdev_get, blkdev_put};
-use crate::dev::dev::dev_ioctl;
+use crate::dev::cdev::Cdev;
+use crate::dev::blkdev::Blkdev;
+use crate::dev::dev::DeviceInstance;
 use crate::net::mbufq_init;
 // Wave P3-8d: `sysnet.rs`'s `sock_lock`/`sockets` (two independently-
 // paired globals) were migrated to a single `SpinLock<*mut sock>` --
@@ -843,7 +843,7 @@ impl VfsFile {
         let raw_cdev = unsafe { (*inode).dev_mnt.cdev };
         let major = ((raw_cdev >> 20) & 0xFFF) as c_int;
         let minor = (raw_cdev & 0xFFFFF) as c_int;
-        let cdev = cdev_get(major, minor);
+        let cdev = Cdev::get(major, minor);
         if is_err(cdev) {
             // Cross-module `ERR_PTR` this cluster doesn't own
             // (`dev/cdev.rs`) -- passed through verbatim, same precedent
@@ -863,14 +863,14 @@ impl VfsFile {
         let open_file = unsafe { (*cdev).ops.and_then(|o| o.open_file(cdev, &raw mut *self)) };
         if let Some(ret) = open_file {
             if ret != 0 {
-                cdev_put(cdev);
+                Cdev::put(cdev);
                 return Err(Errno::Raw(ret));
             }
             if self.ops.is_some() {
                 // `open_file` took over: the VFS does not also store
                 // `file->cdev` (the cdev manages its own refcount in that
                 // case), matching the C original's comment exactly.
-                cdev_put(cdev);
+                Cdev::put(cdev);
                 return Ok(());
             }
         }
@@ -898,7 +898,7 @@ impl VfsFile {
         let raw_bdev = unsafe { (*inode).dev_mnt.bdev };
         let major = ((raw_bdev >> 20) & 0xFFF) as c_int;
         let minor = (raw_bdev & 0xFFFFF) as c_int;
-        let blkdev = blkdev_get(major, minor);
+        let blkdev = Blkdev::get(major, minor);
         if is_err(blkdev) || blkdev.is_null() {
             // Device not found -- allow open for stat but not I/O.
             // SAFETY: `pos.blkdev` is the active union member of a blkdev file.
@@ -1076,7 +1076,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
             // SAFETY: `pos.cdev` is the active union member of a cdev file.
             let cdev = unsafe { f.pos.cdev };
             if !cdev.is_null() {
-                let ret = cdev_put(cdev);
+                let ret = Cdev::put(cdev);
                 // SAFETY: same active-union-member store.
                 unsafe { f.pos.cdev = ptr::null_mut() };
                 if ret != 0 {
@@ -1085,7 +1085,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
             }
         } else if is_blk(mode) {
             // SAFETY: `pos.blkdev` is the active union member of a blkdev file.
-            let ret = unsafe { blkdev_put(f.pos.blkdev) };
+            let ret = unsafe { Blkdev::put(f.pos.blkdev) };
             // SAFETY: same active-union-member store.
             unsafe { f.pos.blkdev = ptr::null_mut() };
             if ret != 0 {
@@ -1157,7 +1157,7 @@ fn ioctl_inner(&mut self, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
             // matches the C original's cast exactly).
             let dev = unsafe { self.pos.cdev as *mut device_t };
             if !dev.is_null() {
-                return Ok(dev_ioctl(dev, cmd, arg));
+                return Ok(DeviceInstance::ioctl(dev, cmd, arg));
             }
             return Err(Errno::NoDev);
         }
@@ -1249,7 +1249,7 @@ fn read_inner(&mut self, buf: *mut c_void, n: usize, user: c_int) -> KResult<isi
         } else {
             // SAFETY: `pos.cdev` is the active union member of a cdev file.
             let cdev = unsafe { self.pos.cdev };
-            Ok(cdev_read(cdev, user as bool_, buf, n) as isize)
+            Ok(Cdev::read(cdev, user as bool_, buf, n) as isize)
         };
     }
 
@@ -1428,7 +1428,7 @@ fn write_inner(
         } else {
             // SAFETY: `pos.cdev` is the active union member of a cdev file.
             let cdev = unsafe { self.pos.cdev };
-            Ok(cdev_write(cdev, user as bool_, buf, n) as isize)
+            Ok(Cdev::write(cdev, user as bool_, buf, n) as isize)
         };
     }
 

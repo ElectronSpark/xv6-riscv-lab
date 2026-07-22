@@ -73,7 +73,7 @@ unsafe extern "C" {
 // P3-1D mesh sweep: dev/netdev.rs/sysnet.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
-use crate::dev::netdev::netdev_get_default;
+use crate::dev::netdev::Netdev;
 use crate::sysnet::sockrecvudp;
 
 // ===========================================================================
@@ -470,7 +470,7 @@ fn net_tx_eth(m: *mut mbuf, ethtype: u16) {
     // its own panic path (never actually returns for this file's fixed,
     // in-bounds header sizes), so `ethhdr` is always valid here.
     let ethhdr = unsafe { mbufpush(m, core::mem::size_of::<Eth>() as c_uint) as *mut Eth };
-    let ndev = netdev_get_default();
+    let ndev = Netdev::get_default();
 
     // SAFETY: `ethhdr` live (see above); `ndev` checked for null.
     unsafe {
@@ -564,7 +564,7 @@ fn net_tx_arp(op: u16, dmac: *const u8, dip: u32) -> c_int {
     }
 
     // Ethernet + IP part of the ARP header.
-    let ndev = netdev_get_default();
+    let ndev = Netdev::get_default();
     // SAFETY: `arphdr` live; `ndev`/`dmac` checked/caller-provided.
     unsafe {
         if !ndev.is_null() {

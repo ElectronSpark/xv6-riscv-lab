@@ -33,9 +33,7 @@ use crate::bindings::{
 use crate::kobject::KArc;
 use crate::kstd::{result_to_neg_errno, KResult};
 
-use super::dev::{
-    device_dup, device_get, device_put, device_register, device_unregister, DeviceOps,
-};
+use super::dev::{DeviceInstance, DeviceOps};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -48,7 +46,7 @@ use crate::kstd::{err_ptr, is_err};
 
 // P3-1D mesh sweep: dev/bio.rs is in scope for this wave; validates a
 // bio's fields against its target block device.
-use super::bio::bio_validate;
+use super::bio::Bio;
 
 // ---------------------------------------------------------------------------
 // Native layouts — Wave P3-N4 (device core family, blkdev half).
@@ -232,130 +230,138 @@ impl DeviceOps for BlkdevDeviceOps {
 
 // ---------------------------------------------------------------------------
 // Public C ABI.
+//
+// KERNEL-OO: relocated onto `impl Blkdev` -- behavior-preserving only:
+// raw `*mut blkdev_t` params kept (`Blkdev` is Freeze and shared
+// cross-hart via the device table's refcount/RCU, so no `&self`
+// receiver), bodies byte-identical, `unsafe extern "C"` signatures
+// preserved exactly.
 // ---------------------------------------------------------------------------
 
-/// Get a block device by its major and minor numbers. Returns the
-/// blkdev on success, or `ERR_PTR` on error.
-// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
-// `vfs/file.rs`) now import this via crate-path `use` instead of an
-// `extern` redeclaration -- demoted.
-// P3-9: converted to `KArc<device_t>` -- same manual-get/conditional-put
-// leak hazard fixed as `dev/cdev.rs::cdev_get` (see its comment); the
-// `Drop` on the "wrong type" branch now releases the reference
-// automatically.
-pub(crate) extern "C" fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t {
-    let device = device_get(major, minor);
-    if is_err(device) {
-        return device as *mut blkdev_t;
-    }
-    // SAFETY: `device` is non-null and not an error-pointer here --
-    // `device_get`'s success postcondition (one held kobject reference)
-    // is exactly `KArc::from_raw`'s precondition.
-    let device = unsafe { KArc::<device_t>::from_raw(device) };
-    if device.type_ != dev_type_e_DEV_TYPE_BLOCK {
-        // `device` (the KArc) drops here, releasing the reference.
-        return err_ptr(neg(ENODEV));
-    }
-    KArc::into_raw(device) as *mut blkdev_t
-}
-
-// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
-// grep) -- demoted; `#[allow(dead_code)]` documents the gap, same
-// precedent as `dev/cdev.rs`'s `cdev_dup`.
-#[allow(dead_code)]
-pub(crate) extern "C" fn blkdev_dup(dev: *mut blkdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    device_dup(dev as *mut device_t)
-}
-
-// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
-// `vfs/file.rs`) now import this via crate-path `use` instead of an
-// `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn blkdev_put(dev: *mut blkdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    device_put(dev as *mut device_t)
-}
-
-// P3-1D mesh sweep: callers (`ramdisk.rs`, `virtio_disk.rs`,
-// `dev/x1_sdhci.rs`) now import this via crate-path `use` instead of an
-// `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn blkdev_register(dev: *mut blkdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    // Ops validation (was `blkdev_ops_validate`): the old per-slot
-    // `Some` checks are unrepresentable-by-construction now that all
-    // three methods are required trait methods -- only "no table at
-    // all" remains rejectable.
-    // SAFETY: `dev` is caller-provided; reading `.ops` is a plain field
-    // read of caller-owned data.
-    if unsafe { (*dev).ops }.is_none() {
-        return neg(EINVAL);
-    }
-    let device = dev as *mut device_t;
-    // SAFETY: `dev` is caller-exclusive, not yet published
-    // (device_register is the point of publication).
-    unsafe {
-        (*device).type_ = dev_type_e_DEV_TYPE_BLOCK;
-        (*device).ops = Some(&BLKDEV_DEVICE_OPS);
-    }
-    device_register(device)
-}
-
-// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
-// grep) -- demoted; `#[allow(dead_code)]` documents the gap, same
-// precedent as `blkdev_dup` above.
-#[allow(dead_code)]
-pub(crate) extern "C" fn blkdev_unregister(dev: *mut blkdev_t) -> c_int {
-    if dev.is_null() {
-        return neg(EINVAL);
-    }
-    device_unregister(dev as *mut device_t)
-}
-
-// P3-1D mesh sweep: callers (`ramdisk.rs`, `bufcache.rs`,
-// `virtio_disk.rs`, `dev/x1_sdhci.rs`, `vfs/xv6fs/superblock.rs`) now
-// import this via crate-path `use` instead of an `extern` redeclaration --
-// demoted.
-pub(crate) extern "C" fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
-    if blkdev.is_null() || bio_ptr.is_null() {
-        return neg(EINVAL);
-    }
-    // SAFETY: `blkdev`/`bio_ptr` are caller-provided, live pointers --
-    // caller holds references on both (matches the C contract: neither
-    // `blkdev_submit_bio` nor its C original take/drop any reference).
-    unsafe {
-        if (*blkdev).dev.type_ != dev_type_e_DEV_TYPE_BLOCK {
-            return neg(ENODEV);
+impl Blkdev {
+    /// Get a block device by its major and minor numbers. Returns the
+    /// blkdev on success, or `ERR_PTR` on error.
+    // P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
+    // `vfs/file.rs`) now import this via crate-path `use` instead of an
+    // `extern` redeclaration -- demoted.
+    // P3-9: converted to `KArc<device_t>` -- same manual-get/conditional-put
+    // leak hazard fixed as `dev/cdev.rs::Cdev::get` (see its comment); the
+    // `Drop` on the "wrong type" branch now releases the reference
+    // automatically.
+    pub(crate) extern "C" fn get(major: c_int, minor: c_int) -> *mut blkdev_t {
+        let device = DeviceInstance::get(major, minor);
+        if is_err(device) {
+            return device as *mut blkdev_t;
         }
-        // A missing table is the old "submit_bio slot `None`" state (a
-        // registered device always has `Some` ops) -- same `ENOSYS`.
-        let Some(ops) = (*blkdev).ops else {
-            return neg(ENOSYS);
-        };
-        let rw = (*bio_ptr).flags.rw() != 0;
-        let writable = (*blkdev).flags.writable() != 0;
-        let readable = (*blkdev).flags.readable() != 0;
-        if rw && !writable {
-            return neg(EACCES);
+        // SAFETY: `device` is non-null and not an error-pointer here --
+        // `DeviceInstance::get`'s success postcondition (one held kobject
+        // reference) is exactly `KArc::from_raw`'s precondition.
+        let device = unsafe { KArc::<device_t>::from_raw(device) };
+        if device.type_ != dev_type_e_DEV_TYPE_BLOCK {
+            // `device` (the KArc) drops here, releasing the reference.
+            return err_ptr(neg(ENODEV));
         }
-        if !rw && !readable {
-            return neg(EACCES);
-        }
-        (*bio_ptr).block_shift = (*blkdev).block_shift;
+        KArc::into_raw(device) as *mut blkdev_t
+    }
 
-        let ret = bio_validate(bio_ptr, blkdev);
-        if ret != 0 {
-            return ret;
+    // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+    // grep) -- demoted; `#[allow(dead_code)]` documents the gap, same
+    // precedent as `dev/cdev.rs`'s `Cdev::dup`.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn dup(dev: *mut blkdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
         }
+        DeviceInstance::dup(dev as *mut device_t)
+    }
 
-        // SAFETY: `bio_validate` just passed and the caller keeps `bio`
-        // live until completion -- exactly `BlkdevOps::submit_bio`'s
-        // contract.
-        result_to_neg_errno(ops.submit_bio(blkdev, bio_ptr))
+    // P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
+    // `vfs/file.rs`) now import this via crate-path `use` instead of an
+    // `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn put(dev: *mut blkdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
+        }
+        DeviceInstance::put(dev as *mut device_t)
+    }
+
+    // P3-1D mesh sweep: callers (`ramdisk.rs`, `virtio_disk.rs`,
+    // `dev/x1_sdhci.rs`) now import this via crate-path `use` instead of an
+    // `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn register(dev: *mut blkdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
+        }
+        // Ops validation (was `blkdev_ops_validate`): the old per-slot
+        // `Some` checks are unrepresentable-by-construction now that all
+        // three methods are required trait methods -- only "no table at
+        // all" remains rejectable.
+        // SAFETY: `dev` is caller-provided; reading `.ops` is a plain field
+        // read of caller-owned data.
+        if unsafe { (*dev).ops }.is_none() {
+            return neg(EINVAL);
+        }
+        let device = dev as *mut device_t;
+        // SAFETY: `dev` is caller-exclusive, not yet published
+        // (`DeviceInstance::register` is the point of publication).
+        unsafe {
+            (*device).type_ = dev_type_e_DEV_TYPE_BLOCK;
+            (*device).ops = Some(&BLKDEV_DEVICE_OPS);
+        }
+        DeviceInstance::register(device)
+    }
+
+    // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+    // grep) -- demoted; `#[allow(dead_code)]` documents the gap, same
+    // precedent as `Blkdev::dup` above.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn unregister(dev: *mut blkdev_t) -> c_int {
+        if dev.is_null() {
+            return neg(EINVAL);
+        }
+        DeviceInstance::unregister(dev as *mut device_t)
+    }
+
+    // P3-1D mesh sweep: callers (`ramdisk.rs`, `bufcache.rs`,
+    // `virtio_disk.rs`, `dev/x1_sdhci.rs`, `vfs/xv6fs/superblock.rs`) now
+    // import this via crate-path `use` instead of an `extern` redeclaration --
+    // demoted.
+    pub(crate) extern "C" fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+        if blkdev.is_null() || bio_ptr.is_null() {
+            return neg(EINVAL);
+        }
+        // SAFETY: `blkdev`/`bio_ptr` are caller-provided, live pointers --
+        // caller holds references on both (matches the C contract: neither
+        // `Blkdev::submit_bio` nor its C original take/drop any reference).
+        unsafe {
+            if (*blkdev).dev.type_ != dev_type_e_DEV_TYPE_BLOCK {
+                return neg(ENODEV);
+            }
+            // A missing table is the old "submit_bio slot `None`" state (a
+            // registered device always has `Some` ops) -- same `ENOSYS`.
+            let Some(ops) = (*blkdev).ops else {
+                return neg(ENOSYS);
+            };
+            let rw = (*bio_ptr).flags.rw() != 0;
+            let writable = (*blkdev).flags.writable() != 0;
+            let readable = (*blkdev).flags.readable() != 0;
+            if rw && !writable {
+                return neg(EACCES);
+            }
+            if !rw && !readable {
+                return neg(EACCES);
+            }
+            (*bio_ptr).block_shift = (*blkdev).block_shift;
+
+            let ret = Bio::validate(bio_ptr, blkdev);
+            if ret != 0 {
+                return ret;
+            }
+
+            // SAFETY: `bio_validate` just passed and the caller keeps `bio`
+            // live until completion -- exactly `BlkdevOps::submit_bio`'s
+            // contract.
+            result_to_neg_errno(ops.submit_bio(blkdev, bio_ptr))
+        }
     }
 }

@@ -41,7 +41,7 @@ use crate::proc::ProcTable;
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration. P3-10c: `CdevOps` is the ops-table trait
 // this file's `TtyCdevOps` implements.
-use crate::dev::cdev::{cdev_register, CdevOps};
+use crate::dev::cdev::{Cdev, CdevOps};
 
 // P3-1C mesh sweep: tty/{tty,session}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
@@ -236,7 +236,7 @@ impl TtyDev {
             (*cdev).flags.set_writable(1);
             (*cdev).ops = Some(&TTY_CDEV_OPS);
 
-            let ret = cdev_register(cdev);
+            let ret = Cdev::register(cdev);
             if ret != 0 {
                 __panic_start();
                 crate::kprintln!(

@@ -56,7 +56,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::bindings::{cdev_t, mode_t};
 use crate::kstd::{Errno, KResult};
 
-use super::cdev::{cdev_register, CdevOps};
+use super::cdev::{Cdev, CdevOps};
 
 // ---------------------------------------------------------------------------
 // External C symbols, declared locally per this crate's established
@@ -83,27 +83,37 @@ fn either_copyout(user_dst: c_int, dst: u64, src: *const c_void, len: u64) -> c_
 // as every other Rust module reading `current`).
 use crate::proc::proc_shims::xv6_current_thread;
 
-/// Replicates the C `assert(expr, fmt, ret)` expansion used three times
-/// in `nullranddevinit()`. Same special-casing precedent as
-/// `kernel/ipi.rs`'s `assert_hartid_in_range` (a fixed `kassert!`-style
-/// macro can't carry a runtime `%d`).
-fn assert_registered(ret: c_int, which: &core::ffi::CStr, func: &core::ffi::CStr) {
-    if ret == 0 {
-        return;
+/// `/dev/null`/`/dev/zero`/`/dev/random` registration + RNG-state owner
+/// (KERNEL-OO ZST, matching `kernel/tty/tty_dev.rs`'s `TtyDev`
+/// precedent) -- there is no single `cdev_t`/`bio`-style per-instance
+/// "subject" here (three independent cdevs plus one global RNG seed), so
+/// every remaining free fn in this file lands here rather than on any
+/// one of the three `CdevOps` implementors above.
+pub(crate) struct NullRandDev;
+
+impl NullRandDev {
+    /// Replicates the C `assert(expr, fmt, ret)` expansion used three times
+    /// in [`NullRandDev::init`]. Same special-casing precedent as
+    /// `kernel/ipi.rs`'s `assert_hartid_in_range` (a fixed `kassert!`-style
+    /// macro can't carry a runtime `%d`).
+    fn assert_registered(ret: c_int, which: &core::ffi::CStr, func: &core::ffi::CStr) {
+        if ret == 0 {
+            return;
+        }
+        __panic_start();
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            "kernel/dev/nullrand.rs",
+            line!() as c_int,
+            crate::printf::Cs(func.as_ptr()),
+        );
+        crate::kprintln!(
+            "nullranddevinit: failed to register {} cdev: {}",
+            crate::printf::Cs(which.as_ptr()),
+            ret,
+        );
+        __panic_end();
     }
-    __panic_start();
-    crate::kprintln!(
-        "ASSERTION_FAILURE {}:{}: In function '{}':",
-        "kernel/dev/nullrand.rs",
-        line!() as c_int,
-        crate::printf::Cs(func.as_ptr()),
-    );
-    crate::kprintln!(
-        "nullranddevinit: failed to register {} cdev: {}",
-        crate::printf::Cs(which.as_ptr()),
-        ret,
-    );
-    __panic_end();
 }
 
 // ---------------------------------------------------------------------------
@@ -160,45 +170,47 @@ impl CdevOps for NullCdevOps {
 /// Xorshift64star state seed (matches the C literal exactly).
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
 
-fn xorshift64star() -> u64 {
-    let mut x = RAND_STATE.load(Ordering::Relaxed);
-    x ^= crate::machine::read_time();
-    // SAFETY: `xv6_current_thread()` always returns a live, non-null
-    // pointer (the running thread) -- only its bit pattern is used here,
-    // as XOR-mixing entropy, matching the C's `(uint64)current`; the
-    // pointer is never dereferenced.
-    x ^= xv6_current_thread() as u64;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    x = x.wrapping_mul(2685821657736338717);
-    RAND_STATE.store(x, Ordering::Relaxed);
-    x
-}
-
-/// `void random_fill_bytes(void *buf, size_t count)` -- fills `buf` with
-/// `count` pseudo-random bytes. Called both by [`random_read`] (kernel
-/// destination path) and, cross-module within this same crate, by
-/// `kernel/proc/sysproc.rs`'s `sys_getrandom` (see this module's doc
-/// comment for the signature-fidelity note on that caller).
-// P3-1D mesh sweep: caller (`proc/sysproc.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn random_fill_bytes(buf: *mut u8, count: usize) {
-    if buf.is_null() || count == 0 {
-        return;
+impl NullRandDev {
+    fn xorshift64star() -> u64 {
+        let mut x = RAND_STATE.load(Ordering::Relaxed);
+        x ^= crate::machine::read_time();
+        // SAFETY: `xv6_current_thread()` always returns a live, non-null
+        // pointer (the running thread) -- only its bit pattern is used here,
+        // as XOR-mixing entropy, matching the C's `(uint64)current`; the
+        // pointer is never dereferenced.
+        x ^= xv6_current_thread() as u64;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        x = x.wrapping_mul(2685821657736338717);
+        RAND_STATE.store(x, Ordering::Relaxed);
+        x
     }
-    let mut i = 0usize;
-    while i < count {
-        let mut r = xorshift64star();
-        let mut b = 0;
-        while b < 8 && i < count {
-            // SAFETY: `buf` is caller-provided and valid for `count`
-            // bytes (checked non-null above); `i < count` is checked by
-            // the loop condition on every iteration.
-            unsafe { *buf.add(i) = (r & 0xFF) as u8 };
-            r >>= 8;
-            b += 1;
-            i += 1;
+
+    /// `void random_fill_bytes(void *buf, size_t count)` -- fills `buf` with
+    /// `count` pseudo-random bytes. Called both by [`RandomCdevOps::read`]
+    /// (kernel destination path) and, cross-module within this same crate,
+    /// by `kernel/proc/sysproc.rs`'s `sys_getrandom` (see this module's doc
+    /// comment for the signature-fidelity note on that caller).
+    // P3-1D mesh sweep: caller (`proc/sysproc.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn random_fill_bytes(buf: *mut u8, count: usize) {
+        if buf.is_null() || count == 0 {
+            return;
+        }
+        let mut i = 0usize;
+        while i < count {
+            let mut r = Self::xorshift64star();
+            let mut b = 0;
+            while b < 8 && i < count {
+                // SAFETY: `buf` is caller-provided and valid for `count`
+                // bytes (checked non-null above); `i < count` is checked by
+                // the loop condition on every iteration.
+                unsafe { *buf.add(i) = (r & 0xFF) as u8 };
+                r >>= 8;
+                b += 1;
+                i += 1;
+            }
         }
     }
 }
@@ -228,7 +240,7 @@ impl CdevOps for RandomCdevOps {
         }
 
         if !user {
-            random_fill_bytes(buf as *mut u8, count);
+            NullRandDev::random_fill_bytes(buf as *mut u8, count);
             return Ok(count as c_int);
         }
 
@@ -236,7 +248,7 @@ impl CdevOps for RandomCdevOps {
         let mut done: usize = 0;
         while done < count {
             let chunk = core::cmp::min(count - done, kbuf.len());
-            random_fill_bytes(kbuf.as_mut_ptr(), chunk);
+            NullRandDev::random_fill_bytes(kbuf.as_mut_ptr(), chunk);
 
             // SAFETY: `either_copyout` validates the userspace
             // destination range itself; `kbuf` is a live local buffer
@@ -322,7 +334,7 @@ impl CdevOps for ZeroCdevOps {
 // Registration.
 // ---------------------------------------------------------------------------
 
-/// Every field not set explicitly by [`nullranddevinit`] is
+/// Every field not set explicitly by [`NullRandDev::init`] is
 /// intentionally left zero, matching the C static initializers'
 /// implicit zero-fill for `.dev.kobj`/`.dev.type_`/`.dev.unregistering`
 /// (same `MaybeUninit::zeroed()` + populate-then-register precedent as
@@ -331,48 +343,50 @@ static mut NULL_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 static mut RANDOM_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 static mut ZERO_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
-/// `void nullranddevinit(void)` -- registers `/dev/null`, `/dev/random`,
-/// `/dev/zero`. Called once from `start_kernel.c`'s single-hart
-/// post-init sequence (see that file's `nullranddevinit();` call site).
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn nullranddevinit() {
-    // SAFETY: `nullranddevinit()` runs exactly once, from
-    // `start_kernel.c`'s single-hart init sequence, before any other
-    // code can observe `NULL_CDEV`/`RANDOM_CDEV`/`ZERO_CDEV` (same
-    // reasoning as `kernel/console.rs`'s `consoledevinit`).
-    unsafe {
-        let cdev = NULL_CDEV.as_mut_ptr();
-        (*cdev).dev.major = NULL_MAJOR;
-        (*cdev).dev.minor = NULL_MINOR;
-        (*cdev).dev.devname = c"null".as_ptr();
-        (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).flags.set_readable(1);
-        (*cdev).flags.set_writable(1);
-        (*cdev).ops = Some(&NULL_CDEV_OPS);
-        let ret = cdev_register(cdev);
-        assert_registered(ret, c"null", c"nullranddevinit");
+impl NullRandDev {
+    /// `void nullranddevinit(void)` -- registers `/dev/null`, `/dev/random`,
+    /// `/dev/zero`. Called once from `start_kernel.c`'s single-hart
+    /// post-init sequence (see that file's `nullranddevinit();` call site).
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn init() {
+        // SAFETY: `NullRandDev::init()` runs exactly once, from
+        // `start_kernel.c`'s single-hart init sequence, before any other
+        // code can observe `NULL_CDEV`/`RANDOM_CDEV`/`ZERO_CDEV` (same
+        // reasoning as `kernel/console.rs`'s `consoledevinit`).
+        unsafe {
+            let cdev = NULL_CDEV.as_mut_ptr();
+            (*cdev).dev.major = NULL_MAJOR;
+            (*cdev).dev.minor = NULL_MINOR;
+            (*cdev).dev.devname = c"null".as_ptr();
+            (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
+            (*cdev).flags.set_readable(1);
+            (*cdev).flags.set_writable(1);
+            (*cdev).ops = Some(&NULL_CDEV_OPS);
+            let ret = Cdev::register(cdev);
+            Self::assert_registered(ret, c"null", c"nullranddevinit");
 
-        let cdev = RANDOM_CDEV.as_mut_ptr();
-        (*cdev).dev.major = RANDOM_MAJOR;
-        (*cdev).dev.minor = RANDOM_MINOR;
-        (*cdev).dev.devname = c"random".as_ptr();
-        (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).flags.set_readable(1);
-        (*cdev).flags.set_writable(1);
-        (*cdev).ops = Some(&RANDOM_CDEV_OPS);
-        let ret = cdev_register(cdev);
-        assert_registered(ret, c"random", c"nullranddevinit");
+            let cdev = RANDOM_CDEV.as_mut_ptr();
+            (*cdev).dev.major = RANDOM_MAJOR;
+            (*cdev).dev.minor = RANDOM_MINOR;
+            (*cdev).dev.devname = c"random".as_ptr();
+            (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
+            (*cdev).flags.set_readable(1);
+            (*cdev).flags.set_writable(1);
+            (*cdev).ops = Some(&RANDOM_CDEV_OPS);
+            let ret = Cdev::register(cdev);
+            Self::assert_registered(ret, c"random", c"nullranddevinit");
 
-        let cdev = ZERO_CDEV.as_mut_ptr();
-        (*cdev).dev.major = ZERO_MAJOR;
-        (*cdev).dev.minor = ZERO_MINOR;
-        (*cdev).dev.devname = c"zero".as_ptr();
-        (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).flags.set_readable(1);
-        (*cdev).flags.set_writable(1);
-        (*cdev).ops = Some(&ZERO_CDEV_OPS);
-        let ret = cdev_register(cdev);
-        assert_registered(ret, c"zero", c"nullranddevinit");
+            let cdev = ZERO_CDEV.as_mut_ptr();
+            (*cdev).dev.major = ZERO_MAJOR;
+            (*cdev).dev.minor = ZERO_MINOR;
+            (*cdev).dev.devname = c"zero".as_ptr();
+            (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
+            (*cdev).flags.set_readable(1);
+            (*cdev).flags.set_writable(1);
+            (*cdev).ops = Some(&ZERO_CDEV_OPS);
+            let ret = Cdev::register(cdev);
+            Self::assert_registered(ret, c"zero", c"nullranddevinit");
+        }
     }
 }

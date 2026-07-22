@@ -286,6 +286,11 @@ unsafe impl HasKobject for bio {
 /// Mirrors `__bio_relase_kobj_cb()`. See the module doc's "Preserved-as-
 /// is" note: the C original's page-cleanup loop was entirely commented
 /// out, so this is faithfully just a free.
+///
+/// FLOOR: address-taken `extern "C"` kobject-release callback (installed
+/// as a bare fn-pointer at `Bio::alloc_inner`'s `(*bio_ptr).kobj.ops.
+/// release = Some(bio_release_kobj_cb)` below) -- kept a free fn per this
+/// wave's floor rule, matching `dev/dev.rs`'s `underlying_kobject_release`.
 extern "C" fn bio_release_kobj_cb(obj: *mut kobject) {
     // `kobj` is `struct bio`'s first field (offset 0) -- plain
     // reinterpret cast, not `container_of` arithmetic (see module doc).
@@ -293,192 +298,204 @@ extern "C" fn bio_release_kobj_cb(obj: *mut kobject) {
     // SAFETY: `kobject_put` (this callback's only caller) guarantees
     // `obj` was live and its refcount just reached zero, i.e. `bio_ptr`
     // is a valid, uniquely-owned `struct bio` allocation from
-    // `kmm_alloc` in `bio_alloc` below -- freeing it here is exactly
-    // the deallocation `bio_alloc` paired it with.
+    // `kmm_alloc` in `Bio::alloc_inner` below -- freeing it here is
+    // exactly the deallocation `Bio::alloc_inner` paired it with.
     unsafe { crate::mm::kalloc::Kmem::kmm_free(bio_ptr as *mut c_void) };
 }
 
 // ---------------------------------------------------------------------------
 // Public C ABI -- exact symbol/signature parity with `kernel/inc/dev/bio.h`.
+//
+// KERNEL-OO: the five externally-linked entry points (plus the internal
+// `alloc_inner` helper) are now associated functions on [`Bio`] (the
+// `bio`-wrapping native type) rather than free `bio_*` functions --
+// behavior-preserving relocation only: raw `*mut bio` params kept (`Bio`
+// is Freeze and shared cross-hart via the kobject refcount/RCU-adjacent
+// device table, so no `&self`/`&Bio` receiver is introduced), bodies
+// byte-identical, `unsafe extern "C"` signatures preserved exactly so
+// `Bio::method` stays usable wherever a raw fn-pointer of the old
+// signature was expected.
 // ---------------------------------------------------------------------------
 
-/// Allocate a `bio` with `vec_length` (uninitialised) segments. Returns
-/// an `ERR_PTR` on invalid arguments or allocation failure.
-// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
-// now import this via crate-path `use` instead of an `extern`
-// redeclaration -- demoted.
-pub(crate) extern "C" fn bio_alloc(
-    bdev: *mut blkdev_t,
-    vec_length: i16,
-    rw: bool_,
-    end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
-    private_data: *mut c_void,
-) -> *mut bio {
-    result_to_errptr(bio_alloc_inner(bdev, vec_length, rw, end_io, private_data))
-}
+impl Bio {
+    /// Allocate a `bio` with `vec_length` (uninitialised) segments. Returns
+    /// an `ERR_PTR` on invalid arguments or allocation failure.
+    // P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
+    // now import this via crate-path `use` instead of an `extern`
+    // redeclaration -- demoted.
+    pub(crate) extern "C" fn alloc(
+        bdev: *mut blkdev_t,
+        vec_length: i16,
+        rw: bool_,
+        end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
+        private_data: *mut c_void,
+    ) -> *mut bio {
+        result_to_errptr(Self::alloc_inner(bdev, vec_length, rw, end_io, private_data))
+    }
 
-fn bio_alloc_inner(
-    bdev: *mut blkdev_t,
-    vec_length: i16,
-    rw: bool_,
-    end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
-    private_data: *mut c_void,
-) -> KResult<*mut bio> {
-    if bdev.is_null() || vec_length <= 0 || vec_length > BIO_MAX_VECS {
-        return Err(Errno::Inval);
+    fn alloc_inner(
+        bdev: *mut blkdev_t,
+        vec_length: i16,
+        rw: bool_,
+        end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
+        private_data: *mut c_void,
+    ) -> KResult<*mut bio> {
+        if bdev.is_null() || vec_length <= 0 || vec_length > BIO_MAX_VECS {
+            return Err(Errno::Inval);
+        }
+        let bio_size = core::mem::size_of::<bio>() + (vec_length as usize) * core::mem::size_of::<bio_vec>();
+        let bio_ptr = unsafe { crate::mm::kalloc::Kmem::kmm_alloc(bio_size) } as *mut bio;
+        if bio_ptr.is_null() {
+            return Err(Errno::NoMem);
+        }
+        // SAFETY: `bio_ptr` is a freshly-allocated, uniquely-owned
+        // `bio_size`-byte region (checked non-null above); zeroing it before
+        // any typed field access is required (matches the C `memset(bio, 0,
+        // bio_size)`) and is valid for a `u8`-representable region of this
+        // size.
+        unsafe {
+            memset(bio_ptr as *mut c_void, 0, bio_size);
+            (*bio_ptr).bdev = bdev;
+            (*bio_ptr).block_shift = (*bdev).block_shift;
+            (*bio_ptr).vec_length = vec_length;
+            (*bio_ptr).flags.set_rw(rw as u64);
+            (*bio_ptr).end_io = end_io;
+            (*bio_ptr).private_data = private_data;
+            (*bio_ptr).kobj.name = c"bio".as_ptr();
+            (*bio_ptr).kobj.ops.release = Some(bio_release_kobj_cb);
+            kobject_init(&raw mut (*bio_ptr).kobj);
+            RawCompletion::init(&raw mut (*bio_ptr).io_completion);
+        }
+        Ok(bio_ptr)
     }
-    let bio_size = core::mem::size_of::<bio>() + (vec_length as usize) * core::mem::size_of::<bio_vec>();
-    let bio_ptr = unsafe { crate::mm::kalloc::Kmem::kmm_alloc(bio_size) } as *mut bio;
-    if bio_ptr.is_null() {
-        return Err(Errno::NoMem);
-    }
-    // SAFETY: `bio_ptr` is a freshly-allocated, uniquely-owned
-    // `bio_size`-byte region (checked non-null above); zeroing it before
-    // any typed field access is required (matches the C `memset(bio, 0,
-    // bio_size)`) and is valid for a `u8`-representable region of this
-    // size.
-    unsafe {
-        memset(bio_ptr as *mut c_void, 0, bio_size);
-        (*bio_ptr).bdev = bdev;
-        (*bio_ptr).block_shift = (*bdev).block_shift;
-        (*bio_ptr).vec_length = vec_length;
-        (*bio_ptr).flags.set_rw(rw as u64);
-        (*bio_ptr).end_io = end_io;
-        (*bio_ptr).private_data = private_data;
-        (*bio_ptr).kobj.name = c"bio".as_ptr();
-        (*bio_ptr).kobj.ops.release = Some(bio_release_kobj_cb);
-        kobject_init(&raw mut (*bio_ptr).kobj);
-        RawCompletion::init(&raw mut (*bio_ptr).io_completion);
-    }
-    Ok(bio_ptr)
-}
 
-/// Install a data segment (`page`/`len`/`offset`) at index `idx` of a
-/// not-yet-submitted `bio`. Returns `0` on success, a negative errno
-/// otherwise.
-// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
-// now import this via crate-path `use` instead of an `extern`
-// redeclaration -- demoted.
-pub(crate) extern "C" fn bio_add_seg(bio_ptr: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int {
-    if bio_ptr.is_null() || page.is_null() || len == 0 {
-        return neg(crate::bindings::EINVAL);
-    }
-    // SAFETY: `bio_ptr` is non-null, caller-owned (not yet submitted, so
-    // exclusively accessed by this thread per the bio lifecycle
-    // contract in the module doc); every field read/write below is a
-    // plain, in-bounds access on that live allocation once `idx` is
-    // validated against `vec_length` just below.
-    unsafe {
-        if (*bio_ptr).flags.valid() != 0 || (*bio_ptr).flags.done() != 0 {
-            return neg(crate::bindings::EIO);
-        }
-        if (*bio_ptr).vec_length <= 0 || (*bio_ptr).vec_length > BIO_MAX_VECS {
+    /// Install a data segment (`page`/`len`/`offset`) at index `idx` of a
+    /// not-yet-submitted `bio`. Returns `0` on success, a negative errno
+    /// otherwise.
+    // P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
+    // now import this via crate-path `use` instead of an `extern`
+    // redeclaration -- demoted.
+    pub(crate) extern "C" fn add_seg(bio_ptr: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int {
+        if bio_ptr.is_null() || page.is_null() || len == 0 {
             return neg(crate::bindings::EINVAL);
         }
-        if idx < 0 || idx >= (*bio_ptr).vec_length {
-            return neg(crate::bindings::EINVAL);
-        }
-        let bvec_ptr = (*bio_ptr).bvecs.as_mut_ptr().add(idx as usize);
-        let mut total_size = (*bio_ptr).size.wrapping_sub((*bvec_ptr).len);
-        total_size = total_size.wrapping_add(len);
-        if total_size > BIO_MAX_SIZE {
-            return neg(E2BIG);
-        }
-        (*bvec_ptr).bv_page = page;
-        (*bvec_ptr).len = len;
-        (*bvec_ptr).offset = offset;
-        (*bio_ptr).size = total_size;
-    }
-    0
-}
-
-/// Increment a `bio`'s reference count.
-// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
-// grep, matches the pre-existing RUST_FORCE_UNDEFINED comment) --
-// demoted; `#[allow(dead_code)]` documents the gap, same precedent as
-// `dev/cdev.rs`'s `cdev_dup`.
-#[allow(dead_code)]
-pub(crate) extern "C" fn bio_dup(bio_ptr: *mut bio) -> c_int {
-    if bio_ptr.is_null() {
-        return neg(crate::bindings::EINVAL);
-    }
-    // SAFETY: `bio_ptr` non-null, caller holds a reference (bio_dup's
-    // documented precondition, `kernel/inc/dev/bio.h`).
-    unsafe { kobject_get(&raw mut (*bio_ptr).kobj) };
-    0
-}
-
-/// Decrement a `bio`'s reference count, freeing it via
-/// [`bio_release_kobj_cb`] once it reaches zero.
-// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
-// now import this via crate-path `use` instead of an `extern`
-// redeclaration -- demoted.
-pub(crate) extern "C" fn bio_release(bio_ptr: *mut bio) -> c_int {
-    if bio_ptr.is_null() {
-        return neg(crate::bindings::EINVAL);
-    }
-    // SAFETY: `bio_ptr` non-null, caller holds a reference being given up.
-    unsafe { kobject_put(&raw mut (*bio_ptr).kobj) };
-    0
-}
-
-/// Validate a `bio`'s fields against its target block device before
-/// submission. Returns `0` if valid, `-EINVAL` otherwise.
-// P3-1D mesh sweep: callers (`dev/blkdev.rs`, `dev/x1_sdhci.rs`) now
-// import this via crate-path `use` instead of an `extern` redeclaration --
-// demoted.
-pub(crate) extern "C" fn bio_validate(bio_ptr: *mut bio, blkdev: *mut blkdev_t) -> c_int {
-    if bio_ptr.is_null() || blkdev.is_null() {
-        return neg(crate::bindings::EINVAL);
-    }
-    // SAFETY: both pointers non-null; `bio_ptr`'s `bvecs[0..vec_length)`
-    // are read-only accessed below after `vec_length` itself is bounds-
-    // checked, mirroring the C loop exactly.
-    unsafe {
-        if (*bio_ptr).bdev != blkdev {
-            return neg(crate::bindings::EINVAL);
-        }
-        if (*bio_ptr).block_shift != (*blkdev).block_shift {
-            return neg(crate::bindings::EINVAL);
-        }
-        if (*bio_ptr).vec_length <= 0 || (*bio_ptr).vec_length > BIO_MAX_VECS {
-            return neg(crate::bindings::EINVAL);
-        }
-        if (*bio_ptr).size > BIO_MAX_SIZE {
-            return neg(crate::bindings::EINVAL);
-        }
-        if kobject_refcount(&raw mut (*bio_ptr).kobj) <= 0 {
-            return neg(crate::bindings::EINVAL);
-        }
-        if (*bio_ptr).error != 0 {
-            return neg(crate::bindings::EINVAL);
-        }
-        if (*bio_ptr).flags.valid() != 0 || (*bio_ptr).flags.done() != 0 {
-            return neg(crate::bindings::EINVAL);
-        }
-
-        // `vec_length` was bounds-checked (`0 < vec_length <= BIO_MAX_VECS`)
-        // above, so `bvecs[0..vec_length)` is the bio's own CPU-side segment
-        // metadata (not a DMA-written region -- the device writes the target
-        // *pages*, not these descriptors) and safe to walk as a slice.
-        let bvecs = core::slice::from_raw_parts((*bio_ptr).bvecs.as_ptr(), (*bio_ptr).vec_length as usize);
-        let mut total_size: u32 = 0;
-        for bvec in bvecs {
-            if bvec.bv_page.is_null() {
+        // SAFETY: `bio_ptr` is non-null, caller-owned (not yet submitted, so
+        // exclusively accessed by this thread per the bio lifecycle
+        // contract in the module doc); every field read/write below is a
+        // plain, in-bounds access on that live allocation once `idx` is
+        // validated against `vec_length` just below.
+        unsafe {
+            if (*bio_ptr).flags.valid() != 0 || (*bio_ptr).flags.done() != 0 {
+                return neg(crate::bindings::EIO);
+            }
+            if (*bio_ptr).vec_length <= 0 || (*bio_ptr).vec_length > BIO_MAX_VECS {
                 return neg(crate::bindings::EINVAL);
             }
-            if bvec.offset as u32 + bvec.len as u32 > PGSIZE {
+            if idx < 0 || idx >= (*bio_ptr).vec_length {
                 return neg(crate::bindings::EINVAL);
             }
-            total_size += bvec.len as u32;
-            if total_size > BIO_MAX_SIZE as u32 {
-                return neg(crate::bindings::EINVAL);
+            let bvec_ptr = (*bio_ptr).bvecs.as_mut_ptr().add(idx as usize);
+            let mut total_size = (*bio_ptr).size.wrapping_sub((*bvec_ptr).len);
+            total_size = total_size.wrapping_add(len);
+            if total_size > BIO_MAX_SIZE {
+                return neg(E2BIG);
             }
+            (*bvec_ptr).bv_page = page;
+            (*bvec_ptr).len = len;
+            (*bvec_ptr).offset = offset;
+            (*bio_ptr).size = total_size;
         }
+        0
+    }
 
-        if total_size != (*bio_ptr).size as u32 {
+    /// Increment a `bio`'s reference count.
+    // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+    // grep, matches the pre-existing RUST_FORCE_UNDEFINED comment) --
+    // demoted; `#[allow(dead_code)]` documents the gap, same precedent as
+    // `dev/cdev.rs`'s `Cdev::dup`.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn dup(bio_ptr: *mut bio) -> c_int {
+        if bio_ptr.is_null() {
             return neg(crate::bindings::EINVAL);
         }
+        // SAFETY: `bio_ptr` non-null, caller holds a reference (`Bio::dup`'s
+        // documented precondition, `kernel/inc/dev/bio.h`).
+        unsafe { kobject_get(&raw mut (*bio_ptr).kobj) };
+        0
     }
-    0
+
+    /// Decrement a `bio`'s reference count, freeing it via
+    /// [`bio_release_kobj_cb`] once it reaches zero.
+    // P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
+    // now import this via crate-path `use` instead of an `extern`
+    // redeclaration -- demoted.
+    pub(crate) extern "C" fn release(bio_ptr: *mut bio) -> c_int {
+        if bio_ptr.is_null() {
+            return neg(crate::bindings::EINVAL);
+        }
+        // SAFETY: `bio_ptr` non-null, caller holds a reference being given up.
+        unsafe { kobject_put(&raw mut (*bio_ptr).kobj) };
+        0
+    }
+
+    /// Validate a `bio`'s fields against its target block device before
+    /// submission. Returns `0` if valid, `-EINVAL` otherwise.
+    // P3-1D mesh sweep: callers (`dev/blkdev.rs`, `dev/x1_sdhci.rs`) now
+    // import this via crate-path `use` instead of an `extern` redeclaration --
+    // demoted.
+    pub(crate) extern "C" fn validate(bio_ptr: *mut bio, blkdev: *mut blkdev_t) -> c_int {
+        if bio_ptr.is_null() || blkdev.is_null() {
+            return neg(crate::bindings::EINVAL);
+        }
+        // SAFETY: both pointers non-null; `bio_ptr`'s `bvecs[0..vec_length)`
+        // are read-only accessed below after `vec_length` itself is bounds-
+        // checked, mirroring the C loop exactly.
+        unsafe {
+            if (*bio_ptr).bdev != blkdev {
+                return neg(crate::bindings::EINVAL);
+            }
+            if (*bio_ptr).block_shift != (*blkdev).block_shift {
+                return neg(crate::bindings::EINVAL);
+            }
+            if (*bio_ptr).vec_length <= 0 || (*bio_ptr).vec_length > BIO_MAX_VECS {
+                return neg(crate::bindings::EINVAL);
+            }
+            if (*bio_ptr).size > BIO_MAX_SIZE {
+                return neg(crate::bindings::EINVAL);
+            }
+            if kobject_refcount(&raw mut (*bio_ptr).kobj) <= 0 {
+                return neg(crate::bindings::EINVAL);
+            }
+            if (*bio_ptr).error != 0 {
+                return neg(crate::bindings::EINVAL);
+            }
+            if (*bio_ptr).flags.valid() != 0 || (*bio_ptr).flags.done() != 0 {
+                return neg(crate::bindings::EINVAL);
+            }
+
+            // `vec_length` was bounds-checked (`0 < vec_length <= BIO_MAX_VECS`)
+            // above, so `bvecs[0..vec_length)` is the bio's own CPU-side segment
+            // metadata (not a DMA-written region -- the device writes the target
+            // *pages*, not these descriptors) and safe to walk as a slice.
+            let bvecs = core::slice::from_raw_parts((*bio_ptr).bvecs.as_ptr(), (*bio_ptr).vec_length as usize);
+            let mut total_size: u32 = 0;
+            for bvec in bvecs {
+                if bvec.bv_page.is_null() {
+                    return neg(crate::bindings::EINVAL);
+                }
+                if bvec.offset as u32 + bvec.len as u32 > PGSIZE {
+                    return neg(crate::bindings::EINVAL);
+                }
+                total_size += bvec.len as u32;
+                if total_size > BIO_MAX_SIZE as u32 {
+                    return neg(crate::bindings::EINVAL);
+                }
+            }
+
+            if total_size != (*bio_ptr).size as u32 {
+                return neg(crate::bindings::EINVAL);
+            }
+        }
+        0
+    }
 }

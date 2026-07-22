@@ -139,7 +139,7 @@ fn __page_to_pa(page: *mut page_t) -> u64 {
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use super::blkdev::blkdev_register;
+use super::blkdev::Blkdev;
 
 // ===========================================================================
 // Register/bit constants -- redeclared locally from `kernel/inc/dev/
@@ -2044,7 +2044,7 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
     }
 
     // SAFETY: `sc` live.
-    let ret = unsafe { blkdev_register(&raw mut (*sc).bdev) };
+    let ret = unsafe { Blkdev::register(&raw mut (*sc).bdev) };
     if ret != 0 {
         crate::kprintln!("x1_sdhci{}: blkdev_register failed: {}", idx as c_int, ret);
         return -1;

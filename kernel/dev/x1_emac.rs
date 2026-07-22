@@ -130,7 +130,7 @@ use crate::net::{mbufalloc, mbuffree, net_rx};
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
 // glob re-export like its neighbors here.
 use crate::proc::Scheduler;
-use super::netdev::{netdev_register, netdev_set_link};
+use super::netdev::Netdev;
 
 // ===========================================================================
 // Register/bit constants -- redeclared locally from `kernel/inc/dev/
@@ -1373,7 +1373,7 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
         (*sc).ndev.full_duplex = (*sc).phy.full_duplex;
         (*sc).ndev.ops = &X1_EMAC_NETDEV_OPS as *const netdev_ops as *mut netdev_ops;
         (*sc).ndev.priv_ = sc as *mut c_void;
-        netdev_register(&raw mut (*sc).ndev);
+        Netdev::register(&raw mut (*sc).ndev);
 
         crate::kprintln!(
             "x1_emac{}: initialised as {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x})",
@@ -1503,7 +1503,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
                 }
 
                 // SAFETY: `sc` live.
-                unsafe { netdev_set_link(&raw mut (*sc).ndev, new_link) };
+                unsafe { Netdev::set_link(&raw mut (*sc).ndev, new_link) };
             }
         }
     }

@@ -57,7 +57,7 @@ use crate::bindings::{
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration. P3-10c: `CdevOps` is the ops-table trait
 // this file's `ConsoleCdevOps` implements.
-use crate::dev::cdev::{cdev_register, CdevOps};
+use crate::dev::cdev::{Cdev, CdevOps};
 use crate::kstd::{cint_result, Errno, KResult};
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
 // crate-path items instead of `extern "C"` redeclarations. `sleep` is
@@ -912,7 +912,7 @@ pub(crate) extern "C" fn consoledevinit() {
         (*cdev).flags.set_writable(1);
         (*cdev).ops = Some(&CONSOLE_CDEV_OPS);
 
-        let errno = cdev_register(cdev);
+        let errno = Cdev::register(cdev);
         if errno != 0 {
             __panic_start();
             crate::kprintln!(

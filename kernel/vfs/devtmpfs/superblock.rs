@@ -187,7 +187,7 @@ use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 // P3-1D mesh sweep: dev/dev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use crate::dev::dev::dev_for_each_device;
+use crate::dev::dev::DevTable;
 
 // `kassert!`/`err_ptr`/`is_err`/`is_err_or_null`/`ptr_err`'s canonical
 // homes are `crate::kstd`/crate root (P3-CS1 centralization). Note
@@ -856,13 +856,13 @@ pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
 //  Retroactive population from device table
 // ------------------------------------------------------------------ */
 
-/// Callback for [`dev_for_each_device`]: create a devtmpfs registry entry
+/// Callback for [`DevTable::for_each_device`]: create a devtmpfs registry entry
 /// for each device that has a devname set but hasn't been registered yet.
-/// Only ever reached through `dev_for_each_device`'s callback function
+/// Only ever reached through `DevTable::for_each_device`'s callback function
 /// pointer, so this stays private -- same precedent as [`devtmpfs_mount`].
 extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_void) -> c_int {
     // SAFETY: `dev` is a live `device_t*` (caller contract:
-    // `dev_for_each_device`'s callback convention, `kernel/inc/dev/dev.h`).
+    // `DevTable::for_each_device`'s callback convention, `kernel/inc/dev/dev.h`).
     let devname = unsafe { (*dev).devname };
     if devname.is_null() {
         return 0; // device has no devtmpfs binding -- skip
@@ -903,9 +903,9 @@ extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_vo
 pub(crate) extern "C" fn devtmpfs_populate_devices() {
     Devtmpfs::ensure_init();
 
-    // Use the dev_for_each_device iterator to find all devices that were
+    // Use the DevTable::for_each_device iterator to find all devices that were
     // registered before devtmpfs was initialised.
-    dev_for_each_device(__devtmpfs_register_one_device, ptr::null_mut());
+    DevTable::for_each_device(__devtmpfs_register_one_device, ptr::null_mut());
 
     // Count how many nodes are now in the registry.
     // SAFETY: registry access guarded by `__DEVTMPFS_NODES`'s lock

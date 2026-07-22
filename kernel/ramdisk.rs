@@ -72,7 +72,7 @@ fn __page_to_pa(page: *mut page_t) -> u64 {
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use crate::dev::blkdev::blkdev_register;
+use crate::dev::blkdev::Blkdev;
 // P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached by crate path.
 use crate::lock::completion::RawCompletion;
@@ -402,7 +402,7 @@ pub(crate) extern "C" fn ramdisk_init() {
     }
 
     // `dev` fully initialised above.
-    let errno = blkdev_register(dev);
+    let errno = Blkdev::register(dev);
     if errno != 0 {
         __panic_start();
         // SAFETY: format string matches its one argument.

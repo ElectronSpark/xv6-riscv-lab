@@ -161,165 +161,175 @@ static mut NETDEV_LIST: *mut netdev = ptr::null_mut();
 /// assigned `index`).
 static mut NETDEV_COUNT: c_int = 0;
 
-/// `void netdev_init(void)`.
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn netdev_init() {
-    // SAFETY: called once, from `start_kernel.c`'s single-hart early
-    // init, before any registration can race it (see module doc).
-    unsafe {
-        NETDEV_LIST = ptr::null_mut();
-        NETDEV_COUNT = 0;
-    }
-}
+// ---------------------------------------------------------------------------
+// KERNEL-OO: relocated onto `impl Netdev` -- behavior-preserving only:
+// raw `*mut netdev` params kept (matches this file's module-doc
+// "no locking" contract -- there's no receiver-refcount reasoning to
+// disturb), bodies byte-identical, `unsafe extern "C"` signatures
+// preserved exactly.
+// ---------------------------------------------------------------------------
 
-/// `int netdev_register(struct netdev *dev)`. Registers a network
-/// device; the first registered device becomes the default transmit
-/// interface (via [`netdev_get_default`]'s tail-walk).
-// P3-1D mesh sweep: callers (`e1000.rs`, `net.rs`, `dev/x1_emac.rs`) now
-// import this via crate-path `use` instead of an `extern` redeclaration --
-// demoted.
-pub(crate) extern "C" fn netdev_register(dev: *mut netdev) -> c_int {
-    if dev.is_null() {
-        return -1;
-    }
-    // SAFETY: `dev` is caller-provided and, per this crate's C-ABI
-    // convention, valid for the duration of the call; reading `.ops` is
-    // a plain field read.
-    let ops = unsafe { (*dev).ops };
-    if ops.is_null() {
-        return -1;
-    }
-    // SAFETY: `ops` just checked non-null above.
-    if unsafe { (*ops).transmit }.is_none() {
-        return -1;
+impl Netdev {
+    /// `void netdev_init(void)`.
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn init() {
+        // SAFETY: called once, from `start_kernel.c`'s single-hart early
+        // init, before any registration can race it (see module doc).
+        unsafe {
+            NETDEV_LIST = ptr::null_mut();
+            NETDEV_COUNT = 0;
+        }
     }
 
-    // SAFETY: single-threaded boot-time registration (see module doc).
-    unsafe {
-        if NETDEV_COUNT >= NETDEV_MAX {
+    /// `int netdev_register(struct netdev *dev)`. Registers a network
+    /// device; the first registered device becomes the default transmit
+    /// interface (via [`Netdev::get_default`]'s tail-walk).
+    // P3-1D mesh sweep: callers (`e1000.rs`, `net.rs`, `dev/x1_emac.rs`) now
+    // import this via crate-path `use` instead of an `extern` redeclaration --
+    // demoted.
+    pub(crate) extern "C" fn register(dev: *mut netdev) -> c_int {
+        if dev.is_null() {
+            return -1;
+        }
+        // SAFETY: `dev` is caller-provided and, per this crate's C-ABI
+        // convention, valid for the duration of the call; reading `.ops` is
+        // a plain field read.
+        let ops = unsafe { (*dev).ops };
+        if ops.is_null() {
+            return -1;
+        }
+        // SAFETY: `ops` just checked non-null above.
+        if unsafe { (*ops).transmit }.is_none() {
             return -1;
         }
 
-        (*dev).index = NETDEV_COUNT;
-        NETDEV_COUNT += 1;
-        (*dev).next = NETDEV_LIST;
-        NETDEV_LIST = dev;
-
-        crate::kprintln!(
-            "netdev: registered {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x}) idx {}",
-            crate::printf::Cs((*dev).name.as_ptr()),
-            ((*dev).mac[0] as c_int as i64) as u64,
-            ((*dev).mac[1] as c_int as i64) as u64,
-            ((*dev).mac[2] as c_int as i64) as u64,
-            ((*dev).mac[3] as c_int as i64) as u64,
-            ((*dev).mac[4] as c_int as i64) as u64,
-            ((*dev).mac[5] as c_int as i64) as u64,
-            (*dev).index,
-        );
-    }
-    0
-}
-
-/// `struct netdev *netdev_get_default(void)` -- returns the
-/// first-registered device (walks to the tail of the prepend-ordered
-/// list, matching the C original exactly).
-// P3-1D mesh sweep: caller (`net.rs`) now imports this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn netdev_get_default() -> *mut netdev {
-    // SAFETY: single-threaded boot-time list access (see module doc);
-    // the list is a plain NULL-terminated singly-linked chain of
-    // caller-owned, never-freed nodes.
-    unsafe {
-        let mut d = NETDEV_LIST;
-        let mut last: *mut netdev = ptr::null_mut();
-        while !d.is_null() {
-            last = d;
-            d = (*d).next;
-        }
-        last
-    }
-}
-
-/// `struct netdev *netdev_get_by_index(int index)`.
-// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
-// grep, matches the pre-existing RUST_FORCE_UNDEFINED comment) --
-// demoted; `#[allow(dead_code)]` documents the gap.
-#[allow(dead_code)]
-pub(crate) extern "C" fn netdev_get_by_index(index: c_int) -> *mut netdev {
-    // SAFETY: see `netdev_get_default`.
-    unsafe {
-        let mut d = NETDEV_LIST;
-        while !d.is_null() {
-            if (*d).index == index {
-                return d;
+        // SAFETY: single-threaded boot-time registration (see module doc).
+        unsafe {
+            if NETDEV_COUNT >= NETDEV_MAX {
+                return -1;
             }
-            d = (*d).next;
-        }
-    }
-    ptr::null_mut()
-}
 
-/// `struct netdev *netdev_get_by_name(const char *name)`.
-// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
-// `#[allow(dead_code)]` documents the gap, same precedent as
-// `netdev_get_by_index` above.
-#[allow(dead_code)]
-pub(crate) extern "C" fn netdev_get_by_name(name: *const c_char) -> *mut netdev {
-    if name.is_null() {
-        return ptr::null_mut();
+            (*dev).index = NETDEV_COUNT;
+            NETDEV_COUNT += 1;
+            (*dev).next = NETDEV_LIST;
+            NETDEV_LIST = dev;
+
+            crate::kprintln!(
+                "netdev: registered {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x}) idx {}",
+                crate::printf::Cs((*dev).name.as_ptr()),
+                ((*dev).mac[0] as c_int as i64) as u64,
+                ((*dev).mac[1] as c_int as i64) as u64,
+                ((*dev).mac[2] as c_int as i64) as u64,
+                ((*dev).mac[3] as c_int as i64) as u64,
+                ((*dev).mac[4] as c_int as i64) as u64,
+                ((*dev).mac[5] as c_int as i64) as u64,
+                (*dev).index,
+            );
+        }
+        0
     }
-    // SAFETY: see `netdev_get_default`; `strncmp` is given `name`
-    // (caller-provided, assumed NUL-terminated or at least
-    // `NETDEV_NAME_MAX`-readable, matching the C original's contract)
-    // and `(*d).name` (a live, embedded, fixed-size array field of a
-    // registered node).
-    unsafe {
-        let mut d = NETDEV_LIST;
-        while !d.is_null() {
-            if strncmp((*d).name.as_ptr(), name, NETDEV_NAME_MAX) == 0 {
-                return d;
+
+    /// `struct netdev *netdev_get_default(void)` -- returns the
+    /// first-registered device (walks to the tail of the prepend-ordered
+    /// list, matching the C original exactly).
+    // P3-1D mesh sweep: caller (`net.rs`) now imports this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn get_default() -> *mut netdev {
+        // SAFETY: single-threaded boot-time list access (see module doc);
+        // the list is a plain NULL-terminated singly-linked chain of
+        // caller-owned, never-freed nodes.
+        unsafe {
+            let mut d = NETDEV_LIST;
+            let mut last: *mut netdev = ptr::null_mut();
+            while !d.is_null() {
+                last = d;
+                d = (*d).next;
             }
-            d = (*d).next;
+            last
         }
     }
-    ptr::null_mut()
-}
 
-/// `void netdev_set_link(struct netdev *dev, int link_up)` -- updates
-/// link state and notifies the registered link-change callback (if any)
-/// on a genuine transition.
-// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn netdev_set_link(dev: *mut netdev, link_up: c_int) {
-    if dev.is_null() {
-        return;
-    }
-    // SAFETY: `dev` is caller-provided and valid for the duration of
-    // this call (same contract as every other function in this file).
-    unsafe {
-        let old = (*dev).link_up;
-        (*dev).link_up = link_up;
-        if old != link_up {
-            if let Some(cb) = (*dev).link_cb {
-                cb(dev, link_up);
+    /// `struct netdev *netdev_get_by_index(int index)`.
+    // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+    // grep, matches the pre-existing RUST_FORCE_UNDEFINED comment) --
+    // demoted; `#[allow(dead_code)]` documents the gap.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn get_by_index(index: c_int) -> *mut netdev {
+        // SAFETY: see `Netdev::get_default`.
+        unsafe {
+            let mut d = NETDEV_LIST;
+            while !d.is_null() {
+                if (*d).index == index {
+                    return d;
+                }
+                d = (*d).next;
             }
         }
+        ptr::null_mut()
     }
-}
 
-/// `void netdev_set_link_callback(struct netdev *dev, netdev_link_cb_t
-/// cb)`.
-// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
-// `#[allow(dead_code)]` documents the gap, same precedent as
-// `netdev_get_by_index` above.
-#[allow(dead_code)]
-pub(crate) extern "C" fn netdev_set_link_callback(dev: *mut netdev, cb: netdev_link_cb_t) {
-    if dev.is_null() {
-        return;
+    /// `struct netdev *netdev_get_by_name(const char *name)`.
+    // P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+    // `#[allow(dead_code)]` documents the gap, same precedent as
+    // `Netdev::get_by_index` above.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn get_by_name(name: *const c_char) -> *mut netdev {
+        if name.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: see `Netdev::get_default`; `strncmp` is given `name`
+        // (caller-provided, assumed NUL-terminated or at least
+        // `NETDEV_NAME_MAX`-readable, matching the C original's contract)
+        // and `(*d).name` (a live, embedded, fixed-size array field of a
+        // registered node).
+        unsafe {
+            let mut d = NETDEV_LIST;
+            while !d.is_null() {
+                if strncmp((*d).name.as_ptr(), name, NETDEV_NAME_MAX) == 0 {
+                    return d;
+                }
+                d = (*d).next;
+            }
+        }
+        ptr::null_mut()
     }
-    // SAFETY: see `netdev_set_link`.
-    unsafe {
-        (*dev).link_cb = cb;
+
+    /// `void netdev_set_link(struct netdev *dev, int link_up)` -- updates
+    /// link state and notifies the registered link-change callback (if any)
+    /// on a genuine transition.
+    // P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn set_link(dev: *mut netdev, link_up: c_int) {
+        if dev.is_null() {
+            return;
+        }
+        // SAFETY: `dev` is caller-provided and valid for the duration of
+        // this call (same contract as every other function in this file).
+        unsafe {
+            let old = (*dev).link_up;
+            (*dev).link_up = link_up;
+            if old != link_up {
+                if let Some(cb) = (*dev).link_cb {
+                    cb(dev, link_up);
+                }
+            }
+        }
+    }
+
+    /// `void netdev_set_link_callback(struct netdev *dev, netdev_link_cb_t
+    /// cb)`.
+    // P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+    // `#[allow(dead_code)]` documents the gap, same precedent as
+    // `Netdev::get_by_index` above.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn set_link_callback(dev: *mut netdev, cb: netdev_link_cb_t) {
+        if dev.is_null() {
+            return;
+        }
+        // SAFETY: see `Netdev::set_link`.
+        unsafe {
+            (*dev).link_cb = cb;
+        }
     }
 }
