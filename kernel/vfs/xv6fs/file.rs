@@ -97,7 +97,7 @@ fn page_free(ptr: *mut c_void, order: u64) {
 // P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
-use crate::vfs::fs::vfs_inode_deref;
+use crate::vfs::fs::FsStruct;
 use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 #[inline(always)]
@@ -131,7 +131,7 @@ const BLK512_PER_BSIZE: u64 = super::BSIZE as u64 / 512;
 
 fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     // SAFETY: `inode` is live.
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
 
@@ -239,7 +239,7 @@ fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
 
 fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     let ip = inode as *mut crate::bindings::xv6fs_inode;
     // SAFETY: `inode` is live.
     let xv6_sb = unsafe { (*inode).sb as *mut crate::bindings::xv6fs_superblock };
@@ -401,7 +401,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
 
 fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
 
     const SEEK_SET: c_int = 0;
     const SEEK_CUR: c_int = 1;
@@ -433,7 +433,7 @@ fn __xv6fs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KR
 
 fn __xv6fs_file_fsync(file: *mut vfs_file, _start: loff_t, _len: loff_t) -> KResult<()> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
         return Ok(());
     }
@@ -447,7 +447,7 @@ fn __xv6fs_file_fsync(file: *mut vfs_file, _start: loff_t, _len: loff_t) -> KRes
 
 fn __xv6fs_file_fflush(file: *mut vfs_file) -> KResult<()> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
         return Ok(());
     }
@@ -489,7 +489,7 @@ fn pcache_result(ret: c_int) -> KResult<()> {
 /// races with concurrent truncate or write.
 fn __xv6fs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c_void {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
         return ptr::null_mut();
     }

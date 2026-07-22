@@ -166,7 +166,7 @@ mod raw {
         crate::vfs::fdtable::vfs_fdtable_put(fdt as *mut c_void as *mut crate::bindings::vfs_fdtable);
     }
     pub fn vfs_struct_put(fs: *mut FsStruct) {
-        crate::vfs::fs::vfs_struct_put(fs as *mut c_void as *mut crate::bindings::fs_struct);
+        crate::vfs::fs::FsStruct::vfs_struct_put(fs as *mut c_void as *mut crate::bindings::fs_struct);
     }
 
     // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this

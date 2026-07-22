@@ -817,7 +817,7 @@ impl Vma {
         let Some(f) = machine::VfsFileRef::from_raw(machine::vma_file(vma_ptr)) else {
             return core::ptr::null_mut();
         };
-        let inode = vfs_inode_deref(f.inode_slot_ptr());
+        let inode = FsStruct::vfs_inode_deref(f.inode_slot_ptr());
         if inode.is_null() {
             return core::ptr::null_mut();
         }
@@ -2773,7 +2773,7 @@ pub(crate) use crate::sbi::sbi_remote_hfence_vma;
     // per-file idiom types the fdtable handle as opaque `*mut c_void`
     // (see `xv6_vm_current_fdtable` above), rather than the real
     // `*mut vfs_fdtable`.
-    pub(crate) use crate::vfs::fs::vfs_inode_deref;
+    pub(crate) use crate::vfs::fs::FsStruct;
     /// SAFETY: `fdtable` must be a live `vfs_fdtable` (caller's contract,
     /// unchanged from the extern declaration this replaces).
     pub fn vfs_fdtable_get_file(fdtable: *mut c_void, fd: c_int) -> *mut vfs_file {
@@ -2925,7 +2925,7 @@ fn xv6_vm_has_current() -> c_int {
 #[inline]
 fn xv6_vm_inode_is_reg(file: *mut vfs_file) -> c_int {
     let Some(f) = machine::VfsFileRef::from_raw(file) else { return 0; };
-    let inode = vfs_inode_deref(f.inode_slot_ptr());
+    let inode = FsStruct::vfs_inode_deref(f.inode_slot_ptr());
     if inode.is_null() { return 0; }
     // S_ISREG: (mode & S_IFMT) == S_IFREG, with S_IFMT=0170000, S_IFREG=0100000.
     let mode = machine::vfs_inode_mode(inode);

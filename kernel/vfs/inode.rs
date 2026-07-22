@@ -863,12 +863,7 @@ use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 // `vfs_inode` instance (no superblock; see `vfs_private.h`) -- only its
 // address is ever used here (pointer identity checks), never its
 // contents.
-use crate::vfs::fs::{
-    __vfs_final_unmount_cleanup, sb_ops, vfs_get_dentry_inode_inner, vfs_inode_deref,
-    vfs_inode_get_ref,
-    vfs_inode_put_ref, vfs_make_orphan, vfs_release_dentry, vfs_remove_inode, vfs_root_inode,
-    vfs_superblock_rlock, vfs_superblock_unlock, vfs_superblock_wholding, vfs_superblock_wlock,
-};
+use crate::vfs::fs::{vfs_release_dentry, vfs_root_inode, FsStruct, VfsSuperblock};
 
 // `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
 // centralization).
@@ -1058,7 +1053,7 @@ fn current_proc_rooti() -> *mut vfs_inode {
     let fs = current_fs();
     // SAFETY: `fs` is live (see `current_fs`); `rooti` is a plain
     // embedded `vfs_inode_ref` field.
-    unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) }
+    unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) }
 }
 
 /// Mirrors `fs.h`'s `static inline vfs_inode_is_local_root()`. N-METH:
@@ -1176,7 +1171,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
     // SAFETY: non-null `inode_in`; preconditions mirror the C asserts.
     unsafe {
         let sb0 = (*inode_in).sb;
-        let holds_wlock = !sb0.is_null() && vfs_superblock_wholding(sb0);
+        let holds_wlock = !sb0.is_null() && VfsSuperblock::vfs_superblock_wholding(sb0);
         kassert!(
             !holds_wlock,
             "vfs_iput: cannot hold superblock write lock when calling"
@@ -1201,10 +1196,10 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
             return;
         }
 
-        vfs_superblock_wlock(sb);
+        VfsSuperblock::vfs_superblock_wlock(sb);
         // SAFETY: non-null `inode`.
         if mutex_trylock(unsafe { ptr::addr_of_mut!((*inode).mutex) }) == 0 {
-            vfs_superblock_unlock(sb);
+            VfsSuperblock::vfs_superblock_unlock(sb);
             Scheduler::yield_now();
             continue;
         }
@@ -1212,7 +1207,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
         if atomic_dec_unless(refcount_atomic(inode), 1) {
             // SAFETY: non-null `inode`.
             mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
-            vfs_superblock_unlock(sb);
+            VfsSuperblock::vfs_superblock_unlock(sb);
             return;
         }
 
@@ -1244,7 +1239,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
             kassert!(old - 1 >= 0, "vfs_iput: inode refcount underflow");
             // SAFETY: non-null `inode`.
             mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
-            vfs_superblock_unlock(sb);
+            VfsSuperblock::vfs_superblock_unlock(sb);
             return;
         }
 
@@ -1260,7 +1255,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                 ln_detach(ptr::addr_of_mut!((*inode).orphan_entry));
                 (*sb).orphan_count -= 1;
                 (*inode).flags.set_orphan(0);
-                if sb_ops(sb).remove_orphan(sb, inode).is_err() {
+                if VfsSuperblock::sb_ops(sb).remove_orphan(sb, inode).is_err() {
                     crate::kprintln!(
                         "vfs_iput: warning: failed to remove orphan inode {} from journal",
                         (*inode).ino as u64,
@@ -1277,7 +1272,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
         if dirty && valid && !failed_clean && attached {
             // SAFETY: non-null `inode`.
             mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
-            vfs_superblock_unlock(sb);
+            VfsSuperblock::vfs_superblock_unlock(sb);
             failed_clean = vfs_sync_inode(inode) != 0;
             continue;
         }
@@ -1308,15 +1303,15 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                 // destroy_inode may do begin/end_op cycles internally
                 // for batching and cannot run with these locks held.
                 unsafe { mutex_unlock(ptr::addr_of_mut!((*inode).mutex)) };
-                vfs_superblock_unlock(sb);
+                VfsSuperblock::vfs_superblock_unlock(sb);
 
                 let mut skip_destroy = false;
-                if unsafe { sb_ops(sb).begin_transaction(sb) }.is_err() {
+                if unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }.is_err() {
                     // Transaction failed — on-disk data remains,
                     // will be cleaned on next mount via orphan
                     // recovery. Still need to remove from cache.
                     unsafe { (*inode).flags.set_destroying(0) };
-                    vfs_superblock_wlock(sb);
+                    VfsSuperblock::vfs_superblock_wlock(sb);
                     unsafe { mutex_lock(ptr::addr_of_mut!((*inode).mutex)) };
                     skip_destroy = true;
                 }
@@ -1327,11 +1322,11 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                     // `destroy_inode` calling convention.
                     unsafe { inode_ops(inode).destroy_inode(inode) };
 
-                    if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+                    if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
                         crate::kprintln!("vfs_iput: warning: end_transaction failed with error {}", e.neg());
                     }
 
-                    vfs_superblock_wlock(sb);
+                    VfsSuperblock::vfs_superblock_wlock(sb);
                     unsafe {
                         mutex_lock(ptr::addr_of_mut!((*inode).mutex));
                         // After destroy, on-disk data is freed: mark
@@ -1346,7 +1341,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
 
         // skip_destroy:
         // SAFETY: non-null `inode`/`sb`, both locked here.
-        let ret = unsafe { vfs_remove_inode((*inode).sb, inode) };
+        let ret = unsafe { VfsSuperblock::vfs_remove_inode((*inode).sb, inode) };
         kassert!(
             ret == 0,
             "vfs_iput: failed to remove inode from superblock inode cache"
@@ -1355,7 +1350,7 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
         let should_free_sb = !attached && unsafe { (*sb).orphan_count } == 0;
 
         unsafe { mutex_unlock(ptr::addr_of_mut!((*inode).mutex)) };
-        vfs_superblock_unlock(sb);
+        VfsSuperblock::vfs_superblock_unlock(sb);
 
         // out:
         vfs_iput_finalize(inode, if should_free_sb { Some(sb) } else { None });
@@ -1387,7 +1382,7 @@ fn vfs_iput_finalize(inode: *mut vfs_inode, sb_to_free: Option<*mut vfs_superblo
         inode_ops(inode).free_inode(inode);
     }
     if let Some(sb) = sb_to_free {
-        __vfs_final_unmount_cleanup(sb);
+        VfsSuperblock::__vfs_final_unmount_cleanup(sb);
     }
 }
 
@@ -1569,13 +1564,13 @@ fn vfs_sync_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
 
     // Begin transaction BEFORE acquiring the inode lock, to avoid
     // sleeping with locks held.
-    unsafe { sb_ops(sb).begin_transaction(sb) }?;
+    unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }?;
 
     vfs_ilock(&raw mut *inode);
     let v = vfs_inode_valid_locked(&raw mut *inode);
     if v != 0 {
         vfs_iunlock(&raw mut *inode);
-        let _ = unsafe { sb_ops(sb).end_transaction(sb) };
+        let _ = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) };
         return Err(Errno::Raw(v));
     }
 
@@ -1585,7 +1580,7 @@ fn vfs_sync_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
     let ret = unsafe { inode_ops(&raw mut *inode).sync_inode(&raw mut *inode) };
     vfs_iunlock(&raw mut *inode);
 
-    if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+    if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
         crate::kprintln!("vfs_sync_inode: warning: end_transaction failed with error {}", e.neg());
     }
     ret
@@ -1766,7 +1761,7 @@ fn vfs_ilookup_inner(
     }
 
     let sb = dir.sb;
-    vfs_superblock_rlock(sb);
+    VfsSuperblock::vfs_superblock_rlock(sb);
     vfs_ilock(&raw mut *dir);
 
     let ret: KResult<()> = 'out: {
@@ -1783,7 +1778,7 @@ fn vfs_ilookup_inner(
     };
 
     vfs_iunlock(&raw mut *dir);
-    vfs_superblock_unlock(sb);
+    VfsSuperblock::vfs_superblock_unlock(sb);
     ret
 }
 
@@ -1820,7 +1815,7 @@ pub(crate) extern "C" fn vfs_dir_iter(
     }
 
     let sb = dir.sb;
-    vfs_superblock_rlock(sb);
+    VfsSuperblock::vfs_superblock_rlock(sb);
     vfs_ilock(&raw mut *dir);
 
     let mut need_lookup = false;
@@ -1905,7 +1900,7 @@ pub(crate) extern "C" fn vfs_dir_iter(
     };
 
     vfs_iunlock(&raw mut *dir);
-    vfs_superblock_unlock(sb);
+    VfsSuperblock::vfs_superblock_unlock(sb);
 
     if ret == 0 {
         if unsafe { (*iter).index } == VFS_DITER_INDEX_PARENT && need_lookup {
@@ -2038,9 +2033,9 @@ fn vfs_create_inner(
 
     loop {
         let sb = dir.sb;
-        unsafe { sb_ops(sb).begin_transaction(sb) }?;
+        unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }?;
 
-        vfs_superblock_wlock(sb);
+        VfsSuperblock::vfs_superblock_wlock(sb);
         vfs_ilock(&raw mut *dir);
 
         // P3-10b: `KResult` end to end — the transitional internal
@@ -2064,16 +2059,16 @@ fn vfs_create_inner(
         // inode. Release all locks and the transaction, yield, retry.
         if is_again(&ret) {
             vfs_iunlock(&raw mut *dir);
-            vfs_superblock_unlock(sb);
-            let _ = unsafe { sb_ops(sb).end_transaction(sb) };
+            VfsSuperblock::vfs_superblock_unlock(sb);
+            let _ = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) };
             Scheduler::yield_now();
             continue;
         }
 
         vfs_iunlock(&raw mut *dir);
-        vfs_superblock_unlock(sb);
+        VfsSuperblock::vfs_superblock_unlock(sb);
 
-        if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+        if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
             crate::kprintln!("vfs_create: warning: end_transaction failed with error {}", e.neg());
         }
         return ret;
@@ -2112,9 +2107,9 @@ pub(crate) fn vfs_mknod_inner(
 
     loop {
         let sb = dir.sb;
-        unsafe { sb_ops(sb).begin_transaction(sb) }?;
+        unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }?;
 
-        vfs_superblock_wlock(sb);
+        VfsSuperblock::vfs_superblock_wlock(sb);
         vfs_ilock(&raw mut *dir);
 
         let ret: KResult<*mut vfs_inode> = {
@@ -2131,16 +2126,16 @@ pub(crate) fn vfs_mknod_inner(
 
         if is_again(&ret) {
             vfs_iunlock(&raw mut *dir);
-            vfs_superblock_unlock(sb);
-            let _ = unsafe { sb_ops(sb).end_transaction(sb) };
+            VfsSuperblock::vfs_superblock_unlock(sb);
+            let _ = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) };
             Scheduler::yield_now();
             continue;
         }
 
         vfs_iunlock(&raw mut *dir);
-        vfs_superblock_unlock(sb);
+        VfsSuperblock::vfs_superblock_unlock(sb);
 
-        if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+        if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
             crate::kprintln!("vfs_mknod: warning: end_transaction failed with error {}", e.neg());
         }
         return ret;
@@ -2179,7 +2174,7 @@ fn vfs_link_inner(
     }
 
     // P3-10b: `KResult`-native lookup (no ERR_PTR decode).
-    let target = vfs_get_dentry_inode_inner(old)?;
+    let target = VfsInode::vfs_get_dentry_inode_inner(old)?;
     kassert!(!target.is_null(), "vfs_link: old dentry inode is NULL");
     // `IRef::from_raw`: `vfs_get_dentry_inode` succeeded (non-null,
     // non-error), whose postcondition is an owned, already-held
@@ -2193,9 +2188,9 @@ fn vfs_link_inner(
     }
 
     let sb = dir.sb;
-    unsafe { sb_ops(sb).begin_transaction(sb) }?;
+    unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }?;
 
-    vfs_superblock_wlock(sb);
+    VfsSuperblock::vfs_superblock_wlock(sb);
     let ret: c_int = 'out_unlock_sb: {
         if is_dir(target.mode) {
             break 'out_unlock_sb neg(EPERM); // Cannot create hard link to a directory
@@ -2224,9 +2219,9 @@ fn vfs_link_inner(
         vfs_iunlock_two(IRef::as_ptr(&target), &raw mut *dir);
         r
     };
-    vfs_superblock_unlock(sb);
+    VfsSuperblock::vfs_superblock_unlock(sb);
 
-    if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+    if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
         crate::kprintln!("vfs_link: warning: end_transaction failed with error {}", e.neg());
     }
 
@@ -2275,7 +2270,7 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     }
 
     // P3-10b: `KResult`-native lookup (no ERR_PTR decode).
-    let target = match vfs_get_dentry_inode_inner(&mut dentry) {
+    let target = match VfsInode::vfs_get_dentry_inode_inner(&mut dentry) {
         Ok(t) => t,
         Err(e) => {
             vfs_release_dentry(&mut dentry);
@@ -2284,13 +2279,13 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     };
 
     let sb = dir.sb;
-    if let Err(e) = unsafe { sb_ops(sb).begin_transaction(sb) } {
+    if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) } {
         vfs_iput(target); // Drop our reference from lookup
         vfs_release_dentry(&mut dentry);
         return Err(e);
     }
 
-    vfs_superblock_wlock(sb);
+    VfsSuperblock::vfs_superblock_wlock(sb);
     vfs_ilock(&raw mut *dir);
     vfs_ilock(target);
 
@@ -2342,14 +2337,14 @@ fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -
     let refcount = unsafe { (*target).ref_count };
     let is_orphan = unsafe { (*target).flags.orphan() != 0 };
     if n_links == 0 && refcount > 1 && !is_orphan {
-        vfs_make_orphan(target);
+        VfsInode::vfs_make_orphan(target);
     }
 
     vfs_iunlock(target);
     vfs_iunlock(&raw mut *dir);
-    vfs_superblock_unlock(sb);
+    VfsSuperblock::vfs_superblock_unlock(sb);
 
-    if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+    if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
         crate::kprintln!("vfs_unlink: warning: end_transaction failed with error {}", e.neg());
     }
     vfs_iput(target); // Drop our reference from lookup
@@ -2383,9 +2378,9 @@ pub(crate) fn vfs_mkdir_inner(
 
     loop {
         let sb = dir.sb;
-        unsafe { sb_ops(sb).begin_transaction(sb) }?;
+        unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }?;
 
-        vfs_superblock_wlock(sb);
+        VfsSuperblock::vfs_superblock_wlock(sb);
         vfs_ilock(&raw mut *dir);
 
         let ret: KResult<*mut vfs_inode> = {
@@ -2402,8 +2397,8 @@ pub(crate) fn vfs_mkdir_inner(
 
         if is_again(&ret) {
             vfs_iunlock(&raw mut *dir);
-            vfs_superblock_unlock(sb);
-            let _ = unsafe { sb_ops(sb).end_transaction(sb) };
+            VfsSuperblock::vfs_superblock_unlock(sb);
+            let _ = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) };
             Scheduler::yield_now();
             continue;
         }
@@ -2419,9 +2414,9 @@ pub(crate) fn vfs_mkdir_inner(
         }
 
         vfs_iunlock(&raw mut *dir);
-        vfs_superblock_unlock(sb);
+        VfsSuperblock::vfs_superblock_unlock(sb);
 
-        if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+        if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
             crate::kprintln!("vfs_mkdir: warning: end_transaction failed with error {}", e.neg());
         }
         return ret;
@@ -2472,7 +2467,7 @@ fn vfs_move_inner(
         return Err(Errno::XDev); // Cross-device move not supported
     }
 
-    vfs_superblock_wlock(sb);
+    VfsSuperblock::vfs_superblock_wlock(sb);
     let result: c_int = 'out: {
         if !is_dir(old_dir.mode) {
             break 'out neg(ENOTDIR);
@@ -2505,7 +2500,7 @@ fn vfs_move_inner(
         vfs_iunlock_two(&raw mut *old_dir, &raw mut *new_dir);
         r
     };
-    vfs_superblock_unlock(sb);
+    VfsSuperblock::vfs_superblock_unlock(sb);
     if result == 0 { Ok(()) } else { Err(Errno::Raw(result)) }
 }
 
@@ -2546,9 +2541,9 @@ fn vfs_symlink_inner(
 
     loop {
         let sb = dir.sb;
-        unsafe { sb_ops(sb).begin_transaction(sb) }?;
+        unsafe { VfsSuperblock::sb_ops(sb).begin_transaction(sb) }?;
 
-        vfs_superblock_wlock(sb);
+        VfsSuperblock::vfs_superblock_wlock(sb);
         vfs_ilock(&raw mut *dir);
 
         let ret: KResult<*mut vfs_inode> = {
@@ -2565,8 +2560,8 @@ fn vfs_symlink_inner(
 
         if is_again(&ret) {
             vfs_iunlock(&raw mut *dir);
-            vfs_superblock_unlock(sb);
-            let _ = unsafe { sb_ops(sb).end_transaction(sb) };
+            VfsSuperblock::vfs_superblock_unlock(sb);
+            let _ = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) };
             Scheduler::yield_now();
             continue;
         }
@@ -2574,9 +2569,9 @@ fn vfs_symlink_inner(
         // Note: symlinks don't need a parent reference (no ".."
         // traversal needed).
         vfs_iunlock(&raw mut *dir);
-        vfs_superblock_unlock(sb);
+        VfsSuperblock::vfs_superblock_unlock(sb);
 
-        if let Err(e) = unsafe { sb_ops(sb).end_transaction(sb) } {
+        if let Err(e) = unsafe { VfsSuperblock::sb_ops(sb).end_transaction(sb) } {
             crate::kprintln!("vfs_symlink: warning: end_transaction failed with error {}", e.neg());
         }
         return ret;
@@ -2734,12 +2729,12 @@ fn vfs_chdir_inner(new_cwd: *mut vfs_inode) -> KResult<()> {
         return Err(Errno::Inval); // not allowed to change to the dummy root
     }
     let fs = current_fs();
-    if core::ptr::eq(&raw const *new_cwd, unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) }) {
+    if core::ptr::eq(&raw const *new_cwd, unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) }) {
         return Ok(()); // No change
     }
 
     let sb = new_cwd.sb;
-    vfs_superblock_rlock(sb);
+    VfsSuperblock::vfs_superblock_rlock(sb);
     vfs_ilock(&raw mut *new_cwd);
 
     let mut old: vfs_inode_ref = unsafe { core::mem::zeroed() };
@@ -2747,27 +2742,27 @@ fn vfs_chdir_inner(new_cwd: *mut vfs_inode) -> KResult<()> {
     let v = vfs_inode_valid_locked(&raw mut *new_cwd);
     if v != 0 {
         vfs_iunlock(&raw mut *new_cwd);
-        vfs_superblock_unlock(sb);
-        vfs_inode_put_ref(&mut old);
+        VfsSuperblock::vfs_superblock_unlock(sb);
+        FsStruct::vfs_inode_put_ref(&mut old);
         return Err(Errno::Raw(v));
     }
     if !is_dir(new_cwd.mode) {
         vfs_iunlock(&raw mut *new_cwd);
-        vfs_superblock_unlock(sb);
-        vfs_inode_put_ref(&mut old);
+        VfsSuperblock::vfs_superblock_unlock(sb);
+        FsStruct::vfs_inode_put_ref(&mut old);
         return Err(Errno::NotDir);
     }
 
     let mut new_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
-    let r = vfs_inode_get_ref(&raw mut *new_cwd, &mut new_ref);
+    let r = FsStruct::vfs_inode_get_ref(&raw mut *new_cwd, &mut new_ref);
     if r != 0 {
         vfs_iunlock(&raw mut *new_cwd);
-        vfs_superblock_unlock(sb);
-        vfs_inode_put_ref(&mut old);
+        VfsSuperblock::vfs_superblock_unlock(sb);
+        FsStruct::vfs_inode_put_ref(&mut old);
         return Err(Errno::Raw(r));
     }
     vfs_iunlock(&raw mut *new_cwd);
-    vfs_superblock_unlock(sb);
+    VfsSuperblock::vfs_superblock_unlock(sb);
 
     // To keep it simple, fs_struct is only locked around the swap itself
     // (matches the C original's own comment).
@@ -2777,7 +2772,7 @@ fn vfs_chdir_inner(new_cwd: *mut vfs_inode) -> KResult<()> {
         old = unsafe { (*fs).cwd };
         unsafe { (*fs).cwd = new_ref };
     }
-    vfs_inode_put_ref(&mut old);
+    FsStruct::vfs_inode_put_ref(&mut old);
     Ok(())
 }
 
@@ -2796,12 +2791,12 @@ fn vfs_chroot_inner(new_root: *mut vfs_inode) -> KResult<()> {
         return Err(Errno::Inval); // not allowed to change to the dummy root
     }
     let fs = current_fs();
-    if core::ptr::eq(new_root, unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) }) {
+    if core::ptr::eq(new_root, unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) }) {
         return Ok(()); // No change
     }
 
     let mut new_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
-    let r = vfs_inode_get_ref(new_root, &mut new_ref);
+    let r = FsStruct::vfs_inode_get_ref(new_root, &mut new_ref);
     if r != 0 {
         return Err(Errno::Raw(r));
     }
@@ -2813,7 +2808,7 @@ fn vfs_chroot_inner(new_root: *mut vfs_inode) -> KResult<()> {
         old = unsafe { (*fs).rooti };
         unsafe { (*fs).rooti = new_ref };
     }
-    vfs_inode_put_ref(&mut old);
+    FsStruct::vfs_inode_put_ref(&mut old);
     Ok(())
 }
 
@@ -2828,7 +2823,7 @@ pub(crate) extern "C" fn vfs_curdir() -> *mut vfs_inode {
     // SAFETY: `fs` is live; `cwd` is a plain embedded field. Only the
     // current process can change its own cwd, so no lock is needed here
     // (matches the C original).
-    let cwd = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) };
+    let cwd = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) };
     kassert!(!cwd.is_null(), "vfs_curdir: current working directory inode is NULL");
     vfs_idup(cwd);
     cwd
@@ -2839,7 +2834,7 @@ pub(crate) extern "C" fn vfs_curdir() -> *mut vfs_inode {
 pub(crate) extern "C" fn vfs_curroot() -> *mut vfs_inode {
     let fs = current_fs();
     // SAFETY: see `vfs_curdir`.
-    let rooti = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) };
+    let rooti = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) };
     kassert!(!rooti.is_null(), "vfs_curroot: current root directory inode is NULL");
     vfs_idup(rooti);
     rooti
@@ -2941,7 +2936,7 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inod
         }
 
         // P3-10b: `KResult`-native lookup (no ERR_PTR decode).
-        let next = vfs_get_dentry_inode_inner(&mut dentry);
+        let next = VfsInode::vfs_get_dentry_inode_inner(&mut dentry);
         vfs_release_dentry(&mut dentry);
         let next = match next {
             Ok(n) => n,

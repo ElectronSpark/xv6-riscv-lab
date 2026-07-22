@@ -498,7 +498,7 @@ use crate::sysnet::SOCKETS;
 // wave; converted from `extern "C"` redeclarations to plain crate-path
 // items (identical signatures, same `crate::bindings::*` types this file
 // already imports).
-use crate::vfs::fs::{vfs_inode_deref, vfs_inode_get_ref, vfs_inode_put_ref};
+use crate::vfs::fs::FsStruct;
 use crate::vfs::inode::{vfs_ilock, vfs_itruncate, vfs_iunlock};
 use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_open};
 
@@ -930,7 +930,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     // `return`s immediately, so the borrow never outlives the free. The
     // `pos` union write and the raw-pointer C-ABI callbacks keep raw.
     let f = unsafe { &mut *file };
-    let ret = vfs_inode_get_ref(inode, &raw mut f.inode);
+    let ret = FsStruct::vfs_inode_get_ref(inode, &raw mut f.inode);
     if ret != 0 {
         file_free(&raw mut *f);
         vfs_iunlock(inode);
@@ -940,7 +940,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     if is_chr(mode) {
         if let Err(e) = f.open_cdev(inode) {
             vfs_iunlock(inode);
-            vfs_inode_put_ref(&raw mut f.inode);
+            FsStruct::vfs_inode_put_ref(&raw mut f.inode);
             file_free(&raw mut *f);
             return Err(e);
         }
@@ -967,13 +967,13 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     // with the inode lock held, matching its documented contract.
     if let Err(e) = unsafe { crate::vfs::inode::inode_ops(inode).open(inode, &raw mut *f, f_flags) } {
         vfs_iunlock(inode);
-        vfs_inode_put_ref(&raw mut f.inode);
+        FsStruct::vfs_inode_put_ref(&raw mut f.inode);
         file_free(&raw mut *f);
         return Err(e);
     }
     if f.ops.is_none() {
         vfs_iunlock(inode);
-        vfs_inode_put_ref(&raw mut f.inode);
+        FsStruct::vfs_inode_put_ref(&raw mut f.inode);
         file_free(&raw mut *f);
         crate::kprintln!("vfs_fileopen: file operations not set by inode open");
         return Err(Errno::Inval);
@@ -1016,7 +1016,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
     // `fflush` dispatch stay `unsafe`.
     let f = unsafe { &mut *file };
 
-    let inode = vfs_inode_deref(&raw mut f.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut f.inode);
 
     // Flush dirty pages before releasing the inode reference, so all
     // data is written to disk before the inode can be torn down (avoids
@@ -1071,7 +1071,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
         // Sockets are not opened via inodes, so no cleanup here.
     }
 
-    vfs_inode_put_ref(&raw mut f.inode);
+    FsStruct::vfs_inode_put_ref(&raw mut f.inode);
     file_free(&raw mut *f);
 }
 
@@ -1104,7 +1104,7 @@ fn ioctl_inner(&mut self, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
 
     // Fast path: character / block device files -- dispatch to the
     // device layer.
-    let inode = vfs_inode_deref(&raw mut self.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
     if !inode.is_null() {
         // SAFETY: non-null `inode`.
         let mode = unsafe { (*inode).mode };
@@ -1173,7 +1173,7 @@ fn read_inner(&mut self, buf: *mut c_void, n: usize, user: c_int) -> KResult<isi
     // P3-7b: `self` is a reference — plain fields (`ops`, `f_flags`,
     // `inode`) are safe access; the `pos` union and the raw-`self` trait
     // dispatch (unchanged signature) keep their `unsafe`.
-    let inode = vfs_inode_deref(&raw mut self.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
 
     // Handle pipe/socket read -- these don't have inodes.
     if inode.is_null() {
@@ -1280,7 +1280,7 @@ fn stat_inner(&mut self, out: *mut stat) -> KResult<c_int> {
 
     // P3-7b: `self` is a reference — `inode`/`ops` are safe field access
     // (the `out` writes and the raw-`inode` getattr dispatch stay raw).
-    let inode = vfs_inode_deref(&raw mut self.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
     if inode.is_null() {
         // Custom file descriptors (PTY slaves, etc.) have no backing
         // inode. Return a synthetic stat indicating a character device
@@ -1356,7 +1356,7 @@ fn write_inner(
     }
 
     // P3-7b: `self` is a reference (see `VfsFile::read_inner`'s note).
-    let inode = vfs_inode_deref(&raw mut self.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
 
     // Handle pipe/socket write -- these don't have inodes.
     if inode.is_null() {
@@ -1456,7 +1456,7 @@ impl VfsFile {
 fn lseek_inner(&mut self, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     // P3-7b: `self` is a reference — `inode`/`ops` are safe field access;
     // the `pos` union and the raw-`self` trait dispatch stay `unsafe`.
-    let inode = vfs_inode_deref(&raw mut self.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
     if inode.is_null() {
         return Err(Errno::Inval);
     }
@@ -1509,7 +1509,7 @@ impl VfsFile {
 /// method (was the free fn `truncate_inner`).
 fn truncate_inner(&mut self, length: loff_t) -> KResult<c_int> {
     // P3-7b: `self` is a reference — `inode` is safe field access.
-    let inode = vfs_inode_deref(&raw mut self.inode);
+    let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
     if inode.is_null() {
         return Err(Errno::Inval);
     }

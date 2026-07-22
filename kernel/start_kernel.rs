@@ -112,7 +112,7 @@ use crate::printf::printfinit;
 use crate::tty::ptmx::ptmxinit;
 use crate::tty::tty::tty_init;
 use crate::tty::tty_dev::ttydevinit;
-use crate::vfs::fs::vfs_init;
+use crate::vfs::fs::Vfs;
 use crate::vfs::pipe::pipe_init;
 
 // ===========================================================================
@@ -425,7 +425,7 @@ pub(crate) fn start_kernel_post_init() {
         // regular thread (e.g., because it calls sleep), and thus cannot
         // be run from main().
         // VFS initialization - mounts xv6fs and sets up root filesystem
-        vfs_init();
+        Vfs::vfs_init();
 
         // Set up root directory for init process (must be after vfs_init)
         Thread::install_user_root();

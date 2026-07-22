@@ -284,11 +284,8 @@ use crate::kobject::KArc;
 // (identical signatures -- `mode_t`/`dev_t` are transparent `u32` type
 // aliases, so the former `u32`-typed params are unaffected). `vfs_root_inode`
 // is fs.rs's single dummy VFS-root `vfs_inode` instance.
-use crate::vfs::fs::{
-    vfs_fs_type_allocate, vfs_mount, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type,
-    vfs_root_inode, vfs_superblock_unlock, vfs_superblock_wlock,
-};
-use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock};
+use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_root_inode};
+use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, VfsInode};
 
 // `kassert!`/`is_err`/`is_err_or_null`'s canonical homes are
 // `crate::kstd`/crate root (P3-CS1 centralization). P3-CS12: the two
@@ -992,7 +989,7 @@ pub(crate) extern "C" fn xv6fs_init() {
     let ret = __xv6fs_init_cache();
     kassert!(ret == 0, "xv6fs_init: __xv6fs_init_cache failed");
 
-    let fs_type = vfs_fs_type_allocate();
+    let fs_type = VfsFsType::vfs_fs_type_allocate();
     kassert!(!fs_type.is_null(), "xv6fs_init: vfs_fs_type_allocate failed");
     // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
     unsafe {
@@ -1000,10 +997,10 @@ pub(crate) extern "C" fn xv6fs_init() {
         (*fs_type).ops = Some(&XV6FS_FS_TYPE_OPS);
     }
 
-    vfs_mount_lock();
-    let ret = vfs_register_fs_type(fs_type);
+    Vfs::vfs_mount_lock();
+    let ret = VfsFsType::vfs_register_fs_type(fs_type);
     kassert!(ret == 0, "xv6fs_init: vfs_register_fs_type failed");
-    vfs_mount_unlock();
+    Vfs::vfs_mount_unlock();
 
     crate::kprintln!("xv6fs: filesystem type registered");
 }
@@ -1058,19 +1055,19 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     // Mount xv6fs at /root. vfs_mount requires: mount mutex, superblock
     // write lock, and inode lock. On success, caller must release locks.
     // On failure, vfs_mount releases them.
-    vfs_mount_lock();
+    Vfs::vfs_mount_lock();
     // SAFETY: `root_dir` is a live, referenced inode; `.sb` is valid.
-    unsafe { vfs_superblock_wlock((*root_dir).sb) };
+    unsafe { VfsSuperblock::vfs_superblock_wlock((*root_dir).sb) };
     vfs_ilock(root_dir);
-    let ret = vfs_mount(c"xv6fs".as_ptr(), root_dir, dev_inode, 0, ptr::null());
+    let ret = VfsInode::vfs_mount(c"xv6fs".as_ptr(), root_dir, dev_inode, 0, ptr::null());
     if ret == 0 {
         // Success: caller releases locks.
         vfs_iunlock(root_dir);
         // SAFETY: same as above.
-        unsafe { vfs_superblock_unlock((*root_dir).sb) };
+        unsafe { VfsSuperblock::vfs_superblock_unlock((*root_dir).sb) };
     }
     // On failure, vfs_mount already released locks.
-    vfs_mount_unlock();
+    Vfs::vfs_mount_unlock();
 
     // Release device inode reference (mount holds its own if needed).
     vfs_iput(dev_inode);

@@ -149,15 +149,12 @@ use crate::vfs::file::{
     vfs_ioctl, vfs_pipealloc, vfs_sockalloc, FileOps,
 };
 use crate::vfs::fs::{
-    vfs_dump_inodes, vfs_dump_sb_inodes, vfs_get_dentry_inode, vfs_get_deferred_iput_wq,
-    vfs_inode_deref, vfs_inode_get_ref, vfs_inode_put_ref, vfs_mount, vfs_mount_lock,
-    vfs_mount_unlock, vfs_release_dentry, vfs_superblock_unlock, vfs_superblock_wlock,
-    vfs_unmount,
+    vfs_release_dentry, FsStruct, Vfs, VfsFsType, VfsSuperblock,
 };
 use crate::vfs::inode::{
     vfs_chdir, vfs_chroot, vfs_create, vfs_dir_iter, vfs_idup, vfs_ilock, vfs_ilookup,
     vfs_iput, vfs_itruncate, vfs_iunlock, vfs_link, vfs_mkdir, vfs_mknod, vfs_move, vfs_namei,
-    vfs_nameiparent, vfs_readlink, vfs_symlink, vfs_unlink, IRef,
+    vfs_nameiparent, vfs_readlink, vfs_symlink, vfs_unlink, IRef, VfsInode,
 };
 
 // ===========================================================================
@@ -398,7 +395,7 @@ unsafe extern "C" fn vfs_fput_work_func(work: *mut work_struct) {
 
 unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
     let file = data as *mut vfs_file;
-    let wq = vfs_get_deferred_iput_wq();
+    let wq = Vfs::vfs_get_deferred_iput_wq();
 
     if wq.is_null() {
         // Workqueue not available (early init or shutdown): fall back to
@@ -929,7 +926,7 @@ fn lstat_inner() -> KResult<()> {
         return Err(Errno::Raw(ret));
     }
 
-    let inode = vfs_get_dentry_inode(&mut dentry);
+    let inode = VfsInode::vfs_get_dentry_inode(&mut dentry);
     vfs_release_dentry(&mut dentry);
     vfs_iput(parent);
     if is_err(inode) {
@@ -1043,7 +1040,7 @@ fn readlink_inner() -> KResult<isize> {
         return Err(Errno::Raw(ret));
     }
 
-    let inode = vfs_get_dentry_inode(&mut dentry);
+    let inode = VfsInode::vfs_get_dentry_inode(&mut dentry);
     vfs_release_dentry(&mut dentry);
     vfs_iput(parent);
     if is_err(inode) {
@@ -1260,7 +1257,7 @@ fn open_inner() -> KResult<c_int> {
     }
 
     if should_truncate {
-        let ret = vfs_itruncate(vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) }), 0);
+        let ret = vfs_itruncate(FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) }), 0);
         if ret != 0 {
             vfs_fput(f);
             return Err(Errno::Raw(ret));
@@ -1501,7 +1498,7 @@ fn vfs_make_absolute_path(relpath: &[c_char], relpath_len: c_int, abspath: &mut 
     let (cwd, root) = {
         let _g = fs_lock(fs);
         // SAFETY: `fs` is live; `.cwd`/`.rooti` are plain embedded fields.
-        unsafe { (vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)), vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti))) }
+        unsafe { (FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)), FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti))) }
     };
 
     if cwd.is_null() {
@@ -1659,7 +1656,7 @@ fn chdir_inner() -> KResult<()> {
     // Get a reference to the new cwd BEFORE acquiring the spinlock
     // (vfs_inode_get_ref may acquire the inode mutex internally).
     let mut new_cwd_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
-    let ret = vfs_inode_get_ref(inode, &mut new_cwd_ref);
+    let ret = FsStruct::vfs_inode_get_ref(inode, &mut new_cwd_ref);
     if ret != 0 {
         vfs_iput(inode);
         return Err(Errno::Raw(ret));
@@ -1681,7 +1678,7 @@ fn chdir_inner() -> KResult<()> {
         fs_ref.cwd = new_cwd_ref;
     }
 
-    vfs_inode_put_ref(&mut old_cwd);
+    FsStruct::vfs_inode_put_ref(&mut old_cwd);
     vfs_iput(inode);
 
     Ok(())
@@ -1713,7 +1710,7 @@ fn getcwd_inner(buf_addr: u64, size: c_int) -> KResult<u64> {
     let (cwd, root) = {
         let _g = fs_lock(fs);
         // SAFETY: `fs` is live; `.cwd`/`.rooti` are plain embedded fields.
-        unsafe { (vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)), vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti))) }
+        unsafe { (FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)), FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti))) }
     };
 
     if cwd.is_null() {
@@ -1951,7 +1948,7 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
     }
 
     // SAFETY: non-null `f`.
-    let inode = vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) });
+    let inode = FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) });
     if inode.is_null() || !is_dir(unsafe { (*inode).mode }) {
         vfs_fput(f);
         return Err(Errno::NotDir);
@@ -2001,7 +1998,7 @@ fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
         }
 
         // Get the inode's d_type.
-        let child = vfs_get_dentry_inode(&mut dentry);
+        let child = VfsInode::vfs_get_dentry_inode(&mut dentry);
         let mut d_type = DT_UNKNOWN;
         if !is_err_or_null(child) {
             d_type = mode_to_dtype(unsafe { (*child).mode });
@@ -2109,7 +2106,7 @@ pub(crate) extern "C" fn sys_chroot() -> u64 {
 
 /// Kernel-internal mount helper: resolves the target path, the (optional)
 /// source device, acquires the mount/superblock/inode locks in order, and
-/// calls `vfs_mount()`. Called both from `sys_mount` and from
+/// calls `VfsInode::vfs_mount()`. Called both from `sys_mount` and from
 /// `vfs_init()`'s `/tmp`/`/dev` bring-up (`vfs/fs.rs`, via its own local
 /// extern). Mirrors the C `vfs_mount_path()`.
 pub(crate) extern "C" fn vfs_mount_path(
@@ -2150,21 +2147,21 @@ pub(crate) extern "C" fn vfs_mount_path(
     // the same superblock. SAFETY: non-null `target_dir` (checked above).
     let target_sb = unsafe { (*target_dir).sb };
 
-    // Acquire the locks vfs_mount() requires: mount mutex, superblock write
+    // Acquire the locks VfsInode::vfs_mount() requires: mount mutex, superblock write
     // lock, mountpoint inode lock.
-    vfs_mount_lock();
-    vfs_superblock_wlock(target_sb);
+    Vfs::vfs_mount_lock();
+    VfsSuperblock::vfs_superblock_wlock(target_sb);
     vfs_ilock(target_dir);
 
-    let ret = vfs_mount(fstype, target_dir, source_inode, 0, ptr::null());
+    let ret = VfsInode::vfs_mount(fstype, target_dir, source_inode, 0, ptr::null());
 
-    // On success, release the locks. On failure, vfs_mount() already
+    // On success, release the locks. On failure, VfsInode::vfs_mount() already
     // released them.
     if ret == 0 {
         vfs_iunlock(target_dir);
-        vfs_superblock_unlock(target_sb);
+        VfsSuperblock::vfs_superblock_unlock(target_sb);
     }
-    vfs_mount_unlock();
+    Vfs::vfs_mount_unlock();
 
     if !source_inode.is_null() {
         vfs_iput(source_inode);
@@ -2206,7 +2203,7 @@ pub(crate) extern "C" fn sys_mount() -> u64 {
 
 /// Kernel-internal unmount helper: resolves the mounted filesystem's root
 /// via `vfs_namei` (which follows mounts), validates it is actually a
-/// mount root, acquires the lock nest `vfs_unmount()` requires, and calls
+/// mount root, acquires the lock nest `VfsInode::vfs_unmount()` requires, and calls
 /// it. Mirrors the C `vfs_umount_path()`.
 pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_int) -> c_int {
     let mounted_root = vfs_namei(target, target_len as usize);
@@ -2249,34 +2246,34 @@ pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_in
     // SAFETY: non-null `target_dir` (checked above).
     let parent_sb = unsafe { (*target_dir).sb };
 
-    // Acquire the locks vfs_unmount() requires: mount mutex, parent
+    // Acquire the locks VfsInode::vfs_unmount() requires: mount mutex, parent
     // superblock write lock, child superblock write lock, mountpoint inode
     // lock, mounted-root inode lock.
-    vfs_mount_lock();
-    vfs_superblock_wlock(parent_sb);
-    vfs_superblock_wlock(child_sb);
+    Vfs::vfs_mount_lock();
+    VfsSuperblock::vfs_superblock_wlock(parent_sb);
+    VfsSuperblock::vfs_superblock_wlock(child_sb);
     vfs_ilock(target_dir);
     vfs_ilock(mounted_root);
 
-    let ret = vfs_unmount(target_dir);
+    let ret = VfsInode::vfs_unmount(target_dir);
 
     if ret != 0 {
-        // On failure, release the locks in reverse order (vfs_unmount()
+        // On failure, release the locks in reverse order (VfsInode::vfs_unmount()
         // did not free anything).
         vfs_iunlock(mounted_root);
         vfs_iunlock(target_dir);
-        vfs_superblock_unlock(child_sb);
-        vfs_superblock_unlock(parent_sb);
-        vfs_mount_unlock();
+        VfsSuperblock::vfs_superblock_unlock(child_sb);
+        VfsSuperblock::vfs_superblock_unlock(parent_sb);
+        Vfs::vfs_mount_unlock();
         vfs_iput(mounted_root);
         return ret;
     }
 
-    // On success, vfs_unmount() has already unlocked and freed
+    // On success, VfsInode::vfs_unmount() has already unlocked and freed
     // mounted_root/child_sb; only release what's left.
     vfs_iunlock(target_dir);
-    vfs_superblock_unlock(parent_sb);
-    vfs_mount_unlock();
+    VfsSuperblock::vfs_superblock_unlock(parent_sb);
+    Vfs::vfs_mount_unlock();
 
     0
 }
@@ -2317,7 +2314,7 @@ fn dumpinode_inner() -> KResult<()> {
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
         // No path argument: dump every superblock.
-        vfs_dump_inodes();
+        VfsFsType::vfs_dump_inodes();
         return Ok(());
     }
 
@@ -2336,7 +2333,7 @@ fn dumpinode_inner() -> KResult<()> {
         return Err(Errno::Inval);
     }
 
-    vfs_dump_sb_inodes(sb);
+    VfsSuperblock::vfs_dump_sb_inodes(sb);
     Ok(())
 }
 

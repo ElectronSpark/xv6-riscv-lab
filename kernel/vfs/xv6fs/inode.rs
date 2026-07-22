@@ -674,7 +674,7 @@ fn __xv6fs_create_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, 
     // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call —
     // no ERR_PTR decode, and the old dead null -> `ENOMEM` branch had
     // no producer.)
-    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    let new_inode = crate::vfs::fs::VfsSuperblock::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
     // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
@@ -716,7 +716,7 @@ fn __xv6fs_mkdir_inner(dir: *mut vfs_inode, mode: mode_t, name: *const c_char, n
     }
 
     // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call.)
-    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    let new_inode = crate::vfs::fs::VfsSuperblock::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
     // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
@@ -966,7 +966,7 @@ fn __xv6fs_symlink_inner(
     }
 
     // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call.)
-    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    let new_inode = crate::vfs::fs::VfsSuperblock::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
     // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;
@@ -1050,7 +1050,7 @@ fn __xv6fs_mknod_inner(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name: *con
     let xv6_sb = unsafe { (*dir).sb as *mut xv6fs_superblock };
 
     // SAFETY: `dir` is live. (P3-10b: `KResult`-native VFS-core call.)
-    let new_inode = crate::vfs::fs::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
+    let new_inode = crate::vfs::fs::VfsSuperblock::vfs_alloc_inode_inner(unsafe { (*dir).sb })?;
     // vfs_alloc_inode_inner returns the inode locked.
 
     let ip = new_inode as *mut xv6fs_inode;

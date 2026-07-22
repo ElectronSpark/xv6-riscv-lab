@@ -41,7 +41,7 @@ use super::{
 // P3-1C mesh sweep: vfs/{inode,fs}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
-use crate::vfs::fs::{vfs_remove_inode, vfs_release_dentry};
+use crate::vfs::fs::{VfsSuperblock, vfs_release_dentry};
 use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 // ===========================================================================
@@ -621,7 +621,7 @@ fn __tmpfs_alloc_link_inode(
     // SAFETY: `dir` is a live directory `tmpfs_inode`. (P3-10b:
     // `KResult`-native VFS-core call, no ERR_PTR decode.)
     let sb = unsafe { (*dir).vfs_inode.sb };
-    let vfs_inode = match crate::vfs::fs::vfs_alloc_inode_inner(sb) {
+    let vfs_inode = match crate::vfs::fs::VfsSuperblock::vfs_alloc_inode_inner(sb) {
         Ok(i) => i,
         Err(e) => {
             __tmpfs_do_unlink(dentry);
@@ -1108,7 +1108,7 @@ fn __tmpfs_symlink_inner(
             let ni = unsafe { &mut *new_inode };
             let vi = ptr::addr_of_mut!(ni.vfs_inode);
             let dsb = unsafe { (*dir).sb };
-            let rm_ret = vfs_remove_inode(dsb, vi);
+            let rm_ret = VfsSuperblock::vfs_remove_inode(dsb, vi);
             kassert!(
                 rm_ret == 0,
                 "Tmpfs symlink: failed to remove inode after symlink target allocation failure"

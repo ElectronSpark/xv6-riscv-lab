@@ -182,7 +182,7 @@ fn proctab_proc_add(t: *mut Thread) {
 // for the real `crate::bindings` structs).
 #[inline(always)]
 fn vfs_struct_clone(old: *mut FsStruct, flags: u64) -> *mut FsStruct {
-    crate::vfs::fs::vfs_struct_clone(old as *mut c_void as *mut crate::bindings::fs_struct, flags)
+    crate::vfs::fs::FsStruct::vfs_struct_clone(old as *mut c_void as *mut crate::bindings::fs_struct, flags)
         as *mut c_void as *mut FsStruct
 }
 #[inline(always)]

@@ -41,7 +41,7 @@ use super::{s_isdir, s_islnk, s_isreg, TMPFS_MAX_FILE_SIZE};
 // P3-1C mesh sweep: vfs/{inode,fs}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures).
-use crate::vfs::fs::vfs_inode_deref;
+use crate::vfs::fs::FsStruct;
 use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 // ===========================================================================
@@ -179,7 +179,7 @@ fn current() -> *mut thread {
 
 fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     let ti = inode as *mut tmpfs_inode;
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
 
@@ -287,7 +287,7 @@ fn __tmpfs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count: usize, us
 
 fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, user: bool) -> KResult<isize> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     let ti = inode as *mut tmpfs_inode;
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     let count = count_in;
@@ -422,7 +422,7 @@ fn __tmpfs_file_write(file: *mut vfs_file, buf: *const c_char, count_in: usize, 
 
 fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
 
     const SEEK_SET: c_int = 0;
     const SEEK_CUR: c_int = 1;
@@ -461,7 +461,7 @@ fn __tmpfs_file_llseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KR
 /// concurrent truncate or write.
 fn __tmpfs_file_fault(file: *mut vfs_file, vma_ptr: *mut vma, va: u64) -> *mut c_void {
     // SAFETY: `file` is live (caller's contract).
-    let inode = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
+    let inode = unsafe { FsStruct::vfs_inode_deref(ptr::addr_of_mut!((*file).inode)) };
     if inode.is_null() {
         return ptr::null_mut();
     }

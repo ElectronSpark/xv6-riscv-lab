@@ -152,11 +152,8 @@ fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
 // converted from `extern "C"` redeclarations to plain crate-path items
 // (identical signatures). `vfs_root_inode` is fs.rs's single dummy
 // VFS-root `vfs_inode` instance.
-use crate::vfs::fs::{
-    vfs_fs_type_allocate, vfs_mount, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type,
-    vfs_remove_inode, vfs_root_inode,
-};
-use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iunlock};
+use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_root_inode};
+use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iunlock, VfsInode};
 
 // `kassert!`'s canonical home is `crate::kstd`/crate root (P3-CS1
 // centralization). P3-10b (ops-table redesign): the CS13-era
@@ -386,7 +383,7 @@ pub(crate) fn tmpfs_unmount_begin_impl(sb: *mut vfs_superblock) {
                         crate::vfs::inode::inode_ops(inode).destroy_inode(inode);
                         // Remove from hash and mark invalid.
                         (*inode).flags.set_valid(0);
-                        vfs_remove_inode(sb, inode);
+                        VfsSuperblock::vfs_remove_inode(sb, inode);
                         vfs_iunlock(inode);
                         // Free the inode structure.
                         crate::vfs::inode::inode_ops(inode).free_inode(inode);
@@ -603,7 +600,7 @@ pub(crate) extern "C" fn tmpfs_init() {
     let ret = __tmpfs_init_cache();
     kassert!(ret == 0, "tmpfs_init: __tmpfs_init_cache failed");
 
-    let fs_type = vfs_fs_type_allocate();
+    let fs_type = VfsFsType::vfs_fs_type_allocate();
     kassert!(!fs_type.is_null(), "tmpfs_init: vfs_fs_type_allocate failed");
     // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
     unsafe {
@@ -611,10 +608,10 @@ pub(crate) extern "C" fn tmpfs_init() {
         (*fs_type).ops = Some(&TMPFS_FS_TYPE_OPS);
     }
 
-    vfs_mount_lock();
-    let ret = vfs_register_fs_type(fs_type);
+    Vfs::vfs_mount_lock();
+    let ret = VfsFsType::vfs_register_fs_type(fs_type);
     kassert!(ret == 0, "tmpfs_init: vfs_register_fs_type failed");
-    vfs_mount_unlock();
+    Vfs::vfs_mount_unlock();
 
     // SAFETY: `printf` is C-variadic; arguments match the `%lu %lu`/`%lu`
     // format strings exactly.
@@ -636,14 +633,14 @@ pub(crate) extern "C" fn tmpfs_init() {
 /// This mounts a fresh tmpfs instance at the VFS root inode and sets it
 /// as the process root. Call this after [`tmpfs_init`] during early boot.
 pub(crate) extern "C" fn tmpfs_mount_root() {
-    vfs_mount_lock();
+    Vfs::vfs_mount_lock();
     // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
     // (`vfs/fs.rs`), always live.
     unsafe { vfs_ilock(ptr::addr_of_mut!(vfs_root_inode)) };
 
     // SAFETY: same as above.
     let ret = unsafe {
-        vfs_mount(
+        VfsInode::vfs_mount(
             c"tmpfs".as_ptr(),
             ptr::addr_of_mut!(vfs_root_inode),
             ptr::null_mut(),
@@ -657,7 +654,7 @@ pub(crate) extern "C" fn tmpfs_mount_root() {
     if ret == 0 {
         unsafe { vfs_iunlock(ptr::addr_of_mut!(vfs_root_inode)) };
     }
-    vfs_mount_unlock();
+    Vfs::vfs_mount_unlock();
 
     // SAFETY: same as above.
     let mnt_rooti = unsafe { vfs_root_inode.dev_mnt.mnt.mnt_rooti };

@@ -67,7 +67,7 @@
 //!   of the list head's self-reference fixup.
 //! * `__DEVTMPFS_SB` (`__devtmpfs_sb` in the C original) is written once
 //!   per mount/unmount under the VFS-core mount lock
-//!   (`vfs_mount_lock()`, held by the generic mount/unmount machinery
+//!   (`Vfs::vfs_mount_lock()`, held by the generic mount/unmount machinery
 //!   that calls [`devtmpfs_mount`]/[`devtmpfs_umount_free`] as its
 //!   `vfs_fs_type_ops` callbacks) but *read* without any lock from
 //!   [`__devtmpfs_get_root`] — called from [`devtmpfs_create_node`]/
@@ -137,7 +137,7 @@ use crate::sync::SpinLock;
 // P3-1C mesh sweep: vfs/{fs,inode}.rs and vfs/tmpfs/{superblock,inode}.rs
 // are in scope for this wave; converted from `extern "C"` redeclarations
 // to plain crate-path items (identical signatures).
-use crate::vfs::fs::{vfs_fs_type_allocate, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type, vfs_release_dentry};
+use crate::vfs::fs::{Vfs, VfsFsType, VfsSuperblock, vfs_release_dentry};
 use crate::vfs::inode::{vfs_idup, vfs_ilookup, vfs_iput, vfs_unlink};
 use crate::vfs::tmpfs::inode::tmpfs_make_directory;
 use crate::vfs::tmpfs::superblock::{
@@ -432,7 +432,7 @@ unsafe fn __devtmpfs_walk_parent(
                 // trait method is a driver callback with exactly this
                 // contract (P3-10b: `KResult`-native dyn dispatch, no
                 // ERR_PTR decode).
-                let child = unsafe { crate::vfs::fs::sb_ops(sb).get_inode(sb, dentry.ino) };
+                let child = unsafe { crate::vfs::fs::VfsSuperblock::sb_ops(sb).get_inode(sb, dentry.ino) };
                 // Deliberate fix (see module doc): release the dentry's
                 // heap-allocated name now that `.ino` has been consumed.
                 vfs_release_dentry(&mut dentry);
@@ -892,7 +892,7 @@ pub(crate) extern "C" fn devtmpfs_init() {
     __devtmpfs_ensure_init();
 
     // Register the devtmpfs filesystem type.
-    let fs_type = vfs_fs_type_allocate();
+    let fs_type = VfsFsType::vfs_fs_type_allocate();
     kassert!(!fs_type.is_null(), "devtmpfs_init: vfs_fs_type_allocate failed");
     // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
     unsafe {
@@ -900,10 +900,10 @@ pub(crate) extern "C" fn devtmpfs_init() {
         (*fs_type).ops = Some(&DEVTMPFS_FS_TYPE_OPS);
     }
 
-    vfs_mount_lock();
-    let ret = vfs_register_fs_type(fs_type);
+    Vfs::vfs_mount_lock();
+    let ret = VfsFsType::vfs_register_fs_type(fs_type);
     kassert!(ret == 0, "devtmpfs_init: vfs_register_fs_type failed");
-    vfs_mount_unlock();
+    Vfs::vfs_mount_unlock();
 
     crate::kprintln!("devtmpfs: filesystem type registered");
 

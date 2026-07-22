@@ -634,7 +634,7 @@ use crate::mm::Vm;
 // signatures to their real definitions (same `crate::bindings::*` types
 // already imported above), so they become plain crate-path imports.
 use crate::vfs::fdtable::vfs_fdtable_put;
-use crate::vfs::fs::{vfs_inode_get_ref, vfs_struct_clone, vfs_struct_put};
+use crate::vfs::fs::FsStruct;
 use crate::vfs::inode::vfs_iput;
 
 // NO-STANDALONE-FN: the former FFI facades `session_alloc`/`session_add_pg`/
@@ -1029,7 +1029,7 @@ impl Thread {
 
             let mut fs_clone: *mut fs_struct = ptr::null_mut();
             if !(*initproc).fs.is_null() {
-                fs_clone = vfs_struct_clone((*initproc).fs, 0);
+                fs_clone = FsStruct::vfs_struct_clone((*initproc).fs, 0);
                 if is_err_or_null(fs_clone) {
                     Pid::free();
                     ThreadAccess::assume(p).destroy();
@@ -1148,7 +1148,7 @@ impl<'a> ThreadAccess<'a> {
                 self.set_fdtable(ptr::null_mut());
             }
             if !(*p).fs.is_null() {
-                vfs_struct_put((*p).fs);
+                FsStruct::vfs_struct_put((*p).fs);
                 (*p).fs = ptr::null_mut();
             }
 
@@ -1291,7 +1291,7 @@ impl Thread {
         u! {
         let root_inode = root_inode as *mut vfs_inode;
         let mut cwd_ref: core::mem::MaybeUninit<vfs_inode_ref> = core::mem::MaybeUninit::uninit();
-        let ret = vfs_inode_get_ref(root_inode, cwd_ref.as_mut_ptr());
+        let ret = FsStruct::vfs_inode_get_ref(root_inode, cwd_ref.as_mut_ptr());
         if ret < 0 {
             kpanic!("install_user_root: failed to get ref to root inode");
         }
