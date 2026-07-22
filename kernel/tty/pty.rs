@@ -50,7 +50,7 @@ use crate::mm::either_copyin;
 // body (`pty_alloc`) or an explicit `unsafe { }` block, so no behavior
 // changes.
 use crate::tty::tty::{tty_alloc, tty_input};
-use crate::vfs::pipe::{pipe_read, pipe_write};
+use crate::vfs::pipe::Pipe;
 
 const EFAULT: i64 = 14;
 
@@ -96,7 +96,7 @@ impl TtyOps for PtySlaveOps {
     /// [`TtyOps::read`] contract).
     unsafe fn read(&self, tty: *mut tty, buf: *mut c_char, nr: usize) -> KResult<usize> {
         // SAFETY: see fn doc.
-        pipe_ret_to_result(unsafe { pipe_read((*tty).input_pipe, buf, nr as u64, 0) })
+        pipe_ret_to_result(unsafe { Pipe::pipe_read((*tty).input_pipe, buf, nr as u64, 0) })
     }
 
     /// Slave write -> push into the output pipe (master can read it).
@@ -108,7 +108,7 @@ impl TtyOps for PtySlaveOps {
     /// [`TtyOps::write`] contract).
     unsafe fn write(&self, tty: *mut tty, buf: *const c_char, nr: usize) -> KResult<usize> {
         // SAFETY: see fn doc.
-        pipe_ret_to_result(unsafe { pipe_write((*tty).output_pipe, buf, nr as u64, 0) })
+        pipe_ret_to_result(unsafe { Pipe::pipe_write((*tty).output_pipe, buf, nr as u64, 0) })
     }
 }
 
@@ -195,7 +195,7 @@ pub(crate) unsafe extern "C" fn pty_master_read(
     // itself per the userspace/kernel split encoded by `user`; `slave`
     // is caller-guaranteed live (fn doc), so `(*slave).output_pipe` is
     // a valid read.
-    unsafe { pipe_read((*slave).output_pipe, buf, count as u64, user as c_int) as isize }
+    unsafe { Pipe::pipe_read((*slave).output_pipe, buf, count as u64, user as c_int) as isize }
 }
 
 // ===========================================================================

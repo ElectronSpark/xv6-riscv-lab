@@ -140,14 +140,8 @@ use crate::mm::{either_copyin, either_copyout, Vm};
 // wave; converted from `extern "C"` redeclarations to plain crate-path
 // items (identical signatures, same `crate::bindings::*` types this file
 // already imports).
-use crate::vfs::fdtable::{
-    vfs_fdtable_alloc_fd, vfs_fdtable_alloc_fd_from, vfs_fdtable_dealloc_fd,
-    vfs_fdtable_get_fdflags, vfs_fdtable_get_file, vfs_fdtable_set_fdflags,
-};
-use crate::vfs::file::{
-    truncate, vfs_fileopen, vfs_fileread, vfs_filestat, vfs_filewrite, vfs_filelseek, vfs_fput,
-    vfs_ioctl, vfs_pipealloc, vfs_sockalloc, FileOps,
-};
+use crate::vfs::fdtable::VfsFdtable;
+use crate::vfs::file::{FileOps, VfsFile};
 use crate::vfs::fs::{
     vfs_release_dentry, FsStruct, Vfs, VfsFsType, VfsSuperblock,
 };
@@ -383,7 +377,7 @@ unsafe extern "C" fn vfs_fput_work_func(work: *mut work_struct) {
     // SAFETY: `work` is a live work item queued by `vfs_fd_rcucb` below,
     // whose `.data` is the `vfs_file*` to release.
     let file = unsafe { (*work).data } as *mut vfs_file;
-    vfs_fput(file);
+    VfsFile::vfs_fput(file);
     WorkStruct::free(work);
 }
 
@@ -394,22 +388,22 @@ unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
     if wq.is_null() {
         // Workqueue not available (early init or shutdown): fall back to
         // a direct call.
-        vfs_fput(file);
+        VfsFile::vfs_fput(file);
         return;
     }
 
     let work = WorkStruct::create(Some(vfs_fput_work_func), file as u64);
     if work.is_null() {
         crate::kprintln!("__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput");
-        vfs_fput(file);
+        VfsFile::vfs_fput(file);
         return;
     }
 
     Workqueue::queue(wq, work);
 }
 
-/// Defer `vfs_fput()` until the current RCU grace period completes, so
-/// no concurrent `vfs_fdtable_get_file()` can still be observing `file`.
+/// Defer `VfsFile::vfs_fput()` until the current RCU grace period completes, so
+/// no concurrent `VfsFdtable::vfs_fdtable_get_file()` can still be observing `file`.
 impl Sys {
     fn vfs_fput_call_rcu(file: *mut vfs_file) {
         // SAFETY: `head` is null (the callee slab-allocates and owns the
@@ -422,27 +416,27 @@ impl Sys {
 }
 
 /// Look up `fd` in the current thread's fdtable with a `+1` refcount.
-/// Caller must call `vfs_fput()`.
+/// Caller must call `VfsFile::vfs_fput()`.
 impl Sys {
     fn vfs_argfd(fd: c_int) -> *mut vfs_file {
         if fd < 0 || fd as usize >= NOFILE {
             return ptr::null_mut();
         }
-        vfs_fdtable_get_file(Sys::current_fdtable(), fd)
+        VfsFdtable::vfs_fdtable_get_file(Sys::current_fdtable(), fd)
     }
 }
 
 /// Allocate an fd for `file`. Caller must hold `current->fdtable->lock`.
 impl Sys {
     fn vfs_fdalloc(file: *mut vfs_file) -> c_int {
-        vfs_fdtable_alloc_fd(Sys::current_fdtable(), file)
+        VfsFdtable::vfs_fdtable_alloc_fd(Sys::current_fdtable(), file)
     }
 }
 
 /// Deallocate `fd`. Caller must hold `current->fdtable->lock`.
 impl Sys {
     fn vfs_fdfree(fd: c_int) -> *mut vfs_file {
-        vfs_fdtable_dealloc_fd(Sys::current_fdtable(), fd)
+        VfsFdtable::vfs_fdtable_dealloc_fd(Sys::current_fdtable(), fd)
     }
 }
 
@@ -469,7 +463,7 @@ impl Sys {
             newfd = Sys::vfs_fdalloc(f);
         }
 
-        vfs_fput(f); // remove the reference from vfs_argfd
+        VfsFile::vfs_fput(f); // remove the reference from vfs_argfd
         Ok(newfd)
     }
 }
@@ -504,7 +498,7 @@ impl Sys {
         }
 
         if oldfd == newfd {
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
             return Ok(newfd);
         }
 
@@ -513,13 +507,13 @@ impl Sys {
         {
             let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*Sys::current_fdtable()).lock) }).lock();
             old_newfd = Sys::vfs_fdfree(newfd);
-            ret = vfs_fdtable_alloc_fd_from(Sys::current_fdtable(), f, newfd);
+            ret = VfsFdtable::vfs_fdtable_alloc_fd_from(Sys::current_fdtable(), f, newfd);
         }
 
         if !old_newfd.is_null() {
             Sys::vfs_fput_call_rcu(old_newfd);
         }
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -549,8 +543,8 @@ impl Sys {
             return Err(Errno::BadF);
         }
 
-        let ret = vfs_fileread(f, p as *mut c_void, n as usize, 1);
-        vfs_fput(f);
+        let ret = VfsFile::vfs_fileread(f, p as *mut c_void, n as usize, 1);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -580,8 +574,8 @@ impl Sys {
             return Err(Errno::BadF);
         }
 
-        let ret = vfs_filewrite(f, p as *const c_void, n as usize, 1);
-        vfs_fput(f);
+        let ret = VfsFile::vfs_filewrite(f, p as *const c_void, n as usize, 1);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -642,9 +636,9 @@ impl Sys {
         }
 
         let mut kst: stat = unsafe { core::mem::zeroed() };
-        let ret = vfs_filestat(f, &mut kst);
+        let ret = VfsFile::vfs_filestat(f, &mut kst);
         if ret != 0 {
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
             return Err(Errno::Raw(ret));
         }
 
@@ -655,11 +649,11 @@ impl Sys {
             core::mem::size_of::<stat>() as u64,
         ) < 0
         {
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
             return Err(Errno::Fault);
         }
 
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(())
     }
 }
@@ -688,8 +682,8 @@ impl Sys {
             return Err(Errno::BadF);
         }
 
-        let ret = vfs_filelseek(f, offset, whence);
-        vfs_fput(f);
+        let ret = VfsFile::vfs_filelseek(f, offset, whence);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -720,8 +714,8 @@ impl Sys {
             return Err(Errno::BadF);
         }
 
-        let ret = truncate(f, length);
-        vfs_fput(f);
+        let ret = VfsFile::truncate(f, length);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -759,9 +753,9 @@ impl Sys {
                 let _g =
                     KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*Sys::current_fdtable()).lock) }).lock();
                 ret = if cmd == F_GETFD {
-                    vfs_fdtable_get_fdflags(Sys::current_fdtable(), fd)
+                    VfsFdtable::vfs_fdtable_get_fdflags(Sys::current_fdtable(), fd)
                 } else {
-                    vfs_fdtable_set_fdflags(Sys::current_fdtable(), fd, arg & FD_CLOEXEC)
+                    VfsFdtable::vfs_fdtable_set_fdflags(Sys::current_fdtable(), fd, arg & FD_CLOEXEC)
                 };
             }
             return Ok(ret);
@@ -792,9 +786,9 @@ impl Sys {
                     let _g =
                         KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*Sys::current_fdtable()).lock) })
                             .lock();
-                    ret = vfs_fdtable_alloc_fd_from(Sys::current_fdtable(), f, arg);
+                    ret = VfsFdtable::vfs_fdtable_alloc_fd_from(Sys::current_fdtable(), f, arg);
                     if ret >= 0 && cmd == F_DUPFD_CLOEXEC {
-                        let _ = vfs_fdtable_set_fdflags(Sys::current_fdtable(), ret, FD_CLOEXEC);
+                        let _ = VfsFdtable::vfs_fdtable_set_fdflags(Sys::current_fdtable(), ret, FD_CLOEXEC);
                     }
                 }
             }
@@ -803,7 +797,7 @@ impl Sys {
             }
         }
 
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -1282,7 +1276,7 @@ impl Sys {
 
         let should_truncate = omode & O_TRUNC != 0 && is_reg(unsafe { (*inode).mode });
 
-        let f = vfs_fileopen(inode, omode);
+        let f = VfsFile::vfs_fileopen(inode, omode);
         VfsInode::vfs_iput(inode);
 
         if is_err(f) {
@@ -1292,7 +1286,7 @@ impl Sys {
         if should_truncate {
             let ret = VfsInode::vfs_itruncate(FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) }), 0);
             if ret != 0 {
-                vfs_fput(f);
+                VfsFile::vfs_fput(f);
                 return Err(Errno::Raw(ret));
             }
         }
@@ -1302,12 +1296,12 @@ impl Sys {
             let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*Sys::current_fdtable()).lock) }).lock();
             fd = Sys::vfs_fdalloc(f);
             if fd >= 0 && omode & O_CLOEXEC != 0 {
-                let _ = vfs_fdtable_set_fdflags(Sys::current_fdtable(), fd, FD_CLOEXEC);
+                let _ = VfsFdtable::vfs_fdtable_set_fdflags(Sys::current_fdtable(), fd, FD_CLOEXEC);
             }
         }
         // When success, the refcount of f will be increased by fdtable, thus we do
         // not put f here. When failure, we need to put f anyway.
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(fd)
     }
 }
@@ -1857,7 +1851,7 @@ impl Sys {
     fn pipe_inner(fdarray: u64) -> KResult<()> {
         let mut rf: *mut vfs_file = ptr::null_mut();
         let mut wf: *mut vfs_file = ptr::null_mut();
-        let ret = vfs_pipealloc(&mut rf, &mut wf);
+        let ret = VfsFile::vfs_pipealloc(&mut rf, &mut wf);
         if ret != 0 {
             return Err(Errno::Raw(ret));
         }
@@ -1869,8 +1863,8 @@ impl Sys {
             fd0 = Sys::vfs_fdalloc(rf);
             if fd0 < 0 {
                 drop(_g);
-                vfs_fput(rf);
-                vfs_fput(wf);
+                VfsFile::vfs_fput(rf);
+                VfsFile::vfs_fput(wf);
                 return Err(Errno::Raw(fd0));
             }
 
@@ -1878,8 +1872,8 @@ impl Sys {
             if fd1 < 0 {
                 Sys::vfs_fdfree(fd0);
                 drop(_g);
-                vfs_fput(rf);
-                vfs_fput(wf);
+                VfsFile::vfs_fput(rf);
+                VfsFile::vfs_fput(wf);
                 Sys::vfs_fput_call_rcu(rf);
                 return Err(Errno::Raw(fd1));
             }
@@ -1906,8 +1900,8 @@ impl Sys {
                 Sys::vfs_fdfree(fd1);
             }
 
-            vfs_fput(rf);
-            vfs_fput(wf);
+            VfsFile::vfs_fput(rf);
+            VfsFile::vfs_fput(wf);
             Sys::vfs_fput_call_rcu(rf);
             Sys::vfs_fput_call_rcu(wf);
             return Err(Errno::Fault);
@@ -1916,8 +1910,8 @@ impl Sys {
         // Release the references from vfs_pipealloc - fdtable holds its own
         // references now (same pattern as sys_vfs_open's vfs_fput after
         // vfs_fdalloc).
-        vfs_fput(rf);
-        vfs_fput(wf);
+        VfsFile::vfs_fput(rf);
+        VfsFile::vfs_fput(wf);
 
         Ok(())
     }
@@ -1943,7 +1937,7 @@ pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
 impl Sys {
     fn connect_inner(raddr: c_int, lport: c_int, rport: c_int) -> KResult<c_int> {
         let mut f: *mut vfs_file = ptr::null_mut();
-        let ret = vfs_sockalloc(&mut f, raddr as u32, lport as u16, rport as u16);
+        let ret = VfsFile::vfs_sockalloc(&mut f, raddr as u32, lport as u16, rport as u16);
         if ret != 0 {
             return Err(Errno::Raw(ret));
         }
@@ -1956,7 +1950,7 @@ impl Sys {
 
         // When success, the refcount of f will be increased by fdtable, thus we do
         // not put f here. When failure, we need to put f anyway.
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(fd)
     }
 }
@@ -2005,13 +1999,13 @@ impl Sys {
         // SAFETY: non-null `f`.
         let inode = FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) });
         if inode.is_null() || !is_dir(unsafe { (*inode).mode }) {
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
             return Err(Errno::NotDir);
         }
 
         let kbuf = kmm_alloc(count as usize);
         if kbuf.is_null() {
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
             return Err(Errno::NoMem);
         }
 
@@ -2028,7 +2022,7 @@ impl Sys {
             let ret = VfsInode::vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).pos.dir_iter) }, &mut dentry);
             if ret != 0 {
                 kmm_free(kbuf);
-                vfs_fput(f);
+                VfsFile::vfs_fput(f);
                 return Err(Errno::Raw(ret));
             }
 
@@ -2082,13 +2076,13 @@ impl Sys {
         if bytes_written > 0 {
             if Vm::vm_copyout(unsafe { (*Sys::current()).vm }, dirp, kbuf, bytes_written as u64) < 0 {
                 kmm_free(kbuf);
-                vfs_fput(f);
+                VfsFile::vfs_fput(f);
                 return Err(Errno::Fault);
             }
         }
 
         kmm_free(kbuf);
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(bytes_written)
     }
 }
@@ -2446,7 +2440,7 @@ impl Sys {
         match cmd {
             TCGETS => {
                 let mut kt: termios = unsafe { core::mem::zeroed() };
-                ret = vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
+                ret = VfsFile::vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
                 if ret == 0 {
                     if either_copyout(1, arg, &mut kt as *mut termios as *mut c_void, core::mem::size_of::<termios>() as u64) < 0 {
                         ret = neg(EFAULT);
@@ -2458,12 +2452,12 @@ impl Sys {
                 if either_copyin(&mut kt as *mut termios as *mut c_void, 1, arg, core::mem::size_of::<termios>() as u64) < 0 {
                     ret = neg(EFAULT);
                 } else {
-                    ret = vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
+                    ret = VfsFile::vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
                 }
             }
             TIOCGWINSZ => {
                 let mut kws: winsize = unsafe { core::mem::zeroed() };
-                ret = vfs_ioctl(f, cmd, &mut kws as *mut winsize as *mut c_void);
+                ret = VfsFile::vfs_ioctl(f, cmd, &mut kws as *mut winsize as *mut c_void);
                 if ret == 0 {
                     if either_copyout(1, arg, &mut kws as *mut winsize as *mut c_void, core::mem::size_of::<winsize>() as u64) < 0 {
                         ret = neg(EFAULT);
@@ -2475,12 +2469,12 @@ impl Sys {
                 if either_copyin(&mut kws as *mut winsize as *mut c_void, 1, arg, core::mem::size_of::<winsize>() as u64) < 0 {
                     ret = neg(EFAULT);
                 } else {
-                    ret = vfs_ioctl(f, cmd, &mut kws as *mut winsize as *mut c_void);
+                    ret = VfsFile::vfs_ioctl(f, cmd, &mut kws as *mut winsize as *mut c_void);
                 }
             }
             TIOCGPGRP => {
                 let mut kpgid: crate::bindings::pid_t = 0;
-                ret = vfs_ioctl(f, cmd, &mut kpgid as *mut crate::bindings::pid_t as *mut c_void);
+                ret = VfsFile::vfs_ioctl(f, cmd, &mut kpgid as *mut crate::bindings::pid_t as *mut c_void);
                 if ret == 0 {
                     if either_copyout(1, arg, &mut kpgid as *mut crate::bindings::pid_t as *mut c_void, core::mem::size_of::<crate::bindings::pid_t>() as u64) < 0 {
                         ret = neg(EFAULT);
@@ -2492,12 +2486,12 @@ impl Sys {
                 if either_copyin(&mut kpgid as *mut crate::bindings::pid_t as *mut c_void, 1, arg, core::mem::size_of::<crate::bindings::pid_t>() as u64) < 0 {
                     ret = neg(EFAULT);
                 } else {
-                    ret = vfs_ioctl(f, cmd, &mut kpgid as *mut crate::bindings::pid_t as *mut c_void);
+                    ret = VfsFile::vfs_ioctl(f, cmd, &mut kpgid as *mut crate::bindings::pid_t as *mut c_void);
                 }
             }
             TIOCGPTN => {
                 let mut kptn: c_int = 0;
-                ret = vfs_ioctl(f, cmd, &mut kptn as *mut c_int as *mut c_void);
+                ret = VfsFile::vfs_ioctl(f, cmd, &mut kptn as *mut c_int as *mut c_void);
                 if ret == 0 {
                     if either_copyout(1, arg, &mut kptn as *mut c_int as *mut c_void, core::mem::size_of::<c_int>() as u64) < 0 {
                         ret = neg(EFAULT);
@@ -2506,15 +2500,15 @@ impl Sys {
             }
             TIOCSCTTY => {
                 // `arg` is an integer flag (usually 0); pass it through as-is.
-                ret = vfs_ioctl(f, cmd, arg as *mut c_void);
+                ret = VfsFile::vfs_ioctl(f, cmd, arg as *mut c_void);
             }
             _ => {
                 // Unknown ioctl -- pass arg through as an opaque pointer.
-                ret = vfs_ioctl(f, cmd, arg as *mut c_void);
+                ret = VfsFile::vfs_ioctl(f, cmd, arg as *mut c_void);
             }
         }
 
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -2547,13 +2541,13 @@ impl Sys {
         }
 
         let mut kt: termios = unsafe { core::mem::zeroed() };
-        let mut ret = vfs_ioctl(f, TCGETS, &mut kt as *mut termios as *mut c_void);
+        let mut ret = VfsFile::vfs_ioctl(f, TCGETS, &mut kt as *mut termios as *mut c_void);
         if ret == 0 {
             if either_copyout(1, termios_p, &mut kt as *mut termios as *mut c_void, core::mem::size_of::<termios>() as u64) < 0 {
                 ret = neg(EFAULT);
             }
         }
-        vfs_fput(f);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -2592,12 +2586,12 @@ impl Sys {
 
         let mut kt: termios = unsafe { core::mem::zeroed() };
         if either_copyin(&mut kt as *mut termios as *mut c_void, 1, termios_p, core::mem::size_of::<termios>() as u64) < 0 {
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
             return Err(Errno::Fault);
         }
 
-        let ret = vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
-        vfs_fput(f);
+        let ret = VfsFile::vfs_ioctl(f, cmd, &mut kt as *mut termios as *mut c_void);
+        VfsFile::vfs_fput(f);
         Ok(ret)
     }
 }
@@ -2741,7 +2735,7 @@ impl Sys {
 
                 if inode.is_null() {
                     // No inode AND no `vfs_file_ops.poll`. If `ops` is NULL
-                    // entirely this is a legacy socket (`vfs_sockalloc()`);
+                    // entirely this is a legacy socket (`VfsFile::vfs_sockalloc()`);
                     // polling its rxq is not yet implemented (matches the C
                     // original's own commented-out `sockpoll()` call).
                     // SAFETY: non-null `f`.
@@ -2781,7 +2775,7 @@ impl Sys {
                 }
             }
 
-            vfs_fput(f);
+            VfsFile::vfs_fput(f);
 
             if pfd.revents != 0 {
                 ready += 1;

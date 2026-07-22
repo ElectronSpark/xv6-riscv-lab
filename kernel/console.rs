@@ -131,7 +131,7 @@ use crate::irq::irq_core::register_irq_handler;
 // `unsafe { }` block (verified per call site), so no behavior changes.
 use crate::tty::tty::{tty_alloc, tty_input, tty_ioctl, tty_output, tty_poll, tty_read};
 use crate::tty::session::{session_lookup, session_set_ctrl_tty};
-use crate::vfs::pipe::pipe_set_flags;
+use crate::vfs::pipe::Pipe;
 
 const EINTR: c_int = 4;
 const EFAULT: c_int = 14;
@@ -975,8 +975,8 @@ pub(crate) extern "C" fn consoledevinit() {
         // tty_echo_char() never sleep when the pipe is full --
         // characters are silently discarded instead.
         const PIPE_FLAGS_NONBLOCK_WR: c_int = 4;
-        pipe_set_flags((*t).input_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
-        pipe_set_flags((*t).output_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
+        Pipe::pipe_set_flags((*t).input_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
+        Pipe::pipe_set_flags((*t).output_pipe, 1 << PIPE_FLAGS_NONBLOCK_WR);
 
         // Attach the console TTY to init's session as the controlling
         // terminal.

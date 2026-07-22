@@ -117,8 +117,8 @@ use crate::proc::Proc;
 // accordingly. Signatures verified identical (same `crate::bindings::*`
 // types this file already imports above), so this is a pure mesh
 // simplification, not an ABI change.
-use crate::vfs::fdtable::vfs_fdtable_close_on_exec;
-use crate::vfs::file::{vfs_fileopen, vfs_filelseek, vfs_fileread, vfs_fput};
+use crate::vfs::fdtable::VfsFdtable;
+use crate::vfs::file::VfsFile;
 use crate::vfs::inode::VfsInode;
 
 /// `proc/exit.rs::vfork_done` takes its own local opaque `Thread` marker
@@ -403,7 +403,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         () => {{
             Vm::vm_put(tmp_vm);
             if !file.is_null() {
-                vfs_fput(file);
+                VfsFile::vfs_fput(file);
             }
             return -1;
         }};
@@ -425,7 +425,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     }
 
     // Open the file for reading.
-    file = vfs_fileopen(inode, O_RDONLY);
+    file = VfsFile::vfs_fileopen(inode, O_RDONLY);
     VfsInode::vfs_iput(inode); // vfs_fileopen takes its own reference.
 
     if is_err(file) {
@@ -437,7 +437,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
 
     // Read ELF header.
     let mut elf_mu = MaybeUninit::<elfhdr>::uninit();
-    let n = vfs_fileread(file, elf_mu.as_mut_ptr() as *mut c_void, size_of::<elfhdr>(), 0);
+    let n = VfsFile::vfs_fileread(file, elf_mu.as_mut_ptr() as *mut c_void, size_of::<elfhdr>(), 0);
     if n as usize != size_of::<elfhdr>() {
         bad!();
     }
@@ -472,13 +472,13 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     let mut off: i64 = elf.phoff as i64;
     for _ in 0..elf.phnum {
         // Seek to program header.
-        if vfs_filelseek(file, off, SEEK_SET) != off {
+        if VfsFile::vfs_filelseek(file, off, SEEK_SET) != off {
             bad_locked!();
         }
 
         // Read program header.
         let mut ph_mu = MaybeUninit::<proghdr>::uninit();
-        if vfs_fileread(file, ph_mu.as_mut_ptr() as *mut c_void, size_of::<proghdr>(), 0)
+        if VfsFile::vfs_fileread(file, ph_mu.as_mut_ptr() as *mut c_void, size_of::<proghdr>(), 0)
             != size_of::<proghdr>() as isize
         {
             bad_locked!();
@@ -549,11 +549,11 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
             memset(pa, 0, PGSIZE as usize);
 
             let foff = (file_off + (file_pg_end - va)) as loff_t;
-            if vfs_filelseek(file, foff, SEEK_SET) != foff {
+            if VfsFile::vfs_filelseek(file, foff, SEEK_SET) != foff {
                 kfree(pa);
                 bad_locked!();
             }
-            if vfs_fileread(file, pa, nbytes as usize, 0) != nbytes as isize {
+            if VfsFile::vfs_fileread(file, pa, nbytes as usize, 0) != nbytes as isize {
                 kfree(pa);
                 bad_locked!();
             }
@@ -590,7 +590,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     }
 
     // Done with the file.
-    vfs_fput(file);
+    VfsFile::vfs_fput(file);
     file = ptr::null_mut();
 
     let p = xv6_current_thread();
@@ -802,7 +802,7 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
     // Close descriptors marked close-on-exec now that exec is committed.
     // SAFETY: `p` is the live current thread.
     unsafe {
-        vfs_fdtable_close_on_exec((*p).fdtable);
+        VfsFdtable::vfs_fdtable_close_on_exec((*p).fdtable);
     }
 
     // Wake vfork parent - we've replaced our address space so parent can

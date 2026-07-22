@@ -307,63 +307,72 @@ fn store_release_u32(p: *mut u32, v: u32) {
     crate::machine::smp_store_release_i32(p as *mut c_int, v as c_int)
 }
 
-/// # Safety
-/// `pi` must point to a live, aligned `pipe`.
-#[inline(always)]
-fn flags_atomic<'a>(pi: *mut pipe) -> &'a AtomicI32 {
-    // SAFETY: `flags` is a plain C `int` field, same size/align as
-    // `AtomicI32`; caller ensures `pi` is a live, aligned `pipe`.
-    unsafe { &*(ptr::addr_of_mut!((*pi).flags) as *const AtomicI32) }
-}
-#[inline(always)]
-fn pipe_writable(pi: *mut pipe) -> bool {
-    flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_WRITABLE) != 0
-}
-#[inline(always)]
-fn pipe_readable(pi: *mut pipe) -> bool {
-    flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_READABLE) != 0
-}
-#[inline(always)]
-fn pipe_nonblock_rd(pi: *mut pipe) -> bool {
-    flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_NONBLOCK_RD) != 0
-}
-#[inline(always)]
-fn pipe_nonblock_wr(pi: *mut pipe) -> bool {
-    flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_NONBLOCK_WR) != 0
-}
+impl Pipe {
+    /// # Safety
+    /// `pi` must point to a live, aligned `pipe`. N-METH: inherent assoc
+    /// fn (was the free fn `flags_atomic`); raw `pi` param kept (Pipe is
+    /// `Freeze` with cross-hart `nread`/`nwrite` peeks -- no `&self`
+    /// receiver, see the module doc's floor class).
+    #[inline(always)]
+    fn flags_atomic<'a>(pi: *mut pipe) -> &'a AtomicI32 {
+        // SAFETY: `flags` is a plain C `int` field, same size/align as
+        // `AtomicI32`; caller ensures `pi` is a live, aligned `pipe`.
+        unsafe { &*(ptr::addr_of_mut!((*pi).flags) as *const AtomicI32) }
+    }
+    #[inline(always)]
+    fn pipe_writable(pi: *mut pipe) -> bool {
+        Pipe::flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_WRITABLE) != 0
+    }
+    #[inline(always)]
+    fn pipe_readable(pi: *mut pipe) -> bool {
+        Pipe::flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_READABLE) != 0
+    }
+    #[inline(always)]
+    fn pipe_nonblock_rd(pi: *mut pipe) -> bool {
+        Pipe::flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_NONBLOCK_RD) != 0
+    }
+    #[inline(always)]
+    fn pipe_nonblock_wr(pi: *mut pipe) -> bool {
+        Pipe::flags_atomic(pi).load(Ordering::Acquire) & (1 << PIPE_FLAGS_NONBLOCK_WR) != 0
+    }
 
-/// Mirrors `PIPE_CLEAR_WRITABLE`. **Preserved 1:1 including a latent
-/// quirk**: this only returns `true` (safe to free) when the flags word
-/// was *exactly* `1 << PIPE_FLAGS_WRITABLE` before the clear -- i.e. if
-/// any nonblock bit (`kernel/console.rs`'s `pipe_set_flags`, used on
-/// TTY-owned pipes) happens to be set, this reports "not yet safe to
-/// free" even after both readable and writable are actually clear,
-/// leaking the pipe's backing page/slab object. Anonymous pipes from
-/// `pipe()` never touch the nonblock bits, so this only affects
-/// TTY-internal pipes, which are not expected to ever `pipe_close()` in
-/// practice; flagged rather than fixed, matching this port's fidelity
-/// mandate.
-#[inline(always)]
-fn clear_writable(pi: *mut pipe) -> bool {
-    let bit = 1i32 << PIPE_FLAGS_WRITABLE;
-    let old = flags_atomic(pi).fetch_and(!bit, Ordering::SeqCst);
-    old == bit
-}
-/// Mirrors `PIPE_CLEAR_READABLE` -- see [`clear_writable`].
-#[inline(always)]
-fn clear_readable(pi: *mut pipe) -> bool {
-    let bit = 1i32 << PIPE_FLAGS_READABLE;
-    let old = flags_atomic(pi).fetch_and(!bit, Ordering::SeqCst);
-    old == bit
-}
+    /// Mirrors `PIPE_CLEAR_WRITABLE`. **Preserved 1:1 including a latent
+    /// quirk**: this only returns `true` (safe to free) when the flags word
+    /// was *exactly* `1 << PIPE_FLAGS_WRITABLE` before the clear -- i.e. if
+    /// any nonblock bit (`kernel/console.rs`'s `pipe_set_flags`, used on
+    /// TTY-owned pipes) happens to be set, this reports "not yet safe to
+    /// free" even after both readable and writable are actually clear,
+    /// leaking the pipe's backing page/slab object. Anonymous pipes from
+    /// `pipe()` never touch the nonblock bits, so this only affects
+    /// TTY-internal pipes, which are not expected to ever `pipe_close()` in
+    /// practice; flagged rather than fixed, matching this port's fidelity
+    /// mandate. N-METH: inherent assoc fn (was the free fn `clear_writable`).
+    #[inline(always)]
+    fn clear_writable(pi: *mut pipe) -> bool {
+        let bit = 1i32 << PIPE_FLAGS_WRITABLE;
+        let old = Pipe::flags_atomic(pi).fetch_and(!bit, Ordering::SeqCst);
+        old == bit
+    }
+    /// Mirrors `PIPE_CLEAR_READABLE` -- see [`Pipe::clear_writable`].
+    /// N-METH: inherent assoc fn (was the free fn `clear_readable`).
+    #[inline(always)]
+    fn clear_readable(pi: *mut pipe) -> bool {
+        let bit = 1i32 << PIPE_FLAGS_READABLE;
+        let old = Pipe::flags_atomic(pi).fetch_and(!bit, Ordering::SeqCst);
+        old == bit
+    }
 
-fn reader_lock(pi: *mut pipe) -> KSpinlock {
-    // SAFETY: `pi` is a live pipe (every call site's precondition).
-    KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*pi).reader_lock) })
-}
-fn writer_lock(pi: *mut pipe) -> KSpinlock {
-    // SAFETY: `pi` is a live pipe (every call site's precondition).
-    KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*pi).writer_lock) })
+    /// N-METH: inherent assoc fn (was the free fn `reader_lock`); raw `pi`
+    /// param kept (floor class, see the module doc).
+    fn reader_lock(pi: *mut pipe) -> KSpinlock {
+        // SAFETY: `pi` is a live pipe (every call site's precondition).
+        KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*pi).reader_lock) })
+    }
+    /// N-METH: inherent assoc fn (was the free fn `writer_lock`).
+    fn writer_lock(pi: *mut pipe) -> KSpinlock {
+        // SAFETY: `pi` is a live pipe (every call site's precondition).
+        KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*pi).writer_lock) })
+    }
 }
 
 // ===========================================================================
@@ -384,97 +393,110 @@ fn pipe_slab() -> *mut slab_cache_t {
     __PIPE_CACHE.0.get() as *mut slab_cache_t
 }
 
-pub(crate) extern "C" fn pipe_init() {
-    let ret = slab_cache_init(
-        pipe_slab(),
-        c"pipe_cache".as_ptr() as *mut c_char,
-        core::mem::size_of::<pipe>(),
-        SLAB_FLAG_STATIC as u64,
-    );
-    kassert!(ret == 0, "Failed to initialize pipe_cache slab cache");
-}
-
-pub(crate) extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
-    result_to_errptr(pipe_alloc_inner(flags))
-}
-
-fn pipe_alloc_inner(flags: c_int) -> KResult<*mut pipe> {
-    let pi = slab_alloc(pipe_slab()) as *mut pipe;
-    if pi.is_null() {
-        return Err(Errno::NoMem);
-    }
-
-    let data = kalloc();
-    if data.is_null() {
-        slab_free(pi as *mut c_void);
-        return Err(Errno::NoMem);
-    }
-
-    // SAFETY: `pi` was just slab-allocated and is exclusively owned by
-    // this call; no other thread can observe it until this function
-    // returns it to its caller.
-    unsafe {
-        crate::machine::smp_store_release_i32(ptr::addr_of_mut!((*pi).flags), PIPE_FLAGS_RW | flags);
-        (*pi).nwrite = 0;
-        (*pi).nread = 0;
-        (*pi).data = data as *mut c_char;
-        spin_init(
-            ptr::addr_of_mut!((*pi).reader_lock),
-            c"vfs_pipe_reader".as_ptr() as *mut c_char,
+impl Pipe {
+    /// N-METH: inherent assoc fn (was the free `extern "C"` fn `pipe_init`);
+    /// name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn pipe_init() {
+        let ret = slab_cache_init(
+            pipe_slab(),
+            c"pipe_cache".as_ptr() as *mut c_char,
+            core::mem::size_of::<pipe>(),
+            SLAB_FLAG_STATIC as u64,
         );
-        spin_init(
-            ptr::addr_of_mut!((*pi).writer_lock),
-            c"vfs_pipe_writer".as_ptr() as *mut c_char,
-        );
-        if let Some(r) = TqRef::from_ptr(ptr::addr_of_mut!((*pi).nread_queue)) {
-            r.init(c"pipe_nread_queue".as_ptr(), ptr::null_mut());
-        }
-        if let Some(r) = TqRef::from_ptr(ptr::addr_of_mut!((*pi).nwrite_queue)) {
-            r.init(c"pipe_nwrite_queue".as_ptr(), ptr::null_mut());
-        }
+        kassert!(ret == 0, "Failed to initialize pipe_cache slab cache");
     }
-    Ok(pi)
-}
 
-pub(crate) extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
-    let freed;
-    if writable != 0 {
-        let g = writer_lock(pi).lock();
-        freed = clear_writable(pi);
-        // SAFETY: non-null `pi`.
-        let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(-1, 0));
-        drop(g);
-    } else {
-        let g = reader_lock(pi).lock();
-        freed = clear_readable(pi);
-        // SAFETY: non-null `pi`.
-        let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(-1, 0));
-        drop(g);
+    /// N-METH: inherent assoc fn (was the free `extern "C"` fn
+    /// `pipe_alloc`); name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
+        result_to_errptr(Pipe::pipe_alloc_inner(flags))
     }
-    if freed {
-        // SAFETY: `pi->data` was allocated by `kalloc()` in `pipe_alloc`
-        // and is being freed exactly once (the both-clear check above
-        // guards against a double free between the two closer sides).
-        unsafe { kfree((*pi).data as *mut c_void) };
-        slab_free(pi as *mut c_void);
-    }
-}
 
-pub(crate) extern "C" fn pipe_set_flags(pi: *mut pipe, flags: c_int) {
-    let set = flags & PIPE_NONBLOCK_MASK;
-    let a = flags_atomic(pi);
-    let mut old = a.load(Ordering::Acquire);
-    loop {
-        let new = (old & !PIPE_NONBLOCK_MASK) | set;
-        match a.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => return,
-            Err(cur) => old = cur,
+    /// N-METH: inherent assoc fn (was the free fn `pipe_alloc_inner`).
+    fn pipe_alloc_inner(flags: c_int) -> KResult<*mut pipe> {
+        let pi = slab_alloc(pipe_slab()) as *mut pipe;
+        if pi.is_null() {
+            return Err(Errno::NoMem);
+        }
+
+        let data = kalloc();
+        if data.is_null() {
+            slab_free(pi as *mut c_void);
+            return Err(Errno::NoMem);
+        }
+
+        // SAFETY: `pi` was just slab-allocated and is exclusively owned by
+        // this call; no other thread can observe it until this function
+        // returns it to its caller.
+        unsafe {
+            crate::machine::smp_store_release_i32(ptr::addr_of_mut!((*pi).flags), PIPE_FLAGS_RW | flags);
+            (*pi).nwrite = 0;
+            (*pi).nread = 0;
+            (*pi).data = data as *mut c_char;
+            spin_init(
+                ptr::addr_of_mut!((*pi).reader_lock),
+                c"vfs_pipe_reader".as_ptr() as *mut c_char,
+            );
+            spin_init(
+                ptr::addr_of_mut!((*pi).writer_lock),
+                c"vfs_pipe_writer".as_ptr() as *mut c_char,
+            );
+            if let Some(r) = TqRef::from_ptr(ptr::addr_of_mut!((*pi).nread_queue)) {
+                r.init(c"pipe_nread_queue".as_ptr(), ptr::null_mut());
+            }
+            if let Some(r) = TqRef::from_ptr(ptr::addr_of_mut!((*pi).nwrite_queue)) {
+                r.init(c"pipe_nwrite_queue".as_ptr(), ptr::null_mut());
+            }
+        }
+        Ok(pi)
+    }
+
+    /// N-METH: inherent assoc fn (was the free `extern "C"` fn
+    /// `pipe_close`); name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
+        let freed;
+        if writable != 0 {
+            let g = Pipe::writer_lock(pi).lock();
+            freed = Pipe::clear_writable(pi);
+            // SAFETY: non-null `pi`.
+            let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(-1, 0));
+            drop(g);
+        } else {
+            let g = Pipe::reader_lock(pi).lock();
+            freed = Pipe::clear_readable(pi);
+            // SAFETY: non-null `pi`.
+            let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(-1, 0));
+            drop(g);
+        }
+        if freed {
+            // SAFETY: `pi->data` was allocated by `kalloc()` in `pipe_alloc`
+            // and is being freed exactly once (the both-clear check above
+            // guards against a double free between the two closer sides).
+            unsafe { kfree((*pi).data as *mut c_void) };
+            slab_free(pi as *mut c_void);
         }
     }
-}
 
-pub(crate) extern "C" fn pipe_get_flags(pi: *mut pipe) -> c_int {
-    flags_atomic(pi).load(Ordering::Acquire) & PIPE_NONBLOCK_MASK
+    /// N-METH: inherent assoc fn (was the free `extern "C"` fn
+    /// `pipe_set_flags`); name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn pipe_set_flags(pi: *mut pipe, flags: c_int) {
+        let set = flags & PIPE_NONBLOCK_MASK;
+        let a = Pipe::flags_atomic(pi);
+        let mut old = a.load(Ordering::Acquire);
+        loop {
+            let new = (old & !PIPE_NONBLOCK_MASK) | set;
+            match a.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return,
+                Err(cur) => old = cur,
+            }
+        }
+    }
+
+    /// N-METH: inherent assoc fn (was the free `extern "C"` fn
+    /// `pipe_get_flags`); name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn pipe_get_flags(pi: *mut pipe) -> c_int {
+        Pipe::flags_atomic(pi).load(Ordering::Acquire) & PIPE_NONBLOCK_MASK
+    }
 }
 
 // ===========================================================================
@@ -482,13 +504,15 @@ pub(crate) extern "C" fn pipe_get_flags(pi: *mut pipe) -> c_int {
 // section before changing anything here.
 // ===========================================================================
 
+impl Pipe {
 /// Mirrors `__pipe_wait_writer`: a *reader* blocked on an empty pipe
 /// waits here, on `nread_queue`, protected by `writer_lock` (not
-/// `reader_lock`) -- intentional, see the module doc.
+/// `reader_lock`) -- intentional, see the module doc. N-METH: inherent
+/// assoc fn (was the free fn `pipe_wait_writer`).
 fn pipe_wait_writer(pi: *mut pipe) -> c_int {
     let cur = xv6_current_thread();
-    let g = writer_lock(pi).lock();
-    if !pipe_writable(pi) || crate::proc::access::ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.killed()) != 0 {
+    let g = Pipe::writer_lock(pi).lock();
+    if !Pipe::pipe_writable(pi) || crate::proc::access::ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.killed()) != 0 {
         drop(g);
         // Return 0 to let the caller re-check and detect EOF properly.
         return 0;
@@ -526,12 +550,13 @@ fn pipe_wait_writer(pi: *mut pipe) -> c_int {
     0
 }
 
-/// Mirrors `__pipe_wait_reader` -- symmetric to [`pipe_wait_writer`], see
-/// the module doc.
+/// Mirrors `__pipe_wait_reader` -- symmetric to [`Pipe::pipe_wait_writer`],
+/// see the module doc. N-METH: inherent assoc fn (was the free fn
+/// `pipe_wait_reader`).
 fn pipe_wait_reader(pi: *mut pipe) -> c_int {
     let cur = xv6_current_thread();
-    let g = reader_lock(pi).lock();
-    if !pipe_readable(pi) || crate::proc::access::ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.killed()) != 0 {
+    let g = Pipe::reader_lock(pi).lock();
+    if !Pipe::pipe_readable(pi) || crate::proc::access::ThreadAccess::from_ptr(cur).map_or(0, |ta| ta.killed()) != 0 {
         drop(g);
         return 0;
     }
@@ -557,6 +582,7 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
     }
     0
 }
+}
 
 // ===========================================================================
 // Standalone pipe read/write -- the core pipe I/O routines. They
@@ -565,6 +591,9 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
 // handling.
 // ===========================================================================
 
+impl Pipe {
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `pipe_read`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, user: c_int) -> i64 {
     let count = count as usize;
     let pr = xv6_current_thread();
@@ -572,11 +601,11 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
     let mut tmp: [u8; 128] = [0; 128];
     let mut tmp_pos: usize = 0;
     let mut tmp_len: usize = 0;
-    let nonblock = pipe_nonblock_rd(pi);
+    let nonblock = Pipe::pipe_nonblock_rd(pi);
 
     'out: {
         while total < count {
-            let mut g = Some(reader_lock(pi).lock());
+            let mut g = Some(Pipe::reader_lock(pi).lock());
             while tmp_len == 0 {
                 // SAFETY: non-null `pi`.
                 let nwrite = load_acquire_u32(unsafe { ptr::addr_of!((*pi).nwrite) });
@@ -587,7 +616,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
                 let nread_old = unsafe { (*pi).nread };
                 let readable = nwrite.wrapping_sub(nread_old) as usize;
                 if readable == 0 {
-                    if !pipe_writable(pi) {
+                    if !Pipe::pipe_writable(pi) {
                         // Writer closed and no data left: EOF.
                         g = None;
                         break 'out;
@@ -612,7 +641,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
                     let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
                     g = None;
 
-                    let ret = pipe_wait_writer(pi);
+                    let ret = Pipe::pipe_wait_writer(pi);
                     if ret < 0 {
                         if total > 0 {
                             break 'out;
@@ -621,7 +650,7 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
                     }
                     // Return 0 to re-check conditions (wakeup may be
                     // from close or data).
-                    g = Some(reader_lock(pi).lock());
+                    g = Some(Pipe::reader_lock(pi).lock());
                 } else {
                     let read_size = (count - total).min(readable).min(tmp.len());
                     let nread = nread_old.wrapping_add(read_size as u32);
@@ -694,13 +723,15 @@ pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, 
     }
 
     {
-        let _g = reader_lock(pi).lock();
+        let _g = Pipe::reader_lock(pi).lock();
         // SAFETY: non-null `pi`.
         let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nwrite_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
     }
     total as i64
 }
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `pipe_write`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u64, user: c_int) -> i64 {
     let count = count as usize;
     let pr = xv6_current_thread();
@@ -708,7 +739,7 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
     let mut tmp: [u8; 128] = [0; 128];
     let mut tmp_pos: usize = 0;
     let mut tmp_len: usize = 0;
-    let nonblock = pipe_nonblock_wr(pi);
+    let nonblock = Pipe::pipe_nonblock_wr(pi);
 
     'out: {
         while total < count {
@@ -756,11 +787,11 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
                 }
             }
             total += tmp_len;
-            let mut g = Some(writer_lock(pi).lock());
+            let mut g = Some(Pipe::writer_lock(pi).lock());
             while tmp_len > tmp_pos {
                 // SAFETY: non-null `pi`.
                 let nread = load_acquire_u32(unsafe { ptr::addr_of!((*pi).nread) });
-                if !pipe_readable(pi) || crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) != 0 {
+                if !Pipe::pipe_readable(pi) || crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) != 0 {
                     g = None;
                     return -1;
                 }
@@ -781,14 +812,14 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
                     let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
                     g = None;
 
-                    let ret = pipe_wait_reader(pi);
+                    let ret = Pipe::pipe_wait_reader(pi);
                     if ret < 0 {
                         if total > tmp_len {
                             break 'out;
                         }
                         return ret as i64;
                     }
-                    g = Some(writer_lock(pi).lock());
+                    g = Some(Pipe::writer_lock(pi).lock());
                 } else {
                     let write_size = (tmp_len - tmp_pos).min(writable);
                     let nwrite = nwrite_old.wrapping_add(write_size as u32);
@@ -823,11 +854,12 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
     }
 
     {
-        let _g = writer_lock(pi).lock();
+        let _g = Pipe::writer_lock(pi).lock();
         // SAFETY: non-null `pi`.
         let _ = TqRef::from_ptr(unsafe { ptr::addr_of_mut!((*pi).nread_queue) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
     }
     (total as i64) - (tmp_len as i64 - tmp_pos as i64)
+}
 }
 
 // ===========================================================================
@@ -836,10 +868,12 @@ pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u6
 // pipe_write above.
 // ===========================================================================
 
+impl Pipe {
 /// `pipe_read`/`pipe_write`'s raw `i64` ("bytes moved, or negative
 /// errno") -> [`KResult<isize>`], preserving the exact errno via
 /// [`Errno::Raw`] passthrough (`-EAGAIN`/`-EINTR` from the ring-buffer
-/// half are results this adapter layer doesn't own).
+/// half are results this adapter layer doesn't own). N-METH: inherent
+/// assoc fn (was the free fn `pipe_result`).
 #[inline]
 fn pipe_result(ret: i64) -> KResult<isize> {
     if ret < 0 {
@@ -849,24 +883,27 @@ fn pipe_result(ret: i64) -> KResult<isize> {
     }
 }
 
+/// N-METH: inherent assoc fn (was the free fn `pipe_file_read`).
 fn pipe_file_read(file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool) -> KResult<isize> {
     // SAFETY: non-null `file` (only reachable via `PIPE_FILE_OPS`
     // dispatch from `vfs/file.rs`, which already validated `file`).
     let pi = unsafe { (*file).pos.pipe };
-    pipe_result(pipe_read(pi, buf, count as u64, user as c_int))
+    Pipe::pipe_result(Pipe::pipe_read(pi, buf, count as u64, user as c_int))
 }
 
+/// N-METH: inherent assoc fn (was the free fn `pipe_file_write`).
 fn pipe_file_write(
     file: *mut vfs_file,
     buf: *const c_char,
     count: usize,
     user: bool,
 ) -> KResult<isize> {
-    // SAFETY: see `pipe_file_read`.
+    // SAFETY: see `Pipe::pipe_file_read`.
     let pi = unsafe { (*file).pos.pipe };
-    pipe_result(pipe_write(pi, buf, count as u64, user as c_int))
+    Pipe::pipe_result(Pipe::pipe_write(pi, buf, count as u64, user as c_int))
 }
 
+/// N-METH: inherent assoc fn (was the free fn `pipe_file_release`).
 fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
     // Pipes have no inode.
     // SAFETY: non-null `file`.
@@ -874,7 +911,7 @@ fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()>
     if !pi.is_null() {
         // SAFETY: non-null `file`.
         let writable = (unsafe { (*file).f_flags } & O_ACCMODE) != O_RDONLY;
-        pipe_close(pi, writable as c_int);
+        Pipe::pipe_close(pi, writable as c_int);
         // SAFETY: non-null `file`.
         unsafe { (*file).pos.pipe = ptr::null_mut() };
     }
@@ -882,7 +919,8 @@ fn pipe_file_release(_inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()>
 }
 
 /// Mirrors `__pipe_file_poll`: check pipe readiness for I/O without
-/// blocking. Returns the subset of `events` that are ready.
+/// blocking. Returns the subset of `events` that are ready. N-METH:
+/// inherent assoc fn (was the free fn `pipe_file_poll`).
 fn pipe_file_poll(file: *mut vfs_file, events: c_short) -> c_int {
     // SAFETY: non-null `file`.
     let pi = unsafe { (*file).pos.pipe };
@@ -897,19 +935,20 @@ fn pipe_file_poll(file: *mut vfs_file, events: c_short) -> c_int {
     let writable = PIPESIZE - readable;
 
     let mut revents: c_short = 0;
-    if events & (POLLIN | POLLRDNORM) != 0 && (readable > 0 || !pipe_writable(pi)) {
+    if events & (POLLIN | POLLRDNORM) != 0 && (readable > 0 || !Pipe::pipe_writable(pi)) {
         revents |= events & (POLLIN | POLLRDNORM);
     }
-    if events & (POLLOUT | POLLWRNORM) != 0 && (writable > 0 && pipe_readable(pi)) {
+    if events & (POLLOUT | POLLWRNORM) != 0 && (writable > 0 && Pipe::pipe_readable(pi)) {
         revents |= events & (POLLOUT | POLLWRNORM);
     }
-    if !pipe_readable(pi) {
+    if !Pipe::pipe_readable(pi) {
         revents |= POLLERR;
     }
-    if !pipe_writable(pi) {
+    if !Pipe::pipe_writable(pi) {
         revents |= POLLHUP;
     }
     revents as c_int
+}
 }
 
 // P3-10a `FileOps` trait implementor (was the `struct vfs_file_ops`
@@ -928,23 +967,26 @@ static PIPE_FILE_OPS: PipeFileOps = PipeFileOps;
 impl crate::vfs::file::FileOps for PipeFileOps {
     unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
         -> KResult<isize> {
-        pipe_file_read(file, buf, count, user)
+        Pipe::pipe_file_read(file, buf, count, user)
     }
 
     unsafe fn write(&self, file: *mut vfs_file, buf: *const c_char, count: usize, user: bool)
         -> KResult<isize> {
-        pipe_file_write(file, buf, count, user)
+        Pipe::pipe_file_write(file, buf, count, user)
     }
 
     unsafe fn release(&self, inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
-        pipe_file_release(inode, file)
+        Pipe::pipe_file_release(inode, file)
     }
 
     unsafe fn poll(&self, file: *mut vfs_file, events: c_short) -> Option<c_int> {
-        Some(pipe_file_poll(file, events))
+        Some(Pipe::pipe_file_poll(file, events))
     }
 }
 
+impl Pipe {
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `pipe_open`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: c_int) {
     // SAFETY: `file` is a freshly allocated `vfs_file` (every caller's
     // precondition, e.g. `vfs_pipealloc` in `vfs/file.rs`).
@@ -953,5 +995,6 @@ pub(crate) extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: 
         (*file).pos.pipe = pi;
         (*file).ops = Some(&PIPE_FILE_OPS);
     }
+}
 }
 

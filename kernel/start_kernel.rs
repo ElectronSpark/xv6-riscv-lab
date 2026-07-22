@@ -113,7 +113,7 @@ use crate::tty::ptmx::ptmxinit;
 use crate::tty::tty::tty_init;
 use crate::tty::tty_dev::ttydevinit;
 use crate::vfs::fs::Vfs;
-use crate::vfs::pipe::pipe_init;
+use crate::vfs::pipe::Pipe;
 
 // ===========================================================================
 // Early physical-memory bounds — canonical definitions.
@@ -279,7 +279,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         crate::kprintln!("page table initialized");
         PageTable::kvminithart(); // turn on paging
         crate::kprintln!("paging enabled");
-        pipe_init(); // initialize pipe subsystem
+        Pipe::pipe_init(); // initialize pipe subsystem
         mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
         crate::kprintln!("mycpu initialized");
         rcu_init(); // RCU subsystem initialization

@@ -633,7 +633,7 @@ use crate::mm::Vm;
 // `vfs_inode_get_ref`/`vfs_iput`/`vfs_fdtable_put` have identical
 // signatures to their real definitions (same `crate::bindings::*` types
 // already imported above), so they become plain crate-path imports.
-use crate::vfs::fdtable::vfs_fdtable_put;
+use crate::vfs::fdtable::VfsFdtable;
 use crate::vfs::fs::FsStruct;
 use crate::vfs::inode::VfsInode;
 
@@ -1144,7 +1144,7 @@ impl<'a> ThreadAccess<'a> {
                 self.set_vm(ptr::null_mut());
             }
             if !self.fdtable_ptr().is_null() {
-                vfs_fdtable_put(self.fdtable_ptr());
+                VfsFdtable::vfs_fdtable_put(self.fdtable_ptr());
                 self.set_fdtable(ptr::null_mut());
             }
             if !(*p).fs.is_null() {

@@ -163,7 +163,7 @@ mod raw {
         }
     }
     pub fn vfs_fdtable_put(fdt: *mut VfsFdtable) {
-        crate::vfs::fdtable::vfs_fdtable_put(fdt as *mut c_void as *mut crate::bindings::vfs_fdtable);
+        crate::vfs::fdtable::VfsFdtable::vfs_fdtable_put(fdt as *mut c_void as *mut crate::bindings::vfs_fdtable);
     }
     pub fn vfs_struct_put(fs: *mut FsStruct) {
         crate::vfs::fs::FsStruct::vfs_struct_put(fs as *mut c_void as *mut crate::bindings::fs_struct);

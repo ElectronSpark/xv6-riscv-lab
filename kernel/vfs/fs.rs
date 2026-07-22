@@ -770,8 +770,8 @@ use crate::mm::cffi::raw::kmm_free;
 // redeclarations (all identical signatures -- same `crate::bindings::*`
 // types this file already imports).
 use crate::vfs::devtmpfs::superblock::{devtmpfs_init, devtmpfs_post_mount_populate};
-use crate::vfs::fdtable::{__vfs_fdtable_global_init, vfs_fdtable_init};
-use crate::vfs::file::{__vfs_file_init, __vfs_file_shrink_cache};
+use crate::vfs::fdtable::VfsFdtable;
+use crate::vfs::file::VfsFile;
 use crate::vfs::inode::{inode_ops, VfsInode};
 use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
 use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
@@ -3000,7 +3000,7 @@ impl Vfs {
             VfsInode::vfs_rooti_init();
             ln_init(&raw mut VFS_FS_TYPES);
             mutex_init(&raw mut __MOUNT_MUTEX, c"vfs_mount_mutex".as_ptr() as *mut c_char);
-            __vfs_fdtable_global_init();
+            VfsFdtable::__vfs_fdtable_global_init();
             let mut ret = slab_cache_init(
                 &raw mut VFS_SUPERBLOCK_CACHE,
                 c"vfs_superblock_cache".as_ptr() as *mut c_char,
@@ -3038,9 +3038,9 @@ impl Vfs {
             let thread = xv6_current_thread();
             kassert!(!thread.is_null(), "Vfs::vfs_init must be called from a thread context");
             VfsInode::__vfs_inode_init(&raw mut vfs_root_inode);
-            __vfs_file_init();
+            VfsFile::__vfs_file_init();
             (*thread).fs = FsStruct::vfs_struct_init();
-            (*thread).fdtable = vfs_fdtable_init();
+            (*thread).fdtable = VfsFdtable::vfs_fdtable_init();
 
             // Initialize filesystem types (registers them with VFS).
             tmpfs_init();
@@ -3145,7 +3145,7 @@ impl Vfs {
         unsafe {
             slab_cache_shrink(&raw mut VFS_SUPERBLOCK_CACHE, 0x7fffffff);
             slab_cache_shrink(&raw mut VFS_FS_TYPE_CACHE, 0x7fffffff);
-            __vfs_file_shrink_cache();
+            VfsFile::__vfs_file_shrink_cache();
         }
     }
 

@@ -187,7 +187,7 @@ fn vfs_struct_clone(old: *mut FsStruct, flags: u64) -> *mut FsStruct {
 }
 #[inline(always)]
 fn vfs_fdtable_clone(src: *mut VfsFdtable, flags: c_int) -> *mut VfsFdtable {
-    crate::vfs::fdtable::vfs_fdtable_clone(
+    crate::vfs::fdtable::VfsFdtable::vfs_fdtable_clone(
         src as *mut c_void as *mut crate::bindings::vfs_fdtable,
         flags,
     ) as *mut c_void as *mut VfsFdtable

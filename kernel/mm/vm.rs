@@ -306,7 +306,7 @@ impl Vma {
 
             (*vma_ptr).flags = PROT_NONE as u64;
             if !(*vma_ptr).file.is_null() {
-                vfs_fput((*vma_ptr).file);
+                VfsFile::vfs_fput((*vma_ptr).file);
             }
             (*vma_ptr).file = core::ptr::null_mut();
             (*vma_ptr).pgoff = 0;
@@ -349,7 +349,7 @@ impl Vma {
             (*dst).flags = (*src).flags;
             (*dst).pgoff = (*src).pgoff;
             if !(*src).file.is_null() {
-                let dup = vfs_fdup((*src).file);
+                let dup = VfsFile::vfs_fdup((*src).file);
                 if dup.is_null() {
                     return -(EBADF as c_int);
                 }
@@ -450,7 +450,7 @@ impl Vma {
             (*new_vma).end = (*vma_ptr).end;
             (*new_vma).flags = (*vma_ptr).flags;
             if !(*vma_ptr).file.is_null() {
-                (*new_vma).file = vfs_fdup((*vma_ptr).file);
+                (*new_vma).file = VfsFile::vfs_fdup((*vma_ptr).file);
                 (*new_vma).pgoff = (*vma_ptr).pgoff + (va - (*vma_ptr).start);
             } else {
                 (*new_vma).file = core::ptr::null_mut();
@@ -511,7 +511,7 @@ impl Vma {
             Vma::xv6_vm_list_detach_list_entry(vma2);
             Vma::xv6_vm_list_detach_free_list_entry(vma2);
             if !(*vma2).file.is_null() {
-                vfs_fput((*vma2).file);
+                VfsFile::vfs_fput((*vma2).file);
                 (*vma2).file = core::ptr::null_mut();
             }
             Vma::__vma_free(vma2);
@@ -2085,7 +2085,7 @@ impl Vm {
                 return -(ENOMEM as c_int);
             }
             if !file.is_null() {
-                (*vma_ptr).file = vfs_fdup(file);
+                (*vma_ptr).file = VfsFile::vfs_fdup(file);
                 if (*vma_ptr).file.is_null() {
                     Vma::vma_free(vm_ptr, vma_ptr);
                     return -(EBADF as c_int);
@@ -2637,7 +2637,7 @@ impl Vm {
             if xv6_vm_inode_is_reg(file) == 0 {
                 // SAFETY: `file` was just checked non-null and is a live
                 // `vfs_file` reference obtained from `vfs_fdtable_get_file`.
-                unsafe { vfs_fput(file) };
+                unsafe { VfsFile::vfs_fput(file) };
                 return u64::MAX;
             }
         } else if (flags & MAP_ANONYMOUS as c_int) == 0 {
@@ -2660,7 +2660,7 @@ impl Vm {
                 drop(_g);
                 if !file.is_null() {
                     // SAFETY: `file` is a live `vfs_file` reference (see above).
-                    unsafe { vfs_fput(file) };
+                    unsafe { VfsFile::vfs_fput(file) };
                 }
                 return u64::MAX;
             }
@@ -2674,7 +2674,7 @@ impl Vm {
             drop(_g);
             if !file.is_null() {
                 // SAFETY: `file` is a live `vfs_file` reference (see above).
-                unsafe { vfs_fput(file) };
+                unsafe { VfsFile::vfs_fput(file) };
             }
             return u64::MAX;
         }
@@ -2777,7 +2777,7 @@ pub(crate) use crate::sbi::sbi_remote_hfence_vma;
     /// SAFETY: `fdtable` must be a live `vfs_fdtable` (caller's contract,
     /// unchanged from the extern declaration this replaces).
     pub fn vfs_fdtable_get_file(fdtable: *mut c_void, fd: c_int) -> *mut vfs_file {
-        crate::vfs::fdtable::vfs_fdtable_get_file(
+        crate::vfs::fdtable::VfsFdtable::vfs_fdtable_get_file(
             fdtable as *mut crate::bindings::vfs_fdtable,
             fd,
         )
@@ -3191,7 +3191,7 @@ unsafe extern "C" {
 // identical (`*mut vfs_file`, same type this file already imports), so
 // these become plain crate-path re-exports instead of `extern "C"`
 // redeclarations.
-use crate::vfs::file::{vfs_fdup, vfs_fput, FileOps};
+use crate::vfs::file::{FileOps, VfsFile};
 pub(crate) use crate::mm::slab::slab_free;
 pub(crate) use crate::mm::vm_pgtab::xv6_vm_panic;
 

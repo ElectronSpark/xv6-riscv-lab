@@ -500,7 +500,7 @@ use crate::sysnet::SOCKETS;
 // already imports).
 use crate::vfs::fs::FsStruct;
 use crate::vfs::inode::VfsInode;
-use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_open};
+use crate::vfs::pipe::Pipe;
 
 // `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
 // centralization).
@@ -615,11 +615,16 @@ unsafe fn ln_detach(node: *mut list_node_t) {
 // and their ordering rationale).
 // ---------------------------------------------------------------------------
 
-#[inline(always)]
-fn refcount_atomic<'a>(file: *mut vfs_file) -> &'a AtomicI32 {
-    // SAFETY: `ref_count` is a plain C `int` field, same size/align as
-    // `AtomicI32`; caller ensures `file` is a live, aligned `vfs_file`.
-    unsafe { &*(ptr::addr_of_mut!((*file).ref_count) as *const AtomicI32) }
+impl VfsFile {
+    /// N-METH: inherent assoc fn (was a free fn on the raw `*mut
+    /// vfs_file`); raw-pointer param kept (P3-7b's refcount aliasing
+    /// screen, same precedent as `VfsInode::refcount_atomic`).
+    #[inline(always)]
+    fn refcount_atomic<'a>(file: *mut vfs_file) -> &'a AtomicI32 {
+        // SAFETY: `ref_count` is a plain C `int` field, same size/align as
+        // `AtomicI32`; caller ensures `file` is a live, aligned `vfs_file`.
+        unsafe { &*(ptr::addr_of_mut!((*file).ref_count) as *const AtomicI32) }
+    }
 }
 
 fn atomic_oper_cond(
@@ -697,105 +702,124 @@ impl VfsFile {
     }
 }
 
-fn ftable_attach(file: *mut vfs_file) {
-    let mut g = __VFS_FTABLE.lock();
-    // SAFETY: `g` proves the lock is held; `&raw mut *g` is the live
-    // global open-file list head (initialized once by `__vfs_file_init`
-    // before any attach/detach can race in); `file->list_entry` is not
-    // yet linked anywhere (every caller passes a freshly allocated file).
-    unsafe {
-        ln_push_back(&raw mut *g, ptr::addr_of_mut!((*file).list_entry));
+impl VfsFile {
+    /// N-METH: inherent assoc fn (was the free fn `ftable_attach`); raw
+    /// `file` param kept (operates on a not-yet-live/just-built file, per
+    /// the module doc's lifetime-honesty exclusions).
+    fn ftable_attach(file: *mut vfs_file) {
+        let mut g = __VFS_FTABLE.lock();
+        // SAFETY: `g` proves the lock is held; `&raw mut *g` is the live
+        // global open-file list head (initialized once by
+        // `VfsFile::vfs_file_init` before any attach/detach can race in);
+        // `file->list_entry` is not yet linked anywhere (every caller
+        // passes a freshly allocated file).
+        unsafe {
+            ln_push_back(&raw mut *g, ptr::addr_of_mut!((*file).list_entry));
+        }
+        let count = __VFS_OPEN_FILE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(g);
+        kassert!(count > 0, "vfs file open count overflow");
     }
-    let count = __VFS_OPEN_FILE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    drop(g);
-    kassert!(count > 0, "vfs file open count overflow");
-}
 
-fn ftable_detach(file: *mut vfs_file) {
-    let g = __VFS_FTABLE.lock();
-    // SAFETY: `g` proves the lock is held (the critical section the head
-    // and every linked node share); `file->list_entry` is linked into
-    // `__VFS_FTABLE` (every caller passes a file that went through
-    // `ftable_attach`), so `ln_detach` only relinks its own neighbours.
-    unsafe { ln_detach(ptr::addr_of_mut!((*file).list_entry)) };
-    let count = __VFS_OPEN_FILE_COUNT.fetch_sub(1, Ordering::SeqCst) - 1;
-    drop(g);
-    kassert!(count >= 0, "vfs file open count underflow");
-}
+    /// N-METH: inherent assoc fn (was the free fn `ftable_detach`); raw
+    /// `file` param kept (called from [`VfsFile::vfs_fput`] on the file
+    /// being torn down).
+    fn ftable_detach(file: *mut vfs_file) {
+        let g = __VFS_FTABLE.lock();
+        // SAFETY: `g` proves the lock is held (the critical section the head
+        // and every linked node share); `file->list_entry` is linked into
+        // `__VFS_FTABLE` (every caller passes a file that went through
+        // `ftable_attach`), so `ln_detach` only relinks its own neighbours.
+        unsafe { ln_detach(ptr::addr_of_mut!((*file).list_entry)) };
+        let count = __VFS_OPEN_FILE_COUNT.fetch_sub(1, Ordering::SeqCst) - 1;
+        drop(g);
+        kassert!(count >= 0, "vfs file open count underflow");
+    }
 
-fn file_alloc() -> *mut vfs_file {
-    let file = slab_alloc(vfs_file_slab()) as *mut vfs_file;
-    if file.is_null() {
-        return ptr::null_mut();
+    /// N-METH: inherent assoc fn (was the free fn `file_alloc`); no live
+    /// receiver exists yet (constructs a fresh file), so it stays a raw
+    /// out-pointer-returning constructor per the module doc's
+    /// lifetime-honesty exclusions.
+    fn file_alloc() -> *mut vfs_file {
+        let file = slab_alloc(vfs_file_slab()) as *mut vfs_file;
+        if file.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `slab_alloc` returned a fresh, exclusively-owned
+        // `size_of::<vfs_file>()` allocation; zeroing then field-initializing
+        // it mirrors the C original's `memset` + explicit-field-init. `ops`
+        // is written explicitly: all-zero bytes are not a documented `None`
+        // for the `Option<&'static dyn FileOps>` fat pointer (P3-10a), so
+        // the raw `write` (a pure store — no read/drop of the zeroed bytes)
+        // establishes the field's validity before anyone loads it.
+        unsafe {
+            ptr::write_bytes(file, 0, 1);
+            ptr::addr_of_mut!((*file).ops).write(None);
+            mutex_init(ptr::addr_of_mut!((*file).lock), c"vfs_file_lock".as_ptr() as *mut c_char);
+            (*file).ref_count = 1;
+        }
+        file
     }
-    // SAFETY: `slab_alloc` returned a fresh, exclusively-owned
-    // `size_of::<vfs_file>()` allocation; zeroing then field-initializing
-    // it mirrors the C original's `memset` + explicit-field-init. `ops`
-    // is written explicitly: all-zero bytes are not a documented `None`
-    // for the `Option<&'static dyn FileOps>` fat pointer (P3-10a), so
-    // the raw `write` (a pure store — no read/drop of the zeroed bytes)
-    // establishes the field's validity before anyone loads it.
-    unsafe {
-        ptr::write_bytes(file, 0, 1);
-        ptr::addr_of_mut!((*file).ops).write(None);
-        mutex_init(ptr::addr_of_mut!((*file).lock), c"vfs_file_lock".as_ptr() as *mut c_char);
-        (*file).ref_count = 1;
-    }
-    file
-}
 
-fn file_free(file: *mut vfs_file) {
-    if file.is_null() {
-        return;
-    }
-    // SAFETY: `file` is a live, exclusively-owned `vfs_file` about to be
-    // returned to the slab (every caller holds the last reference);
-    // `release` is the driver's teardown hook with exactly that
-    // contract. A missing table (`None` ops) skips the call, and the
-    // trait's default `release` is `Ok(())` — both reproduce the old
-    // null-table/`None`-slot "silently skip" behavior.
-    unsafe {
-        if let Some(ops) = (*file).ops {
-            if let Err(e) = ops.release((*file).inode.inode, file) {
-                crate::kprintln!("__vfs_file_free: file ops release failed, errno={}", e.neg());
+    /// N-METH: inherent assoc fn (was the free fn `file_free`); raw
+    /// `file` param kept (frees the object -- lifetime-honesty exclusion).
+    fn file_free(file: *mut vfs_file) {
+        if file.is_null() {
+            return;
+        }
+        // SAFETY: `file` is a live, exclusively-owned `vfs_file` about to be
+        // returned to the slab (every caller holds the last reference);
+        // `release` is the driver's teardown hook with exactly that
+        // contract. A missing table (`None` ops) skips the call, and the
+        // trait's default `release` is `Ok(())` — both reproduce the old
+        // null-table/`None`-slot "silently skip" behavior.
+        unsafe {
+            if let Some(ops) = (*file).ops {
+                if let Err(e) = ops.release((*file).inode.inode, file) {
+                    crate::kprintln!("__vfs_file_free: file ops release failed, errno={}", e.neg());
+                }
             }
         }
+        slab_free(file as *mut c_void);
     }
-    slab_free(file as *mut c_void);
-}
 
-pub(crate) extern "C" fn __vfs_file_init() {
-    let ret = slab_cache_init(
-        vfs_file_slab(),
-        c"vfs_file_cache".as_ptr() as *mut c_char,
-        core::mem::size_of::<vfs_file>(),
-        (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
-    );
-    kassert!(ret == 0, "Failed to initialize vfs_file_cache slab cache");
-    // Complete the one-time list-head self-reference fixup through the
-    // guard (Wave P3-8f: `__VFS_FTABLE` owns its lock now, so the head is
-    // reached via `.lock()` rather than a `spin_init` on a separate
-    // `spinlock_t` plus a raw write to a separate `static mut` — the
-    // `SpinLock::new` `const fn` already put the lock in its initialised
-    // state). Called exactly once, at boot, before any other thread can
-    // observe `__VFS_FTABLE` (matches the C original's single
-    // `vfs_init()` call site).
-    {
-        let mut head = __VFS_FTABLE.lock();
-        let addr: *mut list_node_t = &raw mut *head;
-        // SAFETY: `addr` is the live, stable address of the list head the
-        // guard owns; writing its own address into `next`/`prev` is the
-        // `LIST_ENTRY_INITIALIZED` self-reference idiom.
-        unsafe {
-            (*addr).prev = addr;
-            (*addr).next = addr;
+    /// N-METH: inherent assoc fn (was the free fn `__vfs_file_init`); name
+    /// kept verbatim (NAMESPACING, not renaming) per the `8283168`/
+    /// `VfsInode::vfs_idup` precedent.
+    pub(crate) extern "C" fn __vfs_file_init() {
+        let ret = slab_cache_init(
+            vfs_file_slab(),
+            c"vfs_file_cache".as_ptr() as *mut c_char,
+            core::mem::size_of::<vfs_file>(),
+            (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
+        );
+        kassert!(ret == 0, "Failed to initialize vfs_file_cache slab cache");
+        // Complete the one-time list-head self-reference fixup through the
+        // guard (Wave P3-8f: `__VFS_FTABLE` owns its lock now, so the head is
+        // reached via `.lock()` rather than a `spin_init` on a separate
+        // `spinlock_t` plus a raw write to a separate `static mut` — the
+        // `SpinLock::new` `const fn` already put the lock in its initialised
+        // state). Called exactly once, at boot, before any other thread can
+        // observe `__VFS_FTABLE` (matches the C original's single
+        // `vfs_init()` call site).
+        {
+            let mut head = __VFS_FTABLE.lock();
+            let addr: *mut list_node_t = &raw mut *head;
+            // SAFETY: `addr` is the live, stable address of the list head the
+            // guard owns; writing its own address into `next`/`prev` is the
+            // `LIST_ENTRY_INITIALIZED` self-reference idiom.
+            unsafe {
+                (*addr).prev = addr;
+                (*addr).next = addr;
+            }
         }
+        __VFS_OPEN_FILE_COUNT.store(0, Ordering::SeqCst);
     }
-    __VFS_OPEN_FILE_COUNT.store(0, Ordering::SeqCst);
-}
 
-pub(crate) extern "C" fn __vfs_file_shrink_cache() {
-    slab_cache_shrink(vfs_file_slab(), 0x7fffffff);
+    /// N-METH: inherent assoc fn (was the free fn `__vfs_file_shrink_cache`).
+    pub(crate) extern "C" fn __vfs_file_shrink_cache() {
+        slab_cache_shrink(vfs_file_slab(), 0x7fffffff);
+    }
 }
 
 // ===========================================================================
@@ -901,6 +925,10 @@ impl VfsFile {
 /// (`vfs_inode_get_ref`, the inode `open` callback) stay `Err(Errno::Raw(..))`
 /// — a boundary this cluster doesn't own, same precedent as
 /// `vfs_syscall.rs`'s `open_inner`.
+impl VfsFile {
+/// N-METH: inherent assoc fn (was the free fn `vfs_fileopen_inner`); raw
+/// `inode`/return kept (constructs a fresh file -- lifetime-honesty
+/// exclusion).
 fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs_file> {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
         return Err(Errno::Inval);
@@ -917,7 +945,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
 
     VfsInode::vfs_ilock(inode);
     // @TODO: check permission
-    let file = file_alloc();
+    let file = VfsFile::file_alloc();
     if file.is_null() {
         VfsInode::vfs_iunlock(inode);
         return Err(Errno::NoMem);
@@ -932,7 +960,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     let f = unsafe { &mut *file };
     let ret = FsStruct::vfs_inode_get_ref(inode, &raw mut f.inode);
     if ret != 0 {
-        file_free(&raw mut *f);
+        VfsFile::file_free(&raw mut *f);
         VfsInode::vfs_iunlock(inode);
         return Err(Errno::Raw(ret));
     }
@@ -941,11 +969,11 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
         if let Err(e) = f.open_cdev(inode) {
             VfsInode::vfs_iunlock(inode);
             FsStruct::vfs_inode_put_ref(&raw mut f.inode);
-            file_free(&raw mut *f);
+            VfsFile::file_free(&raw mut *f);
             return Err(e);
         }
         VfsInode::vfs_iunlock(inode);
-        ftable_attach(&raw mut *f);
+        VfsFile::ftable_attach(&raw mut *f);
         f.f_flags = f_flags;
         return Ok(&raw mut *f);
     }
@@ -953,7 +981,7 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     if is_blk(mode) {
         f.open_blkdev(inode); // Infallible -- see its own doc comment.
         VfsInode::vfs_iunlock(inode);
-        ftable_attach(&raw mut *f);
+        VfsFile::ftable_attach(&raw mut *f);
         f.f_flags = f_flags;
         return Ok(&raw mut *f);
     }
@@ -968,44 +996,47 @@ fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs
     if let Err(e) = unsafe { crate::vfs::inode::inode_ops(inode).open(inode, &raw mut *f, f_flags) } {
         VfsInode::vfs_iunlock(inode);
         FsStruct::vfs_inode_put_ref(&raw mut f.inode);
-        file_free(&raw mut *f);
+        VfsFile::file_free(&raw mut *f);
         return Err(e);
     }
     if f.ops.is_none() {
         VfsInode::vfs_iunlock(inode);
         FsStruct::vfs_inode_put_ref(&raw mut f.inode);
-        file_free(&raw mut *f);
+        VfsFile::file_free(&raw mut *f);
         crate::kprintln!("vfs_fileopen: file operations not set by inode open");
         return Err(Errno::Inval);
     }
 
     VfsInode::vfs_iunlock(inode);
-    ftable_attach(&raw mut *f);
+    VfsFile::ftable_attach(&raw mut *f);
     f.f_flags = f_flags;
     // SAFETY: `pos.f_pos` is the active union member of a regular file.
     unsafe { f.pos.f_pos = 0 };
     Ok(&raw mut *f)
 }
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_fileopen`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file {
-    result_to_errptr(vfs_fileopen_inner(inode, f_flags))
+    result_to_errptr(VfsFile::vfs_fileopen_inner(inode, f_flags))
 }
 
 /// Release a file reference. Decrements the file's reference count; on
 /// last reference, detaches from the global table, flushes/closes the
 /// backing object (cdev/blkdev/pipe), drops the inode reference, and
-/// frees the `vfs_file`.
+/// frees the `vfs_file`. N-METH: inherent assoc fn (was the free
+/// `extern "C"` fn `vfs_fput`); name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
     if file.is_null() {
         return;
     }
-    if atomic_dec_unless(refcount_atomic(file), 1) {
+    if atomic_dec_unless(VfsFile::refcount_atomic(file), 1) {
         return;
     }
     // File descriptors are shared through dup, thus when refcount
     // reaches 1, no other threads will be using it. No need to lock the
     // file structure.
-    ftable_detach(file);
+    VfsFile::ftable_detach(file);
 
     // SAFETY: the final reference was just dropped above (the `dup`
     // sharing means refcount==1 => genuinely exclusive), so this thread
@@ -1065,26 +1096,28 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
             let pi = unsafe { f.pos.pipe };
             if !pi.is_null() {
                 let writable = (f.f_flags & O_ACCMODE) != O_RDONLY;
-                pipe_close(pi, writable as c_int);
+                Pipe::pipe_close(pi, writable as c_int);
             }
         }
         // Sockets are not opened via inodes, so no cleanup here.
     }
 
     FsStruct::vfs_inode_put_ref(&raw mut f.inode);
-    file_free(&raw mut *f);
+    VfsFile::file_free(&raw mut *f);
 }
 
 /// Duplicate a file reference (increment refcount). Returns `NULL` if
-/// `file` was already closed (or `NULL`).
+/// `file` was already closed (or `NULL`). N-METH: inherent assoc fn (was
+/// the free `extern "C"` fn `vfs_fdup`); name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file {
     if file.is_null() {
         return ptr::null_mut();
     }
-    if !atomic_inc_unless(refcount_atomic(file), 0) {
+    if !atomic_inc_unless(VfsFile::refcount_atomic(file), 0) {
         return ptr::null_mut(); // File was already closed.
     }
     file
+}
 }
 
 impl VfsFile {
@@ -1138,8 +1171,9 @@ fn ioctl_inner(&mut self, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
 
     Err(Errno::NotTy)
 }
-}
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_ioctl`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
     if file.is_null() {
         return Errno::BadF.neg(); // Same errno the old null check produced.
@@ -1151,6 +1185,7 @@ pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_vo
         Ok(v) => v,
         Err(e) => e.neg(),
     }
+}
 }
 
 impl VfsFile {
@@ -1252,8 +1287,9 @@ fn read_inner(&mut self, buf: *mut c_void, n: usize, user: c_int) -> KResult<isi
     }
     Ok(ret)
 }
-}
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_fileread`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize {
     if file.is_null() {
         return Errno::BadF.neg() as isize; // Same errno the old null check produced.
@@ -1264,6 +1300,7 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
         Ok(v) => v,
         Err(e) => e.neg() as isize,
     }
+}
 }
 
 impl VfsFile {
@@ -1324,8 +1361,9 @@ fn stat_inner(&mut self, out: *mut stat) -> KResult<c_int> {
     VfsInode::vfs_iunlock(inode);
     Ok(0)
 }
-}
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_filestat`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
     if file.is_null() {
         return Errno::BadF.neg(); // Same errno the old null check produced.
@@ -1337,7 +1375,6 @@ pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_
     }
 }
 
-impl VfsFile {
 /// Core logic behind [`vfs_filewrite`], factored out as a private method
 /// returning [`KResult`] (P3-CS6) — same shape/rationale as
 /// [`VfsFile::read_inner`] with the `O_RDONLY`/`O_WRONLY` access checks
@@ -1428,8 +1465,9 @@ fn write_inner(
     }
     Ok(ret)
 }
-}
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_filewrite`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_filewrite(
     file: *mut vfs_file,
     buf: *const c_void,
@@ -1446,7 +1484,6 @@ pub(crate) extern "C" fn vfs_filewrite(
     }
 }
 
-impl VfsFile {
 /// Core logic behind [`vfs_filelseek`], factored out as a private method
 /// returning [`KResult`] (P3-CS6). Only `EBADF`/`EINVAL`/`ESPIPE` are
 /// this method's own failures; the driver-callback (`ops.llseek`)
@@ -1487,8 +1524,9 @@ fn lseek_inner(&mut self, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     }
     Ok(ret)
 }
-}
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_filelseek`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
     if file.is_null() {
         return Errno::BadF.neg() as loff_t; // Same errno the old null check produced.
@@ -1500,7 +1538,6 @@ pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, when
     }
 }
 
-impl VfsFile {
 /// Core logic behind [`truncate`], factored out as a private method
 /// returning [`KResult`] (P3-CS6). Only `EBADF`/`EISDIR`/`EINVAL` are
 /// this method's own failures; `vfs_itruncate`'s result passes through
@@ -1527,8 +1564,9 @@ fn truncate_inner(&mut self, length: loff_t) -> KResult<c_int> {
     // `vfs_ilock` is acquired inside `vfs_itruncate`.
     Ok(VfsInode::vfs_itruncate(inode, length))
 }
-}
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `truncate`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
     if file.is_null() {
         return Errno::BadF.neg(); // Same errno the old null check produced.
@@ -1539,15 +1577,18 @@ pub(crate) extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int 
         Err(e) => e.neg(),
     }
 }
+}
 
 // ===========================================================================
 // VFS pipe allocation.
 // ===========================================================================
 
+impl VfsFile {
 /// Core logic behind [`vfs_pipealloc`], factored out as a private helper
 /// returning [`KResult`] (P3-CS6). The `pipe_alloc` `ERR_PTR` failure is a
 /// cross-module boundary this cluster doesn't own -- stays
-/// `Err(Errno::Raw(..))`, same precedent as `open_cdev`.
+/// `Err(Errno::Raw(..))`, same precedent as `open_cdev`. N-METH: inherent
+/// assoc fn (was the free fn `vfs_pipealloc_inner`).
 fn vfs_pipealloc_inner(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> KResult<()> {
     // SAFETY: `rf`/`wf` are caller-owned out-params (every caller in the
     // tree passes stack-local `struct vfs_file *` addresses).
@@ -1556,29 +1597,29 @@ fn vfs_pipealloc_inner(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> KResul
         *wf = ptr::null_mut();
     }
 
-    let read_file = file_alloc();
+    let read_file = VfsFile::file_alloc();
     if read_file.is_null() {
         return Err(Errno::NoMem);
     }
 
-    let write_file = file_alloc();
+    let write_file = VfsFile::file_alloc();
     if write_file.is_null() {
-        file_free(read_file);
+        VfsFile::file_free(read_file);
         return Err(Errno::NoMem);
     }
 
-    let pi = pipe_alloc(0);
+    let pi = Pipe::pipe_alloc(0);
     if is_err(pi) {
-        file_free(read_file);
-        file_free(write_file);
+        VfsFile::file_free(read_file);
+        VfsFile::file_free(write_file);
         return Err(Errno::Raw(ptr_err(pi)));
     }
 
-    pipe_open(read_file, pi, O_RDONLY);
-    ftable_attach(read_file);
+    Pipe::pipe_open(read_file, pi, O_RDONLY);
+    VfsFile::ftable_attach(read_file);
 
-    pipe_open(write_file, pi, O_WRONLY);
-    ftable_attach(write_file);
+    Pipe::pipe_open(write_file, pi, O_WRONLY);
+    VfsFile::ftable_attach(write_file);
 
     // SAFETY: see above.
     unsafe {
@@ -1588,8 +1629,11 @@ fn vfs_pipealloc_inner(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> KResul
     Ok(())
 }
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_pipealloc`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> c_int {
-    result_to_neg_errno(vfs_pipealloc_inner(rf, wf))
+    result_to_neg_errno(VfsFile::vfs_pipealloc_inner(rf, wf))
+}
 }
 
 // ===========================================================================
@@ -1633,6 +1677,7 @@ struct mbufq {
 // `fn(Option<&'static dyn FileOps>, *mut c_void, c_int) -> KResult<c_int>`
 // when a real caller (e.g. a future sysnet fd path) appears.
 
+impl VfsFile {
 /// Core logic behind [`vfs_sockalloc`], factored out as a private helper
 /// returning [`KResult`] (P3-CS6). The duplicate-tuple check is this
 /// function's only "real" runtime failure mode -- `Err(Errno::AddrInUse)`.
@@ -1641,7 +1686,8 @@ struct mbufq {
 /// the original never called the matching `ftable_detach`/`vfs_fput`
 /// before `file_free`ing it (a pre-existing quirk, not introduced by
 /// this conversion -- kept byte-for-byte since behavior must stay
-/// identical).
+/// identical). N-METH: inherent assoc fn (was the free fn
+/// `vfs_sockalloc_inner`).
 fn vfs_sockalloc_inner(
     out: *mut *mut vfs_file,
     raddr: u32,
@@ -1651,14 +1697,14 @@ fn vfs_sockalloc_inner(
     // SAFETY: caller-owned out-param.
     unsafe { *out = ptr::null_mut() };
 
-    let f = file_alloc();
+    let f = VfsFile::file_alloc();
     if f.is_null() {
         return Err(Errno::NoMem);
     }
 
     let si = kalloc() as *mut sock;
     if si.is_null() {
-        file_free(f);
+        VfsFile::file_free(f);
         return Err(Errno::NoMem);
     }
 
@@ -1682,7 +1728,7 @@ fn vfs_sockalloc_inner(
         (*f).pos.sock = si as *mut crate::bindings::sock;
         (*f).ops = None; // Sockets use direct socket I/O.
     }
-    ftable_attach(f);
+    VfsFile::ftable_attach(f);
 
     // Add to the list of sockets (checking for duplicates).
     let dup: bool = {
@@ -1727,7 +1773,7 @@ fn vfs_sockalloc_inner(
 
     if dup {
         kfree(si as *mut c_void);
-        file_free(f);
+        VfsFile::file_free(f);
         return Err(Errno::AddrInUse);
     }
 
@@ -1736,11 +1782,14 @@ fn vfs_sockalloc_inner(
     Ok(())
 }
 
+/// N-METH: inherent assoc fn (was the free `extern "C"` fn `vfs_sockalloc`);
+/// name kept verbatim (NAMESPACING).
 pub(crate) extern "C" fn vfs_sockalloc(
     out: *mut *mut vfs_file,
     raddr: u32,
     lport: u16,
     rport: u16,
 ) -> c_int {
-    result_to_neg_errno(vfs_sockalloc_inner(out, raddr, lport, rport))
+    result_to_neg_errno(VfsFile::vfs_sockalloc_inner(out, raddr, lport, rport))
+}
 }

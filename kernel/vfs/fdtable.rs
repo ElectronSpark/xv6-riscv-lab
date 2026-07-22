@@ -273,7 +273,7 @@ fn slab_free(obj: *mut c_void) {
 // P3-1C mesh sweep: vfs/file.rs is in scope for this wave, so these
 // become plain crate-path imports instead of `extern "C"` redeclarations
 // (identical signatures).
-use crate::vfs::file::{vfs_fdup, vfs_fput};
+use crate::vfs::file::VfsFile;
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, fd-space
@@ -366,24 +366,30 @@ unsafe fn rcu_assign_file(p: *mut *mut vfs_file, v: *mut vfs_file) {
 // `SeqCst` fetch-add) exactly (see the module doc's Refcount map).
 // ---------------------------------------------------------------------------
 
-/// # Safety
-/// `fdtable` must point to a live, aligned `vfs_fdtable`.
-#[inline(always)]
-fn refcount_atomic<'a>(fdtable: *mut vfs_fdtable) -> &'a AtomicI32 {
-    // SAFETY: `ref_count` is a plain C `int` field, same size/align as
-    // `AtomicI32`; caller ensures `fdtable` is a live, aligned
-    // `vfs_fdtable`.
-    unsafe { &*(ptr::addr_of_mut!((*fdtable).ref_count) as *const AtomicI32) }
-}
+impl VfsFdtable {
+    /// # Safety
+    /// `fdtable` must point to a live, aligned `vfs_fdtable`. N-METH:
+    /// inherent assoc fn (was the free fn `refcount_atomic`); raw
+    /// `fdtable` param kept (same precedent as `VfsInode`/`VfsFile`'s
+    /// identical helper).
+    #[inline(always)]
+    fn refcount_atomic<'a>(fdtable: *mut vfs_fdtable) -> &'a AtomicI32 {
+        // SAFETY: `ref_count` is a plain C `int` field, same size/align as
+        // `AtomicI32`; caller ensures `fdtable` is a live, aligned
+        // `vfs_fdtable`.
+        unsafe { &*(ptr::addr_of_mut!((*fdtable).ref_count) as *const AtomicI32) }
+    }
 
-/// # Safety
-/// `fdtable` must point to a live, aligned `vfs_fdtable`.
-#[inline(always)]
-fn fd_count_atomic<'a>(fdtable: *mut vfs_fdtable) -> &'a AtomicI32 {
-    // SAFETY: `fd_count` is a plain C `int` field, same size/align as
-    // `AtomicI32`; caller ensures `fdtable` is a live, aligned
-    // `vfs_fdtable`.
-    unsafe { &*(ptr::addr_of_mut!((*fdtable).fd_count) as *const AtomicI32) }
+    /// # Safety
+    /// `fdtable` must point to a live, aligned `vfs_fdtable`. N-METH:
+    /// inherent assoc fn (was the free fn `fd_count_atomic`).
+    #[inline(always)]
+    fn fd_count_atomic<'a>(fdtable: *mut vfs_fdtable) -> &'a AtomicI32 {
+        // SAFETY: `fd_count` is a plain C `int` field, same size/align as
+        // `AtomicI32`; caller ensures `fdtable` is a live, aligned
+        // `vfs_fdtable`.
+        unsafe { &*(ptr::addr_of_mut!((*fdtable).fd_count) as *const AtomicI32) }
+    }
 }
 
 #[inline(always)]
@@ -417,49 +423,57 @@ fn fdtable_slab() -> *mut slab_cache_t {
     __VFS_FDTABLE_SLAB.0.get() as *mut slab_cache_t
 }
 
-/// Initialize the fdtable slab cache. Called once during VFS
-/// initialization.
-pub(crate) extern "C" fn __vfs_fdtable_global_init() {
-    let ret = slab_cache_init(
-        fdtable_slab(),
-        c"vfs_fdtable_cache".as_ptr() as *mut c_char,
-        core::mem::size_of::<vfs_fdtable>(),
-        (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
-    );
-    kassert!(ret == 0, "Failed to initialize vfs_fdtable_cache slab cache");
-}
-
-/// Allocate and initialize a new fdtable (`ref_count = 1`, all fields
-/// zeroed). Returns `Err(Errno::NoMem)` on allocation failure.
-///
-/// P3-CS3 (Result-over-ERR_PTR): this is a private, file-internal helper
-/// (both call sites — [`vfs_fdtable_init`] and [`clone_locked`] — live in
-/// this file), so it returns [`KResult`] directly instead of the
-/// transitional `ERR_PTR`/null-pointer convention: neither caller can
-/// forget to check for failure (the compiler forces it via `?`/`match`),
-/// unlike the previous `if fdtable.is_null() { ... }` duplicated at both
-/// sites.
-fn fdtable_alloc_init() -> KResult<NonNull<vfs_fdtable>> {
-    let fdtable = slab_alloc(fdtable_slab()) as *mut vfs_fdtable;
-    let fdtable = NonNull::new(fdtable).ok_or(Errno::NoMem)?;
-    // SAFETY: `slab_alloc` returned a fresh, exclusively-owned
-    // `size_of::<vfs_fdtable>()` allocation (confirmed non-null just
-    // above); zeroing then field-init mirrors the C original's `memset` +
-    // explicit-field-init.
-    unsafe {
-        ptr::write_bytes(fdtable.as_ptr(), 0, 1);
-        spin_init(
-            ptr::addr_of_mut!((*fdtable.as_ptr()).lock),
-            c"vfs_fdtable_lock".as_ptr() as *mut c_char,
+impl VfsFdtable {
+    /// Initialize the fdtable slab cache. Called once during VFS
+    /// initialization. N-METH: inherent assoc fn (was the free `extern
+    /// "C"` fn `__vfs_fdtable_global_init`); name kept verbatim
+    /// (NAMESPACING).
+    pub(crate) extern "C" fn __vfs_fdtable_global_init() {
+        let ret = slab_cache_init(
+            fdtable_slab(),
+            c"vfs_fdtable_cache".as_ptr() as *mut c_char,
+            core::mem::size_of::<vfs_fdtable>(),
+            (SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP) as u64,
         );
-        (*fdtable.as_ptr()).ref_count = 1;
+        kassert!(ret == 0, "Failed to initialize vfs_fdtable_cache slab cache");
     }
-    Ok(fdtable)
-}
 
-fn fdtable_free(fdtable: *mut vfs_fdtable) {
-    if !fdtable.is_null() {
-        slab_free(fdtable as *mut c_void);
+    /// Allocate and initialize a new fdtable (`ref_count = 1`, all fields
+    /// zeroed). Returns `Err(Errno::NoMem)` on allocation failure.
+    ///
+    /// P3-CS3 (Result-over-ERR_PTR): this is a private, file-internal helper
+    /// (both call sites — [`VfsFdtable::vfs_fdtable_init`] and
+    /// [`VfsFdtable::clone_locked`] — live in this file), so it returns
+    /// [`KResult`] directly instead of the transitional `ERR_PTR`/
+    /// null-pointer convention: neither caller can forget to check for
+    /// failure (the compiler forces it via `?`/`match`), unlike the
+    /// previous `if fdtable.is_null() { ... }` duplicated at both sites.
+    /// N-METH: inherent assoc fn (was the free fn `fdtable_alloc_init`).
+    fn fdtable_alloc_init() -> KResult<NonNull<vfs_fdtable>> {
+        let fdtable = slab_alloc(fdtable_slab()) as *mut vfs_fdtable;
+        let fdtable = NonNull::new(fdtable).ok_or(Errno::NoMem)?;
+        // SAFETY: `slab_alloc` returned a fresh, exclusively-owned
+        // `size_of::<vfs_fdtable>()` allocation (confirmed non-null just
+        // above); zeroing then field-init mirrors the C original's `memset` +
+        // explicit-field-init.
+        unsafe {
+            ptr::write_bytes(fdtable.as_ptr(), 0, 1);
+            spin_init(
+                ptr::addr_of_mut!((*fdtable.as_ptr()).lock),
+                c"vfs_fdtable_lock".as_ptr() as *mut c_char,
+            );
+            (*fdtable.as_ptr()).ref_count = 1;
+        }
+        Ok(fdtable)
+    }
+
+    /// N-METH: inherent assoc fn (was the free fn `fdtable_free`); raw
+    /// `fdtable` param kept (frees the object -- lifetime-honesty
+    /// exclusion, same precedent as `VfsFile::file_free`).
+    fn fdtable_free(fdtable: *mut vfs_fdtable) {
+        if !fdtable.is_null() {
+            slab_free(fdtable as *mut c_void);
+        }
     }
 }
 
@@ -514,7 +528,7 @@ impl VfsFdtable {
         }
         let fd = fd as usize;
 
-        if vfs_fdup(file).is_null() {
+        if VfsFile::vfs_fdup(file).is_null() {
             return Err(Errno::NoMem); // Failed to duplicate file reference
         }
 
@@ -524,53 +538,58 @@ impl VfsFdtable {
         // receiver); publication must be a `Release` store because
         // concurrent RCU readers load this slot without the lock.
         unsafe { rcu_assign_file(ptr::addr_of_mut!(self.files[fd]), file) };
-        fd_count_atomic(self).fetch_add(1, Ordering::SeqCst);
+        VfsFdtable::fd_count_atomic(self).fetch_add(1, Ordering::SeqCst);
         Ok(fd)
     }
-}
 
-/// Allocate a file descriptor starting from a minimum fd `>= start_fd`.
-/// Increments `file`'s reference count via `vfs_fdup`.
-///
-/// LOCKING: caller MUST hold `fdtable.lock`.
-///
-/// C-ABI boundary (P3-CS3): this `pub(crate) extern "C"` entry point is
-/// called from `vfs/vfs_syscall.rs` (a different module) expecting the
-/// crate's established "fd or negative errno" `c_int` convention, so the
-/// one [`KResult`] -> `c_int` conversion happens right here, at the edge —
-/// [`alloc_fd_from_locked`] itself never constructs a negative-errno
-/// `c_int` or an `ERR_PTR`.
-pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
-    fdtable: *mut vfs_fdtable,
-    file: *mut vfs_file,
-    start_fd: c_int,
-) -> c_int {
-    if fdtable.is_null() {
-        return Errno::Inval.neg(); // Same errno the old null check produced.
+    /// Allocate a file descriptor starting from a minimum fd `>= start_fd`.
+    /// Increments `file`'s reference count via `vfs_fdup`.
+    ///
+    /// LOCKING: caller MUST hold `fdtable.lock`.
+    ///
+    /// C-ABI boundary (P3-CS3): this `pub(crate) extern "C"` entry point is
+    /// called from `vfs/vfs_syscall.rs` (a different module) expecting the
+    /// crate's established "fd or negative errno" `c_int` convention, so the
+    /// one [`KResult`] -> `c_int` conversion happens right here, at the edge —
+    /// [`VfsFdtable::alloc_fd_from_locked`] itself never constructs a
+    /// negative-errno `c_int` or an `ERR_PTR`. N-METH: inherent assoc fn
+    /// (was the free `extern "C"` fn `vfs_fdtable_alloc_fd_from`); name
+    /// kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
+        fdtable: *mut vfs_fdtable,
+        file: *mut vfs_file,
+        start_fd: c_int,
+    ) -> c_int {
+        if fdtable.is_null() {
+            return Errno::Inval.neg(); // Same errno the old null check produced.
+        }
+        // SAFETY: non-null (just checked); the caller holds `fdtable.lock`
+        // (asserted inside) and a live reference to the table, so it stays
+        // valid for the call. P3-7a boundary conversion — see the module
+        // doc's aliasing caveat for the concurrent-RCU-reader approximation.
+        let fdtable = unsafe { &mut *fdtable };
+        match fdtable.alloc_fd_from_locked(file, start_fd) {
+            Ok(fd) => fd as c_int,
+            Err(e) => e.neg(),
+        }
     }
-    // SAFETY: non-null (just checked); the caller holds `fdtable.lock`
-    // (asserted inside) and a live reference to the table, so it stays
-    // valid for the call. P3-7a boundary conversion — see the module
-    // doc's aliasing caveat for the concurrent-RCU-reader approximation.
-    let fdtable = unsafe { &mut *fdtable };
-    match fdtable.alloc_fd_from_locked(file, start_fd) {
-        Ok(fd) => fd as c_int,
-        Err(e) => e.neg(),
+
+    /// Allocate the lowest available file descriptor for `file`.
+    ///
+    /// LOCKING: caller MUST hold `fdtable.lock`. N-METH: inherent assoc fn
+    /// (was the free `extern "C"` fn `vfs_fdtable_alloc_fd`); name kept
+    /// verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *mut vfs_file) -> c_int {
+        VfsFdtable::vfs_fdtable_alloc_fd_from(fdtable, file, 0)
     }
-}
 
-/// Allocate the lowest available file descriptor for `file`.
-///
-/// LOCKING: caller MUST hold `fdtable.lock`.
-pub(crate) extern "C" fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *mut vfs_file) -> c_int {
-    vfs_fdtable_alloc_fd_from(fdtable, file, 0)
-}
-
-/// Create a new, empty fdtable. Used when a new thread doesn't share its
-/// parent's fdtable. Panics on allocation failure (matches the C
-/// original's `assert`).
-pub(crate) extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
-    let fdtable = fdtable_alloc_init();
+    /// Create a new, empty fdtable. Used when a new thread doesn't share its
+    /// parent's fdtable. Panics on allocation failure (matches the C
+    /// original's `assert`). N-METH: inherent assoc fn (was the free
+    /// `extern "C"` fn `vfs_fdtable_init`); name kept verbatim
+    /// (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
+    let fdtable = VfsFdtable::fdtable_alloc_init();
     kassert!(fdtable.is_ok(), "vfs_fdtable_init: fdtable is NULL");
     // NOTE: the C original re-`memset`s `files`/`files_bitmap`/
     // `cloexec_bitmap` here, redundant with `fdtable_alloc_init`'s own
@@ -581,39 +600,41 @@ pub(crate) extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
     // never fires — same guarantee the original `!fdtable.is_null()`
     // assert gave the raw-pointer return.
     fdtable.expect("BUG: fdtable_alloc_init returned Err after kassert passed").as_ptr()
-}
-
-/// Core clone/share logic behind [`vfs_fdtable_clone`], factored out as a
-/// private helper returning [`KResult`] (P3-CS3: only called from this
-/// file). The two failure modes (`src` null, `dest` allocation OOM) are
-/// `Err` returns instead of hand-encoded `ERR_PTR`s; the two success
-/// paths (share `src`, or the freshly built `dest`) are `Ok(NonNull)` —
-/// there is no representable state where this helper hands back a raw
-/// pointer that might secretly be an encoded error, unlike the pointer
-/// this replaces.
-///
-/// `vfs_fdup`'s own return (`dst_file` below) stays `ERR_PTR`-checked via
-/// [`is_err_or_null`] on purpose: that call crosses into `vfs/file.rs`, a
-/// different file's still-transitional C-ABI surface, out of this
-/// cluster's contained scope (see the module's Result-over-ERR_PTR note).
-fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vfs_fdtable>> {
-    let src_nn = NonNull::new(src).ok_or(Errno::Inval)?;
-
-    rcu_read_lock();
-    if clone_flags & CLONE_FILES != 0 {
-        // Share the fdtable.
-        refcount_atomic(src).fetch_add(1, Ordering::SeqCst);
-        rcu_read_unlock();
-        return Ok(src_nn);
     }
 
-    let mut dest_nn = match fdtable_alloc_init() {
-        Ok(nn) => nn,
-        Err(e) => {
+    /// Core clone/share logic behind [`VfsFdtable::vfs_fdtable_clone`],
+    /// factored out as a private helper returning [`KResult`] (P3-CS3:
+    /// only called from this file). The two failure modes (`src` null,
+    /// `dest` allocation OOM) are `Err` returns instead of hand-encoded
+    /// `ERR_PTR`s; the two success paths (share `src`, or the freshly
+    /// built `dest`) are `Ok(NonNull)` — there is no representable state
+    /// where this helper hands back a raw pointer that might secretly be
+    /// an encoded error, unlike the pointer this replaces.
+    ///
+    /// `vfs_fdup`'s own return (`dst_file` below) stays `ERR_PTR`-checked
+    /// via [`is_err_or_null`] on purpose: that call crosses into
+    /// `vfs/file.rs`, a different file's still-transitional C-ABI surface,
+    /// out of this cluster's contained scope (see the module's
+    /// Result-over-ERR_PTR note). N-METH: inherent assoc fn (was the free
+    /// fn `clone_locked`).
+    fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vfs_fdtable>> {
+        let src_nn = NonNull::new(src).ok_or(Errno::Inval)?;
+
+        rcu_read_lock();
+        if clone_flags & CLONE_FILES != 0 {
+            // Share the fdtable.
+            VfsFdtable::refcount_atomic(src).fetch_add(1, Ordering::SeqCst);
             rcu_read_unlock();
-            return Err(e); // Allocation failed
+            return Ok(src_nn);
         }
-    };
+
+        let mut dest_nn = match VfsFdtable::fdtable_alloc_init() {
+            Ok(nn) => nn,
+            Err(e) => {
+                rcu_read_unlock();
+                return Err(e); // Allocation failed
+            }
+        };
     // SAFETY: `dest` is freshly allocated and not yet published to any
     // other thread — genuinely exclusive, so a `&mut` view is honest
     // (P3-7a).
@@ -630,7 +651,7 @@ fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vf
         // caller holds a reference to it, per this function's contract).
         let src_file = unsafe { rcu_deref_file(ptr::addr_of_mut!((*src).files[i])) };
         if is_fd(src_file) {
-            let dst_file = vfs_fdup(src_file);
+            let dst_file = VfsFile::vfs_fdup(src_file);
             if !is_err_or_null(dst_file) {
                 dest.files[i] = dst_file;
                 dest.fd_count += 1;
@@ -652,72 +673,77 @@ fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vf
     fence(Ordering::SeqCst);
 
     Ok(dest_nn)
-}
-
-/// Clone or share an fdtable for fork/clone. If `clone_flags &
-/// CLONE_FILES`, shares `src` (bumps its refcount and returns it);
-/// otherwise deep-copies with duplicated file references.
-///
-/// Returns the (possibly shared) fdtable, or `ERR_PTR` on failure.
-///
-/// C-ABI boundary (P3-CS3): `proc/clone.rs` (a different module) calls
-/// this expecting the crate's transitional `ERR_PTR`-encoded-pointer
-/// convention (it decodes the result with its own local `check_ptr`
-/// helper), so [`result_to_errptr`] does the one `KResult` -> `ERR_PTR`
-/// conversion right here, at the edge — [`clone_locked`] itself never
-/// constructs an `ERR_PTR`.
-pub(crate) extern "C" fn vfs_fdtable_clone(
-    src: *mut vfs_fdtable,
-    clone_flags: c_int,
-) -> *mut vfs_fdtable {
-    result_to_errptr(clone_locked(src, clone_flags).map(NonNull::as_ptr))
-}
-
-/// Release a reference to an fdtable. On last reference, closes all open
-/// files and frees the fdtable. Called when a thread exits or unshares
-/// its fdtable.
-pub(crate) extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
-    if fdtable.is_null() {
-        return;
     }
 
-    if atomic_dec_unless(refcount_atomic(fdtable), 1) {
-        return; // Still has references
+    /// Clone or share an fdtable for fork/clone. If `clone_flags &
+    /// CLONE_FILES`, shares `src` (bumps its refcount and returns it);
+    /// otherwise deep-copies with duplicated file references.
+    ///
+    /// Returns the (possibly shared) fdtable, or `ERR_PTR` on failure.
+    ///
+    /// C-ABI boundary (P3-CS3): `proc/clone.rs` (a different module) calls
+    /// this expecting the crate's transitional `ERR_PTR`-encoded-pointer
+    /// convention (it decodes the result with its own local `check_ptr`
+    /// helper), so [`result_to_errptr`] does the one `KResult` -> `ERR_PTR`
+    /// conversion right here, at the edge — [`VfsFdtable::clone_locked`]
+    /// itself never constructs an `ERR_PTR`. N-METH: inherent assoc fn (was
+    /// the free `extern "C"` fn `vfs_fdtable_clone`); name kept verbatim
+    /// (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_clone(
+        src: *mut vfs_fdtable,
+        clone_flags: c_int,
+    ) -> *mut vfs_fdtable {
+        result_to_errptr(VfsFdtable::clone_locked(src, clone_flags).map(NonNull::as_ptr))
     }
 
-    // No need to hold the lock here since no other references exist.
-    // SAFETY: the final reference was just dropped above, so this thread
-    // has genuinely exclusive access — an honest `&mut` (P3-7a). Plain
-    // (non-RCU, non-atomic) field access below matches the C original
-    // exactly (it does not use rcu_dereference/rcu_assign_pointer here
-    // either). The borrow ends before `fdtable_free` consumes the raw
-    // pointer.
-    let ft = unsafe { &mut *fdtable };
-    // First, close all open files in the range [0, NOFILE). N-METH goal #2:
-    // the fixed-array scan is an `iter_mut()` over the (now exclusively
-    // owned) slot array; the closed-count is tallied and applied to
-    // `fd_count` once after the walk (the per-slot `fd_count -= 1` would
-    // otherwise re-borrow `ft` mutably inside `ft.files.iter_mut()`),
-    // byte-for-byte the same final `fd_count` and same ascending
-    // `vfs_fput` order as the index loop it replaces.
-    let mut closed: c_int = 0;
-    for slot in ft.files.iter_mut() {
-        let file = *slot;
-        if is_fd(file) {
-            vfs_fput(file);
-            *slot = ptr::null_mut();
-            closed += 1;
+    /// Release a reference to an fdtable. On last reference, closes all open
+    /// files and frees the fdtable. Called when a thread exits or unshares
+    /// its fdtable. N-METH: inherent assoc fn (was the free `extern "C"` fn
+    /// `vfs_fdtable_put`); name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
+        if fdtable.is_null() {
+            return;
         }
+
+        if atomic_dec_unless(VfsFdtable::refcount_atomic(fdtable), 1) {
+            return; // Still has references
+        }
+
+        // No need to hold the lock here since no other references exist.
+        // SAFETY: the final reference was just dropped above, so this thread
+        // has genuinely exclusive access — an honest `&mut` (P3-7a). Plain
+        // (non-RCU, non-atomic) field access below matches the C original
+        // exactly (it does not use rcu_dereference/rcu_assign_pointer here
+        // either). The borrow ends before `fdtable_free` consumes the raw
+        // pointer.
+        let ft = unsafe { &mut *fdtable };
+        // First, close all open files in the range [0, NOFILE). N-METH goal #2:
+        // the fixed-array scan is an `iter_mut()` over the (now exclusively
+        // owned) slot array; the closed-count is tallied and applied to
+        // `fd_count` once after the walk (the per-slot `fd_count -= 1` would
+        // otherwise re-borrow `ft` mutably inside `ft.files.iter_mut()`),
+        // byte-for-byte the same final `fd_count` and same ascending
+        // `vfs_fput` order as the index loop it replaces.
+        let mut closed: c_int = 0;
+        for slot in ft.files.iter_mut() {
+            let file = *slot;
+            if is_fd(file) {
+                VfsFile::vfs_fput(file);
+                *slot = ptr::null_mut();
+                closed += 1;
+            }
+        }
+        ft.fd_count -= closed;
+
+        kassert!(ft.fd_count >= 0, "vfs_fdtable_destroy: fd_count negative");
+        VfsFdtable::fdtable_free(fdtable);
     }
-    ft.fd_count -= closed;
 
-    kassert!(ft.fd_count >= 0, "vfs_fdtable_destroy: fd_count negative");
-    fdtable_free(fdtable);
-}
-
-/// Look up the file for `fd`, returning it with an incremented refcount
-/// (caller must `vfs_fput()` when done). Wait-free (RCU read lock only).
-pub(crate) extern "C" fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
+    /// Look up the file for `fd`, returning it with an incremented refcount
+    /// (caller must `vfs_fput()` when done). Wait-free (RCU read lock only).
+    /// N-METH: inherent assoc fn (was the free `extern "C"` fn
+    /// `vfs_fdtable_get_file`); name kept verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
     if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
         return ptr::null_mut(); // Invalid arguments
     }
@@ -726,141 +752,150 @@ pub(crate) extern "C" fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_i
     // non-null.
     let file = unsafe { rcu_deref_file(ptr::addr_of_mut!((*fdtable).files[fd as usize])) };
     if is_fd(file) {
-        let file = vfs_fdup(file);
+        let file = VfsFile::vfs_fdup(file);
         rcu_read_unlock();
         return file;
     }
     rcu_read_unlock();
     ptr::null_mut() // File descriptor not allocated
-}
-
-/// Remove `fd` from the table and return the file that was associated
-/// with it. Does NOT decrement the file's refcount — caller must handle
-/// that (typically after an RCU grace period, so concurrent readers from
-/// [`vfs_fdtable_get_file`] can't observe a freed file).
-///
-/// LOCKING: caller MUST hold `fdtable.lock`.
-pub(crate) extern "C" fn vfs_fdtable_dealloc_fd(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
-    if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
-        return ptr::null_mut(); // Invalid arguments
-    }
-    kassert!(
-        // SAFETY: non-null `fdtable`; only the lock's address is taken.
-        KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
-        "vfs_fdtable_dealloc_fd: fdtable lock not held"
-    );
-    let fd = fd as usize;
-    // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
-    let file = unsafe { (*fdtable).files[fd] };
-    if !is_fd(file) {
-        return ptr::null_mut(); // File descriptor not allocated
     }
 
-    // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
-    unsafe {
-        rcu_assign_file(ptr::addr_of_mut!((*fdtable).files[fd]), ptr::null_mut());
-        (*fdtable).files_bitmap[0] &= !(1u64 << fd);
-        (*fdtable).cloexec_bitmap[0] &= !(1u64 << fd);
-    }
-    fd_count_atomic(fdtable).fetch_sub(1, Ordering::SeqCst);
-    file
-}
+    /// Remove `fd` from the table and return the file that was associated
+    /// with it. Does NOT decrement the file's refcount — caller must handle
+    /// that (typically after an RCU grace period, so concurrent readers from
+    /// [`VfsFdtable::vfs_fdtable_get_file`] can't observe a freed file).
+    ///
+    /// LOCKING: caller MUST hold `fdtable.lock`. N-METH: inherent assoc fn
+    /// (was the free `extern "C"` fn `vfs_fdtable_dealloc_fd`); name kept
+    /// verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_dealloc_fd(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
+        if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
+            return ptr::null_mut(); // Invalid arguments
+        }
+        kassert!(
+            // SAFETY: non-null `fdtable`; only the lock's address is taken.
+            KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
+            "vfs_fdtable_dealloc_fd: fdtable lock not held"
+        );
+        let fd = fd as usize;
+        // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
+        let file = unsafe { (*fdtable).files[fd] };
+        if !is_fd(file) {
+            return ptr::null_mut(); // File descriptor not allocated
+        }
 
-/// Get the `FD_CLOEXEC` flag for `fd`, or a negative errno.
-///
-/// LOCKING: caller MUST hold `fdtable.lock`.
-pub(crate) extern "C" fn vfs_fdtable_get_fdflags(fdtable: *mut vfs_fdtable, fd: c_int) -> c_int {
-    if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
-        return neg(EBADF);
-    }
-    kassert!(
-        // SAFETY: non-null `fdtable`; only the lock's address is taken.
-        KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
-        "vfs_fdtable_get_fdflags: fdtable lock not held"
-    );
-    let fd = fd as usize;
-    // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
-    let file = unsafe { (*fdtable).files[fd] };
-    if !is_fd(file) {
-        return neg(EBADF);
-    }
-    let mut flags = 0;
-    // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
-    if unsafe { (*fdtable).cloexec_bitmap[0] } & (1u64 << fd) != 0 {
-        flags |= FD_CLOEXEC;
-    }
-    flags
-}
-
-/// Set (or clear) the `FD_CLOEXEC` flag for `fd`. Returns 0 on success, a
-/// negative errno on failure.
-///
-/// LOCKING: caller MUST hold `fdtable.lock`.
-pub(crate) extern "C" fn vfs_fdtable_set_fdflags(
-    fdtable: *mut vfs_fdtable,
-    fd: c_int,
-    flags: c_int,
-) -> c_int {
-    if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
-        return neg(EBADF);
-    }
-    kassert!(
-        // SAFETY: non-null `fdtable`; only the lock's address is taken.
-        KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
-        "vfs_fdtable_set_fdflags: fdtable lock not held"
-    );
-    let fd = fd as usize;
-    // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
-    let file = unsafe { (*fdtable).files[fd] };
-    if !is_fd(file) {
-        return neg(EBADF);
-    }
-
-    // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
-    unsafe {
-        if flags & FD_CLOEXEC != 0 {
-            (*fdtable).cloexec_bitmap[0] |= 1u64 << fd;
-        } else {
+        // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
+        unsafe {
+            rcu_assign_file(ptr::addr_of_mut!((*fdtable).files[fd]), ptr::null_mut());
+            (*fdtable).files_bitmap[0] &= !(1u64 << fd);
             (*fdtable).cloexec_bitmap[0] &= !(1u64 << fd);
         }
-    }
-    0
-}
-
-/// Close every fd with `FD_CLOEXEC` set. Called from `exec.c` on a
-/// successful `execve`.
-pub(crate) extern "C" fn vfs_fdtable_close_on_exec(fdtable: *mut vfs_fdtable) {
-    if fdtable.is_null() {
-        return;
+        VfsFdtable::fd_count_atomic(fdtable).fetch_sub(1, Ordering::SeqCst);
+        file
     }
 
-    let mut to_close: [*mut vfs_file; NOFILE] = [ptr::null_mut(); NOFILE];
-    let mut close_count = 0usize;
+    /// Get the `FD_CLOEXEC` flag for `fd`, or a negative errno.
+    ///
+    /// LOCKING: caller MUST hold `fdtable.lock`. N-METH: inherent assoc fn
+    /// (was the free `extern "C"` fn `vfs_fdtable_get_fdflags`); name kept
+    /// verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_get_fdflags(fdtable: *mut vfs_fdtable, fd: c_int) -> c_int {
+        if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
+            return neg(EBADF);
+        }
+        kassert!(
+            // SAFETY: non-null `fdtable`; only the lock's address is taken.
+            KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
+            "vfs_fdtable_get_fdflags: fdtable lock not held"
+        );
+        let fd = fd as usize;
+        // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
+        let file = unsafe { (*fdtable).files[fd] };
+        if !is_fd(file) {
+            return neg(EBADF);
+        }
+        let mut flags = 0;
+        // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
+        if unsafe { (*fdtable).cloexec_bitmap[0] } & (1u64 << fd) != 0 {
+            flags |= FD_CLOEXEC;
+        }
+        flags
+    }
 
-    {
-        // SAFETY: non-null `fdtable`; only the lock's address is taken.
-        let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).lock();
-        for fd in 0..NOFILE {
-            // SAFETY: lock held (guard `_g` above); `fd` in bounds.
-            let was_set = unsafe {
-                let mask = 1u64 << fd;
-                let w = (*fdtable).cloexec_bitmap[0];
-                (*fdtable).cloexec_bitmap[0] = w & !mask;
-                w & mask != 0
-            };
-            if !was_set {
-                continue;
-            }
+    /// Set (or clear) the `FD_CLOEXEC` flag for `fd`. Returns 0 on success, a
+    /// negative errno on failure.
+    ///
+    /// LOCKING: caller MUST hold `fdtable.lock`. N-METH: inherent assoc fn
+    /// (was the free `extern "C"` fn `vfs_fdtable_set_fdflags`); name kept
+    /// verbatim (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_set_fdflags(
+        fdtable: *mut vfs_fdtable,
+        fd: c_int,
+        flags: c_int,
+    ) -> c_int {
+        if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
+            return neg(EBADF);
+        }
+        kassert!(
+            // SAFETY: non-null `fdtable`; only the lock's address is taken.
+            KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).holding(),
+            "vfs_fdtable_set_fdflags: fdtable lock not held"
+        );
+        let fd = fd as usize;
+        // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
+        let file = unsafe { (*fdtable).files[fd] };
+        if !is_fd(file) {
+            return neg(EBADF);
+        }
 
-            let file = vfs_fdtable_dealloc_fd(fdtable, fd as c_int);
-            if is_fd(file) {
-                to_close[close_count] = file;
-                close_count += 1;
+        // SAFETY: non-null `fdtable`; `fd` in bounds; lock held.
+        unsafe {
+            if flags & FD_CLOEXEC != 0 {
+                (*fdtable).cloexec_bitmap[0] |= 1u64 << fd;
+            } else {
+                (*fdtable).cloexec_bitmap[0] &= !(1u64 << fd);
             }
         }
-    } // lock released here, before the fput loop (matches the C original)
+        0
+    }
 
-    for entry in to_close.iter().take(close_count) {
-        vfs_fput(*entry);
+    /// Close every fd with `FD_CLOEXEC` set. Called from `exec.c` on a
+    /// successful `execve`. N-METH: inherent assoc fn (was the free
+    /// `extern "C"` fn `vfs_fdtable_close_on_exec`); name kept verbatim
+    /// (NAMESPACING).
+    pub(crate) extern "C" fn vfs_fdtable_close_on_exec(fdtable: *mut vfs_fdtable) {
+        if fdtable.is_null() {
+            return;
+        }
+
+        let mut to_close: [*mut vfs_file; NOFILE] = [ptr::null_mut(); NOFILE];
+        let mut close_count = 0usize;
+
+        {
+            // SAFETY: non-null `fdtable`; only the lock's address is taken.
+            let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*fdtable).lock) }).lock();
+            for fd in 0..NOFILE {
+                // SAFETY: lock held (guard `_g` above); `fd` in bounds.
+                let was_set = unsafe {
+                    let mask = 1u64 << fd;
+                    let w = (*fdtable).cloexec_bitmap[0];
+                    (*fdtable).cloexec_bitmap[0] = w & !mask;
+                    w & mask != 0
+                };
+                if !was_set {
+                    continue;
+                }
+
+                let file = VfsFdtable::vfs_fdtable_dealloc_fd(fdtable, fd as c_int);
+                if is_fd(file) {
+                    to_close[close_count] = file;
+                    close_count += 1;
+                }
+            }
+        } // lock released here, before the fput loop (matches the C original)
+
+        for entry in to_close.iter().take(close_count) {
+            VfsFile::vfs_fput(*entry);
+        }
     }
 }

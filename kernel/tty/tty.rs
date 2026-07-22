@@ -22,7 +22,7 @@
 //! the raw wait queue (`raw_wait`) — every field inside [`TtyInner`]. A
 //! `.lock()` returns a [`crate::sync::SpinLockGuard`] that
 //! `Deref`s/`DerefMut`s straight to [`TtyInner`]. [`tty_input`] and
-//! [`Tty::echo_char`] both need to call into `pipe_write()`, which can
+//! [`Tty::echo_char`] both need to call into `Pipe::pipe_write()`, which can
 //! sleep (the pipe may be full) — exactly like the C original, the guard
 //! is `drop()`-ed immediately before any such call and re-`.lock()`-ed
 //! immediately after; the state machine below keeps that drop/reacquire
@@ -77,7 +77,7 @@ use super::termios::termios_init_default;
 // P3-1C mesh sweep: vfs/pipe.rs is in scope for this wave; converted from
 // `extern "C"` redeclarations to plain crate-path items (identical
 // signatures).
-use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_read, pipe_write};
+use crate::vfs::pipe::Pipe;
 
 // ===========================================================================
 // Native uabi `struct termios` + `struct winsize` — P3-4b nativization
@@ -649,17 +649,17 @@ pub(crate) unsafe fn tty_alloc(name: *const c_char, ops: Option<&'static dyn Tty
     }
 
     // Two blocking pipes: input (driver->user) and output (user->driver).
-    let inp = pipe_alloc(0);
+    let inp = Pipe::pipe_alloc(0);
     if is_err(inp) {
         slab_free(raw as *mut c_void);
         // Propagate the encoded ERR_PTR value, reinterpreted as `*mut
         // tty` -- mirrors the C original's `return (struct tty *)inp;`.
         return inp as *mut tty;
     }
-    let outp = pipe_alloc(0);
+    let outp = Pipe::pipe_alloc(0);
     if is_err(outp) {
-        pipe_close(inp, 1);
-        pipe_close(inp, 0);
+        Pipe::pipe_close(inp, 1);
+        Pipe::pipe_close(inp, 0);
         slab_free(raw as *mut c_void);
         return outp as *mut tty;
     }
@@ -732,13 +732,13 @@ pub(crate) unsafe extern "C" fn tty_free(t: *mut tty) {
     unsafe {
         let inp = (*t).input_pipe;
         if !inp.is_null() {
-            pipe_close(inp, 1);
-            pipe_close(inp, 0);
+            Pipe::pipe_close(inp, 1);
+            Pipe::pipe_close(inp, 0);
         }
         let outp = (*t).output_pipe;
         if !outp.is_null() {
-            pipe_close(outp, 1);
-            pipe_close(outp, 0);
+            Pipe::pipe_close(outp, 1);
+            Pipe::pipe_close(outp, 0);
         }
         slab_free(t as *mut c_void);
     }
@@ -859,11 +859,11 @@ impl Tty {
     ///
     /// # Locking
     /// `guard` must be `self`'s currently-held lock guard. This method
-    /// drops it before calling `pipe_write()` (which can sleep if the
+    /// drops it before calling `Pipe::pipe_write()` (which can sleep if the
     /// output pipe is full) and returns a freshly re-acquired guard tied
     /// to `&self` -- the caller must use the returned guard from this
     /// point on, exactly mirroring the C original's "drop the spinlock
-    /// before calling pipe_write(), re-lock after" comment. The
+    /// before calling Pipe::pipe_write(), re-lock after" comment. The
     /// `'a`-bound receiver/guard makes that re-acquire a *safe*
     /// `self.inner.lock()` (was an `unsafe` raw re-deref).
     fn echo_char<'a>(
@@ -893,12 +893,12 @@ impl Tty {
             n += 1;
         }
 
-        // Drop the lock before calling pipe_write() -- it can sleep.
+        // Drop the lock before calling Pipe::pipe_write() -- it can sleep.
         drop(guard);
         // SAFETY: `self` is a live `Tty` (the `&self` receiver), so
         // `self.output_pipe` is the non-null pipe installed by
         // `tty_alloc`; `echobuf[..n]` is a valid readable buffer.
-        unsafe { pipe_write(self.output_pipe, echobuf.as_ptr() as *const c_char, n as u64, 0) };
+        unsafe { Pipe::pipe_write(self.output_pipe, echobuf.as_ptr() as *const c_char, n as u64, 0) };
         // Re-acquire the same lock so the returned guard is valid for the
         // caller to continue -- now a safe borrow of `self.inner`.
         self.inner.lock()
@@ -1056,7 +1056,7 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
                 let nul: u8 = 0;
                 // SAFETY: `this` is live; lock dropped above.
                 unsafe {
-                    pipe_write(this.input_pipe, &nul as *const u8 as *const c_char, 0, 0);
+                    Pipe::pipe_write(this.input_pipe, &nul as *const u8 as *const c_char, 0, 0);
                 }
                 guard = this.inner.lock();
                 continue;
@@ -1090,7 +1090,7 @@ pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count
             let ch = c as u8 as c_char;
             drop(guard);
             // SAFETY: `this` is live; lock dropped above.
-            unsafe { pipe_write(this.input_pipe, &ch as *const c_char, 1, 0) };
+            unsafe { Pipe::pipe_write(this.input_pipe, &ch as *const c_char, 1, 0) };
             guard = this.inner.lock();
         }
     }
@@ -1123,7 +1123,7 @@ pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u
     if canon {
         // SAFETY: `t` is live; `pipe_read` validates `buf` itself per
         // the userspace/kernel split encoded by `user`.
-        return unsafe { pipe_read((*t).input_pipe, buf, count, user) };
+        return unsafe { Pipe::pipe_read((*t).input_pipe, buf, count, user) };
     }
 
     // ---- Raw mode: read from direct ring buffer ----
@@ -1274,7 +1274,7 @@ pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count
     if !need_opost {
         // Fast path -- no post-processing.
         // SAFETY: `t` is live; `pipe_write` validates `buf` itself.
-        return unsafe { pipe_write((*t).output_pipe, buf, count, user) };
+        return unsafe { Pipe::pipe_write((*t).output_pipe, buf, count, user) };
     }
 
     // Slow path -- scan for '\n' and insert '\r' before it.
@@ -1328,7 +1328,7 @@ pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count
             olen += 1;
         }
 
-        let ret = unsafe { pipe_write((*t).output_pipe, outbuf.as_ptr() as *const c_char, olen as u64, 0) };
+        let ret = unsafe { Pipe::pipe_write((*t).output_pipe, outbuf.as_ptr() as *const c_char, olen as u64, 0) };
         if ret < 0 {
             return if written > 0 { written as i64 } else { ret };
         }
@@ -1352,7 +1352,7 @@ pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count
 /// writable kernel bytes.
 pub(crate) unsafe extern "C" fn tty_output(t: *mut tty, buf: *mut c_char, count: u64) -> i64 {
     // SAFETY: `t` is caller-guaranteed live (fn doc).
-    unsafe { pipe_read((*t).output_pipe, buf, count, 0) }
+    unsafe { Pipe::pipe_read((*t).output_pipe, buf, count, 0) }
 }
 
 // ===========================================================================
