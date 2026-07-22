@@ -66,7 +66,6 @@ pub use crate::proc::thread_queue::Tnode as tnode_t;
 pub use crate::kobject::Kobject as kobject;
 pub use crate::proc::workqueue::WorkStruct as work_struct;
 pub use crate::proc::workqueue::Workqueue as workqueue;
-pub use crate::proc::workqueue::WorkqueueCallbacks as workqueue_callbacks;
 pub use crate::proc::pgroup::Pgroup as pgroup;
 pub use crate::proc::thread_group::ThreadGroup as thread_group;
 pub use crate::tty::session::Session as session;
@@ -263,11 +262,10 @@ pub type ht_hash_t = uint64;
 pub type sigset_t = uint64;
 pub type siginfo_t = crate::proc::signal::SigInfo;
 pub type stack_t = stack;
-// kernel/inc/proc/workqueue_types.h
-pub type workqueue_lifecycle_cb_t =
-    ::core::option::Option<unsafe extern "C" fn(arg1: *mut workqueue)>;
-pub type workqueue_thread_lifecycle_cb_t =
-    ::core::option::Option<unsafe extern "C" fn(arg1: *mut workqueue, arg2: *mut thread)>;
+// kernel/inc/proc/workqueue_types.h -- `workqueue_lifecycle_cb_t`/
+// `workqueue_thread_lifecycle_cb_t` retired: TRAIT-OPS (final wave)
+// replaced the fn-pointer `struct workqueue_callbacks` they backed with
+// `crate::proc::workqueue::WqLifecycle`.
 // kernel/inc/uabi/termios.h
 pub type tcflag_t = uint32;
 pub type cc_t = uint8;

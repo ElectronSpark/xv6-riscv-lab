@@ -55,7 +55,7 @@ use crate::proc::proc_shims;
 // callers across lock/mm/vfs/tty are unaffected), so this is purely an
 // internal representation swap.
 use crate::proc::thread_queue::{Tnode, Tq, Ttree};
-use crate::proc::workqueue::{WorkHandler, WorkStruct};
+use crate::proc::workqueue::{WorkHandler, WorkStruct, WqLifecycle};
 
 // SAFETY: `($self).raw.as_ptr()` is a live, non-null pointer per this
 // module's `# Safety` note (top of file); the callee (`proc_shims::$fn`)
@@ -1862,7 +1862,7 @@ pub(super) fn list_node_pop_back_raw(head: *mut list_node_t) -> *mut list_node_t
 // =========================================================================
 use crate::bindings::{
     rb_node, rb_root, tnode as tnode_t, tq as tq_t, ttree as ttree_t,
-    work_struct, workqueue, workqueue_callbacks,
+    work_struct, workqueue,
 };
 
 const TYPE_NONE_U32: u32 = 0;
@@ -2144,29 +2144,16 @@ impl<'a> WorkqueueRef<'a> {
     #[inline] pub fn max_active(&self) -> c_int { raw_get!(self, max_active) }
     #[inline] pub fn set_min_active(&self, v: c_int) { raw_set!(self, min_active, v) }
     #[inline] pub fn set_max_active(&self, v: c_int) { raw_set!(self, max_active, v) }
-    #[inline] pub fn callbacks_ptr(&self) -> *mut workqueue_callbacks {
-        raw_mut_ptr!(self, callbacks)
+    // TRAIT-OPS (final wave): the six `cb_workqueue_ctor`/`cb_workqueue_dtor`/
+    // `cb_manager_ctor`/`cb_manager_dtor`/`cb_worker_ctor`/`cb_worker_dtor`
+    // fn-pointer accessors (plus `callbacks_ptr`/`copy_callbacks`) collapse
+    // into this one pair over the single `Option<&'static dyn WqLifecycle>`
+    // slot -- same shape as `WorkStructRef::{handler,set_handler}` below.
+    #[inline] pub fn lifecycle(&self) -> Option<&'static dyn WqLifecycle> {
+        raw_get!(self, lifecycle)
     }
-    #[inline] pub fn copy_callbacks(&self, src: *const workqueue_callbacks) {
-        if !src.is_null() { raw_set!(self, callbacks, *src) }
-    }
-    #[inline] pub fn cb_workqueue_ctor(&self) -> Option<unsafe extern "C" fn(*mut workqueue)> {
-        raw_get!(self, callbacks.workqueue_ctor)
-    }
-    #[inline] pub fn cb_workqueue_dtor(&self) -> Option<unsafe extern "C" fn(*mut workqueue)> {
-        raw_get!(self, callbacks.workqueue_dtor)
-    }
-    #[inline] pub fn cb_manager_ctor(&self) -> Option<unsafe extern "C" fn(*mut workqueue, *mut thread)> {
-        raw_get!(self, callbacks.manager_ctor)
-    }
-    #[inline] pub fn cb_manager_dtor(&self) -> Option<unsafe extern "C" fn(*mut workqueue, *mut thread)> {
-        raw_get!(self, callbacks.manager_dtor)
-    }
-    #[inline] pub fn cb_worker_ctor(&self) -> Option<unsafe extern "C" fn(*mut workqueue, *mut thread)> {
-        raw_get!(self, callbacks.worker_ctor)
-    }
-    #[inline] pub fn cb_worker_dtor(&self) -> Option<unsafe extern "C" fn(*mut workqueue, *mut thread)> {
-        raw_get!(self, callbacks.worker_dtor)
+    #[inline] pub fn set_lifecycle(&self, l: Option<&'static dyn WqLifecycle>) {
+        raw_set!(self, lifecycle, l)
     }
     // P3-N3: `workqueue` is native (`crate::proc::workqueue::Workqueue`);
     // the anonymous C bitfield struct is its named `flags` field

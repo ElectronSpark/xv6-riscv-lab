@@ -12,10 +12,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use crate::bindings::{
-    slab_cache_t, spinlock_t, thread, tq_t, work_struct, workqueue,
-    workqueue_callbacks,
-};
+use crate::bindings::{slab_cache_t, spinlock_t, thread, tq_t, work_struct, workqueue};
 use crate::list::ListNode;
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
 use crate::proc::access::{
@@ -26,18 +23,19 @@ use crate::proc::access::{
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3D, nativized in Wave P3-N3.
 //
-// `WorkStruct`/`Workqueue`/`WorkqueueCallbacks` ARE the kernel-wide Rust
-// definitions of `kernel/inc/proc/workqueue_types.h`'s `struct
-// work_struct`/`struct workqueue`/`struct workqueue_callbacks` now:
+// `WorkStruct`/`Workqueue` ARE the kernel-wide Rust definitions of
+// `kernel/inc/proc/workqueue_types.h`'s `struct work_struct`/`struct
+// workqueue` now (the C header's `struct workqueue_callbacks` has no
+// native counterpart any more -- see the TRAIT-OPS note just below):
 // `build.rs` blocklists the bindgen-generated forms and injects
 // `pub use crate::proc::workqueue::WorkStruct as work_struct;` (etc.)
 // raw-line re-exports, so the remaining bindgen struct that embeds a
 // work_struct by value (`blkdev.flush_work`) and every
-// `crate::bindings::{work_struct,workqueue,workqueue_callbacks}` path
-// across the crate resolves here. The `workqueue_lifecycle_cb_t`/
-// `workqueue_thread_lifecycle_cb_t` fn-pointer typedefs stay
-// bindgen-emitted (plain `Option<unsafe extern "C" fn(..)>` aliases whose
-// `*mut workqueue` parameter now resolves to the native `Workqueue`).
+// `crate::bindings::{work_struct,workqueue}` path across the crate
+// resolves here. TRAIT-OPS (final wave) retired the bindgen
+// `workqueue_callbacks` struct and its `workqueue_lifecycle_cb_t`/
+// `workqueue_thread_lifecycle_cb_t` fn-pointer typedefs -- both replaced
+// by the `WqLifecycle` trait below.
 //
 // TRAIT-OPS: the `func`/`fault` C-ABI fn-pointer pair -> single vtable
 // dispatch slot. `WorkHandler` is dyn-compatible (both methods take
@@ -120,35 +118,69 @@ const _: () = {
     assert!(core::mem::align_of::<Option<&'static dyn WorkHandler>>() == 8, "handler fat-ptr align");
 };
 
-/// Native mirror of `struct workqueue_callbacks`
-/// (`kernel/inc/proc/workqueue_types.h`). Field types are the
-/// still-bindgen `workqueue_lifecycle_cb_t`/
-/// `workqueue_thread_lifecycle_cb_t` typedefs — exactly what the
-/// pre-nativization bindgen struct carried.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct WorkqueueCallbacks {
-    pub(crate) workqueue_ctor: crate::bindings::workqueue_lifecycle_cb_t,
-    pub(crate) workqueue_dtor: crate::bindings::workqueue_lifecycle_cb_t,
-    pub(crate) manager_ctor: crate::bindings::workqueue_thread_lifecycle_cb_t,
-    pub(crate) manager_dtor: crate::bindings::workqueue_thread_lifecycle_cb_t,
-    pub(crate) worker_ctor: crate::bindings::workqueue_thread_lifecycle_cb_t,
-    pub(crate) worker_dtor: crate::bindings::workqueue_thread_lifecycle_cb_t,
+// TRAIT-OPS (final wave): the six-slot `workqueue_lifecycle_cb_t`/
+// `workqueue_thread_lifecycle_cb_t` fn-pointer table (former
+// `struct workqueue_callbacks`, `kernel/inc/proc/workqueue_types.h`)
+// collapses into one vtable dispatch slot, same shape as `WorkHandler`
+// above: `WqLifecycle` is dyn-compatible (every method takes `&self`
+// plus raw pointers, no generics) so `dyn WqLifecycle` is a valid trait
+// object.
+//
+// All-default-is-no-op semantics: grep-exhaustive, the only in-tree
+// installer of a non-empty callback set is `workqueue_test.rs`'s T1/T2
+// cases, and even they only ever populate `workqueue_ctor`/
+// `workqueue_dtor` (leaving `manager_ctor/dtor`/`worker_ctor/dtor` at
+// their old `None`); every production workqueue (`Pcache`'s flush
+// queue, `SchedTimer`'s queue, the VFS `iput` queue) is created via the
+// callback-less `Workqueue::create`, i.e. `lifecycle: None`. Each
+// dispatch site below used to guard the old `Option<fn>` slot with
+// `invoke_wq_cb`/`invoke_wq_t_cb`'s own `None`-is-a-silent-no-op arm;
+// a `None` `lifecycle` field reproduces that identically, and the six
+// default (no-op) method bodies below reproduce the historical
+// per-slot `None` behavior for any future installer that only
+// overrides a subset of the six.
+pub(crate) trait WqLifecycle: Sync {
+    /// Runs once a fully-initialized queue is published, before
+    /// `create_with_callbacks` spins up its manager thread (was the
+    /// `workqueue_ctor` slot).
+    ///
+    /// # Safety
+    /// `wq` must point to a live, properly initialized `workqueue` --
+    /// same contract as every `WorkqueueRef` method (module-level
+    /// `# Safety` note in `crate::proc::access`).
+    unsafe fn workqueue_ctor(&self, _wq: *mut workqueue) {}
+    /// Runs the first time a queue is killed (was the `workqueue_dtor`
+    /// slot); see `WorkqueueRef::kill`'s `mark_dtor_once` guard for the
+    /// exactly-once contract this is called under.
+    ///
+    /// # Safety
+    /// Same contract as [`Self::workqueue_ctor`].
+    unsafe fn workqueue_dtor(&self, _wq: *mut workqueue) {}
+    /// Runs on a fresh manager thread right after it registers itself
+    /// as `wq.manager` (was the `manager_ctor` slot).
+    ///
+    /// # Safety
+    /// `wq`/`t` must point to a live `workqueue`/`thread`.
+    unsafe fn manager_ctor(&self, _wq: *mut workqueue, _t: *mut thread) {}
+    /// Runs on a manager thread as it exits (was the `manager_dtor`
+    /// slot).
+    ///
+    /// # Safety
+    /// Same contract as [`Self::manager_ctor`].
+    unsafe fn manager_dtor(&self, _wq: *mut workqueue, _t: *mut thread) {}
+    /// Runs on a fresh worker thread before it enters its dequeue loop
+    /// (was the `worker_ctor` slot).
+    ///
+    /// # Safety
+    /// Same contract as [`Self::manager_ctor`].
+    unsafe fn worker_ctor(&self, _wq: *mut workqueue, _t: *mut thread) {}
+    /// Runs on a worker thread as it exits (was the `worker_dtor`
+    /// slot).
+    ///
+    /// # Safety
+    /// Same contract as [`Self::manager_ctor`].
+    unsafe fn worker_dtor(&self, _wq: *mut workqueue, _t: *mut thread) {}
 }
-
-// P3-N3 hardcoded layout proof — bindgen: six consecutive
-// `Option<unsafe extern "C" fn(..)>` (8 bytes each); cross-compiler
-// probe: size 48, align 8, offsets 0/8/16/24/32/40.
-const _: () = {
-    assert!(core::mem::size_of::<WorkqueueCallbacks>() == 48, "workqueue_callbacks size");
-    assert!(core::mem::align_of::<WorkqueueCallbacks>() == 8, "workqueue_callbacks alignment");
-    assert!(core::mem::offset_of!(WorkqueueCallbacks, workqueue_ctor) == 0);
-    assert!(core::mem::offset_of!(WorkqueueCallbacks, workqueue_dtor) == 8);
-    assert!(core::mem::offset_of!(WorkqueueCallbacks, manager_ctor) == 16);
-    assert!(core::mem::offset_of!(WorkqueueCallbacks, manager_dtor) == 24);
-    assert!(core::mem::offset_of!(WorkqueueCallbacks, worker_ctor) == 32);
-    assert!(core::mem::offset_of!(WorkqueueCallbacks, worker_dtor) == 40);
-};
 
 /// Native replacement for the anonymous C bitfield struct
 /// `struct { uint64 active : 1; uint64 dtor_called : 1; }` inside
@@ -209,7 +241,7 @@ pub struct Workqueue {
     pub(crate) nr_workers: c_int,
     pub(crate) min_active: c_int,
     pub(crate) max_active: c_int,
-    pub(crate) callbacks: WorkqueueCallbacks,
+    pub(crate) lifecycle: Option<&'static dyn WqLifecycle>,
 }
 
 // P3-N3 hardcoded layout proof — values captured from the
@@ -219,12 +251,22 @@ pub struct Workqueue {
 // [c_char; 32], __bindgen_anon_1: workqueue__bindgen_ty_1, nr_workers:
 // c_int, min_active: c_int, max_active: c_int, callbacks:
 // workqueue_callbacks }`, `#[repr(C)] #[repr(align(64))]`) and
-// independently confirmed by the cross-compiler `_Static_assert`
-// probe: size 256, align 64, offsets
+// independently confirmed by the cross-compiler `_Static_assert` probe:
+// pre-TRAIT-OPS size 256, align 64, offsets
 // 0/24/72/88/96/104/120/[152]/160/164/168/176 (the anonymous bitfield
 // struct occupies [152,160), pinned in the probe by both neighbours).
+//
+// TRAIT-OPS (final wave): the trailing 48-byte, 6-slot
+// `WorkqueueCallbacks` field (offset 176, extending to 224, padded to
+// 256 for the `align(64)` tail) shrinks to one 16-byte
+// `Option<&'static dyn WqLifecycle>` fat pointer at the same offset
+// (176) -- `lifecycle` is the LAST field so no other offset above
+// moves. New end-of-fields is 176+16=192, which is *itself* an exact
+// multiple of 64, so the `align(64)` tail needs zero extra padding:
+// `size_of::<Workqueue>()` SHRINKS 256 -> 192 (compiler-checked below,
+// not just asserted).
 const _: () = {
-    assert!(core::mem::size_of::<Workqueue>() == 256, "workqueue size");
+    assert!(core::mem::size_of::<Workqueue>() == 192, "workqueue size");
     assert!(core::mem::align_of::<Workqueue>() == 64, "workqueue alignment");
     assert!(core::mem::offset_of!(Workqueue, lock) == 0, "workqueue.lock offset");
     assert!(core::mem::offset_of!(Workqueue, idle_queue) == 24, "workqueue.idle_queue offset");
@@ -237,7 +279,10 @@ const _: () = {
     assert!(core::mem::offset_of!(Workqueue, nr_workers) == 160, "workqueue.nr_workers offset");
     assert!(core::mem::offset_of!(Workqueue, min_active) == 164, "workqueue.min_active offset");
     assert!(core::mem::offset_of!(Workqueue, max_active) == 168, "workqueue.max_active offset");
-    assert!(core::mem::offset_of!(Workqueue, callbacks) == 176, "workqueue.callbacks offset");
+    assert!(core::mem::offset_of!(Workqueue, lifecycle) == 176, "workqueue.lifecycle offset");
+    // Honest fat-pointer proof (WorkHandler/IrqHandler/RbOps precedent).
+    assert!(core::mem::size_of::<Option<&'static dyn WqLifecycle>>() == 16, "lifecycle fat-ptr size");
+    assert!(core::mem::align_of::<Option<&'static dyn WqLifecycle>>() == 8, "lifecycle fat-ptr align");
 };
 
 // -------- mirrored constants ----------------------------------------------
@@ -347,21 +392,13 @@ use crate::proc::Scheduler;
     ThreadAccess::from_ptr(p)
 }
 
-// Callback trampolines: invoking a stored `unsafe extern "C" fn` pointer is
-// inherently unsafe — encapsulated once per arity. (The `work_struct`
-// callback pair used to have its own `invoke_work_cb` trampoline here;
-// TRAIT-OPS replaced it with direct `dyn WorkHandler` dispatch in
-// `WorkStructRef::execute` below, so only the two lifecycle-callback
-// trampolines remain.)
-#[inline] fn invoke_wq_cb(cb: Option<unsafe extern "C" fn(*mut workqueue)>, wq: *mut workqueue) {
-    if let Some(f) = cb { unsafe { f(wq); } }
-}
-#[inline] fn invoke_wq_t_cb(
-    cb: Option<unsafe extern "C" fn(*mut workqueue, *mut thread)>,
-    wq: *mut workqueue, t: *mut thread,
-) {
-    if let Some(f) = cb { unsafe { f(wq, t); } }
-}
+// TRAIT-OPS (final wave): the former `invoke_wq_cb`/`invoke_wq_t_cb`
+// callback trampolines (each a thin "invoke a stored `unsafe extern "C"
+// fn` pointer, no-op if `None`" wrapper) are gone -- every lifecycle
+// dispatch site below now calls straight through the single stored
+// `Option<&'static dyn WqLifecycle>` slot (`if let Some(l) = ... { l.
+// <slot>(..) }`), same shape as `WorkStructRef::execute`'s direct `dyn
+// WorkHandler` dispatch just above.
 
 // NO-STANDALONE-FN: the former `thread_killed`/`thread_set_killed` free fns
 // are gone. The killed-flag test/set is now expressed directly at each call
@@ -549,7 +586,13 @@ impl<'a> WorkqueueRef<'a> {
         let should = self.mark_dtor_once();
         let manager = self.manager_ptr();
         self.lock_ref().unlock();
-        if should { invoke_wq_cb(self.cb_workqueue_dtor(), self.as_ptr()); }
+        if should {
+            if let Some(l) = self.lifecycle() {
+                // SAFETY: `self.as_ptr()` is this handle's own live `workqueue`
+                // -- exactly the contract `WqLifecycle::workqueue_dtor` documents.
+                unsafe { l.workqueue_dtor(self.as_ptr()); }
+            }
+        }
         if !manager.is_null() {
             let r = crate::proc::access::ThreadAccess::from_ptr(manager).map_or(-22, |ta| ta.kill_thread(SIGKILL));
             if r < 0 { if let Some(a) = ta(manager) { a.flags_set_bit(THREAD_FLAG_KILLED); } }
@@ -584,7 +627,11 @@ fn exit_worker_routine(exit_code: u64) -> ! {
     cur_h.tcb_unlock();
     if !wq_p.is_null() {
         if let Some(wq) = wqr(wq_p) {
-            invoke_wq_t_cb(wq.cb_worker_dtor(), wq_p, cur_t);
+            if let Some(l) = wq.lifecycle() {
+                // SAFETY: `wq_p`/`cur_t` are the live `workqueue`/`thread` this
+                // exiting worker belongs to -- `WqLifecycle::worker_dtor`'s contract.
+                unsafe { l.worker_dtor(wq_p, cur_t); }
+            }
             wq.lock_ref().lock();
             if wq.manager_ptr() == cur_t {
                 xv6_panic(c"Manager thread try to exit using worker exit routine".as_ptr());
@@ -618,7 +665,11 @@ fn exit_manager_routine(exit_code: u64) -> ! {
     let wq_p = cur_a.map(|a| a.wq_ptr()).unwrap_or(ptr::null_mut());
     cur_h.tcb_unlock();
     if let Some(wq) = wqr(wq_p) {
-        invoke_wq_t_cb(wq.cb_manager_dtor(), wq_p, cur_t);
+        if let Some(l) = wq.lifecycle() {
+            // SAFETY: `wq_p`/`cur_t` are the live `workqueue`/`thread` this
+            // exiting manager belongs to -- `WqLifecycle::manager_dtor`'s contract.
+            unsafe { l.manager_dtor(wq_p, cur_t); }
+        }
         wq.lock_ref().lock();
         if wq.manager_ptr() == cur_t { wq.set_manager(ptr::null_mut()); }
         wq.lock_ref().unlock();
@@ -639,7 +690,12 @@ unsafe extern "C" fn worker_routine() {
     wq.lock_ref().lock();
     if wq.manager_ptr() == cur_t { wq.lock_ref().unlock(); Proc::exit(-EINVAL); }
     wq.lock_ref().unlock();
-    invoke_wq_t_cb(wq.cb_worker_ctor(), wq_p, cur_t);
+    if let Some(l) = wq.lifecycle() {
+        // SAFETY: `wq_p`/`cur_t` are the live `workqueue`/`thread` this fresh
+        // worker belongs to -- `WqLifecycle::worker_ctor`'s contract; this
+        // fn's own `unsafe extern "C"` body is already an unsafe context.
+        unsafe { l.worker_ctor(wq_p, cur_t); }
+    }
     loop {
         wq.lock_ref().lock();
         if cur_h.flags_test_bit(THREAD_FLAG_KILLED) { wq.lock_ref().unlock(); exit_worker_routine(0); }
@@ -679,7 +735,12 @@ unsafe extern "C" fn manager_routine() {
     wq.lock_ref().lock();
     wq.set_manager(cur_t);
     wq.lock_ref().unlock();
-    invoke_wq_t_cb(wq.cb_manager_ctor(), wq_p, cur_t);
+    if let Some(l) = wq.lifecycle() {
+        // SAFETY: `wq_p`/`cur_t` are the live `workqueue`/`thread` this fresh
+        // manager belongs to -- `WqLifecycle::manager_ctor`'s contract; this
+        // fn's own `unsafe extern "C"` body is already an unsafe context.
+        unsafe { l.manager_ctor(wq_p, cur_t); }
+    }
     wq.lock_ref().lock();
     loop {
         if cur_h.flags_test_bit(THREAD_FLAG_KILLED) {
@@ -771,7 +832,7 @@ impl Workqueue {
     pub(super) fn create_with_callbacks(
         name: *const c_char,
         mut max_active: c_int,
-        callbacks: *const workqueue_callbacks,
+        lifecycle: Option<&'static dyn WqLifecycle>,
     ) -> *mut workqueue {
         if max_active < 0 { return ptr::null_mut(); }
         if max_active == 0 { max_active = WORKQUEUE_DEFAULT_MAX_ACTIVE; }
@@ -782,19 +843,28 @@ impl Workqueue {
         let Some(wq) = wqr(wq_p) else { return ptr::null_mut(); };
         wq.struct_init();
         strncpy(wq.name_buf_ptr(), name, WORKQUEUE_NAME_MAX);
-        wq.copy_callbacks(callbacks);
+        wq.set_lifecycle(lifecycle);
         wq.set_max_active(max_active);
         wq.set_min_active(if max_active < WORKQUEUE_DEFAULT_MIN_ACTIVE {
             WORKQUEUE_DEFAULT_MIN_ACTIVE
         } else { max_active });
         wq.set_nr_workers(0);
         wq.set_active(1);
-        invoke_wq_cb(wq.cb_workqueue_ctor(), wq_p);
+        if let Some(l) = wq.lifecycle() {
+            // SAFETY: `wq_p` is the just-initialized, live `workqueue` this
+            // handle owns -- `WqLifecycle::workqueue_ctor`'s contract.
+            unsafe { l.workqueue_ctor(wq_p); }
+        }
         wq.lock_ref().lock();
         if wq.create_manager() != 0 {
             let should = wq.mark_dtor_once();
             wq.lock_ref().unlock();
-            if should { invoke_wq_cb(wq.cb_workqueue_dtor(), wq_p); }
+            if should {
+                if let Some(l) = wq.lifecycle() {
+                    // SAFETY: same contract as the `workqueue_ctor` call above.
+                    unsafe { l.workqueue_dtor(wq_p); }
+                }
+            }
             free_ptr(wq_p);
             return ptr::null_mut();
         }
@@ -806,7 +876,7 @@ impl Workqueue {
     /// Create a callback-less workqueue (was `workqueue_create`).
     /// pcache/timer/vfs/workqueue_test.
     pub(crate) fn create(name: *const c_char, max_active: c_int) -> *mut workqueue {
-        Self::create_with_callbacks(name, max_active, ptr::null())
+        Self::create_with_callbacks(name, max_active, None)
     }
 
     /// Deactivate a workqueue and tear down its manager (was

@@ -82,8 +82,8 @@
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use crate::bindings::{work_struct, workqueue, workqueue_callbacks};
-use crate::proc::{WorkHandler, WorkStruct, Workqueue};
+use crate::bindings::{work_struct, workqueue};
+use crate::proc::{WorkHandler, WorkStruct, Workqueue, WqLifecycle};
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
@@ -159,12 +159,23 @@ static CTOR_CALLS: AtomicI32 = AtomicI32::new(0);
 static DTOR_CALLS: AtomicI32 = AtomicI32::new(0);
 static RUN_COUNT: AtomicI32 = AtomicI32::new(0);
 
-unsafe extern "C" fn cb_ctor(_wq: *mut workqueue) {
-    CTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+// TRAIT-OPS (final wave): `cb_ctor`/`cb_dtor` used to be
+// `workqueue_ctor`/`workqueue_dtor`-slot fn pointers, installed as a
+// `workqueue_callbacks` struct literal; now one ZST `WqLifecycle`
+// implementor overrides just those two methods (T1/T2 never populate
+// `manager_ctor/dtor`/`worker_ctor/dtor`, so `WqLifecycle`'s default
+// no-op bodies cover those four unmodified).
+struct CbWqLifecycle;
+impl WqLifecycle for CbWqLifecycle {
+    unsafe fn workqueue_ctor(&self, _wq: *mut workqueue) {
+        CTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe fn workqueue_dtor(&self, _wq: *mut workqueue) {
+        DTOR_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
 }
-unsafe extern "C" fn cb_dtor(_wq: *mut workqueue) {
-    DTOR_CALLS.fetch_add(1, Ordering::SeqCst);
-}
+static CB_WQ_LIFECYCLE: CbWqLifecycle = CbWqLifecycle;
+
 // TRAIT-OPS: `cb_run_counter`/`cb_noop` used to be `func`-slot fn pointers;
 // each is now a ZST `WorkHandler` implementor with one `'static` instance
 // whose address is taken in the test cases below. Neither ever populated
@@ -190,15 +201,7 @@ static CB_NOOP: CbNoop = CbNoop;
 fn t1_ctor_invoked_on_create() {
     CTOR_CALLS.store(0, Ordering::SeqCst);
     DTOR_CALLS.store(0, Ordering::SeqCst);
-    let callbacks = workqueue_callbacks {
-        workqueue_ctor: Some(cb_ctor),
-        workqueue_dtor: Some(cb_dtor),
-        manager_ctor: None,
-        manager_dtor: None,
-        worker_ctor: None,
-        worker_dtor: None,
-    };
-    let wq = Workqueue::create_with_callbacks(c"wqtest_t1".as_ptr(), 1, &callbacks);
+    let wq = Workqueue::create_with_callbacks(c"wqtest_t1".as_ptr(), 1, Some(&CB_WQ_LIFECYCLE));
     if wq.is_null() {
         case_fail();
         return;
@@ -214,15 +217,7 @@ fn t1_ctor_invoked_on_create() {
 fn t2_dtor_invoked_once_on_kill() {
     CTOR_CALLS.store(0, Ordering::SeqCst);
     DTOR_CALLS.store(0, Ordering::SeqCst);
-    let callbacks = workqueue_callbacks {
-        workqueue_ctor: Some(cb_ctor),
-        workqueue_dtor: Some(cb_dtor),
-        manager_ctor: None,
-        manager_dtor: None,
-        worker_ctor: None,
-        worker_dtor: None,
-    };
-    let wq = Workqueue::create_with_callbacks(c"wqtest_t2".as_ptr(), 1, &callbacks);
+    let wq = Workqueue::create_with_callbacks(c"wqtest_t2".as_ptr(), 1, Some(&CB_WQ_LIFECYCLE));
     if wq.is_null() {
         case_fail();
         return;
