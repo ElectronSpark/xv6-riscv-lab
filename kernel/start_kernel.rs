@@ -222,8 +222,8 @@ use crate::dev::dev::DevTable;
 use crate::dev::fdt::Fdt;
 use crate::dev::netdev::Netdev;
 use crate::dev::nullrand::NullRandDev;
-use crate::dev::x1_emac::x1_emac_init;
-use crate::dev::x1_sdhci::x1_sdhci_init;
+use crate::dev::x1_emac::X1EmacSoftc;
+use crate::dev::x1_sdhci::SdhciSoftc;
 use crate::pci::pci_init;
 use crate::ramdisk::ramdisk_init;
 use crate::sbi::{sbi_probe_extensions, sbi_start_secondary_harts};
@@ -310,8 +310,8 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         sched_timer_init();
         // Post-init device drivers: spawned as kthreads so they run with
         // the scheduler active and can use sleep_ms() / Scheduler::yield_now().
-        x1_emac_init(); // SpacemiT X1 EMAC (probes via FDT)
-        x1_sdhci_init(); // SpacemiT X1 SDHCI SD/eMMC (probes via FDT)
+        X1EmacSoftc::init(); // SpacemiT X1 EMAC (probes via FDT)
+        SdhciSoftc::init(); // SpacemiT X1 SDHCI SD/eMMC (probes via FDT)
         // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
         core::sync::atomic::fence(Ordering::SeqCst);
     }

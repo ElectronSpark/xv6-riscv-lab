@@ -15,7 +15,7 @@
 //!
 //! # QEMU verifiability (Wave 25 charter)
 //!
-//! [`x1_emac_init`] -- the only entry point `start_kernel.c` calls --
+//! [`X1EmacSoftc::init`] -- the only entry point `start_kernel.c` calls --
 //! early-returns when `platform.has_emac` is false, which it always is
 //! on QEMU's generated device tree (Wave 23 finding: no EMAC-compatible
 //! node in `-machine virt`'s DTB). **Compile-verify + boot-no-regression
@@ -462,7 +462,7 @@ unsafe fn dma_cache_inval(addr: *mut c_void, size: usize) {
 // against the C original, not because any external ABI depends on it.
 // ===========================================================================
 #[repr(C)]
-struct X1EmacSoftc {
+pub(crate) struct X1EmacSoftc {
     regs: *mut u32, // EMAC MMIO base
 
     // APMU registers (identity-mapped virtual = physical).
@@ -531,15 +531,6 @@ impl<T> SyncCell<T> {
 static EMAC_SC: SyncCell<[MaybeUninit<X1EmacSoftc>; MAX_EMAC_INSTANCES]> =
     SyncCell(UnsafeCell::new([const { MaybeUninit::uninit() }; MAX_EMAC_INSTANCES]));
 
-/// # Safety
-/// `idx` must be `< MAX_EMAC_INSTANCES`.
-#[inline(always)]
-unsafe fn emac_sc(idx: usize) -> *mut X1EmacSoftc {
-    // SAFETY: caller contract; `EMAC_SC` is a live, `MAX_EMAC_INSTANCES`-
-    // element array.
-    unsafe { (EMAC_SC.get() as *mut X1EmacSoftc).add(idx) }
-}
-
 /// `static volatile int emac_init_done[MAX_EMAC_INSTANCES]` -- `1` = ok,
 /// `-1` = fail, `0` = not yet finished. Plain `AtomicI32` array (mirrors
 /// the C `__atomic_*` builtins used at every access site 1:1 -- see
@@ -560,25 +551,25 @@ extern "C" fn x1_emac_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
 
     // Read and acknowledge DMA status.
     // SAFETY: `sc` live per above.
-    let status = unsafe { sc_rd(sc, DMA_STATUS_IRQ) };
+    let status = unsafe { X1EmacSoftc::rd(sc, DMA_STATUS_IRQ) };
     // Acknowledge all bits by writing them back.
     // SAFETY: see above.
-    unsafe { sc_wr(sc, DMA_STATUS_IRQ, status) };
+    unsafe { X1EmacSoftc::wr(sc, DMA_STATUS_IRQ, status) };
 
     if status & DMA_IRQ_RX_DONE != 0 {
         // SAFETY: `sc` live.
-        unsafe { x1_emac_recv(sc) };
+        unsafe { X1EmacSoftc::recv(sc) };
     }
 
     if status & DMA_IRQ_TX_DONE != 0 {
         // SAFETY: `sc` live.
-        unsafe { x1_emac_tx_reclaim(sc) };
+        unsafe { X1EmacSoftc::tx_reclaim(sc) };
     }
 
     if status & DMA_IRQ_RX_DESC_UNAVAIL != 0 {
         // RX ring ran out of descriptors. Kick RX DMA to resume.
         // SAFETY: `sc` live.
-        unsafe { sc_wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF) };
+        unsafe { X1EmacSoftc::wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF) };
     }
 
     if status & (DMA_IRQ_TX_STOPPED | DMA_IRQ_RX_STOPPED) != 0 {
@@ -598,802 +589,826 @@ extern "C" fn x1_emac_transmit_op(ndev: *mut netdev, m: *mut mbuf) -> c_int {
     // contract).
     let sc = unsafe { (*ndev).priv_ } as *mut X1EmacSoftc;
     // SAFETY: `sc`/`m` live per caller contract.
-    unsafe { x1_emac_transmit(sc, m) }
+    unsafe { X1EmacSoftc::transmit(sc, m) }
 }
 
 static X1_EMAC_NETDEV_OPS: netdev_ops = netdev_ops { transmit: Some(x1_emac_transmit_op) };
 
 // ===========================================================================
-// Low-level MMIO helpers. Mirrors `sc_rd`/`sc_wr` static inlines.
+// `X1EmacSoftc` -- every function below takes this per-instance
+// driver-state pointer (or, for the top-level orchestration entry point,
+// no receiver at all) -- KERNEL-OO relocation. Raw pointer params kept
+// throughout, bodies byte-identical to the old free fns, `unsafe extern
+// "C"` signatures preserved exactly.
 // ===========================================================================
 
-/// # Safety
-/// `sc` must be live; `(*sc).regs + off .. +4` must be valid MMIO space.
-#[inline(always)]
-unsafe fn sc_rd(sc: *mut X1EmacSoftc, off: u32) -> u32 {
-    // SAFETY: caller contract.
-    unsafe { ptr::read_volatile(((*sc).regs as *mut u8).add(off as usize) as *mut u32) }
-}
-
-/// # Safety
-/// Same as [`sc_rd`].
-#[inline(always)]
-unsafe fn sc_wr(sc: *mut X1EmacSoftc, off: u32, val: u32) {
-    // SAFETY: caller contract.
-    unsafe { ptr::write_volatile(((*sc).regs as *mut u8).add(off as usize) as *mut u32, val) };
-}
-
-// ===========================================================================
-// APMU / clock / delay-line configuration.
-// ===========================================================================
-
-/// Configure the APMU control register for RGMII mode and AXI single-ID.
-///
-/// # Safety
-/// `sc` must point to a live, exclusively-owned (not-yet-published)
-/// `X1EmacSoftc`.
-unsafe fn x1_emac_apmu_config(sc: *mut X1EmacSoftc) {
-    // SAFETY: caller contract.
-    let ctrl_reg = unsafe { (*sc).ctrl_reg };
-    if ctrl_reg.is_null() {
-        // SAFETY: caller contract; format string matches its one argument.
-        crate::kprintln!("x1_emac{}: no ctrl_reg, skipping APMU config", unsafe { (*sc).index });
-        return;
+impl X1EmacSoftc {
+    /// # Safety
+    /// `idx` must be `< MAX_EMAC_INSTANCES`.
+    #[inline(always)]
+    unsafe fn sc(idx: usize) -> *mut X1EmacSoftc {
+        // SAFETY: caller contract; `EMAC_SC` is a live, `MAX_EMAC_INSTANCES`-
+        // element array.
+        unsafe { (EMAC_SC.get() as *mut X1EmacSoftc).add(idx) }
     }
 
-    // SAFETY: `ctrl_reg` non-null, a live MMIO register per caller contract.
-    let mut val = unsafe { ptr::read_volatile(ctrl_reg) };
+    // -----------------------------------------------------------------------
+    // Low-level MMIO helpers. Mirrors `sc_rd`/`sc_wr` static inlines.
+    // -----------------------------------------------------------------------
 
-    // Enable bus clock gate -- required before any EMAC register access.
-    val |= EMAC_BUS_CLK_EN;
-    // SAFETY: see above.
-    unsafe { ptr::write_volatile(ctrl_reg, val) };
-    fence(Ordering::SeqCst);
-
-    // Deassert reset (take EMAC out of reset).
-    val |= EMAC_RESET_DEASSERT;
-    // SAFETY: see above.
-    unsafe { ptr::write_volatile(ctrl_reg, val) };
-    fence(Ordering::SeqCst);
-    Scheduler::yield_now(); // allow reset to propagate
-
-    // Set RGMII interface mode + AXI single ID.
-    val |= PHY_INTF_RGMII;
-    val |= AXI_SINGLE_ID;
-    // SAFETY: see above.
-    unsafe { ptr::write_volatile(ctrl_reg, val) };
-    fence(Ordering::SeqCst);
-}
-
-/// Program RGMII TX and RX delay-lines using the APMU dline register
-/// (`CLK_TUNING_BY_DLINE` method from the Linux driver).
-///
-/// # Safety
-/// Same as [`x1_emac_apmu_config`].
-unsafe fn x1_emac_dline_config(sc: *mut X1EmacSoftc) {
-    // SAFETY: caller contract.
-    let dline_reg = unsafe { (*sc).dline_reg };
-    if dline_reg.is_null() {
-        // SAFETY: caller contract; format string matches its one argument.
-        crate::kprintln!("x1_emac{}: no dline_reg, skipping delay-line config", unsafe { (*sc).index });
-        return;
+    /// # Safety
+    /// `sc` must be live; `(*sc).regs + off .. +4` must be valid MMIO space.
+    #[inline(always)]
+    unsafe fn rd(sc: *mut X1EmacSoftc, off: u32) -> u32 {
+        // SAFETY: caller contract.
+        unsafe { ptr::read_volatile(((*sc).regs as *mut u8).add(off as usize) as *mut u32) }
     }
 
-    // SAFETY: `dline_reg` non-null, live MMIO per caller contract.
-    let mut val = unsafe { ptr::read_volatile(dline_reg) };
-
-    // TX delay line.
-    val &= !EMAC_TX_DLINE_CODE_MASK;
-    // SAFETY: caller contract.
-    val |= unsafe { (*sc).tx_phase } << EMAC_TX_DLINE_CODE_OFFSET;
-    val |= EMAC_TX_DLINE_EN;
-
-    // RX delay line.
-    val &= !EMAC_RX_DLINE_CODE_MASK;
-    // SAFETY: caller contract.
-    val |= unsafe { (*sc).rx_phase } << EMAC_RX_DLINE_CODE_OFFSET;
-    val |= EMAC_RX_DLINE_EN;
-
-    // SAFETY: see above.
-    unsafe { ptr::write_volatile(dline_reg, val) };
-    fence(Ordering::SeqCst);
-
-    // SAFETY: caller contract; format string matches its three arguments.
-    crate::kprintln!(
-        "x1_emac{}: delay-line tx={} rx={}",
-        unsafe { (*sc).index },
-        unsafe { (*sc).tx_phase },
-        unsafe { (*sc).rx_phase },
-    );
-}
-
-// ===========================================================================
-// DMA reset.
-// ===========================================================================
-
-/// # Safety
-/// `sc` must be live.
-unsafe fn x1_emac_dma_reset(sc: *mut X1EmacSoftc) -> c_int {
-    // Stop DMA.
-    // SAFETY: caller contract.
-    unsafe { sc_wr(sc, DMA_CONTROL, 0) };
-
-    // Assert software reset.
-    // SAFETY: caller contract.
-    unsafe {
-        sc_wr(sc, DMA_CONFIGURATION, DMA_CFG_SW_RESET);
-    }
-    sleep_ms(10);
-    // SAFETY: caller contract.
-    unsafe { sc_wr(sc, DMA_CONFIGURATION, 0) };
-    sleep_ms(10);
-
-    0
-}
-
-// ===========================================================================
-// MAC initialisation (mirrors `emac_init_hw` in Linux).
-// ===========================================================================
-
-/// # Safety
-/// `sc` must be live; `addr` must point to 6 readable bytes.
-unsafe fn x1_emac_set_mac_addr(sc: *mut X1EmacSoftc, addr: *const u8) {
-    // SAFETY: caller contract.
-    unsafe {
-        sc_wr(sc, MAC_ADDRESS1_HIGH, ((*addr.add(1) as u32) << 8) | *addr.add(0) as u32);
-        sc_wr(sc, MAC_ADDRESS1_MED, ((*addr.add(3) as u32) << 8) | *addr.add(2) as u32);
-        sc_wr(sc, MAC_ADDRESS1_LOW, ((*addr.add(5) as u32) << 8) | *addr.add(4) as u32);
-    }
-}
-
-/// # Safety
-/// `sc` must be live.
-unsafe fn x1_emac_init_hw(sc: *mut X1EmacSoftc) {
-    // SAFETY: caller contract for the whole function body below.
-    unsafe {
-        // Disable TX and RX.
-        sc_wr(sc, MAC_RECEIVE_CONTROL, 0);
-        sc_wr(sc, MAC_TRANSMIT_CONTROL, 0);
-
-        // Reset MAC + statistic counters (matches U-Boot emac_reset_hw).
-        sc_wr(sc, MAC_GLOBAL_CONTROL, MAC_GC_RESET_RX_STATS | MAC_GC_RESET_TX_STATS);
-        sc_wr(sc, MAC_GLOBAL_CONTROL, 0);
-
-        // Enable MAC address 1 filtering.
-        sc_wr(sc, MAC_ADDRESS_CONTROL, MAC_AC_ADDR1_ENABLE);
-
-        // Zero the multicast hash table.
-        sc_wr(sc, MAC_MULTICAST_HASH_TABLE1, 0);
-        sc_wr(sc, MAC_MULTICAST_HASH_TABLE2, 0);
-        sc_wr(sc, MAC_MULTICAST_HASH_TABLE3, 0);
-        sc_wr(sc, MAC_MULTICAST_HASH_TABLE4, 0);
-
-        // TX FIFO almost full threshold.
-        sc_wr(sc, MAC_TX_FIFO_ALMOST_FULL, 0x1f8);
-
-        // TX packet start threshold.
-        sc_wr(sc, MAC_TX_PKT_START_THRESHOLD, X1_EMAC_DEFAULT_TX_THRESH);
-
-        // RX packet start threshold.
-        sc_wr(sc, MAC_RX_PKT_START_THRESHOLD, X1_EMAC_DEFAULT_RX_THRESH);
-
-        // Flow control: decode enable.
-        sc_wr(sc, MAC_FC_CONTROL, MAC_FC_DECODE_ENABLE);
-
-        // DMA reset.
-        x1_emac_dma_reset(sc);
-
-        // DMA configuration: strict burst + 64-bit + 16-word burst length.
-        // Matches the vendor Linux driver's register value (0x00060020).
-        // dma-burst-len=5 in DT -> bit 5 -> BURST_16WORD.
-        let val = DMA_CFG_STRICT_BURST | DMA_CFG_64BIT_MODE | DMA_CFG_BURST_16WORD;
-        sc_wr(sc, DMA_CONFIGURATION, val);
-
-        // Disable all interrupts initially.
-        sc_wr(sc, MAC_INTERRUPT_ENABLE, 0);
-        sc_wr(sc, DMA_INTERRUPT_ENABLE, 0);
-    }
-}
-
-/// Set MAC speed/duplex based on PHY link state.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn x1_emac_adjust_link(sc: *mut X1EmacSoftc) {
-    // SAFETY: caller contract.
-    let mut ctrl = unsafe { sc_rd(sc, MAC_GLOBAL_CONTROL) };
-
-    ctrl &= !MAC_GC_SPEED_MASK;
-    // SAFETY: caller contract.
-    let speed = unsafe { (*sc).phy.speed };
-    ctrl |= match speed {
-        1000 => MAC_GC_SPEED_1000M,
-        100 => MAC_GC_SPEED_100M,
-        _ => MAC_GC_SPEED_10M,
-    };
-
-    // SAFETY: caller contract.
-    if unsafe { (*sc).phy.full_duplex } != 0 {
-        ctrl |= MAC_GC_FULL_DUPLEX;
-    } else {
-        ctrl &= !MAC_GC_FULL_DUPLEX;
+    /// # Safety
+    /// Same as [`Self::rd`].
+    #[inline(always)]
+    unsafe fn wr(sc: *mut X1EmacSoftc, off: u32, val: u32) {
+        // SAFETY: caller contract.
+        unsafe { ptr::write_volatile(((*sc).regs as *mut u8).add(off as usize) as *mut u32, val) };
     }
 
-    // SAFETY: caller contract.
-    unsafe { sc_wr(sc, MAC_GLOBAL_CONTROL, ctrl) };
-}
+    // -----------------------------------------------------------------------
+    // APMU / clock / delay-line configuration.
+    // -----------------------------------------------------------------------
 
-// ===========================================================================
-// TX ring setup.
-// ===========================================================================
+    /// Configure the APMU control register for RGMII mode and AXI single-ID.
+    ///
+    /// # Safety
+    /// `sc` must point to a live, exclusively-owned (not-yet-published)
+    /// `X1EmacSoftc`.
+    unsafe fn apmu_config(sc: *mut X1EmacSoftc) {
+        // SAFETY: caller contract.
+        let ctrl_reg = unsafe { (*sc).ctrl_reg };
+        if ctrl_reg.is_null() {
+            // SAFETY: caller contract; format string matches its one argument.
+            crate::kprintln!("x1_emac{}: no ctrl_reg, skipping APMU config", unsafe { (*sc).index });
+            return;
+        }
 
-/// # Safety
-/// `sc` must point to a live, exclusively-owned `X1EmacSoftc`.
-unsafe fn x1_emac_tx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
-    // Allocate descriptor ring (needs to be page-aligned for DMA): 64
-    // entries x 64 bytes = 4096 = exactly 1 page.
-    let ring_size = X1_EMAC_TX_RING_SIZE * core::mem::size_of::<x1_tx_desc>();
+        // SAFETY: `ctrl_reg` non-null, a live MMIO register per caller contract.
+        let mut val = unsafe { ptr::read_volatile(ctrl_reg) };
 
-    // Use kalloc pages -- identity mapped, so VA == PA.
-    // SAFETY: `kalloc` returns a fresh page or null.
-    let ring = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut x1_tx_desc;
-    if ring.is_null() {
-        return -1;
+        // Enable bus clock gate -- required before any EMAC register access.
+        val |= EMAC_BUS_CLK_EN;
+        // SAFETY: see above.
+        unsafe { ptr::write_volatile(ctrl_reg, val) };
+        fence(Ordering::SeqCst);
+
+        // Deassert reset (take EMAC out of reset).
+        val |= EMAC_RESET_DEASSERT;
+        // SAFETY: see above.
+        unsafe { ptr::write_volatile(ctrl_reg, val) };
+        fence(Ordering::SeqCst);
+        Scheduler::yield_now(); // allow reset to propagate
+
+        // Set RGMII interface mode + AXI single ID.
+        val |= PHY_INTF_RGMII;
+        val |= AXI_SINGLE_ID;
+        // SAFETY: see above.
+        unsafe { ptr::write_volatile(ctrl_reg, val) };
+        fence(Ordering::SeqCst);
     }
-    // SAFETY: caller contract; `ring` is a fresh `ring_size`-byte allocation.
-    unsafe {
-        (*sc).tx_ring = ring;
-        memset(ring as *mut c_void, 0, ring_size);
-        memset((*sc).tx_mbufs.as_mut_ptr() as *mut c_void, 0, core::mem::size_of_val(&(*sc).tx_mbufs));
-        (*sc).tx_head = 0;
-        (*sc).tx_tail = 0;
+
+    /// Program RGMII TX and RX delay-lines using the APMU dline register
+    /// (`CLK_TUNING_BY_DLINE` method from the Linux driver).
+    ///
+    /// # Safety
+    /// Same as [`Self::apmu_config`].
+    unsafe fn dline_config(sc: *mut X1EmacSoftc) {
+        // SAFETY: caller contract.
+        let dline_reg = unsafe { (*sc).dline_reg };
+        if dline_reg.is_null() {
+            // SAFETY: caller contract; format string matches its one argument.
+            crate::kprintln!("x1_emac{}: no dline_reg, skipping delay-line config", unsafe { (*sc).index });
+            return;
+        }
+
+        // SAFETY: `dline_reg` non-null, live MMIO per caller contract.
+        let mut val = unsafe { ptr::read_volatile(dline_reg) };
+
+        // TX delay line.
+        val &= !EMAC_TX_DLINE_CODE_MASK;
+        // SAFETY: caller contract.
+        val |= unsafe { (*sc).tx_phase } << EMAC_TX_DLINE_CODE_OFFSET;
+        val |= EMAC_TX_DLINE_EN;
+
+        // RX delay line.
+        val &= !EMAC_RX_DLINE_CODE_MASK;
+        // SAFETY: caller contract.
+        val |= unsafe { (*sc).rx_phase } << EMAC_RX_DLINE_CODE_OFFSET;
+        val |= EMAC_RX_DLINE_EN;
+
+        // SAFETY: see above.
+        unsafe { ptr::write_volatile(dline_reg, val) };
+        fence(Ordering::SeqCst);
+
+        // SAFETY: caller contract; format string matches its three arguments.
+        crate::kprintln!(
+            "x1_emac{}: delay-line tx={} rx={}",
+            unsafe { (*sc).index },
+            unsafe { (*sc).tx_phase },
+            unsafe { (*sc).rx_phase },
+        );
     }
 
-    // Set up chained descriptor pointers. Each descriptor's `buf_addr2`
-    // points to the next descriptor; the last wraps back to the first.
-    for i in 0..X1_EMAC_TX_RING_SIZE {
-        let next = (i + 1) % X1_EMAC_TX_RING_SIZE;
-        // SAFETY: `ring` has `X1_EMAC_TX_RING_SIZE` live entries per
-        // the allocation above; `i`/`next` are both in range.
+    // -----------------------------------------------------------------------
+    // DMA reset.
+    // -----------------------------------------------------------------------
+
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn dma_reset(sc: *mut X1EmacSoftc) -> c_int {
+        // Stop DMA.
+        // SAFETY: caller contract.
+        unsafe { Self::wr(sc, DMA_CONTROL, 0) };
+
+        // Assert software reset.
+        // SAFETY: caller contract.
         unsafe {
-            let d = ring.add(i);
-            (*d).buf_addr2 = ring.add(next) as u64 as u32;
-            (*d).word1 = DESC_CHAINED; // SecondAddressChained
+            Self::wr(sc, DMA_CONFIGURATION, DMA_CFG_SW_RESET);
+        }
+        sleep_ms(10);
+        // SAFETY: caller contract.
+        unsafe { Self::wr(sc, DMA_CONFIGURATION, 0) };
+        sleep_ms(10);
+
+        0
+    }
+
+    // -----------------------------------------------------------------------
+    // MAC initialisation (mirrors `emac_init_hw` in Linux).
+    // -----------------------------------------------------------------------
+
+    /// # Safety
+    /// `sc` must be live; `addr` must point to 6 readable bytes.
+    unsafe fn set_mac_addr(sc: *mut X1EmacSoftc, addr: *const u8) {
+        // SAFETY: caller contract.
+        unsafe {
+            Self::wr(sc, MAC_ADDRESS1_HIGH, ((*addr.add(1) as u32) << 8) | *addr.add(0) as u32);
+            Self::wr(sc, MAC_ADDRESS1_MED, ((*addr.add(3) as u32) << 8) | *addr.add(2) as u32);
+            Self::wr(sc, MAC_ADDRESS1_LOW, ((*addr.add(5) as u32) << 8) | *addr.add(4) as u32);
         }
     }
 
-    // Flush descriptors to memory.
-    // SAFETY: `ring` valid for `ring_size` bytes.
-    unsafe { dma_cache_clean(ring as *mut c_void, ring_size) };
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn init_hw(sc: *mut X1EmacSoftc) {
+        // SAFETY: caller contract for the whole function body below.
+        unsafe {
+            // Disable TX and RX.
+            Self::wr(sc, MAC_RECEIVE_CONTROL, 0);
+            Self::wr(sc, MAC_TRANSMIT_CONTROL, 0);
 
-    0
-}
+            // Reset MAC + statistic counters (matches U-Boot emac_reset_hw).
+            Self::wr(sc, MAC_GLOBAL_CONTROL, MAC_GC_RESET_RX_STATS | MAC_GC_RESET_TX_STATS);
+            Self::wr(sc, MAC_GLOBAL_CONTROL, 0);
 
-// ===========================================================================
-// RX ring setup.
-// ===========================================================================
+            // Enable MAC address 1 filtering.
+            Self::wr(sc, MAC_ADDRESS_CONTROL, MAC_AC_ADDR1_ENABLE);
 
-/// # Safety
-/// Same as [`x1_emac_tx_ring_init`].
-unsafe fn x1_emac_rx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
-    // 64 entries x 64 bytes = 4096 = exactly 1 page.
-    let ring_size = X1_EMAC_RX_RING_SIZE * core::mem::size_of::<x1_rx_desc>();
+            // Zero the multicast hash table.
+            Self::wr(sc, MAC_MULTICAST_HASH_TABLE1, 0);
+            Self::wr(sc, MAC_MULTICAST_HASH_TABLE2, 0);
+            Self::wr(sc, MAC_MULTICAST_HASH_TABLE3, 0);
+            Self::wr(sc, MAC_MULTICAST_HASH_TABLE4, 0);
 
-    // SAFETY: `kalloc` returns a fresh page or null.
-    let ring = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut x1_rx_desc;
-    if ring.is_null() {
-        return -1;
+            // TX FIFO almost full threshold.
+            Self::wr(sc, MAC_TX_FIFO_ALMOST_FULL, 0x1f8);
+
+            // TX packet start threshold.
+            Self::wr(sc, MAC_TX_PKT_START_THRESHOLD, X1_EMAC_DEFAULT_TX_THRESH);
+
+            // RX packet start threshold.
+            Self::wr(sc, MAC_RX_PKT_START_THRESHOLD, X1_EMAC_DEFAULT_RX_THRESH);
+
+            // Flow control: decode enable.
+            Self::wr(sc, MAC_FC_CONTROL, MAC_FC_DECODE_ENABLE);
+
+            // DMA reset.
+            Self::dma_reset(sc);
+
+            // DMA configuration: strict burst + 64-bit + 16-word burst length.
+            // Matches the vendor Linux driver's register value (0x00060020).
+            // dma-burst-len=5 in DT -> bit 5 -> BURST_16WORD.
+            let val = DMA_CFG_STRICT_BURST | DMA_CFG_64BIT_MODE | DMA_CFG_BURST_16WORD;
+            Self::wr(sc, DMA_CONFIGURATION, val);
+
+            // Disable all interrupts initially.
+            Self::wr(sc, MAC_INTERRUPT_ENABLE, 0);
+            Self::wr(sc, DMA_INTERRUPT_ENABLE, 0);
+        }
     }
-    // SAFETY: caller contract; `ring` fresh `ring_size`-byte allocation.
-    unsafe {
-        (*sc).rx_ring = ring;
-        memset(ring as *mut c_void, 0, ring_size);
-        memset((*sc).rx_mbufs.as_mut_ptr() as *mut c_void, 0, core::mem::size_of_val(&(*sc).rx_mbufs));
-        (*sc).rx_head = 0;
+
+    /// Set MAC speed/duplex based on PHY link state.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn adjust_link(sc: *mut X1EmacSoftc) {
+        // SAFETY: caller contract.
+        let mut ctrl = unsafe { Self::rd(sc, MAC_GLOBAL_CONTROL) };
+
+        ctrl &= !MAC_GC_SPEED_MASK;
+        // SAFETY: caller contract.
+        let speed = unsafe { (*sc).phy.speed };
+        ctrl |= match speed {
+            1000 => MAC_GC_SPEED_1000M,
+            100 => MAC_GC_SPEED_100M,
+            _ => MAC_GC_SPEED_10M,
+        };
+
+        // SAFETY: caller contract.
+        if unsafe { (*sc).phy.full_duplex } != 0 {
+            ctrl |= MAC_GC_FULL_DUPLEX;
+        } else {
+            ctrl &= !MAC_GC_FULL_DUPLEX;
+        }
+
+        // SAFETY: caller contract.
+        unsafe { Self::wr(sc, MAC_GLOBAL_CONTROL, ctrl) };
     }
 
-    // Allocate mbufs and set up each descriptor in chained mode.
-    for i in 0..X1_EMAC_RX_RING_SIZE {
-        // `mbufalloc` returns a fresh mbuf or null.
-        let m = mbufalloc(0);
-        if m.is_null() {
-            // SAFETY: caller contract; format string matches its two arguments.
-            crate::kprintln!("x1_emac{}: failed to alloc rx mbuf {}", unsafe { (*sc).index }, i as c_int);
+    // -----------------------------------------------------------------------
+    // TX ring setup.
+    // -----------------------------------------------------------------------
+
+    /// # Safety
+    /// `sc` must point to a live, exclusively-owned `X1EmacSoftc`.
+    unsafe fn tx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
+        // Allocate descriptor ring (needs to be page-aligned for DMA): 64
+        // entries x 64 bytes = 4096 = exactly 1 page.
+        let ring_size = X1_EMAC_TX_RING_SIZE * core::mem::size_of::<x1_tx_desc>();
+
+        // Use kalloc pages -- identity mapped, so VA == PA.
+        // SAFETY: `kalloc` returns a fresh page or null.
+        let ring = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut x1_tx_desc;
+        if ring.is_null() {
             return -1;
         }
-        // SAFETY: caller contract; `i` in range.
-        unsafe { (*sc).rx_mbufs[i] = m };
-
-        let next = (i + 1) % X1_EMAC_RX_RING_SIZE;
-        // SAFETY: `ring`/`m` live; `i`/`next` in range.
+        // SAFETY: caller contract; `ring` is a fresh `ring_size`-byte allocation.
         unsafe {
-            let d = ring.add(i);
-            (*d).buf_addr = (*m).head as u64 as u32;
-            (*d).buf_addr2 = ring.add(next) as u64 as u32;
-            (*d).word1 = rx_desc_buf1_size(MBUF_SIZE) | DESC_CHAINED;
-            (*d).word0 = RX_DESC_OWN; // give to DMA
-
-            // Flush the mbuf buffer so DMA can write into it.
-            dma_cache_clean((*m).head as *mut c_void, MBUF_SIZE as usize);
-        }
-    }
-
-    // Flush all descriptors to memory.
-    // SAFETY: `ring` valid for `ring_size` bytes.
-    unsafe { dma_cache_clean(ring as *mut c_void, ring_size) };
-
-    0
-}
-
-// ===========================================================================
-// Transmit.
-// ===========================================================================
-
-/// # Safety
-/// `sc`/`m` must be live for the duration of this call; `m` is
-/// transferred to the ring on success (queued for DMA) or freed on
-/// reclaim of a previous occupant of the slot -- matches the C's
-/// ownership contract (`net.c` never touches `m` again after this call).
-unsafe fn x1_emac_transmit(sc: *mut X1EmacSoftc, m: *mut mbuf) -> c_int {
-    // SAFETY: caller contract; `(*sc).lock` is a live, initialised
-    // `spinlock_t` embedded in `sc` (set up by `x1_emac_init_one`).
-    let _guard = KSpinlock::from_bindings(unsafe { &raw mut (*sc).lock }).lock();
-
-    // SAFETY: caller contract.
-    let idx = unsafe { (*sc).tx_head } as usize;
-    // SAFETY: `idx < X1_EMAC_TX_RING_SIZE` (produced by `% RING_SIZE`
-    // arithmetic below/at ring init).
-    let d = unsafe { (*sc).tx_ring.add(idx) };
-
-    // Invalidate descriptor to read current state from memory.
-    // SAFETY: `d` a live ring entry.
-    unsafe { dma_cache_inval(d as *mut c_void, core::mem::size_of::<x1_tx_desc>()) };
-
-    // Check if descriptor is still owned by DMA.
-    // SAFETY: `d` live.
-    if unsafe { (*d).word0 } & TX_DESC_OWN != 0 {
-        return -1; // ring full
-    }
-
-    // Free any previously transmitted mbuf.
-    // SAFETY: caller contract.
-    unsafe {
-        if !(*sc).tx_mbufs[idx].is_null() {
-            mbuffree((*sc).tx_mbufs[idx]);
-            (*sc).tx_mbufs[idx] = ptr::null_mut();
-        }
-    }
-
-    // Set up the descriptor -- chained mode: `buf_addr2` already points
-    // to the next descriptor (set during ring init, preserved here).
-    // SAFETY: `d`/`m` live.
-    unsafe {
-        (*d).buf_addr = (*m).head as u64 as u32;
-        (*d).word1 = tx_desc_buf1_size((*m).len) | TX_DESC_FIRST_SEG | TX_DESC_LAST_SEG | TX_DESC_IOC | DESC_CHAINED;
-
-        (*sc).tx_mbufs[idx] = m;
-
-        // Flush the packet data.
-        dma_cache_clean((*m).head as *mut c_void, (*m).len as usize);
-    }
-
-    // Write barrier before setting OWN bit.
-    fence(Ordering::SeqCst);
-    // SAFETY: `d` live.
-    unsafe { (*d).word0 = TX_DESC_OWN };
-
-    // Flush the descriptor.
-    // SAFETY: `d` live.
-    unsafe { dma_cache_clean(d as *mut c_void, core::mem::size_of::<x1_tx_desc>()) };
-
-    // Advance head.
-    // SAFETY: caller contract.
-    unsafe { (*sc).tx_head = (idx as u32 + 1) % X1_EMAC_TX_RING_SIZE as u32 };
-
-    // Kick DMA transmit poll.
-    // SAFETY: caller contract.
-    unsafe { sc_wr(sc, DMA_TRANSMIT_POLL_DEMAND, 0xFF) };
-
-    0
-}
-
-// ===========================================================================
-// Receive.
-// ===========================================================================
-
-/// RX budget: limit how many packets we process per interrupt to avoid
-/// holding the CPU in ISR context for too long and consuming too many
-/// mbufs before the network stack gets a chance to process them.
-const X1_EMAC_RX_BUDGET: i32 = 32;
-
-/// Give a descriptor back to DMA with its existing buffer (chained mode
-/// -- `buf_addr`/`buf_addr2` untouched). Mirrors the C `recycle:` label,
-/// which both of [`x1_emac_recv`]'s error branches `goto` into -- Rust
-/// has no `goto`, so this shared helper reproduces the same "exactly one
-/// source-level copy of the recycle sequence, reached from two call
-/// sites" shape instead of duplicating the sequence inline at each
-/// branch (which would double this function's `fence` count relative to
-/// the C original -- see module doc's ordering accounting: exactly 2
-/// `fence(SeqCst)` call sites in this file's `x1_emac_recv`, matching
-/// the C's 2 `__sync_synchronize()` sites at lines 540/551).
-///
-/// # Safety
-/// `sc`/`d` must be live; `d` must be the ring entry at `idx`.
-unsafe fn rx_recycle(sc: *mut X1EmacSoftc, d: *mut x1_rx_desc, idx: usize) {
-    // SAFETY: caller contract.
-    unsafe {
-        (*d).word1 = rx_desc_buf1_size(MBUF_SIZE) | DESC_CHAINED;
-        // buf_addr2 (next-desc ptr) already set from init.
-        fence(Ordering::SeqCst);
-        (*d).word0 = RX_DESC_OWN;
-        dma_cache_clean(d as *mut c_void, core::mem::size_of::<x1_rx_desc>());
-        (*sc).rx_head = (idx as u32 + 1) % X1_EMAC_RX_RING_SIZE as u32;
-    }
-}
-
-/// # Safety
-/// `sc` must be live.
-unsafe fn x1_emac_recv(sc: *mut X1EmacSoftc) {
-    let mut budget = X1_EMAC_RX_BUDGET;
-
-    loop {
-        budget -= 1;
-        if budget < 0 {
-            break;
+            (*sc).tx_ring = ring;
+            memset(ring as *mut c_void, 0, ring_size);
+            memset((*sc).tx_mbufs.as_mut_ptr() as *mut c_void, 0, core::mem::size_of_val(&(*sc).tx_mbufs));
+            (*sc).tx_head = 0;
+            (*sc).tx_tail = 0;
         }
 
-        // SAFETY: caller contract.
-        let idx = unsafe { (*sc).rx_head } as usize;
-        // SAFETY: `idx < X1_EMAC_RX_RING_SIZE`.
-        let d = unsafe { (*sc).rx_ring.add(idx) };
-
-        // Invalidate descriptor to read from memory.
-        // SAFETY: `d` a live ring entry.
-        unsafe { dma_cache_inval(d as *mut c_void, core::mem::size_of::<x1_rx_desc>()) };
-
-        // Is this descriptor owned by the CPU?
-        // SAFETY: `d` live.
-        let word0 = unsafe { (*d).word0 };
-        if word0 & RX_DESC_OWN != 0 {
-            break;
-        }
-
-        // Check for errors.
-        let app_status = rx_desc_app_status(word0);
-        if app_status & RX_FRAME_ERROR_MASK != 0 {
-            // Error frame -- recycle the buffer.
-            // SAFETY: `d`/`sc` live.
-            unsafe { rx_recycle(sc, d, idx) };
-            continue;
-        }
-
-        // Get frame length (includes FCS).
-        let mut frame_len = rx_desc_frame_len(word0);
-        if frame_len < 14 || frame_len > X1_EMAC_MAX_FRAME_SIZE + X1_EMAC_FCS_SIZE {
-            // Error/oversize frame -- recycle the buffer.
-            // SAFETY: `d`/`sc` live.
-            unsafe { rx_recycle(sc, d, idx) };
-            continue;
-        }
-
-        // Strip FCS (4 bytes).
-        frame_len -= X1_EMAC_FCS_SIZE;
-
-        // Invalidate the received data from cache.
-        // SAFETY: caller contract.
-        let m = unsafe { (*sc).rx_mbufs[idx] };
-        // SAFETY: `m` live; `frame_len` bounded above.
-        unsafe { dma_cache_inval((*m).head as *mut c_void, frame_len as usize) };
-
-        // Set the mbuf length.
-        // SAFETY: `m` live.
-        unsafe { (*m).len = frame_len };
-
-        // Deliver to network stack. `m` live, ownership transferred to
-        // `net_rx` (matches the C original's contract -- `net_rx` is
-        // responsible for `m`'s lifetime from here).
-        net_rx(m);
-
-        // Allocate a replacement mbuf. `mbufalloc` returns a fresh mbuf
-        // or null.
-        let mut newm = mbufalloc(0);
-        if newm.is_null() {
-            // SAFETY: caller contract; format string matches its one argument.
-            crate::kprintln!("x1_emac{}: rx mbuf alloc failed", unsafe { (*sc).index });
-            // Reuse the old mbuf (we already gave it to net_rx, so
-            // allocate or we'll have a dangling pointer). In practice
-            // this shouldn't happen on xv6.
-            newm = mbufalloc(0);
-            if newm.is_null() {
-                panic!("x1_emac: out of mbufs");
+        // Set up chained descriptor pointers. Each descriptor's `buf_addr2`
+        // points to the next descriptor; the last wraps back to the first.
+        for i in 0..X1_EMAC_TX_RING_SIZE {
+            let next = (i + 1) % X1_EMAC_TX_RING_SIZE;
+            // SAFETY: `ring` has `X1_EMAC_TX_RING_SIZE` live entries per
+            // the allocation above; `i`/`next` are both in range.
+            unsafe {
+                let d = ring.add(i);
+                (*d).buf_addr2 = ring.add(next) as u64 as u32;
+                (*d).word1 = DESC_CHAINED; // SecondAddressChained
             }
         }
-        // SAFETY: caller contract; `newm` live.
-        unsafe {
-            (*sc).rx_mbufs[idx] = newm;
-            dma_cache_clean((*newm).head as *mut c_void, MBUF_SIZE as usize);
 
-            // Set up descriptor with new buffer -- chained mode preserved.
-            (*d).buf_addr = (*newm).head as u64 as u32;
-            (*d).word1 = rx_desc_buf1_size(MBUF_SIZE) | DESC_CHAINED;
-            // buf_addr2 already contains next-descriptor pointer from init.
-            fence(Ordering::SeqCst);
-            (*d).word0 = RX_DESC_OWN;
-            dma_cache_clean(d as *mut c_void, core::mem::size_of::<x1_rx_desc>());
+        // Flush descriptors to memory.
+        // SAFETY: `ring` valid for `ring_size` bytes.
+        unsafe { dma_cache_clean(ring as *mut c_void, ring_size) };
 
-            (*sc).rx_head = (idx as u32 + 1) % X1_EMAC_RX_RING_SIZE as u32;
+        0
+    }
+
+    // ---------------------------------------------------------------------------
+    // RX ring setup.
+    // ---------------------------------------------------------------------------
+
+    /// # Safety
+    /// Same as [`Self::tx_ring_init`].
+    unsafe fn rx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
+        // 64 entries x 64 bytes = 4096 = exactly 1 page.
+        let ring_size = X1_EMAC_RX_RING_SIZE * core::mem::size_of::<x1_rx_desc>();
+
+        // SAFETY: `kalloc` returns a fresh page or null.
+        let ring = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut x1_rx_desc;
+        if ring.is_null() {
+            return -1;
         }
+        // SAFETY: caller contract; `ring` fresh `ring_size`-byte allocation.
+        unsafe {
+            (*sc).rx_ring = ring;
+            memset(ring as *mut c_void, 0, ring_size);
+            memset((*sc).rx_mbufs.as_mut_ptr() as *mut c_void, 0, core::mem::size_of_val(&(*sc).rx_mbufs));
+            (*sc).rx_head = 0;
+        }
+
+        // Allocate mbufs and set up each descriptor in chained mode.
+        for i in 0..X1_EMAC_RX_RING_SIZE {
+            // `mbufalloc` returns a fresh mbuf or null.
+            let m = mbufalloc(0);
+            if m.is_null() {
+                // SAFETY: caller contract; format string matches its two arguments.
+                crate::kprintln!("x1_emac{}: failed to alloc rx mbuf {}", unsafe { (*sc).index }, i as c_int);
+                return -1;
+            }
+            // SAFETY: caller contract; `i` in range.
+            unsafe { (*sc).rx_mbufs[i] = m };
+
+            let next = (i + 1) % X1_EMAC_RX_RING_SIZE;
+            // SAFETY: `ring`/`m` live; `i`/`next` in range.
+            unsafe {
+                let d = ring.add(i);
+                (*d).buf_addr = (*m).head as u64 as u32;
+                (*d).buf_addr2 = ring.add(next) as u64 as u32;
+                (*d).word1 = rx_desc_buf1_size(MBUF_SIZE) | DESC_CHAINED;
+                (*d).word0 = RX_DESC_OWN; // give to DMA
+
+                // Flush the mbuf buffer so DMA can write into it.
+                dma_cache_clean((*m).head as *mut c_void, MBUF_SIZE as usize);
+            }
+        }
+
+        // Flush all descriptors to memory.
+        // SAFETY: `ring` valid for `ring_size` bytes.
+        unsafe { dma_cache_clean(ring as *mut c_void, ring_size) };
+
+        0
     }
 
-    // If we hit the budget limit, there may be more packets pending.
-    // Kick DMA poll to trigger another interrupt so we process the rest.
-    if budget < 0 {
-        // SAFETY: caller contract.
-        unsafe { sc_wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF) };
-    }
-}
+    // ---------------------------------------------------------------------------
+    // Transmit.
+    // ---------------------------------------------------------------------------
 
-// ===========================================================================
-// TX reclaim (clean completed TX descriptors).
-// ===========================================================================
+    /// # Safety
+    /// `sc`/`m` must be live for the duration of this call; `m` is
+    /// transferred to the ring on success (queued for DMA) or freed on
+    /// reclaim of a previous occupant of the slot -- matches the C's
+    /// ownership contract (`net.c` never touches `m` again after this call).
+    unsafe fn transmit(sc: *mut X1EmacSoftc, m: *mut mbuf) -> c_int {
+        // SAFETY: caller contract; `(*sc).lock` is a live, initialised
+        // `spinlock_t` embedded in `sc` (set up by `x1_emac_init_one`).
+        let _guard = KSpinlock::from_bindings(unsafe { &raw mut (*sc).lock }).lock();
 
-/// # Safety
-/// `sc` must be live.
-unsafe fn x1_emac_tx_reclaim(sc: *mut X1EmacSoftc) {
-    // SAFETY: caller contract.
-    while unsafe { (*sc).tx_tail } != unsafe { (*sc).tx_head } {
         // SAFETY: caller contract.
-        let idx = unsafe { (*sc).tx_tail } as usize;
-        // SAFETY: `idx < X1_EMAC_TX_RING_SIZE`.
+        let idx = unsafe { (*sc).tx_head } as usize;
+        // SAFETY: `idx < X1_EMAC_TX_RING_SIZE` (produced by `% RING_SIZE`
+        // arithmetic below/at ring init).
         let d = unsafe { (*sc).tx_ring.add(idx) };
 
+        // Invalidate descriptor to read current state from memory.
         // SAFETY: `d` a live ring entry.
         unsafe { dma_cache_inval(d as *mut c_void, core::mem::size_of::<x1_tx_desc>()) };
+
+        // Check if descriptor is still owned by DMA.
         // SAFETY: `d` live.
         if unsafe { (*d).word0 } & TX_DESC_OWN != 0 {
-            break; // still owned by DMA
+            return -1; // ring full
         }
 
+        // Free any previously transmitted mbuf.
         // SAFETY: caller contract.
         unsafe {
             if !(*sc).tx_mbufs[idx].is_null() {
                 mbuffree((*sc).tx_mbufs[idx]);
                 (*sc).tx_mbufs[idx] = ptr::null_mut();
             }
-            (*sc).tx_tail = (idx as u32 + 1) % X1_EMAC_TX_RING_SIZE as u32;
-        }
-    }
-}
-
-// ===========================================================================
-// Start TX/RX DMA.
-// ===========================================================================
-
-/// # Safety
-/// `sc` must be live, with the TX/RX rings already initialised.
-unsafe fn x1_emac_start(sc: *mut X1EmacSoftc) {
-    // SAFETY: caller contract for the whole function body below.
-    unsafe {
-        // Set TX base address.
-        sc_wr(sc, DMA_TRANSMIT_BASE_ADDRESS, (*sc).tx_ring as u64 as u32);
-
-        // Enable TX.
-        let mut val = sc_rd(sc, MAC_TRANSMIT_CONTROL);
-        val |= MAC_TC_TX_ENABLE | MAC_TC_TX_AUTO_RETRY;
-        sc_wr(sc, MAC_TRANSMIT_CONTROL, val);
-
-        // Disable auto-poll (we use poll demand on transmit).
-        sc_wr(sc, DMA_TRANSMIT_AUTO_POLL_COUNTER, 0);
-
-        // Start TX DMA.
-        val = sc_rd(sc, DMA_CONTROL);
-        val |= DMA_CTRL_START_TX;
-        sc_wr(sc, DMA_CONTROL, val);
-
-        // Set RX base address.
-        sc_wr(sc, DMA_RECEIVE_BASE_ADDRESS, (*sc).rx_ring as u64 as u32);
-
-        // Enable RX: receive + store-and-forward.
-        val = sc_rd(sc, MAC_RECEIVE_CONTROL);
-        val |= MAC_RC_RX_ENABLE | MAC_RC_STORE_FORWARD;
-        sc_wr(sc, MAC_RECEIVE_CONTROL, val);
-
-        // Start RX DMA.
-        val = sc_rd(sc, DMA_CONTROL);
-        val |= DMA_CTRL_START_RX;
-        sc_wr(sc, DMA_CONTROL, val);
-
-        // Enable DMA interrupts.
-        val = DMA_IE_TX_DONE | DMA_IE_RX_DONE | DMA_IE_RX_DESC_UNAVAIL | DMA_IE_TX_STOPPED | DMA_IE_RX_STOPPED;
-        sc_wr(sc, DMA_INTERRUPT_ENABLE, val);
-    }
-}
-
-// ===========================================================================
-// Instance initialisation.
-// ===========================================================================
-
-/// `x1_emac_init_one` -- initialise a single EMAC instance
-/// (`idx` indexes `platform.emac[]`, 0 or 1). Returns `0` on success,
-/// `-1` on failure.
-///
-/// # Safety
-/// `idx` must be `< MAX_EMAC_INSTANCES`; must be called at most once per
-/// `idx`, before any other function in this file can observe `emac_sc
-/// (idx)` (single-hart-per-instance-kthread contract, see
-/// [`x1_emac_kthread`]).
-unsafe fn x1_emac_init_one(idx: usize) -> c_int {
-    // SAFETY: caller contract.
-    let sc = unsafe { emac_sc(idx) };
-
-    // SAFETY: `sc` points at `size_of::<X1EmacSoftc>()` bytes of storage
-    // this call exclusively owns (caller contract).
-    unsafe { memset(sc as *mut c_void, 0, core::mem::size_of::<X1EmacSoftc>()) };
-    // SAFETY: `sc` zeroed above, exclusively owned.
-    unsafe {
-        spin_init(&raw mut (*sc).lock, c"x1_emac".as_ptr());
-        (*sc).index = idx as c_int;
-        (*sc).irq = platform.emac[idx].irq as c_int;
-
-        // Map EMAC registers (already identity-mapped by vm.c).
-        (*sc).regs = platform.emac[idx].base as *mut u32;
-        crate::kprintln!(
-            "x1_emac{}: MMIO base 0x{:x}, IRQ {}",
-            idx as c_int,
-            platform.emac[idx].base as u64,
-            platform.emac[idx].irq,
-        );
-
-        // Map APMU ctrl and dline registers.
-        if platform.emac[idx].apmu_base != 0 && platform.emac[idx].ctrl_reg != 0 {
-            (*sc).ctrl_reg = (platform.emac[idx].apmu_base as u64 + platform.emac[idx].ctrl_reg as u64) as *mut u32;
-            crate::kprintln!(
-                "x1_emac{}: ctrl_reg @ 0x{:x}",
-                idx as c_int,
-                platform.emac[idx].apmu_base as u64 + platform.emac[idx].ctrl_reg as u64,
-            );
-        }
-        if platform.emac[idx].apmu_base != 0 && platform.emac[idx].dline_reg != 0 {
-            (*sc).dline_reg = (platform.emac[idx].apmu_base as u64 + platform.emac[idx].dline_reg as u64) as *mut u32;
-            crate::kprintln!(
-                "x1_emac{}: dline_reg @ 0x{:x}",
-                idx as c_int,
-                platform.emac[idx].apmu_base as u64 + platform.emac[idx].dline_reg as u64,
-            );
         }
 
-        (*sc).tx_phase = platform.emac[idx].tx_phase;
-        (*sc).rx_phase = platform.emac[idx].rx_phase;
-        (*sc).reset_gpio = platform.emac[idx].reset_gpio as c_int;
-        (*sc).phy_addr = -1; // auto-detect
-    }
-
-    // Configure APMU: RGMII mode + AXI single ID.
-    // SAFETY: `sc` live, exclusively owned.
-    unsafe { x1_emac_apmu_config(sc) };
-
-    // Configure RGMII delay lines.
-    // SAFETY: see above.
-    unsafe { x1_emac_dline_config(sc) };
-
-    // Init MAC hardware.
-    // SAFETY: see above.
-    unsafe { x1_emac_init_hw(sc) };
-
-    // Init PHY via MDIO.
-    // SAFETY: `(*sc).regs` a live EMAC MMIO base; `(*sc).phy_addr` == -1
-    // requests auto-detect (see `yt8531::yt8531_init`).
-    let phy_addr = unsafe { super::yt8531::yt8531_init((*sc).regs, (*sc).phy_addr) };
-    if phy_addr < 0 {
-        crate::kprintln!("x1_emac{}: PHY init failed", idx as c_int);
-        return -1;
-    }
-    // SAFETY: `sc` live.
-    unsafe { (*sc).phy_addr = phy_addr }; // use the auto-detected PHY address
-
-    // Wait for auto-negotiation (up to 5 seconds).
-    // SAFETY: `sc` live.
-    if unsafe { super::yt8531::yt8531_wait_autoneg((*sc).regs, (*sc).phy_addr, &raw mut (*sc).phy, 5000) } == 0 {
-        // SAFETY: format string matches its three arguments.
-        crate::kprintln!(
-            "x1_emac{}: link up {}Mbps {}-duplex",
-            idx as c_int,
-            unsafe { (*sc).phy.speed },
-            if unsafe { (*sc).phy.full_duplex } != 0 { "full" } else { "half" },
-        );
-    } else {
-        crate::kprintln!("x1_emac{}: no link", idx as c_int);
-        // Continue anyway -- link may come up later.
-        // SAFETY: `sc` live.
+        // Set up the descriptor -- chained mode: `buf_addr2` already points
+        // to the next descriptor (set during ring init, preserved here).
+        // SAFETY: `d`/`m` live.
         unsafe {
-            (*sc).phy.speed = 1000;
-            (*sc).phy.full_duplex = 1;
+            (*d).buf_addr = (*m).head as u64 as u32;
+            (*d).word1 = tx_desc_buf1_size((*m).len) | TX_DESC_FIRST_SEG | TX_DESC_LAST_SEG | TX_DESC_IOC | DESC_CHAINED;
+
+            (*sc).tx_mbufs[idx] = m;
+
+            // Flush the packet data.
+            dma_cache_clean((*m).head as *mut c_void, (*m).len as usize);
+        }
+
+        // Write barrier before setting OWN bit.
+        fence(Ordering::SeqCst);
+        // SAFETY: `d` live.
+        unsafe { (*d).word0 = TX_DESC_OWN };
+
+        // Flush the descriptor.
+        // SAFETY: `d` live.
+        unsafe { dma_cache_clean(d as *mut c_void, core::mem::size_of::<x1_tx_desc>()) };
+
+        // Advance head.
+        // SAFETY: caller contract.
+        unsafe { (*sc).tx_head = (idx as u32 + 1) % X1_EMAC_TX_RING_SIZE as u32 };
+
+        // Kick DMA transmit poll.
+        // SAFETY: caller contract.
+        unsafe { Self::wr(sc, DMA_TRANSMIT_POLL_DEMAND, 0xFF) };
+
+        0
+    }
+
+    // ---------------------------------------------------------------------------
+    // Receive.
+    // ---------------------------------------------------------------------------
+
+    /// RX budget: limit how many packets we process per interrupt to avoid
+    /// holding the CPU in ISR context for too long and consuming too many
+    /// mbufs before the network stack gets a chance to process them.
+    const X1_EMAC_RX_BUDGET: i32 = 32;
+
+    /// Give a descriptor back to DMA with its existing buffer (chained mode
+    /// -- `buf_addr`/`buf_addr2` untouched). Mirrors the C `recycle:` label,
+    /// which both of [`x1_emac_recv`]'s error branches `goto` into -- Rust
+    /// has no `goto`, so this shared helper reproduces the same "exactly one
+    /// source-level copy of the recycle sequence, reached from two call
+    /// sites" shape instead of duplicating the sequence inline at each
+    /// branch (which would double this function's `fence` count relative to
+    /// the C original -- see module doc's ordering accounting: exactly 2
+    /// `fence(SeqCst)` call sites in this file's `x1_emac_recv`, matching
+    /// the C's 2 `__sync_synchronize()` sites at lines 540/551).
+    ///
+    /// # Safety
+    /// `sc`/`d` must be live; `d` must be the ring entry at `idx`.
+    unsafe fn rx_recycle(sc: *mut X1EmacSoftc, d: *mut x1_rx_desc, idx: usize) {
+        // SAFETY: caller contract.
+        unsafe {
+            (*d).word1 = rx_desc_buf1_size(MBUF_SIZE) | DESC_CHAINED;
+            // buf_addr2 (next-desc ptr) already set from init.
+            fence(Ordering::SeqCst);
+            (*d).word0 = RX_DESC_OWN;
+            dma_cache_clean(d as *mut c_void, core::mem::size_of::<x1_rx_desc>());
+            (*sc).rx_head = (idx as u32 + 1) % X1_EMAC_RX_RING_SIZE as u32;
         }
     }
 
-    // Set MAC speed/duplex to match PHY.
-    // SAFETY: `sc` live.
-    unsafe { x1_emac_adjust_link(sc) };
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn recv(sc: *mut X1EmacSoftc) {
+        let mut budget = Self::X1_EMAC_RX_BUDGET;
 
-    // Set MAC address for this instance. Generate a locally-administered
-    // MAC based on instance index.
-    let mac: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, (idx as u8) + 1];
-    // SAFETY: `sc` live; `mac` a live 6-byte array.
-    unsafe { x1_emac_set_mac_addr(sc, mac.as_ptr()) };
+        loop {
+            budget -= 1;
+            if budget < 0 {
+                break;
+            }
 
-    // Init TX ring.
-    // SAFETY: `sc` live.
-    if unsafe { x1_emac_tx_ring_init(sc) } < 0 {
-        crate::kprintln!("x1_emac{}: TX ring init failed", idx as c_int);
-        return -1;
+            // SAFETY: caller contract.
+            let idx = unsafe { (*sc).rx_head } as usize;
+            // SAFETY: `idx < X1_EMAC_RX_RING_SIZE`.
+            let d = unsafe { (*sc).rx_ring.add(idx) };
+
+            // Invalidate descriptor to read from memory.
+            // SAFETY: `d` a live ring entry.
+            unsafe { dma_cache_inval(d as *mut c_void, core::mem::size_of::<x1_rx_desc>()) };
+
+            // Is this descriptor owned by the CPU?
+            // SAFETY: `d` live.
+            let word0 = unsafe { (*d).word0 };
+            if word0 & RX_DESC_OWN != 0 {
+                break;
+            }
+
+            // Check for errors.
+            let app_status = rx_desc_app_status(word0);
+            if app_status & RX_FRAME_ERROR_MASK != 0 {
+                // Error frame -- recycle the buffer.
+                // SAFETY: `d`/`sc` live.
+                unsafe { Self::rx_recycle(sc, d, idx) };
+                continue;
+            }
+
+            // Get frame length (includes FCS).
+            let mut frame_len = rx_desc_frame_len(word0);
+            if frame_len < 14 || frame_len > X1_EMAC_MAX_FRAME_SIZE + X1_EMAC_FCS_SIZE {
+                // Error/oversize frame -- recycle the buffer.
+                // SAFETY: `d`/`sc` live.
+                unsafe { Self::rx_recycle(sc, d, idx) };
+                continue;
+            }
+
+            // Strip FCS (4 bytes).
+            frame_len -= X1_EMAC_FCS_SIZE;
+
+            // Invalidate the received data from cache.
+            // SAFETY: caller contract.
+            let m = unsafe { (*sc).rx_mbufs[idx] };
+            // SAFETY: `m` live; `frame_len` bounded above.
+            unsafe { dma_cache_inval((*m).head as *mut c_void, frame_len as usize) };
+
+            // Set the mbuf length.
+            // SAFETY: `m` live.
+            unsafe { (*m).len = frame_len };
+
+            // Deliver to network stack. `m` live, ownership transferred to
+            // `net_rx` (matches the C original's contract -- `net_rx` is
+            // responsible for `m`'s lifetime from here).
+            net_rx(m);
+
+            // Allocate a replacement mbuf. `mbufalloc` returns a fresh mbuf
+            // or null.
+            let mut newm = mbufalloc(0);
+            if newm.is_null() {
+                // SAFETY: caller contract; format string matches its one argument.
+                crate::kprintln!("x1_emac{}: rx mbuf alloc failed", unsafe { (*sc).index });
+                // Reuse the old mbuf (we already gave it to net_rx, so
+                // allocate or we'll have a dangling pointer). In practice
+                // this shouldn't happen on xv6.
+                newm = mbufalloc(0);
+                if newm.is_null() {
+                    panic!("x1_emac: out of mbufs");
+                }
+            }
+            // SAFETY: caller contract; `newm` live.
+            unsafe {
+                (*sc).rx_mbufs[idx] = newm;
+                dma_cache_clean((*newm).head as *mut c_void, MBUF_SIZE as usize);
+
+                // Set up descriptor with new buffer -- chained mode preserved.
+                (*d).buf_addr = (*newm).head as u64 as u32;
+                (*d).word1 = rx_desc_buf1_size(MBUF_SIZE) | DESC_CHAINED;
+                // buf_addr2 already contains next-descriptor pointer from init.
+                fence(Ordering::SeqCst);
+                (*d).word0 = RX_DESC_OWN;
+                dma_cache_clean(d as *mut c_void, core::mem::size_of::<x1_rx_desc>());
+
+                (*sc).rx_head = (idx as u32 + 1) % X1_EMAC_RX_RING_SIZE as u32;
+            }
+        }
+
+        // If we hit the budget limit, there may be more packets pending.
+        // Kick DMA poll to trigger another interrupt so we process the rest.
+        if budget < 0 {
+            // SAFETY: caller contract.
+            unsafe { Self::wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF) };
+        }
     }
 
-    // Init RX ring.
-    // SAFETY: `sc` live.
-    if unsafe { x1_emac_rx_ring_init(sc) } < 0 {
-        crate::kprintln!("x1_emac{}: RX ring init failed", idx as c_int);
-        return -1;
+    // ---------------------------------------------------------------------------
+    // TX reclaim (clean completed TX descriptors).
+    // ---------------------------------------------------------------------------
+
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn tx_reclaim(sc: *mut X1EmacSoftc) {
+        // SAFETY: caller contract.
+        while unsafe { (*sc).tx_tail } != unsafe { (*sc).tx_head } {
+            // SAFETY: caller contract.
+            let idx = unsafe { (*sc).tx_tail } as usize;
+            // SAFETY: `idx < X1_EMAC_TX_RING_SIZE`.
+            let d = unsafe { (*sc).tx_ring.add(idx) };
+
+            // SAFETY: `d` a live ring entry.
+            unsafe { dma_cache_inval(d as *mut c_void, core::mem::size_of::<x1_tx_desc>()) };
+            // SAFETY: `d` live.
+            if unsafe { (*d).word0 } & TX_DESC_OWN != 0 {
+                break; // still owned by DMA
+            }
+
+            // SAFETY: caller contract.
+            unsafe {
+                if !(*sc).tx_mbufs[idx].is_null() {
+                    mbuffree((*sc).tx_mbufs[idx]);
+                    (*sc).tx_mbufs[idx] = ptr::null_mut();
+                }
+                (*sc).tx_tail = (idx as u32 + 1) % X1_EMAC_TX_RING_SIZE as u32;
+            }
+        }
     }
 
-    // Register IRQ handler.
-    // SAFETY: caller contract; `emac_irq` is a live, fully-initialised
-    // `IrqDesc` for the duration of this call.
-    let ret = unsafe {
-        let mut emac_irq = IrqDesc {
-            handler: Some(x1_emac_intr),
-            data: sc as *mut c_void,
-            dev: ptr::null_mut(),
-            irq: 0,
-            count: 0,
-            rcu_head: core::mem::zeroed(),
+    // ---------------------------------------------------------------------------
+    // Start TX/RX DMA.
+    // ---------------------------------------------------------------------------
+
+    /// # Safety
+    /// `sc` must be live, with the TX/RX rings already initialised.
+    unsafe fn start(sc: *mut X1EmacSoftc) {
+        // SAFETY: caller contract for the whole function body below.
+        unsafe {
+            // Set TX base address.
+            Self::wr(sc, DMA_TRANSMIT_BASE_ADDRESS, (*sc).tx_ring as u64 as u32);
+
+            // Enable TX.
+            let mut val = Self::rd(sc, MAC_TRANSMIT_CONTROL);
+            val |= MAC_TC_TX_ENABLE | MAC_TC_TX_AUTO_RETRY;
+            Self::wr(sc, MAC_TRANSMIT_CONTROL, val);
+
+            // Disable auto-poll (we use poll demand on transmit).
+            Self::wr(sc, DMA_TRANSMIT_AUTO_POLL_COUNTER, 0);
+
+            // Start TX DMA.
+            val = Self::rd(sc, DMA_CONTROL);
+            val |= DMA_CTRL_START_TX;
+            Self::wr(sc, DMA_CONTROL, val);
+
+            // Set RX base address.
+            Self::wr(sc, DMA_RECEIVE_BASE_ADDRESS, (*sc).rx_ring as u64 as u32);
+
+            // Enable RX: receive + store-and-forward.
+            val = Self::rd(sc, MAC_RECEIVE_CONTROL);
+            val |= MAC_RC_RX_ENABLE | MAC_RC_STORE_FORWARD;
+            Self::wr(sc, MAC_RECEIVE_CONTROL, val);
+
+            // Start RX DMA.
+            val = Self::rd(sc, DMA_CONTROL);
+            val |= DMA_CTRL_START_RX;
+            Self::wr(sc, DMA_CONTROL, val);
+
+            // Enable DMA interrupts.
+            val = DMA_IE_TX_DONE | DMA_IE_RX_DONE | DMA_IE_RX_DESC_UNAVAIL | DMA_IE_TX_STOPPED | DMA_IE_RX_STOPPED;
+            Self::wr(sc, DMA_INTERRUPT_ENABLE, val);
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Instance initialisation.
+    // ---------------------------------------------------------------------------
+
+    /// `x1_emac_init_one` -- initialise a single EMAC instance
+    /// (`idx` indexes `platform.emac[]`, 0 or 1). Returns `0` on success,
+    /// `-1` on failure.
+    ///
+    /// # Safety
+    /// `idx` must be `< MAX_EMAC_INSTANCES`; must be called at most once per
+    /// `idx`, before any other function in this file can observe `emac_sc
+    /// (idx)` (single-hart-per-instance-kthread contract, see
+    /// [`x1_emac_kthread`]).
+    unsafe fn init_one(idx: usize) -> c_int {
+        // SAFETY: caller contract.
+        let sc = unsafe { Self::sc(idx) };
+
+        // SAFETY: `sc` points at `size_of::<X1EmacSoftc>()` bytes of storage
+        // this call exclusively owns (caller contract).
+        unsafe { memset(sc as *mut c_void, 0, core::mem::size_of::<X1EmacSoftc>()) };
+        // SAFETY: `sc` zeroed above, exclusively owned.
+        unsafe {
+            spin_init(&raw mut (*sc).lock, c"x1_emac".as_ptr());
+            (*sc).index = idx as c_int;
+            (*sc).irq = platform.emac[idx].irq as c_int;
+
+            // Map EMAC registers (already identity-mapped by vm.c).
+            (*sc).regs = platform.emac[idx].base as *mut u32;
+            crate::kprintln!(
+                "x1_emac{}: MMIO base 0x{:x}, IRQ {}",
+                idx as c_int,
+                platform.emac[idx].base as u64,
+                platform.emac[idx].irq,
+            );
+
+            // Map APMU ctrl and dline registers.
+            if platform.emac[idx].apmu_base != 0 && platform.emac[idx].ctrl_reg != 0 {
+                (*sc).ctrl_reg = (platform.emac[idx].apmu_base as u64 + platform.emac[idx].ctrl_reg as u64) as *mut u32;
+                crate::kprintln!(
+                    "x1_emac{}: ctrl_reg @ 0x{:x}",
+                    idx as c_int,
+                    platform.emac[idx].apmu_base as u64 + platform.emac[idx].ctrl_reg as u64,
+                );
+            }
+            if platform.emac[idx].apmu_base != 0 && platform.emac[idx].dline_reg != 0 {
+                (*sc).dline_reg = (platform.emac[idx].apmu_base as u64 + platform.emac[idx].dline_reg as u64) as *mut u32;
+                crate::kprintln!(
+                    "x1_emac{}: dline_reg @ 0x{:x}",
+                    idx as c_int,
+                    platform.emac[idx].apmu_base as u64 + platform.emac[idx].dline_reg as u64,
+                );
+            }
+
+            (*sc).tx_phase = platform.emac[idx].tx_phase;
+            (*sc).rx_phase = platform.emac[idx].rx_phase;
+            (*sc).reset_gpio = platform.emac[idx].reset_gpio as c_int;
+            (*sc).phy_addr = -1; // auto-detect
+        }
+
+        // Configure APMU: RGMII mode + AXI single ID.
+        // SAFETY: `sc` live, exclusively owned.
+        unsafe { Self::apmu_config(sc) };
+
+        // Configure RGMII delay lines.
+        // SAFETY: see above.
+        unsafe { Self::dline_config(sc) };
+
+        // Init MAC hardware.
+        // SAFETY: see above.
+        unsafe { Self::init_hw(sc) };
+
+        // Init PHY via MDIO.
+        // SAFETY: `(*sc).regs` a live EMAC MMIO base; `(*sc).phy_addr` == -1
+        // requests auto-detect (see `yt8531::Yt8531::yt8531_init`).
+        let phy_addr = unsafe { super::yt8531::Yt8531::yt8531_init((*sc).regs, (*sc).phy_addr) };
+        if phy_addr < 0 {
+            crate::kprintln!("x1_emac{}: PHY init failed", idx as c_int);
+            return -1;
+        }
+        // SAFETY: `sc` live.
+        unsafe { (*sc).phy_addr = phy_addr }; // use the auto-detected PHY address
+
+        // Wait for auto-negotiation (up to 5 seconds).
+        // SAFETY: `sc` live.
+        if unsafe { super::yt8531::Yt8531::yt8531_wait_autoneg((*sc).regs, (*sc).phy_addr, &raw mut (*sc).phy, 5000) } == 0 {
+            // SAFETY: format string matches its three arguments.
+            crate::kprintln!(
+                "x1_emac{}: link up {}Mbps {}-duplex",
+                idx as c_int,
+                unsafe { (*sc).phy.speed },
+                if unsafe { (*sc).phy.full_duplex } != 0 { "full" } else { "half" },
+            );
+        } else {
+            crate::kprintln!("x1_emac{}: no link", idx as c_int);
+            // Continue anyway -- link may come up later.
+            // SAFETY: `sc` live.
+            unsafe {
+                (*sc).phy.speed = 1000;
+                (*sc).phy.full_duplex = 1;
+            }
+        }
+
+        // Set MAC speed/duplex to match PHY.
+        // SAFETY: `sc` live.
+        unsafe { Self::adjust_link(sc) };
+
+        // Set MAC address for this instance. Generate a locally-administered
+        // MAC based on instance index.
+        let mac: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, (idx as u8) + 1];
+        // SAFETY: `sc` live; `mac` a live 6-byte array.
+        unsafe { Self::set_mac_addr(sc, mac.as_ptr()) };
+
+        // Init TX ring.
+        // SAFETY: `sc` live.
+        if unsafe { Self::tx_ring_init(sc) } < 0 {
+            crate::kprintln!("x1_emac{}: TX ring init failed", idx as c_int);
+            return -1;
+        }
+
+        // Init RX ring.
+        // SAFETY: `sc` live.
+        if unsafe { Self::rx_ring_init(sc) } < 0 {
+            crate::kprintln!("x1_emac{}: RX ring init failed", idx as c_int);
+            return -1;
+        }
+
+        // Register IRQ handler.
+        // SAFETY: caller contract; `emac_irq` is a live, fully-initialised
+        // `IrqDesc` for the duration of this call.
+        let ret = unsafe {
+            let mut emac_irq = IrqDesc {
+                handler: Some(x1_emac_intr),
+                data: sc as *mut c_void,
+                dev: ptr::null_mut(),
+                irq: 0,
+                count: 0,
+                rcu_head: core::mem::zeroed(),
+            };
+            register_irq_handler(plic_irq((*sc).irq), &raw mut emac_irq)
         };
-        register_irq_handler(plic_irq((*sc).irq), &raw mut emac_irq)
-    };
-    if ret != 0 {
-        crate::kprintln!("x1_emac{}: failed to register IRQ {}", idx as c_int, unsafe { (*sc).irq });
-        return -1;
+        if ret != 0 {
+            crate::kprintln!("x1_emac{}: failed to register IRQ {}", idx as c_int, unsafe { (*sc).irq });
+            return -1;
+        }
+
+        // Start DMA.
+        // SAFETY: `sc` live, rings initialised above.
+        unsafe { Self::start(sc) };
+
+        // Register with netdev layer.
+        // SAFETY: `sc` live, exclusively owned.
+        unsafe {
+            (*sc).ndev.name[0] = b'e' as c_char;
+            (*sc).ndev.name[1] = b't' as c_char;
+            (*sc).ndev.name[2] = b'h' as c_char;
+            (*sc).ndev.name[3] = b'0' as c_char + idx as c_char;
+            (*sc).ndev.name[4] = 0;
+            memmove((*sc).ndev.mac.as_mut_ptr() as *mut c_void, mac.as_ptr() as *const c_void, 6);
+            (*sc).ndev.mtu = 1500;
+            (*sc).ndev.link_up = (*sc).phy.link_up;
+            (*sc).ndev.speed = (*sc).phy.speed;
+            (*sc).ndev.full_duplex = (*sc).phy.full_duplex;
+            (*sc).ndev.ops = &X1_EMAC_NETDEV_OPS as *const netdev_ops as *mut netdev_ops;
+            (*sc).ndev.priv_ = sc as *mut c_void;
+            Netdev::register(&raw mut (*sc).ndev);
+
+            crate::kprintln!(
+                "x1_emac{}: initialised as {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x})",
+                idx as c_int,
+                crate::printf::Cs((*sc).ndev.name.as_ptr()),
+                ((mac[0] as c_int as i64) as u64),
+                ((mac[1] as c_int as i64) as u64),
+                ((mac[2] as c_int as i64) as u64),
+                ((mac[3] as c_int as i64) as u64),
+                ((mac[4] as c_int as i64) as u64),
+                ((mac[5] as c_int as i64) as u64),
+            );
+        }
+
+        EMAC_COUNT.fetch_add(1, Ordering::SeqCst);
+        0
     }
-
-    // Start DMA.
-    // SAFETY: `sc` live, rings initialised above.
-    unsafe { x1_emac_start(sc) };
-
-    // Register with netdev layer.
-    // SAFETY: `sc` live, exclusively owned.
-    unsafe {
-        (*sc).ndev.name[0] = b'e' as c_char;
-        (*sc).ndev.name[1] = b't' as c_char;
-        (*sc).ndev.name[2] = b'h' as c_char;
-        (*sc).ndev.name[3] = b'0' as c_char + idx as c_char;
-        (*sc).ndev.name[4] = 0;
-        memmove((*sc).ndev.mac.as_mut_ptr() as *mut c_void, mac.as_ptr() as *const c_void, 6);
-        (*sc).ndev.mtu = 1500;
-        (*sc).ndev.link_up = (*sc).phy.link_up;
-        (*sc).ndev.speed = (*sc).phy.speed;
-        (*sc).ndev.full_duplex = (*sc).phy.full_duplex;
-        (*sc).ndev.ops = &X1_EMAC_NETDEV_OPS as *const netdev_ops as *mut netdev_ops;
-        (*sc).ndev.priv_ = sc as *mut c_void;
-        Netdev::register(&raw mut (*sc).ndev);
-
-        crate::kprintln!(
-            "x1_emac{}: initialised as {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x})",
-            idx as c_int,
-            crate::printf::Cs((*sc).ndev.name.as_ptr()),
-            ((mac[0] as c_int as i64) as u64),
-            ((mac[1] as c_int as i64) as u64),
-            ((mac[2] as c_int as i64) as u64),
-            ((mac[3] as c_int as i64) as u64),
-            ((mac[4] as c_int as i64) as u64),
-            ((mac[5] as c_int as i64) as u64),
-        );
-    }
-
-    EMAC_COUNT.fetch_add(1, Ordering::SeqCst);
-    0
 }
 
 // ===========================================================================
-// Top-level init -- spawns a kthread for post-init probing.
+// Top-level init -- spawns a kthread for post-init probing. `*_kthread`
+// entry points stay free fns (address-taken via `Thread::kthread_create`'s
+// `*mut c_void` entry-point cast -- this crate's established convention
+// keeps thread-entry fns free, see `kernel/mm/pcache.rs`'s
+// `flusher_thread` FLOOR precedent, even though a `Type::method` path
+// would also coerce there).
 // ===========================================================================
 
 /// Per-instance init kthread: initialises one EMAC and signals completion.
@@ -1401,7 +1416,7 @@ extern "C" fn x1_emac_init_kthread(idx: u64, _arg2: u64) {
     // SAFETY: `idx` is one of the `0..n` values `x1_emac_kthread` below
     // spawned this thread with, `n <= MAX_EMAC_INSTANCES`; each `idx` is
     // only ever handed to one kthread (see that function).
-    let ret = unsafe { x1_emac_init_one(idx as usize) };
+    let ret = unsafe { X1EmacSoftc::init_one(idx as usize) };
     EMAC_INIT_DONE[idx as usize].store(if ret < 0 { -1 } else { 1 }, Ordering::Release);
     if ret < 0 {
         crate::kprintln!("x1_emac{}: init failed, skipping", idx as c_int);
@@ -1462,9 +1477,9 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
                 continue; // init failed or incomplete
             }
             // SAFETY: `i < MAX_EMAC_INSTANCES`; `EMAC_INIT_DONE[i] == 1`
-            // means `x1_emac_init_one(i)` completed successfully, so
-            // `emac_sc(i)` is fully initialised.
-            let sc = unsafe { emac_sc(i) };
+            // means `X1EmacSoftc::init_one(i)` completed successfully, so
+            // `X1EmacSoftc::sc(i)` is fully initialised.
+            let sc = unsafe { X1EmacSoftc::sc(i) };
             // SAFETY: `sc` live.
             if unsafe { (*sc).phy_addr } < 0 {
                 continue; // PHY init failed for this instance
@@ -1472,7 +1487,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
 
             let mut ps: phy_state = phy_state { link_up: 0, speed: 0, full_duplex: 0 };
             // SAFETY: `sc` live; `ps` local and live.
-            if unsafe { super::yt8531::yt8531_poll_link((*sc).regs, (*sc).phy_addr, &raw mut ps) } != 0 {
+            if unsafe { super::yt8531::Yt8531::yt8531_poll_link((*sc).regs, (*sc).phy_addr, &raw mut ps) } != 0 {
                 continue;
             }
 
@@ -1490,7 +1505,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
 
                 if new_link != 0 {
                     // SAFETY: `sc` live.
-                    unsafe { x1_emac_adjust_link(sc) };
+                    unsafe { X1EmacSoftc::adjust_link(sc) };
                     // SAFETY: format string matches its three arguments.
                     crate::kprintln!(
                         "x1_emac{}: link up {}Mbps {}-duplex",
@@ -1509,24 +1524,26 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
     }
 }
 
-/// `void x1_emac_init(void)` -- schedule EMAC probing as a post-init
-/// kthread. Called from `start_kernel`. The actual hardware probing, PHY
-/// init, and auto-negotiation run in a dedicated kernel thread so that:
-/// 1. The scheduler is already running -> `sleep_ms()` works.
-/// 2. Boot proceeds without blocking on slow PHY negotiation.
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn x1_emac_init() {
-    // SAFETY: `platform` is boot-time-populated by `fdt.rs` before
-    // `start_kernel.c` calls this (documented boot-order contract).
-    if !(unsafe { platform.has_emac } != 0) {
-        return;
-    }
+impl X1EmacSoftc {
+    /// `void x1_emac_init(void)` -- schedule EMAC probing as a post-init
+    /// kthread. Called from `start_kernel`. The actual hardware probing, PHY
+    /// init, and auto-negotiation run in a dedicated kernel thread so that:
+    /// 1. The scheduler is already running -> `sleep_ms()` works.
+    /// 2. Boot proceeds without blocking on slow PHY negotiation.
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn init() {
+        // SAFETY: `platform` is boot-time-populated by `fdt.rs` before
+        // `start_kernel.c` calls this (documented boot-order contract).
+        if !(unsafe { platform.has_emac } != 0) {
+            return;
+        }
 
-    let t = crate::proc::thread::Thread::kthread_create(c"x1_emac".as_ptr(), x1_emac_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
-    if is_err_or_null(t) {
-        crate::kprintln!("x1_emac: failed to create init kthread");
-        return;
+        let t = crate::proc::thread::Thread::kthread_create(c"x1_emac".as_ptr(), x1_emac_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
+        if is_err_or_null(t) {
+            crate::kprintln!("x1_emac: failed to create init kthread");
+            return;
+        }
+        Scheduler::wakeup(t);
     }
-    Scheduler::wakeup(t);
 }

@@ -12,7 +12,7 @@
 //!
 //! # QEMU verifiability (Wave 25 charter)
 //!
-//! This driver probes nothing on `-machine virt`: [`x1_emac::x1_emac_init`]
+//! This driver probes nothing on `-machine virt`: [`x1_emac::X1EmacSoftc::init`]
 //! (the only call chain that reaches any function here) early-returns
 //! when `platform.has_emac` is false, which it always is on QEMU's
 //! generated device tree (verified in Wave 23's fdt.rs port: QEMU virt's
@@ -189,387 +189,405 @@ const MDIO_POLL_INTERVAL_US: i32 = 100;
 const YT8531_PHY_ID: u32 = 0x4f51_e91b;
 
 // ===========================================================================
-// Low-level MMIO helpers. Mirror the C `emac_rd`/`emac_wr` static
-// inlines -- every field access downstream funnels through these two, so
-// this is the file's entire volatile-access surface (11 `volatile` sites
-// in the C original's type declarations/casts; every one of those sites'
-// *dereferences*, plus the ones the type-level `volatile` implied,
-// become an explicit `read_volatile`/`write_volatile` call here or in
-// the loops below, since Rust has no volatile-qualified pointer type).
+// `Yt8531` -- zero-sized marker hosting every free fn in this file (KERNEL-OO
+// relocation). There is no per-instance driver-state struct here (the only
+// "state" this file threads through is the caller-owned EMAC MMIO `base`
+// pointer, per the module doc -- PHY link state lives in the caller's
+// `phy_state`/`PhyState`), so every function -- MMIO helpers, MDIO bus
+// access, PHY init, and link polling -- becomes an associated fn on this
+// ZST, playing the same namespacing role `Rcu`/`DevTable`/`SessionTable`
+// play elsewhere in this crate. Raw pointer params kept throughout, bodies
+// byte-identical to the old free fns, `unsafe extern "C"` signatures
+// preserved exactly.
 // ===========================================================================
 
-/// Read a 32-bit MMIO register at byte offset `off` from `base`.
-///
-/// # Safety
-/// `base + off .. base + off + 4` must be valid, live MMIO register
-/// space for the duration of the access.
-#[inline(always)]
-unsafe fn emac_rd(base: *mut u32, off: u32) -> u32 {
-    // SAFETY: caller contract.
-    unsafe { ptr::read_volatile((base as *mut u8).add(off as usize) as *mut u32) }
-}
+pub(crate) struct Yt8531;
 
-/// Write a 32-bit MMIO register at byte offset `off` from `base`.
-///
-/// # Safety
-/// Same as [`emac_rd`].
-#[inline(always)]
-unsafe fn emac_wr(base: *mut u32, off: u32, val: u32) {
-    // SAFETY: caller contract.
-    unsafe { ptr::write_volatile((base as *mut u8).add(off as usize) as *mut u32, val) };
-}
+impl Yt8531 {
+    // -----------------------------------------------------------------------
+    // Low-level MMIO helpers. Mirror the C `emac_rd`/`emac_wr` static
+    // inlines -- every field access downstream funnels through these two, so
+    // this is the file's entire volatile-access surface (11 `volatile` sites
+    // in the C original's type declarations/casts; every one of those
+    // sites' *dereferences*, plus the ones the type-level `volatile`
+    // implied, become an explicit `read_volatile`/`write_volatile` call here
+    // or in the loops below, since Rust has no volatile-qualified pointer
+    // type).
+    // -----------------------------------------------------------------------
 
-// ===========================================================================
-// MDIO bus access via EMAC registers.
-// ===========================================================================
-
-/// `int mdio_read(volatile uint32 *base, int phy_addr, int reg)`.
-///
-/// # Safety
-/// `base` must be a live EMAC MMIO base pointer (see module doc).
-// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
-pub(crate) unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: c_int) -> c_int {
-    let mut cmd: u32 = 0;
-    cmd |= phy_addr as u32 & MDIO_PHY_ADDR_MASK;
-    cmd |= ((reg as u32) & 0x1F) << MDIO_REG_ADDR_SHIFT;
-    cmd |= MDIO_START_TRANS | MDIO_READ_WRITE;
-
-    // SAFETY: caller contract.
-    unsafe {
-        emac_wr(base, MAC_MDIO_DATA, 0);
-        emac_wr(base, MAC_MDIO_CONTROL, cmd);
+    /// Read a 32-bit MMIO register at byte offset `off` from `base`.
+    ///
+    /// # Safety
+    /// `base + off .. base + off + 4` must be valid, live MMIO register
+    /// space for the duration of the access.
+    #[inline(always)]
+    unsafe fn emac_rd(base: *mut u32, off: u32) -> u32 {
+        // SAFETY: caller contract.
+        unsafe { ptr::read_volatile((base as *mut u8).add(off as usize) as *mut u32) }
     }
 
-    // Poll until START_TRANS clears (bit 15).
-    for _ in 0..(MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US) {
-        Scheduler::yield_now();
+    /// Write a 32-bit MMIO register at byte offset `off` from `base`.
+    ///
+    /// # Safety
+    /// Same as [`Self::emac_rd`].
+    #[inline(always)]
+    unsafe fn emac_wr(base: *mut u32, off: u32, val: u32) {
         // SAFETY: caller contract.
-        let val = unsafe { emac_rd(base, MAC_MDIO_CONTROL) };
-        if val & MDIO_START_TRANS == 0 {
+        unsafe { ptr::write_volatile((base as *mut u8).add(off as usize) as *mut u32, val) };
+    }
+
+    // -----------------------------------------------------------------------
+    // MDIO bus access via EMAC registers.
+    // -----------------------------------------------------------------------
+
+    /// `int mdio_read(volatile uint32 *base, int phy_addr, int reg)`.
+    ///
+    /// # Safety
+    /// `base` must be a live EMAC MMIO base pointer (see module doc).
+    // P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+    pub(crate) unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: c_int) -> c_int {
+        let mut cmd: u32 = 0;
+        cmd |= phy_addr as u32 & MDIO_PHY_ADDR_MASK;
+        cmd |= ((reg as u32) & 0x1F) << MDIO_REG_ADDR_SHIFT;
+        cmd |= MDIO_START_TRANS | MDIO_READ_WRITE;
+
+        // SAFETY: caller contract.
+        unsafe {
+            Self::emac_wr(base, MAC_MDIO_DATA, 0);
+            Self::emac_wr(base, MAC_MDIO_CONTROL, cmd);
+        }
+
+        // Poll until START_TRANS clears (bit 15).
+        for _ in 0..(MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US) {
+            Scheduler::yield_now();
             // SAFETY: caller contract.
-            return (unsafe { emac_rd(base, MAC_MDIO_DATA) } & 0xFFFF) as c_int;
+            let val = unsafe { Self::emac_rd(base, MAC_MDIO_CONTROL) };
+            if val & MDIO_START_TRANS == 0 {
+                // SAFETY: caller contract.
+                return (unsafe { Self::emac_rd(base, MAC_MDIO_DATA) } & 0xFFFF) as c_int;
+            }
         }
+
+        crate::kprintln!("mdio_read: timeout phy={} reg={}", phy_addr, reg);
+        -1
     }
 
-    crate::kprintln!("mdio_read: timeout phy={} reg={}", phy_addr, reg);
-    -1
-}
+    /// `int mdio_write(volatile uint32 *base, int phy_addr, int reg, uint16 val)`.
+    ///
+    /// # Safety
+    /// Same as [`Self::mdio_read`].
+    // P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+    pub(crate) unsafe extern "C" fn mdio_write(base: *mut u32, phy_addr: c_int, reg: c_int, val: u16) -> c_int {
+        let mut cmd: u32 = 0;
 
-/// `int mdio_write(volatile uint32 *base, int phy_addr, int reg, uint16 val)`.
-///
-/// # Safety
-/// Same as [`mdio_read`].
-// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
-pub(crate) unsafe extern "C" fn mdio_write(base: *mut u32, phy_addr: c_int, reg: c_int, val: u16) -> c_int {
-    let mut cmd: u32 = 0;
-
-    // SAFETY: caller contract.
-    unsafe { emac_wr(base, MAC_MDIO_DATA, val as u32) };
-
-    cmd |= phy_addr as u32 & MDIO_PHY_ADDR_MASK;
-    cmd |= ((reg as u32) & 0x1F) << MDIO_REG_ADDR_SHIFT;
-    cmd |= MDIO_START_TRANS; // READ_WRITE bit = 0 -> write
-
-    // SAFETY: caller contract.
-    unsafe { emac_wr(base, MAC_MDIO_CONTROL, cmd) };
-
-    // Poll until START_TRANS clears.
-    for _ in 0..(MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US) {
-        Scheduler::yield_now();
         // SAFETY: caller contract.
-        let v = unsafe { emac_rd(base, MAC_MDIO_CONTROL) };
-        if v & MDIO_START_TRANS == 0 {
-            return 0;
+        unsafe { Self::emac_wr(base, MAC_MDIO_DATA, val as u32) };
+
+        cmd |= phy_addr as u32 & MDIO_PHY_ADDR_MASK;
+        cmd |= ((reg as u32) & 0x1F) << MDIO_REG_ADDR_SHIFT;
+        cmd |= MDIO_START_TRANS; // READ_WRITE bit = 0 -> write
+
+        // SAFETY: caller contract.
+        unsafe { Self::emac_wr(base, MAC_MDIO_CONTROL, cmd) };
+
+        // Poll until START_TRANS clears.
+        for _ in 0..(MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US) {
+            Scheduler::yield_now();
+            // SAFETY: caller contract.
+            let v = unsafe { Self::emac_rd(base, MAC_MDIO_CONTROL) };
+            if v & MDIO_START_TRANS == 0 {
+                return 0;
+            }
+        }
+
+        crate::kprintln!(
+            "mdio_write: timeout phy={} reg={} val=0x{:x}",
+            phy_addr,
+            reg,
+            ((val as c_int) as i32 as i64) as u64,
+        );
+        -1
+    }
+
+    // -----------------------------------------------------------------------
+    // YT8531 extended register access.
+    // -----------------------------------------------------------------------
+
+    /// Write to an extended register (address > `0x1F`) on the YT8531. Uses
+    /// the indirect access method: write `addr` to reg `0x1E`, then write
+    /// `data` to reg `0x1F`. Mirrors `static int yt8531_ext_write(...)`.
+    ///
+    /// # Safety
+    /// Same as [`Self::mdio_read`].
+    unsafe fn ext_write(base: *mut u32, phy_addr: c_int, ext_reg: u16, val: u16) -> c_int {
+        // SAFETY: caller contract.
+        unsafe {
+            if Self::mdio_write(base, phy_addr, YT8531_EXT_REG_ADDR, ext_reg) < 0 {
+                return -1;
+            }
+            Self::mdio_write(base, phy_addr, YT8531_EXT_REG_DATA, val)
         }
     }
 
-    crate::kprintln!(
-        "mdio_write: timeout phy={} reg={} val=0x{:x}",
-        phy_addr,
-        reg,
-        ((val as c_int) as i32 as i64) as u64,
-    );
-    -1
-}
+    // -----------------------------------------------------------------------
+    // YT8531 PHY initialisation.
+    // -----------------------------------------------------------------------
 
-// ===========================================================================
-// YT8531 extended register access.
-// ===========================================================================
+    /// Scan MDIO bus addresses `0..32` for a PHY; returns its address, or
+    /// `-1` if none found. Mirrors `static int mdio_scan(...)`.
+    ///
+    /// # Safety
+    /// Same as [`Self::mdio_read`].
+    unsafe fn mdio_scan(base: *mut u32) -> c_int {
+        for addr in 0..32 {
+            // SAFETY: caller contract.
+            let id1 = unsafe { Self::mdio_read(base, addr, MII_PHYSID1) };
+            if id1 < 0 || id1 == 0xFFFF || id1 == 0x0000 {
+                continue;
+            }
+            // SAFETY: caller contract.
+            let id2 = unsafe { Self::mdio_read(base, addr, MII_PHYSID2) };
+            if id2 < 0 || id2 == 0xFFFF {
+                continue;
+            }
+            let phy_id = ((id1 as u32) << 16) | (id2 as u32);
+            crate::kprintln!("mdio: found PHY at addr {}, ID=0x{:x}", addr, ((phy_id as i32) as i64) as u64);
+            return addr;
+        }
+        -1
+    }
 
-/// Write to an extended register (address > `0x1F`) on the YT8531. Uses
-/// the indirect access method: write `addr` to reg `0x1E`, then write
-/// `data` to reg `0x1F`. Mirrors `static int yt8531_ext_write(...)`.
-///
-/// # Safety
-/// Same as [`mdio_read`].
-unsafe fn yt8531_ext_write(base: *mut u32, phy_addr: c_int, ext_reg: u16, val: u16) -> c_int {
-    // SAFETY: caller contract.
-    unsafe {
-        if mdio_write(base, phy_addr, YT8531_EXT_REG_ADDR, ext_reg) < 0 {
+    /// `int yt8531_init(volatile uint32 *base, int phy_addr)`. Performs soft
+    /// reset, verifies PHY ID, configures LEDs, advertises all speeds, and
+    /// restarts auto-negotiation. Returns the PHY address (`>= 0`) on
+    /// success, `-1` on failure.
+    ///
+    /// # Safety
+    /// Same as [`Self::mdio_read`].
+    // P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int) -> c_int {
+        // If phy_addr < 0, auto-detect.
+        if phy_addr < 0 {
+            // SAFETY: caller contract.
+            phy_addr = unsafe { Self::mdio_scan(base) };
+            if phy_addr < 0 {
+                crate::kprintln!("yt8531: no PHY found on MDIO bus");
+                return -1;
+            }
+        }
+
+        // Verify PHY ID.
+        // SAFETY: caller contract.
+        let id1 = unsafe { Self::mdio_read(base, phy_addr, MII_PHYSID1) };
+        // SAFETY: caller contract.
+        let id2 = unsafe { Self::mdio_read(base, phy_addr, MII_PHYSID2) };
+        if id1 < 0 || id2 < 0 {
             return -1;
-        }
-        mdio_write(base, phy_addr, YT8531_EXT_REG_DATA, val)
-    }
-}
-
-// ===========================================================================
-// YT8531 PHY initialisation.
-// ===========================================================================
-
-/// Scan MDIO bus addresses `0..32` for a PHY; returns its address, or
-/// `-1` if none found. Mirrors `static int mdio_scan(...)`.
-///
-/// # Safety
-/// Same as [`mdio_read`].
-unsafe fn mdio_scan(base: *mut u32) -> c_int {
-    for addr in 0..32 {
-        // SAFETY: caller contract.
-        let id1 = unsafe { mdio_read(base, addr, MII_PHYSID1) };
-        if id1 < 0 || id1 == 0xFFFF || id1 == 0x0000 {
-            continue;
-        }
-        // SAFETY: caller contract.
-        let id2 = unsafe { mdio_read(base, addr, MII_PHYSID2) };
-        if id2 < 0 || id2 == 0xFFFF {
-            continue;
         }
         let phy_id = ((id1 as u32) << 16) | (id2 as u32);
-        crate::kprintln!("mdio: found PHY at addr {}, ID=0x{:x}", addr, ((phy_id as i32) as i64) as u64);
-        return addr;
-    }
-    -1
-}
+        crate::kprintln!("yt8531: PHY ID = 0x{:x} at addr {}", ((phy_id as i32) as i64) as u64, phy_addr);
 
-/// `int yt8531_init(volatile uint32 *base, int phy_addr)`. Performs soft
-/// reset, verifies PHY ID, configures LEDs, advertises all speeds, and
-/// restarts auto-negotiation. Returns the PHY address (`>= 0`) on
-/// success, `-1` on failure.
-///
-/// # Safety
-/// Same as [`mdio_read`].
-// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int) -> c_int {
-    // If phy_addr < 0, auto-detect.
-    if phy_addr < 0 {
+        // Soft reset the PHY.
         // SAFETY: caller contract.
-        phy_addr = unsafe { mdio_scan(base) };
-        if phy_addr < 0 {
-            crate::kprintln!("yt8531: no PHY found on MDIO bus");
+        if unsafe { Self::mdio_write(base, phy_addr, MII_BMCR, BMCR_RESET) } < 0 {
             return -1;
         }
-    }
 
-    // Verify PHY ID.
-    // SAFETY: caller contract.
-    let id1 = unsafe { mdio_read(base, phy_addr, MII_PHYSID1) };
-    // SAFETY: caller contract.
-    let id2 = unsafe { mdio_read(base, phy_addr, MII_PHYSID2) };
-    if id1 < 0 || id2 < 0 {
-        return -1;
-    }
-    let phy_id = ((id1 as u32) << 16) | (id2 as u32);
-    crate::kprintln!("yt8531: PHY ID = 0x{:x} at addr {}", ((phy_id as i32) as i64) as u64, phy_addr);
-
-    // Soft reset the PHY.
-    // SAFETY: caller contract.
-    if unsafe { mdio_write(base, phy_addr, MII_BMCR, BMCR_RESET) } < 0 {
-        return -1;
-    }
-
-    // Wait for reset to complete (BMCR_RESET self-clears). Mirrors the C
-    // `goto reset_done` -- see module doc's diff-review note.
-    let mut reset_ok = false;
-    for _ in 0..50 {
-        sleep_ms(10);
-        // SAFETY: caller contract.
-        let bmcr = unsafe { mdio_read(base, phy_addr, MII_BMCR) };
-        if bmcr >= 0 && (bmcr as u32 & BMCR_RESET as u32) == 0 {
-            reset_ok = true;
-            break;
-        }
-    }
-    if !reset_ok {
-        crate::kprintln!("yt8531: PHY reset timeout");
-        return -1;
-    }
-
-    // reset_done:
-    // YT8531 LED fixup (from Linux vendor driver).
-    if (phy_id & 0xFFFF_FFF0) == (YT8531_PHY_ID & 0xFFFF_FFF0) {
-        crate::kprintln!("yt8531: applying LED fixup");
-        // SAFETY: caller contract.
-        unsafe {
-            yt8531_ext_write(base, phy_addr, YT8531_LED0_CFG, YT8531_LED0_VAL);
-            yt8531_ext_write(base, phy_addr, YT8531_LED1_CFG, YT8531_LED1_VAL);
-            yt8531_ext_write(base, phy_addr, YT8531_LED2_CFG, YT8531_LED2_VAL);
-        }
-    }
-
-    // Advertise all capabilities: 10/100/1000 full/half duplex.
-    let adv = ADVERTISE_CSMA
-        | ADVERTISE_10HALF
-        | ADVERTISE_10FULL
-        | ADVERTISE_100HALF
-        | ADVERTISE_100FULL
-        | ADVERTISE_PAUSE_CAP;
-    // SAFETY: caller contract.
-    if unsafe { mdio_write(base, phy_addr, MII_ADVERTISE, adv) } < 0 {
-        return -1;
-    }
-
-    // Advertise 1000BASE-T full duplex.
-    let ctrl1000 = ADVERTISE_1000FULL;
-    // SAFETY: caller contract.
-    if unsafe { mdio_write(base, phy_addr, MII_CTRL1000, ctrl1000) } < 0 {
-        return -1;
-    }
-
-    // Enable and restart auto-negotiation.
-    let bmcr = BMCR_ANENABLE | BMCR_ANRESTART;
-    // SAFETY: caller contract.
-    if unsafe { mdio_write(base, phy_addr, MII_BMCR, bmcr) } < 0 {
-        return -1;
-    }
-
-    crate::kprintln!("yt8531: auto-negotiation started");
-    phy_addr
-}
-
-// ===========================================================================
-// Link state polling.
-// ===========================================================================
-
-/// `int yt8531_poll_link(volatile uint32 *base, int phy_addr, struct
-/// phy_state *state)`.
-///
-/// # Safety
-/// `base` per [`mdio_read`]; `state` must point to live, writable
-/// `phy_state` storage for the duration of this call.
-// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn yt8531_poll_link(base: *mut u32, phy_addr: c_int, state: *mut phy_state) -> c_int {
-    // SAFETY: caller contract.
-    unsafe {
-        (*state).link_up = 0;
-        (*state).speed = 0;
-        (*state).full_duplex = 0;
-    }
-
-    // SAFETY: caller contract.
-    let bmsr = unsafe { mdio_read(base, phy_addr, MII_BMSR) };
-    if bmsr < 0 {
-        return -1;
-    }
-
-    // Read BMSR twice -- link status is latching-low.
-    // SAFETY: caller contract.
-    let bmsr = unsafe { mdio_read(base, phy_addr, MII_BMSR) };
-    if bmsr < 0 {
-        return -1;
-    }
-
-    if bmsr as u32 & BMSR_LSTATUS as u32 == 0 {
-        return 0; // No link.
-    }
-
-    // SAFETY: caller contract.
-    unsafe { (*state).link_up = 1 };
-
-    // Check 1000BASE-T first.
-    // SAFETY: caller contract.
-    let stat1000 = unsafe { mdio_read(base, phy_addr, MII_STAT1000) };
-    if stat1000 >= 0 && (stat1000 as u32 & LPA_1000FULL as u32) != 0 {
-        // SAFETY: caller contract.
-        unsafe {
-            (*state).speed = PHY_SPEED_1000;
-            (*state).full_duplex = 1;
-        }
-        return 0;
-    }
-    if stat1000 >= 0 && (stat1000 as u32 & LPA_1000HALF as u32) != 0 {
-        // SAFETY: caller contract.
-        unsafe {
-            (*state).speed = PHY_SPEED_1000;
-            (*state).full_duplex = 0;
-        }
-        return 0;
-    }
-
-    // Check 100/10 via LPA.
-    // SAFETY: caller contract.
-    let lpa = unsafe { mdio_read(base, phy_addr, MII_LPA) };
-    if lpa < 0 {
-        return -1;
-    }
-
-    // SAFETY: caller contract.
-    unsafe {
-        if lpa as u32 & LPA_100FULL as u32 != 0 {
-            (*state).speed = PHY_SPEED_100;
-            (*state).full_duplex = 1;
-        } else if lpa as u32 & LPA_100HALF as u32 != 0 {
-            (*state).speed = PHY_SPEED_100;
-            (*state).full_duplex = 0;
-        } else if lpa as u32 & LPA_10FULL as u32 != 0 {
-            (*state).speed = PHY_SPEED_10;
-            (*state).full_duplex = 1;
-        } else if lpa as u32 & LPA_10HALF as u32 != 0 {
-            (*state).speed = PHY_SPEED_10;
-            (*state).full_duplex = 0;
-        } else {
-            // Fallback: assume 100 full.
-            (*state).speed = PHY_SPEED_100;
-            (*state).full_duplex = 1;
-        }
-    }
-
-    0
-}
-
-/// `int yt8531_wait_autoneg(volatile uint32 *base, int phy_addr, struct
-/// phy_state *state, int timeout_ms)`.
-///
-/// # Safety
-/// Same as [`yt8531_poll_link`].
-// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn yt8531_wait_autoneg(
-    base: *mut u32,
-    phy_addr: c_int,
-    state: *mut phy_state,
-    timeout_ms: c_int,
-) -> c_int {
-    let mut elapsed: c_int = 0;
-    let interval: c_int = 100; // poll every 100ms
-
-    while elapsed < timeout_ms {
-        // SAFETY: caller contract.
-        let bmsr = unsafe { mdio_read(base, phy_addr, MII_BMSR) };
-        if bmsr >= 0 && (bmsr as u32 & BMSR_ANEGCOMPLETE as u32) != 0 {
-            crate::kprintln!("yt8531: auto-negotiation complete ({}ms)", elapsed);
+        // Wait for reset to complete (BMCR_RESET self-clears). Mirrors the C
+        // `goto reset_done` -- see module doc's diff-review note.
+        let mut reset_ok = false;
+        for _ in 0..50 {
+            sleep_ms(10);
             // SAFETY: caller contract.
-            return unsafe { yt8531_poll_link(base, phy_addr, state) };
+            let bmcr = unsafe { Self::mdio_read(base, phy_addr, MII_BMCR) };
+            if bmcr >= 0 && (bmcr as u32 & BMCR_RESET as u32) == 0 {
+                reset_ok = true;
+                break;
+            }
         }
-        sleep_ms(interval as u64);
-        elapsed += interval;
+        if !reset_ok {
+            crate::kprintln!("yt8531: PHY reset timeout");
+            return -1;
+        }
+
+        // reset_done:
+        // YT8531 LED fixup (from Linux vendor driver).
+        if (phy_id & 0xFFFF_FFF0) == (YT8531_PHY_ID & 0xFFFF_FFF0) {
+            crate::kprintln!("yt8531: applying LED fixup");
+            // SAFETY: caller contract.
+            unsafe {
+                Self::ext_write(base, phy_addr, YT8531_LED0_CFG, YT8531_LED0_VAL);
+                Self::ext_write(base, phy_addr, YT8531_LED1_CFG, YT8531_LED1_VAL);
+                Self::ext_write(base, phy_addr, YT8531_LED2_CFG, YT8531_LED2_VAL);
+            }
+        }
+
+        // Advertise all capabilities: 10/100/1000 full/half duplex.
+        let adv = ADVERTISE_CSMA
+            | ADVERTISE_10HALF
+            | ADVERTISE_10FULL
+            | ADVERTISE_100HALF
+            | ADVERTISE_100FULL
+            | ADVERTISE_PAUSE_CAP;
+        // SAFETY: caller contract.
+        if unsafe { Self::mdio_write(base, phy_addr, MII_ADVERTISE, adv) } < 0 {
+            return -1;
+        }
+
+        // Advertise 1000BASE-T full duplex.
+        let ctrl1000 = ADVERTISE_1000FULL;
+        // SAFETY: caller contract.
+        if unsafe { Self::mdio_write(base, phy_addr, MII_CTRL1000, ctrl1000) } < 0 {
+            return -1;
+        }
+
+        // Enable and restart auto-negotiation.
+        let bmcr = BMCR_ANENABLE | BMCR_ANRESTART;
+        // SAFETY: caller contract.
+        if unsafe { Self::mdio_write(base, phy_addr, MII_BMCR, bmcr) } < 0 {
+            return -1;
+        }
+
+        crate::kprintln!("yt8531: auto-negotiation started");
+        phy_addr
     }
 
-    // Timeout -- check link anyway.
-    crate::kprintln!("yt8531: auto-negotiation timeout after {}ms, checking link...", timeout_ms);
-    // SAFETY: caller contract.
-    unsafe { yt8531_poll_link(base, phy_addr, state) };
-    // SAFETY: caller contract.
-    if unsafe { (*state).link_up } != 0 {
+    // -----------------------------------------------------------------------
+    // Link state polling.
+    // -----------------------------------------------------------------------
+
+    /// `int yt8531_poll_link(volatile uint32 *base, int phy_addr, struct
+    /// phy_state *state)`.
+    ///
+    /// # Safety
+    /// `base` per [`Self::mdio_read`]; `state` must point to live, writable
+    /// `phy_state` storage for the duration of this call.
+    // P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) unsafe extern "C" fn yt8531_poll_link(base: *mut u32, phy_addr: c_int, state: *mut phy_state) -> c_int {
         // SAFETY: caller contract.
         unsafe {
-            crate::kprintln!(
-                "yt8531: link up despite AN timeout: {}Mbps {}",
-                (*state).speed,
-                if (*state).full_duplex != 0 { "full" } else { "half" },
-            );
+            (*state).link_up = 0;
+            (*state).speed = 0;
+            (*state).full_duplex = 0;
         }
-        return 0;
+
+        // SAFETY: caller contract.
+        let bmsr = unsafe { Self::mdio_read(base, phy_addr, MII_BMSR) };
+        if bmsr < 0 {
+            return -1;
+        }
+
+        // Read BMSR twice -- link status is latching-low.
+        // SAFETY: caller contract.
+        let bmsr = unsafe { Self::mdio_read(base, phy_addr, MII_BMSR) };
+        if bmsr < 0 {
+            return -1;
+        }
+
+        if bmsr as u32 & BMSR_LSTATUS as u32 == 0 {
+            return 0; // No link.
+        }
+
+        // SAFETY: caller contract.
+        unsafe { (*state).link_up = 1 };
+
+        // Check 1000BASE-T first.
+        // SAFETY: caller contract.
+        let stat1000 = unsafe { Self::mdio_read(base, phy_addr, MII_STAT1000) };
+        if stat1000 >= 0 && (stat1000 as u32 & LPA_1000FULL as u32) != 0 {
+            // SAFETY: caller contract.
+            unsafe {
+                (*state).speed = PHY_SPEED_1000;
+                (*state).full_duplex = 1;
+            }
+            return 0;
+        }
+        if stat1000 >= 0 && (stat1000 as u32 & LPA_1000HALF as u32) != 0 {
+            // SAFETY: caller contract.
+            unsafe {
+                (*state).speed = PHY_SPEED_1000;
+                (*state).full_duplex = 0;
+            }
+            return 0;
+        }
+
+        // Check 100/10 via LPA.
+        // SAFETY: caller contract.
+        let lpa = unsafe { Self::mdio_read(base, phy_addr, MII_LPA) };
+        if lpa < 0 {
+            return -1;
+        }
+
+        // SAFETY: caller contract.
+        unsafe {
+            if lpa as u32 & LPA_100FULL as u32 != 0 {
+                (*state).speed = PHY_SPEED_100;
+                (*state).full_duplex = 1;
+            } else if lpa as u32 & LPA_100HALF as u32 != 0 {
+                (*state).speed = PHY_SPEED_100;
+                (*state).full_duplex = 0;
+            } else if lpa as u32 & LPA_10FULL as u32 != 0 {
+                (*state).speed = PHY_SPEED_10;
+                (*state).full_duplex = 1;
+            } else if lpa as u32 & LPA_10HALF as u32 != 0 {
+                (*state).speed = PHY_SPEED_10;
+                (*state).full_duplex = 0;
+            } else {
+                // Fallback: assume 100 full.
+                (*state).speed = PHY_SPEED_100;
+                (*state).full_duplex = 1;
+            }
+        }
+
+        0
     }
-    -1
+
+    /// `int yt8531_wait_autoneg(volatile uint32 *base, int phy_addr, struct
+    /// phy_state *state, int timeout_ms)`.
+    ///
+    /// # Safety
+    /// Same as [`Self::yt8531_poll_link`].
+    // P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) unsafe extern "C" fn yt8531_wait_autoneg(
+        base: *mut u32,
+        phy_addr: c_int,
+        state: *mut phy_state,
+        timeout_ms: c_int,
+    ) -> c_int {
+        let mut elapsed: c_int = 0;
+        let interval: c_int = 100; // poll every 100ms
+
+        while elapsed < timeout_ms {
+            // SAFETY: caller contract.
+            let bmsr = unsafe { Self::mdio_read(base, phy_addr, MII_BMSR) };
+            if bmsr >= 0 && (bmsr as u32 & BMSR_ANEGCOMPLETE as u32) != 0 {
+                crate::kprintln!("yt8531: auto-negotiation complete ({}ms)", elapsed);
+                // SAFETY: caller contract.
+                return unsafe { Self::yt8531_poll_link(base, phy_addr, state) };
+            }
+            sleep_ms(interval as u64);
+            elapsed += interval;
+        }
+
+        // Timeout -- check link anyway.
+        crate::kprintln!("yt8531: auto-negotiation timeout after {}ms, checking link...", timeout_ms);
+        // SAFETY: caller contract.
+        unsafe { Self::yt8531_poll_link(base, phy_addr, state) };
+        // SAFETY: caller contract.
+        if unsafe { (*state).link_up } != 0 {
+            // SAFETY: caller contract.
+            unsafe {
+                crate::kprintln!(
+                    "yt8531: link up despite AN timeout: {}Mbps {}",
+                    (*state).speed,
+                    if (*state).full_duplex != 0 { "full" } else { "half" },
+                );
+            }
+            return 0;
+        }
+        -1
+    }
 }

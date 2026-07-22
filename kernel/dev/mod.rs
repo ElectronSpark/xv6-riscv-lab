@@ -46,7 +46,7 @@
 //! [`x1_emac`], `kernel/dev/x1_sdhci.c` -> [`x1_sdhci`] (Phase 2 Wave 25,
 //! see `docs/rustify/phase2_plan.md`): the Orange-Pi-RV2-only drivers --
 //! the last C in `kernel/dev/`. Every entry point `start_kernel.c` calls
-//! (`x1_emac_init`/`x1_sdhci_init`) probes nothing on QEMU's `-machine
+//! (`X1EmacSoftc::init`/`SdhciSoftc::init`) probes nothing on QEMU's `-machine
 //! virt` (no matching FDT node) -- **compile-verify + boot-no-regression
 //! only** for this trio, see each module's own doc for the full
 //! lower-confidence accounting and what real hardware would be needed to

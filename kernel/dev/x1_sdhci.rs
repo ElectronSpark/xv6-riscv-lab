@@ -11,12 +11,12 @@
 //! capability; falls back to PIO otherwise.
 //!
 //! Key data flow: `bio` (file system) -> `blkdev` -> `submit_bio` ->
-//! [`sdhci_rw_blocks`](sdhci_read_blocks)/[`sdhci_write_blocks`] ->
+//! [`sdhci_rw_blocks`](sdhci_read_blocks)/[`SdhciSoftc::write_blocks`] ->
 //! SDMA/PIO.
 //!
 //! # QEMU verifiability (Wave 25 charter)
 //!
-//! [`x1_sdhci_init`] -- the only entry point `start_kernel.c` calls --
+//! [`SdhciSoftc::init`] -- the only entry point `start_kernel.c` calls --
 //! early-returns when `platform.has_sdhci` is false, which it always is
 //! on QEMU's generated device tree (Wave 23 finding: no SDHCI-compatible
 //! node in `-machine virt`'s DTB). **Compile-verify + boot-no-regression
@@ -38,8 +38,8 @@
 //! Every function below was reviewed line-by-line against
 //! `kernel/dev/x1_sdhci.c` at port time: register field masks/shifts,
 //! command/response handling (including the R2/136-bit response word
-//! mapping comment block in [`sdhci_enumerate_sd`]/
-//! [`sdhci_enumerate_emmc`]), timeout-loop bounds, SDMA boundary-
+//! mapping comment block in [`SdhciSoftc::enumerate_sd`]/
+//! [`SdhciSoftc::enumerate_emmc`]), timeout-loop bounds, SDMA boundary-
 //! reprogramming logic, and log message text/argument order all match.
 //! C `do { ... } while (cond)` loops (the ACMD41 and CMD1 polling loops)
 //! are ported as `loop { ...; if cond_to_exit { break; } }` -- same
@@ -52,7 +52,7 @@
 //! # MMIO ordering
 //!
 //! `x1_sdhci.c` itself has 7 `__sync_synchronize()` calls: 1 in
-//! [`sdhci_aib_enable`], 6 in [`sdhci_apmu_enable`] (one per clock/reset
+//! [`SdhciSoftc::aib_enable`], 6 in [`SdhciSoftc::apmu_enable`] (one per clock/reset
 //! configuration step that touches a register the DMA/clock hardware
 //! also reads). Every one is preserved below as
 //! `core::sync::atomic::fence(Ordering::SeqCst)` at the exact same call
@@ -64,17 +64,17 @@
 //! not an addition invented by this port; 9 `fence(SeqCst)` call sites
 //! total in this file, from two distinct C sources (`x1_sdhci.c`'s 7,
 //! `bio.h`'s 2). Every MMIO register access goes through
-//! [`sdhci_readb`]/[`sdhci_readw`]/[`sdhci_readl`]/[`sdhci_writeb`]/
-//! [`sdhci_writew`]/[`sdhci_writel`] or a direct `read_volatile`/
+//! [`SdhciSoftc::readb`]/[`SdhciSoftc::readw`]/[`SdhciSoftc::readl`]/[`SdhciSoftc::writeb`]/
+//! [`SdhciSoftc::writew`]/[`SdhciSoftc::writel`] or a direct `read_volatile`/
 //! `write_volatile` on an already-dereferenced `apmu_reg`/`aib_reg`
 //! pointer, so the compiler can never reorder or elide any of them,
 //! matching the C `volatile uint8/16/32 *` semantics 1:1. The C
 //! original's own comment about `SDHCI_SOFTWARE_RESET`/
 //! `SDHCI_HOST_VERSION` needing byte/half-word-width accesses (not a
 //! 4-byte `readl`, to avoid a RISC-V unaligned-MMIO load fault) is
-//! preserved exactly -- [`sdhci_reset`] uses [`sdhci_readb`]/
-//! [`sdhci_writeb`], never [`sdhci_wait_bit`] (which is `readl`-only),
-//! and `sdhci_init_one`'s alive-probe uses [`sdhci_readw`] on
+//! preserved exactly -- [`SdhciSoftc::reset`] uses [`SdhciSoftc::readb`]/
+//! [`SdhciSoftc::writeb`], never [`SdhciSoftc::wait_bit`] (which is `readl`-only),
+//! and `SdhciSoftc::init_one`'s alive-probe uses [`SdhciSoftc::readw`] on
 //! `SDHCI_HOST_VERSION` (offset `0xFE`, not 4-byte aligned).
 //!
 //! `dev/bio.h`'s several `static inline` helpers (`bio_iter_*`,
@@ -297,7 +297,7 @@ const fn neg(e: u32) -> c_int {
 // C original (see `x1_emac.rs`'s identical rationale).
 // ===========================================================================
 #[repr(C)]
-struct SdhciSoftc {
+pub(crate) struct SdhciSoftc {
     regs: *mut u8, // SDHCI MMIO base
 
     // APMU clock/reset register (per-instance).
@@ -349,65 +349,67 @@ impl<T> SyncCell<T> {
 static SDHCI_SC: SyncCell<[MaybeUninit<SdhciSoftc>; MAX_SDH_INSTANCES]> =
     SyncCell(UnsafeCell::new([const { MaybeUninit::uninit() }; MAX_SDH_INSTANCES]));
 
-/// # Safety
-/// `idx` must be `< MAX_SDH_INSTANCES`.
-#[inline(always)]
-unsafe fn sdhci_sc(idx: usize) -> *mut SdhciSoftc {
-    // SAFETY: caller contract.
-    unsafe { (SDHCI_SC.get() as *mut SdhciSoftc).add(idx) }
-}
-
 /// `static int sdhci_count` -- number of successfully initialised
 /// instances. Only ever incremented (`__ATOMIC_SEQ_CST`); no reader
 /// exists in this file, matching the C (dead telemetry, preserved as-is).
 static SDHCI_COUNT: AtomicI32 = AtomicI32::new(0);
 
-// ===========================================================================
-// Low-level MMIO helpers. Mirrors `sdhci_read{b,w,l}`/`sdhci_write{b,w,l}`.
-// ===========================================================================
+impl SdhciSoftc {
+    /// # Safety
+    /// `idx` must be `< MAX_SDH_INSTANCES`.
+    #[inline(always)]
+    unsafe fn sc(idx: usize) -> *mut SdhciSoftc {
+        // SAFETY: caller contract.
+        unsafe { (SDHCI_SC.get() as *mut SdhciSoftc).add(idx) }
+    }
 
-/// # Safety
-/// `sc` must be live; `(*sc).regs + off` must be valid MMIO space of the
-/// accessed width.
-#[inline(always)]
-unsafe fn sdhci_readb(sc: *mut SdhciSoftc, off: u32) -> u8 {
-    // SAFETY: caller contract.
-    unsafe { ptr::read_volatile((*sc).regs.add(off as usize)) }
-}
-/// # Safety
-/// Same as [`sdhci_readb`].
-#[inline(always)]
-unsafe fn sdhci_readw(sc: *mut SdhciSoftc, off: u32) -> u16 {
-    // SAFETY: caller contract.
-    unsafe { ptr::read_volatile((*sc).regs.add(off as usize) as *mut u16) }
-}
-/// # Safety
-/// Same as [`sdhci_readb`].
-#[inline(always)]
-unsafe fn sdhci_readl(sc: *mut SdhciSoftc, off: u32) -> u32 {
-    // SAFETY: caller contract.
-    unsafe { ptr::read_volatile((*sc).regs.add(off as usize) as *mut u32) }
-}
-/// # Safety
-/// Same as [`sdhci_readb`].
-#[inline(always)]
-unsafe fn sdhci_writeb(sc: *mut SdhciSoftc, off: u32, val: u8) {
-    // SAFETY: caller contract.
-    unsafe { ptr::write_volatile((*sc).regs.add(off as usize), val) };
-}
-/// # Safety
-/// Same as [`sdhci_readb`].
-#[inline(always)]
-unsafe fn sdhci_writew(sc: *mut SdhciSoftc, off: u32, val: u16) {
-    // SAFETY: caller contract.
-    unsafe { ptr::write_volatile((*sc).regs.add(off as usize) as *mut u16, val) };
-}
-/// # Safety
-/// Same as [`sdhci_readb`].
-#[inline(always)]
-unsafe fn sdhci_writel(sc: *mut SdhciSoftc, off: u32, val: u32) {
-    // SAFETY: caller contract.
-    unsafe { ptr::write_volatile((*sc).regs.add(off as usize) as *mut u32, val) };
+    // ===========================================================================
+    // Low-level MMIO helpers. Mirrors `sdhci_read{b,w,l}`/`sdhci_write{b,w,l}`.
+    // ===========================================================================
+
+    /// # Safety
+    /// `sc` must be live; `(*sc).regs + off` must be valid MMIO space of the
+    /// accessed width.
+    #[inline(always)]
+    unsafe fn readb(sc: *mut SdhciSoftc, off: u32) -> u8 {
+        // SAFETY: caller contract.
+        unsafe { ptr::read_volatile((*sc).regs.add(off as usize)) }
+    }
+    /// # Safety
+    /// Same as [`SdhciSoftc::readb`].
+    #[inline(always)]
+    unsafe fn readw(sc: *mut SdhciSoftc, off: u32) -> u16 {
+        // SAFETY: caller contract.
+        unsafe { ptr::read_volatile((*sc).regs.add(off as usize) as *mut u16) }
+    }
+    /// # Safety
+    /// Same as [`SdhciSoftc::readb`].
+    #[inline(always)]
+    unsafe fn readl(sc: *mut SdhciSoftc, off: u32) -> u32 {
+        // SAFETY: caller contract.
+        unsafe { ptr::read_volatile((*sc).regs.add(off as usize) as *mut u32) }
+    }
+    /// # Safety
+    /// Same as [`SdhciSoftc::readb`].
+    #[inline(always)]
+    unsafe fn writeb(sc: *mut SdhciSoftc, off: u32, val: u8) {
+        // SAFETY: caller contract.
+        unsafe { ptr::write_volatile((*sc).regs.add(off as usize), val) };
+    }
+    /// # Safety
+    /// Same as [`SdhciSoftc::readb`].
+    #[inline(always)]
+    unsafe fn writew(sc: *mut SdhciSoftc, off: u32, val: u16) {
+        // SAFETY: caller contract.
+        unsafe { ptr::write_volatile((*sc).regs.add(off as usize) as *mut u16, val) };
+    }
+    /// # Safety
+    /// Same as [`SdhciSoftc::readb`].
+    #[inline(always)]
+    unsafe fn writel(sc: *mut SdhciSoftc, off: u32, val: u32) {
+        // SAFETY: caller contract.
+        unsafe { ptr::write_volatile((*sc).regs.add(off as usize) as *mut u32, val) };
+    }
 }
 
 // ===========================================================================
@@ -476,1230 +478,1232 @@ unsafe fn sdhci_apmu_wait_fc(reg: *mut u32, timeout_us: c_int) -> c_int {
     -1
 }
 
-/// Enable the AIB clock via APBC (required by SDH0). APBC base and AIB
-/// offset come from the clock-controller's device tree `reg` property.
-/// Bits `[1:0] = 0x3` enable the clock.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_aib_enable(sc: *mut SdhciSoftc) {
-    // SAFETY: caller contract.
-    let aib_reg = unsafe { (*sc).aib_reg };
-    if aib_reg.is_null() {
-        return;
-    }
-    // SAFETY: `aib_reg` non-null, live MMIO per caller contract.
-    let mut val = unsafe { ptr::read_volatile(aib_reg) };
-    val |= APBC_AIB_CLK_EN;
-    // SAFETY: see above.
-    unsafe { ptr::write_volatile(aib_reg, val) };
-    fence(Ordering::SeqCst);
-}
-
-/// Enable clocks and deassert reset for an SDHCI instance. Must be
-/// called before any SDHCI register access.
-///
-/// Preserves the MUX/DIV clock source configuration U-Boot/firmware
-/// already set up (it booted from SD/eMMC, so the clocks must already be
-/// configured) -- only ensures the gate and reset bits are asserted;
-/// only reconfigures MUX/DIV if the IO clock is off AND both fields are
-/// at reset defaults.
-///
-/// # Safety
-/// `sc` must point to a live, exclusively-owned (not-yet-published)
-/// `SdhciSoftc`.
-unsafe fn sdhci_apmu_enable(sc: *mut SdhciSoftc) {
-    // SAFETY: caller contract.
-    let apmu_reg = unsafe { (*sc).apmu_reg };
-    if apmu_reg.is_null() {
-        crate::kprintln!("x1_sdhci{}: no APMU register, skipping clock enable", unsafe { (*sc).index });
-        return;
-    }
-
-    // Step 1: Enable AIB clock (needed for SDH bus fabric).
-    // SAFETY: caller contract.
-    unsafe { sdhci_aib_enable(sc) };
-
-    // Read current APMU register -- U-Boot should have configured MUX/DIV.
-    // SAFETY: `apmu_reg` non-null, live per caller contract.
-    let mut val = unsafe { ptr::read_volatile(apmu_reg) };
-    crate::kprintln!(
-        "x1_sdhci{}: APMU initial value = 0x{:x}",
-        unsafe { (*sc).index },
-        ((val as i32) as i64) as u64,
-    );
-
-    // Configure clock source if not already set up by firmware. Only
-    // reconfigure if IO clock is off AND MUX/DIV are at reset defaults.
-    if (val & SDH_APMU_IO_CLK_EN == 0) || ((val & SDH_APMU_MUX_MASK) == 0 && (val & SDH_APMU_DIV_MASK) == 0) {
-        crate::kprintln!("x1_sdhci{}: configuring clock (MUX=0 PLL1_D6, DIV=1)", unsafe { (*sc).index });
-        val &= !(SDH_APMU_MUX_MASK | SDH_APMU_DIV_MASK);
-        val |= SDH_MUX_PLL1_D6_409M << SDH_APMU_MUX_SHIFT;
-        val |= 1 << SDH_APMU_DIV_SHIFT;
-        // SAFETY: `apmu_reg` live.
-        unsafe { ptr::write_volatile(apmu_reg, val) };
-        fence(Ordering::SeqCst);
-
-        // Trigger frequency change and wait for self-clear.
-        val |= SDH_APMU_CLK_FC;
-        // SAFETY: `apmu_reg` live.
-        unsafe { ptr::write_volatile(apmu_reg, val) };
-        fence(Ordering::SeqCst);
-        // SAFETY: `apmu_reg` live.
-        if unsafe { sdhci_apmu_wait_fc(apmu_reg, 20000) } < 0 {
-            crate::kprintln!("x1_sdhci{}: APMU FC timeout", unsafe { (*sc).index });
+impl SdhciSoftc {
+    /// Enable the AIB clock via APBC (required by SDH0). APBC base and AIB
+    /// offset come from the clock-controller's device tree `reg` property.
+    /// Bits `[1:0] = 0x3` enable the clock.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn aib_enable(sc: *mut SdhciSoftc) {
+        // SAFETY: caller contract.
+        let aib_reg = unsafe { (*sc).aib_reg };
+        if aib_reg.is_null() {
+            return;
         }
+        // SAFETY: `aib_reg` non-null, live MMIO per caller contract.
+        let mut val = unsafe { ptr::read_volatile(aib_reg) };
+        val |= APBC_AIB_CLK_EN;
+        // SAFETY: see above.
+        unsafe { ptr::write_volatile(aib_reg, val) };
+        fence(Ordering::SeqCst);
+    }
+
+    /// Enable clocks and deassert reset for an SDHCI instance. Must be
+    /// called before any SDHCI register access.
+    ///
+    /// Preserves the MUX/DIV clock source configuration U-Boot/firmware
+    /// already set up (it booted from SD/eMMC, so the clocks must already be
+    /// configured) -- only ensures the gate and reset bits are asserted;
+    /// only reconfigures MUX/DIV if the IO clock is off AND both fields are
+    /// at reset defaults.
+    ///
+    /// # Safety
+    /// `sc` must point to a live, exclusively-owned (not-yet-published)
+    /// `SdhciSoftc`.
+    unsafe fn apmu_enable(sc: *mut SdhciSoftc) {
+        // SAFETY: caller contract.
+        let apmu_reg = unsafe { (*sc).apmu_reg };
+        if apmu_reg.is_null() {
+            crate::kprintln!("x1_sdhci{}: no APMU register, skipping clock enable", unsafe { (*sc).index });
+            return;
+        }
+
+        // Step 1: Enable AIB clock (needed for SDH bus fabric).
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::aib_enable(sc) };
+
+        // Read current APMU register -- U-Boot should have configured MUX/DIV.
+        // SAFETY: `apmu_reg` non-null, live per caller contract.
+        let mut val = unsafe { ptr::read_volatile(apmu_reg) };
+        crate::kprintln!(
+            "x1_sdhci{}: APMU initial value = 0x{:x}",
+            unsafe { (*sc).index },
+            ((val as i32) as i64) as u64,
+        );
+
+        // Configure clock source if not already set up by firmware. Only
+        // reconfigure if IO clock is off AND MUX/DIV are at reset defaults.
+        if (val & SDH_APMU_IO_CLK_EN == 0) || ((val & SDH_APMU_MUX_MASK) == 0 && (val & SDH_APMU_DIV_MASK) == 0) {
+            crate::kprintln!("x1_sdhci{}: configuring clock (MUX=0 PLL1_D6, DIV=1)", unsafe { (*sc).index });
+            val &= !(SDH_APMU_MUX_MASK | SDH_APMU_DIV_MASK);
+            val |= SDH_MUX_PLL1_D6_409M << SDH_APMU_MUX_SHIFT;
+            val |= 1 << SDH_APMU_DIV_SHIFT;
+            // SAFETY: `apmu_reg` live.
+            unsafe { ptr::write_volatile(apmu_reg, val) };
+            fence(Ordering::SeqCst);
+
+            // Trigger frequency change and wait for self-clear.
+            val |= SDH_APMU_CLK_FC;
+            // SAFETY: `apmu_reg` live.
+            unsafe { ptr::write_volatile(apmu_reg, val) };
+            fence(Ordering::SeqCst);
+            // SAFETY: `apmu_reg` live.
+            if unsafe { sdhci_apmu_wait_fc(apmu_reg, 20000) } < 0 {
+                crate::kprintln!("x1_sdhci{}: APMU FC timeout", unsafe { (*sc).index });
+            }
+            // SAFETY: `apmu_reg` live.
+            val = unsafe { ptr::read_volatile(apmu_reg) };
+        }
+
+        // Step 2: Enable shared AXI bus clock (via SDH0 register).
+        // SAFETY: caller contract.
+        let apmu_axi_reg = unsafe { (*sc).apmu_axi_reg };
+        if !apmu_axi_reg.is_null() {
+            // SAFETY: `apmu_axi_reg` non-null, live per caller contract.
+            let mut axi = unsafe { ptr::read_volatile(apmu_axi_reg) };
+            if axi & SDH_APMU_AXI_CLK_EN == 0 {
+                axi |= SDH_APMU_AXI_CLK_EN;
+                // SAFETY: see above.
+                unsafe { ptr::write_volatile(apmu_axi_reg, axi) };
+                fence(Ordering::SeqCst);
+            }
+        }
+
+        // Step 3: Enable per-instance AXI + IO clock gates.
         // SAFETY: `apmu_reg` live.
         val = unsafe { ptr::read_volatile(apmu_reg) };
-    }
-
-    // Step 2: Enable shared AXI bus clock (via SDH0 register).
-    // SAFETY: caller contract.
-    let apmu_axi_reg = unsafe { (*sc).apmu_axi_reg };
-    if !apmu_axi_reg.is_null() {
-        // SAFETY: `apmu_axi_reg` non-null, live per caller contract.
-        let mut axi = unsafe { ptr::read_volatile(apmu_axi_reg) };
-        if axi & SDH_APMU_AXI_CLK_EN == 0 {
-            axi |= SDH_APMU_AXI_CLK_EN;
-            // SAFETY: see above.
-            unsafe { ptr::write_volatile(apmu_axi_reg, axi) };
-            fence(Ordering::SeqCst);
+        if val & SDH_APMU_AXI_CLK_EN == 0 {
+            val |= SDH_APMU_AXI_CLK_EN;
         }
-    }
-
-    // Step 3: Enable per-instance AXI + IO clock gates.
-    // SAFETY: `apmu_reg` live.
-    val = unsafe { ptr::read_volatile(apmu_reg) };
-    if val & SDH_APMU_AXI_CLK_EN == 0 {
-        val |= SDH_APMU_AXI_CLK_EN;
-    }
-    if val & SDH_APMU_IO_CLK_EN == 0 {
-        val |= SDH_APMU_IO_CLK_EN;
-    }
-    // SAFETY: `apmu_reg` live.
-    unsafe { ptr::write_volatile(apmu_reg, val) };
-    fence(Ordering::SeqCst);
-
-    // Step 4: Deassert shared AXI bus reset (via SDH0 register).
-    if !apmu_axi_reg.is_null() {
-        // SAFETY: `apmu_axi_reg` non-null, live.
-        let mut axi = unsafe { ptr::read_volatile(apmu_axi_reg) };
-        if axi & SDH_APMU_AXI_RST == 0 {
-            axi |= SDH_APMU_AXI_RST;
-            // SAFETY: see above.
-            unsafe { ptr::write_volatile(apmu_axi_reg, axi) };
-            fence(Ordering::SeqCst);
+        if val & SDH_APMU_IO_CLK_EN == 0 {
+            val |= SDH_APMU_IO_CLK_EN;
         }
+        // SAFETY: `apmu_reg` live.
+        unsafe { ptr::write_volatile(apmu_reg, val) };
+        fence(Ordering::SeqCst);
+
+        // Step 4: Deassert shared AXI bus reset (via SDH0 register).
+        if !apmu_axi_reg.is_null() {
+            // SAFETY: `apmu_axi_reg` non-null, live.
+            let mut axi = unsafe { ptr::read_volatile(apmu_axi_reg) };
+            if axi & SDH_APMU_AXI_RST == 0 {
+                axi |= SDH_APMU_AXI_RST;
+                // SAFETY: see above.
+                unsafe { ptr::write_volatile(apmu_axi_reg, axi) };
+                fence(Ordering::SeqCst);
+            }
+        }
+
+        // Step 5: Deassert per-instance AXI + function resets.
+        // SAFETY: `apmu_reg` live.
+        val = unsafe { ptr::read_volatile(apmu_reg) };
+        if val & SDH_APMU_AXI_RST == 0 {
+            val |= SDH_APMU_AXI_RST;
+        }
+        if val & SDH_APMU_RST == 0 {
+            val |= SDH_APMU_RST;
+        }
+        // SAFETY: `apmu_reg` live.
+        unsafe { ptr::write_volatile(apmu_reg, val) };
+        fence(Ordering::SeqCst);
+
+        sleep_ms(1); // let clocks and reset stabilize
+
+        // SAFETY: caller contract; `apmu_reg`/`apmu_axi_reg` live (or null,
+        // handled by the `0` fallback matching the C ternary).
+        let (reg_val, axi_val) = unsafe {
+            (
+                ptr::read_volatile(apmu_reg),
+                if apmu_axi_reg.is_null() { 0 } else { ptr::read_volatile(apmu_axi_reg) },
+            )
+        };
+        crate::kprintln!(
+            "x1_sdhci{}: APMU enabled (reg=0x{:x}, axi=0x{:x})",
+            unsafe { (*sc).index },
+            ((reg_val as i32) as i64) as u64,
+            ((axi_val as i32) as i64) as u64,
+        );
     }
 
-    // Step 5: Deassert per-instance AXI + function resets.
-    // SAFETY: `apmu_reg` live.
-    val = unsafe { ptr::read_volatile(apmu_reg) };
-    if val & SDH_APMU_AXI_RST == 0 {
-        val |= SDH_APMU_AXI_RST;
-    }
-    if val & SDH_APMU_RST == 0 {
-        val |= SDH_APMU_RST;
-    }
-    // SAFETY: `apmu_reg` live.
-    unsafe { ptr::write_volatile(apmu_reg, val) };
-    fence(Ordering::SeqCst);
+    // ===========================================================================
+    // SDHCI controller reset & init.
+    // ===========================================================================
 
-    sleep_ms(1); // let clocks and reset stabilize
-
-    // SAFETY: caller contract; `apmu_reg`/`apmu_axi_reg` live (or null,
-    // handled by the `0` fallback matching the C ternary).
-    let (reg_val, axi_val) = unsafe {
-        (
-            ptr::read_volatile(apmu_reg),
-            if apmu_axi_reg.is_null() { 0 } else { ptr::read_volatile(apmu_axi_reg) },
-        )
-    };
-    crate::kprintln!(
-        "x1_sdhci{}: APMU enabled (reg=0x{:x}, axi=0x{:x})",
-        unsafe { (*sc).index },
-        ((reg_val as i32) as i64) as u64,
-        ((axi_val as i32) as i64) as u64,
-    );
-}
-
-// ===========================================================================
-// SDHCI controller reset & init.
-// ===========================================================================
-
-/// Wait for a register bit to be set or cleared.
-///
-/// # Safety
-/// `sc` must be live; `reg` a valid 4-byte-aligned register offset
-/// (this helper always uses `sdhci_readl`).
-unsafe fn sdhci_wait_bit(sc: *mut SdhciSoftc, reg: u32, mask: u32, set: bool, timeout_ms: c_int) -> c_int {
-    let deadline = machine::read_time() + machine::tick_s() * timeout_ms as u64 / 1000;
-    while machine::read_time() < deadline {
-        // SAFETY: caller contract.
-        let val = unsafe { sdhci_readl(sc, reg) };
-        if set {
-            if val & mask != 0 {
+    /// Wait for a register bit to be set or cleared.
+    ///
+    /// # Safety
+    /// `sc` must be live; `reg` a valid 4-byte-aligned register offset
+    /// (this helper always uses `SdhciSoftc::readl`).
+    unsafe fn wait_bit(sc: *mut SdhciSoftc, reg: u32, mask: u32, set: bool, timeout_ms: c_int) -> c_int {
+        let deadline = machine::read_time() + machine::tick_s() * timeout_ms as u64 / 1000;
+        while machine::read_time() < deadline {
+            // SAFETY: caller contract.
+            let val = unsafe { SdhciSoftc::readl(sc, reg) };
+            if set {
+                if val & mask != 0 {
+                    return 0;
+                }
+            } else if val & mask == 0 {
                 return 0;
             }
-        } else if val & mask == 0 {
-            return 0;
+            Scheduler::yield_now();
         }
-        Scheduler::yield_now();
+        -1
     }
-    -1
-}
 
-/// Software reset. `mask` is one of `SDHCI_RESET_{ALL,CMD,DATA}`.
-///
-/// `SDHCI_SOFTWARE_RESET` is an 8-bit register at offset `0x2F` (not
-/// 4-byte aligned), so this uses [`sdhci_readb`] -- not [`sdhci_wait_bit`]
-/// (`readl`-only) -- to avoid a load access fault on RISC-V MMIO.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_reset(sc: *mut SdhciSoftc, mask: u8) -> c_int {
-    // SAFETY: caller contract.
-    unsafe { sdhci_writeb(sc, SDHCI_SOFTWARE_RESET, mask) };
-
-    let deadline = machine::read_time() + machine::tick_s() * 100 / 1000;
-    while machine::read_time() < deadline {
+    /// Software reset. `mask` is one of `SDHCI_RESET_{ALL,CMD,DATA}`.
+    ///
+    /// `SDHCI_SOFTWARE_RESET` is an 8-bit register at offset `0x2F` (not
+    /// 4-byte aligned), so this uses [`SdhciSoftc::readb`] -- not [`SdhciSoftc::wait_bit`]
+    /// (`readl`-only) -- to avoid a load access fault on RISC-V MMIO.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn reset(sc: *mut SdhciSoftc, mask: u8) -> c_int {
         // SAFETY: caller contract.
-        if unsafe { sdhci_readb(sc, SDHCI_SOFTWARE_RESET) } & mask == 0 {
-            return 0;
-        }
-        Scheduler::yield_now();
-    }
-    crate::kprintln!(
-        "x1_sdhci{}: reset timeout (mask=0x{:x})",
-        unsafe { (*sc).index },
-        ((mask as c_int) as i32 as i64) as u64,
-    );
-    -1
-}
+        unsafe { SdhciSoftc::writeb(sc, SDHCI_SOFTWARE_RESET, mask) };
 
-/// Set SD clock to a target frequency. Uses the 10-bit divided clock
-/// mode from SDHCI spec v3.0.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_set_clock(sc: *mut SdhciSoftc, target_hz: u32) {
-    // Stop clock.
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_CLOCK_CONTROL, 0) };
-
-    if target_hz == 0 {
-        return;
-    }
-
-    // Read base clock from capabilities.
-    // SAFETY: caller contract.
-    let caps = unsafe { sdhci_readl(sc, SDHCI_CAPABILITIES) };
-    let mut base_clk_mhz = (caps >> SDHCI_CAP_BASE_CLK_SHIFT) & SDHCI_CAP_BASE_CLK_MASK;
-    if base_clk_mhz == 0 {
-        base_clk_mhz = 200; // fallback, typical for X1
-    }
-
-    let base_clk_hz = base_clk_mhz * 1_000_000;
-
-    // Calculate divisor: find smallest divisor that gives <= target_hz.
-    let div: u32 = if base_clk_hz <= target_hz {
-        0 // no division needed
-    } else {
-        // Smallest divisor `d` in `1..2046` giving `<= target_hz`; if none
-        // qualifies the C loop falls out at `d == 2046` (pure CPU
-        // arithmetic search, no MMIO).
-        (1..2046).find(|&d| base_clk_hz / (2 * d) <= target_hz).unwrap_or(2046)
-    };
-
-    // Set divisor and enable internal clock.
-    let mut clk: u16 =
-        (((div & SDHCI_DIV_MASK) as u16) << SDHCI_DIVIDER_SHIFT) | ((((div >> 8) & 0x3) as u16) << SDHCI_DIVIDER_HI_SHIFT) | SDHCI_CLOCK_INT_EN;
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk) };
-
-    // Wait for internal clock stable.
-    // SAFETY: caller contract.
-    if unsafe { sdhci_wait_bit(sc, SDHCI_CLOCK_CONTROL, SDHCI_CLOCK_INT_STABLE as u32, true, SDHCI_CLK_TIMEOUT_MS) } < 0 {
-        crate::kprintln!("x1_sdhci{}: internal clock not stable", unsafe { (*sc).index });
-        return;
-    }
-
-    // Enable clock to card.
-    clk |= SDHCI_CLOCK_CARD_EN;
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk) };
-
-    Scheduler::yield_now(); // brief settling time after clock enable
-}
-
-/// Set bus power to 3.3V.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_set_power(sc: *mut SdhciSoftc) {
-    // SAFETY: caller contract.
-    unsafe { sdhci_writeb(sc, SDHCI_POWER_CONTROL, SDHCI_POWER_330 | SDHCI_POWER_ON) };
-    sleep_ms(10);
-}
-
-/// Apply vendor-specific (KY X1) quirks after reset. All instances start
-/// in internal-clock (bypass PHY) mode for the 400 kHz identification
-/// clock -- the PHY PLL cannot lock at such a low frequency, so
-/// `PHY_FUNC_EN` must NOT be enabled during init. For eMMC, additionally
-/// sets `MMC_CARD_MODE`.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_x1_post_reset(sc: *mut SdhciSoftc) {
-    // SAFETY: caller contract.
-    let mut reg = unsafe { sdhci_readl(sc, SDHC_TX_CFG_REG) };
-    reg |= TX_INT_CLK_SEL;
-    // SAFETY: caller contract.
-    unsafe { sdhci_writel(sc, SDHC_TX_CFG_REG, reg) };
-
-    // SAFETY: caller contract.
-    if unsafe { (*sc).index } >= 2 {
-        // eMMC: set MMC card mode.
-        // SAFETY: caller contract.
-        let mut reg = unsafe { sdhci_readl(sc, SDHC_MMC_CTRL_REG) };
-        reg |= MMC_CARD_MODE;
-        // SAFETY: caller contract.
-        unsafe { sdhci_writel(sc, SDHC_MMC_CTRL_REG, reg) };
-    }
-}
-
-/// Full controller initialisation: reset, power, clock, vendor quirks.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_hw_init(sc: *mut SdhciSoftc) -> c_int {
-    // Full reset.
-    // SAFETY: caller contract.
-    if unsafe { sdhci_reset(sc, SDHCI_RESET_ALL) } < 0 {
-        return -1;
-    }
-
-    // Apply X1 vendor quirks.
-    // SAFETY: caller contract.
-    unsafe { sdhci_x1_post_reset(sc) };
-
-    // Set power to 3.3V.
-    // SAFETY: caller contract.
-    unsafe { sdhci_set_power(sc) };
-
-    // Set initial clock to 400 kHz (identification mode).
-    // SAFETY: caller contract.
-    unsafe { sdhci_set_clock(sc, 400_000) };
-
-    // Set timeout.
-    // SAFETY: caller contract.
-    unsafe { sdhci_writeb(sc, SDHCI_TIMEOUT_CONTROL, SDHCI_TIMEOUT_DEFAULT) };
-
-    // Enable all normal + error interrupt status (for polling).
-    // SAFETY: caller contract.
-    unsafe {
-        sdhci_writew(sc, SDHCI_INT_ENABLE, SDHCI_INT_ALL_MASK);
-        sdhci_writew(sc, SDHCI_ERR_INT_ENABLE, SDHCI_ERR_ALL);
-
-        // Disable interrupt signals (we use polling, not IRQ).
-        sdhci_writew(sc, SDHCI_SIGNAL_ENABLE, 0);
-        sdhci_writew(sc, SDHCI_ERR_SIGNAL_ENABLE, 0);
-    }
-
-    // Check SDMA capability and configure host control.
-    // SAFETY: caller contract.
-    let caps = unsafe { sdhci_readl(sc, SDHCI_CAPABILITIES) };
-    if caps & SDHCI_CAP_SDMA != 0 {
-        // SAFETY: caller contract.
-        unsafe { (*sc).use_dma = 1 };
-        // Select SDMA mode in Host Control register (bits [4:3] = 00).
-        // SAFETY: caller contract.
-        let mut ctrl = unsafe { sdhci_readb(sc, SDHCI_HOST_CONTROL) };
-        ctrl &= !SDHCI_CTRL_DMA_MASK;
-        ctrl |= SDHCI_CTRL_SDMA;
-        // SAFETY: caller contract.
-        unsafe {
-            sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
-        }
-        crate::kprintln!("x1_sdhci{}: SDMA enabled", unsafe { (*sc).index });
-    } else {
-        // SAFETY: caller contract.
-        unsafe {
-            (*sc).use_dma = 0;
-        }
-        crate::kprintln!("x1_sdhci{}: no SDMA capability, using PIO", unsafe { (*sc).index });
-    }
-
-    0
-}
-
-// ===========================================================================
-// Command engine.
-// ===========================================================================
-
-/// Send a command and wait for completion (polled), with an explicit
-/// timeout. Returns `0` on success, a negative errno on error.
-///
-/// # Safety
-/// `sc` must be live; `resp`, if non-null, must point to at least 4
-/// writable `u32`s.
-unsafe fn sdhci_send_cmd_to(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: u16, resp: *mut u32, timeout_ms: c_int) -> c_int {
-    let mut mask = SDHCI_CMD_INHIBIT;
-    if flags & SDHCI_CMD_DATA != 0 {
-        mask |= SDHCI_DATA_INHIBIT;
-    }
-
-    // Wait for command line to be free.
-    // SAFETY: caller contract.
-    if unsafe { sdhci_wait_bit(sc, SDHCI_PRESENT_STATE, mask, false, timeout_ms) } < 0 {
-        crate::kprintln!("x1_sdhci{}: CMD{} inhibit timeout", unsafe { (*sc).index }, cmd_idx);
-        return neg(crate::bindings::ETIMEDOUT);
-    }
-
-    // SAFETY: caller contract for the whole block below.
-    unsafe {
-        // Clear pending interrupts.
-        sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_ALL_MASK);
-        sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
-
-        // Write argument.
-        sdhci_writel(sc, SDHCI_ARGUMENT, arg);
-
-        // Write command register (triggers command issue).
-        let cmd_reg = sdhci_make_cmd(cmd_idx, flags);
-        sdhci_writew(sc, SDHCI_COMMAND, cmd_reg);
-    }
-
-    // Wait for command complete.
-    // SAFETY: caller contract.
-    if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_RESPONSE as u32, true, timeout_ms) } < 0 {
-        // SAFETY: caller contract.
-        let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
-        if cmd_idx != MMC_GO_IDLE_STATE && cmd_idx != SD_SEND_IF_COND && cmd_idx != MMC_SEND_OP_COND {
-            crate::kprintln!(
-                "x1_sdhci{}: CMD{} timeout (err=0x{:x})",
-                unsafe { (*sc).index },
-                cmd_idx,
-                ((err as c_int) as i32 as i64) as u64,
-            );
-        }
-        // SAFETY: caller contract.
-        unsafe { sdhci_reset(sc, SDHCI_RESET_CMD) };
-        return neg(crate::bindings::ETIMEDOUT);
-    }
-
-    // Check for errors.
-    // SAFETY: caller contract.
-    let int_status = unsafe { sdhci_readw(sc, SDHCI_INT_STATUS) };
-    if int_status & SDHCI_INT_ERROR != 0 {
-        // SAFETY: caller contract.
-        let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
-        crate::kprintln!(
-            "x1_sdhci{}: CMD{} error (int=0x{:x}, err=0x{:x})",
-            unsafe { (*sc).index },
-            cmd_idx,
-            ((int_status as c_int) as i32 as i64) as u64,
-            ((err as c_int) as i32 as i64) as u64,
-        );
-        // SAFETY: caller contract.
-        unsafe {
-            sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
-            sdhci_reset(sc, SDHCI_RESET_CMD);
-        }
-        return neg(crate::bindings::EIO);
-    }
-
-    // Clear command complete.
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_RESPONSE) };
-
-    // Read response.
-    if !resp.is_null() {
-        // SAFETY: caller contract; `resp` valid for 4 `u32`s per caller
-        // contract when `flags & 0x03 == SDHCI_CMD_RESP_136`, else 1.
-        unsafe {
-            if flags & 0x03 == SDHCI_CMD_RESP_136 {
-                // R2: 128-bit response across four registers.
-                *resp.add(0) = sdhci_readl(sc, SDHCI_RESPONSE + 0);
-                *resp.add(1) = sdhci_readl(sc, SDHCI_RESPONSE + 4);
-                *resp.add(2) = sdhci_readl(sc, SDHCI_RESPONSE + 8);
-                *resp.add(3) = sdhci_readl(sc, SDHCI_RESPONSE + 12);
-            } else {
-                *resp.add(0) = sdhci_readl(sc, SDHCI_RESPONSE);
+        let deadline = machine::read_time() + machine::tick_s() * 100 / 1000;
+        while machine::read_time() < deadline {
+            // SAFETY: caller contract.
+            if unsafe { SdhciSoftc::readb(sc, SDHCI_SOFTWARE_RESET) } & mask == 0 {
+                return 0;
             }
+            Scheduler::yield_now();
+        }
+        crate::kprintln!(
+            "x1_sdhci{}: reset timeout (mask=0x{:x})",
+            unsafe { (*sc).index },
+            ((mask as c_int) as i32 as i64) as u64,
+        );
+        -1
+    }
+
+    /// Set SD clock to a target frequency. Uses the 10-bit divided clock
+    /// mode from SDHCI spec v3.0.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn set_clock(sc: *mut SdhciSoftc, target_hz: u32) {
+        // Stop clock.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_CLOCK_CONTROL, 0) };
+
+        if target_hz == 0 {
+            return;
+        }
+
+        // Read base clock from capabilities.
+        // SAFETY: caller contract.
+        let caps = unsafe { SdhciSoftc::readl(sc, SDHCI_CAPABILITIES) };
+        let mut base_clk_mhz = (caps >> SDHCI_CAP_BASE_CLK_SHIFT) & SDHCI_CAP_BASE_CLK_MASK;
+        if base_clk_mhz == 0 {
+            base_clk_mhz = 200; // fallback, typical for X1
+        }
+
+        let base_clk_hz = base_clk_mhz * 1_000_000;
+
+        // Calculate divisor: find smallest divisor that gives <= target_hz.
+        let div: u32 = if base_clk_hz <= target_hz {
+            0 // no division needed
+        } else {
+            // Smallest divisor `d` in `1..2046` giving `<= target_hz`; if none
+            // qualifies the C loop falls out at `d == 2046` (pure CPU
+            // arithmetic search, no MMIO).
+            (1..2046).find(|&d| base_clk_hz / (2 * d) <= target_hz).unwrap_or(2046)
+        };
+
+        // Set divisor and enable internal clock.
+        let mut clk: u16 =
+            (((div & SDHCI_DIV_MASK) as u16) << SDHCI_DIVIDER_SHIFT) | ((((div >> 8) & 0x3) as u16) << SDHCI_DIVIDER_HI_SHIFT) | SDHCI_CLOCK_INT_EN;
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_CLOCK_CONTROL, clk) };
+
+        // Wait for internal clock stable.
+        // SAFETY: caller contract.
+        if unsafe { SdhciSoftc::wait_bit(sc, SDHCI_CLOCK_CONTROL, SDHCI_CLOCK_INT_STABLE as u32, true, SDHCI_CLK_TIMEOUT_MS) } < 0 {
+            crate::kprintln!("x1_sdhci{}: internal clock not stable", unsafe { (*sc).index });
+            return;
+        }
+
+        // Enable clock to card.
+        clk |= SDHCI_CLOCK_CARD_EN;
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_CLOCK_CONTROL, clk) };
+
+        Scheduler::yield_now(); // brief settling time after clock enable
+    }
+
+    /// Set bus power to 3.3V.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn set_power(sc: *mut SdhciSoftc) {
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writeb(sc, SDHCI_POWER_CONTROL, SDHCI_POWER_330 | SDHCI_POWER_ON) };
+        sleep_ms(10);
+    }
+
+    /// Apply vendor-specific (KY X1) quirks after reset. All instances start
+    /// in internal-clock (bypass PHY) mode for the 400 kHz identification
+    /// clock -- the PHY PLL cannot lock at such a low frequency, so
+    /// `PHY_FUNC_EN` must NOT be enabled during init. For eMMC, additionally
+    /// sets `MMC_CARD_MODE`.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn x1_post_reset(sc: *mut SdhciSoftc) {
+        // SAFETY: caller contract.
+        let mut reg = unsafe { SdhciSoftc::readl(sc, SDHC_TX_CFG_REG) };
+        reg |= TX_INT_CLK_SEL;
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writel(sc, SDHC_TX_CFG_REG, reg) };
+
+        // SAFETY: caller contract.
+        if unsafe { (*sc).index } >= 2 {
+            // eMMC: set MMC card mode.
+            // SAFETY: caller contract.
+            let mut reg = unsafe { SdhciSoftc::readl(sc, SDHC_MMC_CTRL_REG) };
+            reg |= MMC_CARD_MODE;
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::writel(sc, SDHC_MMC_CTRL_REG, reg) };
         }
     }
 
-    0
-}
-
-/// Send a command with the default timeout (`SDHCI_TIMEOUT_MS`).
-///
-/// # Safety
-/// Same as [`sdhci_send_cmd_to`].
-unsafe fn sdhci_send_cmd(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: u16, resp: *mut u32) -> c_int {
-    // SAFETY: caller contract.
-    unsafe { sdhci_send_cmd_to(sc, cmd_idx, arg, flags, resp, SDHCI_TIMEOUT_MS) }
-}
-
-/// Send an application-specific command (ACMD): CMD55 (APP_CMD) first,
-/// then the actual command.
-///
-/// # Safety
-/// Same as [`sdhci_send_cmd_to`].
-unsafe fn sdhci_send_acmd(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: u16, resp: *mut u32) -> c_int {
-    // SAFETY: caller contract.
-    let rca = unsafe { (*sc).rca };
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(
-            sc,
-            MMC_APP_CMD,
-            rca << 16,
-            SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
-            ptr::null_mut(),
-        )
-    };
-    if ret < 0 {
-        return ret;
-    }
-    // SAFETY: caller contract.
-    unsafe { sdhci_send_cmd(sc, cmd_idx, arg, flags, resp) }
-}
-
-// ===========================================================================
-// SDMA data transfer.
-// ===========================================================================
-
-/// Wait for an SDMA transfer to complete, handling boundary interrupts.
-/// SDMA transfers in fixed-size chunks (512 KB boundary); when the
-/// controller reaches a boundary it pauses and sets `SDHCI_INT_DMA_END`
-/// -- we re-program `SDHCI_DMA_ADDRESS` with the next boundary-aligned
-/// address to resume, until `SDHCI_INT_DATA_END` signals completion.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool) -> c_int {
-    let mut dma_addr = dma_addr_in;
-    let deadline = machine::read_time() + machine::tick_s() * SDHCI_TIMEOUT_MS as u64 / 1000;
-
-    while machine::read_time() < deadline {
+    /// Full controller initialisation: reset, power, clock, vendor quirks.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn hw_init(sc: *mut SdhciSoftc) -> c_int {
+        // Full reset.
         // SAFETY: caller contract.
-        let int_st = unsafe { sdhci_readw(sc, SDHCI_INT_STATUS) };
+        if unsafe { SdhciSoftc::reset(sc, SDHCI_RESET_ALL) } < 0 {
+            return -1;
+        }
+
+        // Apply X1 vendor quirks.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::x1_post_reset(sc) };
+
+        // Set power to 3.3V.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::set_power(sc) };
+
+        // Set initial clock to 400 kHz (identification mode).
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::set_clock(sc, 400_000) };
+
+        // Set timeout.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writeb(sc, SDHCI_TIMEOUT_CONTROL, SDHCI_TIMEOUT_DEFAULT) };
+
+        // Enable all normal + error interrupt status (for polling).
+        // SAFETY: caller contract.
+        unsafe {
+            SdhciSoftc::writew(sc, SDHCI_INT_ENABLE, SDHCI_INT_ALL_MASK);
+            SdhciSoftc::writew(sc, SDHCI_ERR_INT_ENABLE, SDHCI_ERR_ALL);
+
+            // Disable interrupt signals (we use polling, not IRQ).
+            SdhciSoftc::writew(sc, SDHCI_SIGNAL_ENABLE, 0);
+            SdhciSoftc::writew(sc, SDHCI_ERR_SIGNAL_ENABLE, 0);
+        }
+
+        // Check SDMA capability and configure host control.
+        // SAFETY: caller contract.
+        let caps = unsafe { SdhciSoftc::readl(sc, SDHCI_CAPABILITIES) };
+        if caps & SDHCI_CAP_SDMA != 0 {
+            // SAFETY: caller contract.
+            unsafe { (*sc).use_dma = 1 };
+            // Select SDMA mode in Host Control register (bits [4:3] = 00).
+            // SAFETY: caller contract.
+            let mut ctrl = unsafe { SdhciSoftc::readb(sc, SDHCI_HOST_CONTROL) };
+            ctrl &= !SDHCI_CTRL_DMA_MASK;
+            ctrl |= SDHCI_CTRL_SDMA;
+            // SAFETY: caller contract.
+            unsafe {
+                SdhciSoftc::writeb(sc, SDHCI_HOST_CONTROL, ctrl);
+            }
+            crate::kprintln!("x1_sdhci{}: SDMA enabled", unsafe { (*sc).index });
+        } else {
+            // SAFETY: caller contract.
+            unsafe {
+                (*sc).use_dma = 0;
+            }
+            crate::kprintln!("x1_sdhci{}: no SDMA capability, using PIO", unsafe { (*sc).index });
+        }
+
+        0
+    }
+
+    // ===========================================================================
+    // Command engine.
+    // ===========================================================================
+
+    /// Send a command and wait for completion (polled), with an explicit
+    /// timeout. Returns `0` on success, a negative errno on error.
+    ///
+    /// # Safety
+    /// `sc` must be live; `resp`, if non-null, must point to at least 4
+    /// writable `u32`s.
+    unsafe fn send_cmd_to(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: u16, resp: *mut u32, timeout_ms: c_int) -> c_int {
+        let mut mask = SDHCI_CMD_INHIBIT;
+        if flags & SDHCI_CMD_DATA != 0 {
+            mask |= SDHCI_DATA_INHIBIT;
+        }
+
+        // Wait for command line to be free.
+        // SAFETY: caller contract.
+        if unsafe { SdhciSoftc::wait_bit(sc, SDHCI_PRESENT_STATE, mask, false, timeout_ms) } < 0 {
+            crate::kprintln!("x1_sdhci{}: CMD{} inhibit timeout", unsafe { (*sc).index }, cmd_idx);
+            return neg(crate::bindings::ETIMEDOUT);
+        }
+
+        // SAFETY: caller contract for the whole block below.
+        unsafe {
+            // Clear pending interrupts.
+            SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_ALL_MASK);
+            SdhciSoftc::writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+
+            // Write argument.
+            SdhciSoftc::writel(sc, SDHCI_ARGUMENT, arg);
+
+            // Write command register (triggers command issue).
+            let cmd_reg = sdhci_make_cmd(cmd_idx, flags);
+            SdhciSoftc::writew(sc, SDHCI_COMMAND, cmd_reg);
+        }
+
+        // Wait for command complete.
+        // SAFETY: caller contract.
+        if unsafe { SdhciSoftc::wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_RESPONSE as u32, true, timeout_ms) } < 0 {
+            // SAFETY: caller contract.
+            let err = unsafe { SdhciSoftc::readw(sc, SDHCI_ERR_INT_STATUS) };
+            if cmd_idx != MMC_GO_IDLE_STATE && cmd_idx != SD_SEND_IF_COND && cmd_idx != MMC_SEND_OP_COND {
+                crate::kprintln!(
+                    "x1_sdhci{}: CMD{} timeout (err=0x{:x})",
+                    unsafe { (*sc).index },
+                    cmd_idx,
+                    ((err as c_int) as i32 as i64) as u64,
+                );
+            }
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::reset(sc, SDHCI_RESET_CMD) };
+            return neg(crate::bindings::ETIMEDOUT);
+        }
 
         // Check for errors.
-        if int_st & SDHCI_INT_ERROR != 0 {
+        // SAFETY: caller contract.
+        let int_status = unsafe { SdhciSoftc::readw(sc, SDHCI_INT_STATUS) };
+        if int_status & SDHCI_INT_ERROR != 0 {
             // SAFETY: caller contract.
-            let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
+            let err = unsafe { SdhciSoftc::readw(sc, SDHCI_ERR_INT_STATUS) };
             crate::kprintln!(
-                "x1_sdhci{}: DMA {} error (int=0x{:x}, err=0x{:x})",
+                "x1_sdhci{}: CMD{} error (int=0x{:x}, err=0x{:x})",
                 unsafe { (*sc).index },
-                if is_write { "write" } else { "read" },
-                ((int_st as c_int) as i32 as i64) as u64,
+                cmd_idx,
+                ((int_status as c_int) as i32 as i64) as u64,
                 ((err as c_int) as i32 as i64) as u64,
             );
             // SAFETY: caller contract.
             unsafe {
-                sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
-                sdhci_reset(sc, SDHCI_RESET_DATA);
+                SdhciSoftc::writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+                SdhciSoftc::reset(sc, SDHCI_RESET_CMD);
             }
             return neg(crate::bindings::EIO);
         }
 
-        // Transfer complete -- all data moved.
-        if int_st & SDHCI_INT_DATA_END != 0 {
-            // SAFETY: caller contract.
-            unsafe { sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END) };
-            return 0;
+        // Clear command complete.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_RESPONSE) };
+
+        // Read response.
+        if !resp.is_null() {
+            // SAFETY: caller contract; `resp` valid for 4 `u32`s per caller
+            // contract when `flags & 0x03 == SDHCI_CMD_RESP_136`, else 1.
+            unsafe {
+                if flags & 0x03 == SDHCI_CMD_RESP_136 {
+                    // R2: 128-bit response across four registers.
+                    *resp.add(0) = SdhciSoftc::readl(sc, SDHCI_RESPONSE + 0);
+                    *resp.add(1) = SdhciSoftc::readl(sc, SDHCI_RESPONSE + 4);
+                    *resp.add(2) = SdhciSoftc::readl(sc, SDHCI_RESPONSE + 8);
+                    *resp.add(3) = SdhciSoftc::readl(sc, SDHCI_RESPONSE + 12);
+                } else {
+                    *resp.add(0) = SdhciSoftc::readl(sc, SDHCI_RESPONSE);
+                }
+            }
         }
 
-        // SDMA boundary reached -- reprogram address and continue.
-        if int_st & SDHCI_INT_DMA_END != 0 {
-            // SAFETY: caller contract.
-            unsafe { sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DMA_END) };
-            // Advance to next boundary.
-            dma_addr &= !(SDHCI_SDMA_BOUNDARY as u64 - 1);
-            dma_addr += SDHCI_SDMA_BOUNDARY as u64;
-            // SAFETY: caller contract.
-            unsafe { sdhci_writel(sc, SDHCI_DMA_ADDRESS, dma_addr as u32) };
-        }
-
-        Scheduler::yield_now();
+        0
     }
 
-    crate::kprintln!(
-        "x1_sdhci{}: DMA {} timeout",
-        unsafe { (*sc).index },
-        if is_write { "write" } else { "read" },
-    );
-    // SAFETY: caller contract.
-    unsafe {
-        sdhci_reset(sc, SDHCI_RESET_DATA);
-    }
-    neg(crate::bindings::ETIMEDOUT)
-}
-
-// ===========================================================================
-// PIO data transfer.
-// ===========================================================================
-
-/// Read a single 512-byte block from the card using PIO.
-///
-/// # Safety
-/// `sc` must be live; `buf` must point to `SDHCI_BLOCK_SIZE_VAL` (512)
-/// writable bytes, 4-byte aligned.
-unsafe fn sdhci_pio_read_block(sc: *mut SdhciSoftc, buf: *mut c_void) -> c_int {
-    let p = buf as *mut u32;
-
-    // Wait for data available.
-    // SAFETY: caller contract.
-    if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
-        crate::kprintln!("x1_sdhci{}: PIO read data timeout", unsafe { (*sc).index });
-        return neg(crate::bindings::ETIMEDOUT);
-    }
-
-    // Clear the data available interrupt.
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL) };
-
-    // Read 512 / 4 = 128 words from data buffer port.
-    for i in 0..(SDHCI_BLOCK_SIZE_VAL / 4) as usize {
-        // SAFETY: caller contract; `p` valid for 128 `u32`s.
-        unsafe { *p.add(i) = sdhci_readl(sc, SDHCI_BUFFER) };
-    }
-
-    0
-}
-
-/// Write a single 512-byte block to the card using PIO.
-///
-/// # Safety
-/// `sc` must be live; `buf` must point to `SDHCI_BLOCK_SIZE_VAL` (512)
-/// readable bytes, 4-byte aligned.
-unsafe fn sdhci_pio_write_block(sc: *mut SdhciSoftc, buf: *const c_void) -> c_int {
-    let p = buf as *const u32;
-
-    // Wait for space available.
-    // SAFETY: caller contract.
-    if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_SPACE_AVAIL as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
-        crate::kprintln!("x1_sdhci{}: PIO write space timeout", unsafe { (*sc).index });
-        return neg(crate::bindings::ETIMEDOUT);
-    }
-
-    // Clear the space available interrupt.
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_SPACE_AVAIL) };
-
-    // Write 128 words to data buffer port.
-    for i in 0..(SDHCI_BLOCK_SIZE_VAL / 4) as usize {
-        // SAFETY: caller contract; `p` valid for 128 `u32`s.
-        unsafe { sdhci_writel(sc, SDHCI_BUFFER, *p.add(i)) };
-    }
-
-    0
-}
-
-/// Wait for transfer complete after all blocks transferred.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_wait_xfer_done(sc: *mut SdhciSoftc) -> c_int {
-    // SAFETY: caller contract.
-    if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
-        crate::kprintln!("x1_sdhci{}: transfer complete timeout", unsafe { (*sc).index });
-        return neg(crate::bindings::ETIMEDOUT);
-    }
-
-    // Check for errors.
-    // SAFETY: caller contract.
-    let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
-    if err != 0 {
-        crate::kprintln!(
-            "x1_sdhci{}: transfer error 0x{:x}",
-            unsafe { (*sc).index },
-            ((err as c_int) as i32 as i64) as u64,
-        );
+    /// Send a command with the default timeout (`SDHCI_TIMEOUT_MS`).
+    ///
+    /// # Safety
+    /// Same as [`SdhciSoftc::send_cmd_to`].
+    unsafe fn send_cmd(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: u16, resp: *mut u32) -> c_int {
         // SAFETY: caller contract.
-        unsafe {
-            sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
-            sdhci_reset(sc, SDHCI_RESET_DATA);
-        }
-        return neg(crate::bindings::EIO);
+        unsafe { SdhciSoftc::send_cmd_to(sc, cmd_idx, arg, flags, resp, SDHCI_TIMEOUT_MS) }
     }
 
-    // Clear transfer complete.
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END) };
-    0
-}
-
-// ===========================================================================
-// Block read/write (single + multi-block).
-// ===========================================================================
-
-/// Read `nblocks` 512-byte blocks starting at `lba` into `buf`. Uses
-/// SDMA if available, otherwise falls back to PIO. `buf` must point to a
-/// physically-contiguous buffer (physical address usable as both VA and
-/// PA due to identity mapping).
-///
-/// # Safety
-/// `sc` must be live; `buf` must point to `nblocks * 512` writable bytes.
-unsafe fn sdhci_read_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *mut c_void) -> c_int {
-    let total = nblocks * SDHCI_BLOCK_SIZE_VAL;
-
-    // SDHC/SDXC/eMMC uses block addressing; SD uses byte addressing.
-    // SAFETY: caller contract.
-    let card_addr = if unsafe { (*sc).card_type } == CARD_TYPE_SD { lba * 512 } else { lba };
-
-    // Set block size and count.
-    // SAFETY: caller contract.
-    unsafe {
-        sdhci_writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
-        sdhci_writew(sc, SDHCI_BLOCK_COUNT, nblocks as u16);
-    }
-
-    // Transfer mode: read direction, block count enable.
-    let mut mode = SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN;
-    if nblocks > 1 {
-        mode |= SDHCI_TRNS_MULTI | SDHCI_TRNS_AUTO_CMD12;
-    }
-
-    // SAFETY: caller contract.
-    let use_dma = unsafe { (*sc).use_dma } != 0;
-    if use_dma {
-        // Invalidate cache before device writes to memory.
+    /// Send an application-specific command (ACMD): CMD55 (APP_CMD) first,
+    /// then the actual command.
+    ///
+    /// # Safety
+    /// Same as [`SdhciSoftc::send_cmd_to`].
+    unsafe fn send_acmd(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: u16, resp: *mut u32) -> c_int {
         // SAFETY: caller contract.
-        unsafe { dma_cache_inval(buf, total as usize) };
-
-        // Program SDMA system address.
+        let rca = unsafe { (*sc).rca };
         // SAFETY: caller contract.
-        unsafe { sdhci_writel(sc, SDHCI_DMA_ADDRESS, buf as u64 as u32) };
-        mode |= SDHCI_TRNS_DMA;
-    }
-
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_TRANSFER_MODE, mode) };
-
-    // Command.
-    let cmd_idx = if nblocks == 1 { MMC_READ_SINGLE_BLOCK } else { MMC_READ_MULTIPLE_BLOCK };
-    let cmd_flags = SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA;
-
-    // SAFETY: caller contract.
-    let ret = unsafe { sdhci_send_cmd(sc, cmd_idx, card_addr, cmd_flags, ptr::null_mut()) };
-    if ret < 0 {
-        return ret;
-    }
-
-    if use_dma {
-        // SAFETY: caller contract.
-        let ret = unsafe { sdhci_sdma_wait(sc, buf as u64, false) };
+        let ret = unsafe {
+            SdhciSoftc::send_cmd(
+                sc,
+                MMC_APP_CMD,
+                rca << 16,
+                SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
+                ptr::null_mut(),
+            )
+        };
         if ret < 0 {
             return ret;
         }
-        // Invalidate again to ensure CPU sees DMA-written data.
         // SAFETY: caller contract.
-        unsafe { dma_cache_inval(buf, total as usize) };
+        unsafe { SdhciSoftc::send_cmd(sc, cmd_idx, arg, flags, resp) }
+    }
+
+    // ===========================================================================
+    // SDMA data transfer.
+    // ===========================================================================
+
+    /// Wait for an SDMA transfer to complete, handling boundary interrupts.
+    /// SDMA transfers in fixed-size chunks (512 KB boundary); when the
+    /// controller reaches a boundary it pauses and sets `SDHCI_INT_DMA_END`
+    /// -- we re-program `SDHCI_DMA_ADDRESS` with the next boundary-aligned
+    /// address to resume, until `SDHCI_INT_DATA_END` signals completion.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool) -> c_int {
+        let mut dma_addr = dma_addr_in;
+        let deadline = machine::read_time() + machine::tick_s() * SDHCI_TIMEOUT_MS as u64 / 1000;
+
+        while machine::read_time() < deadline {
+            // SAFETY: caller contract.
+            let int_st = unsafe { SdhciSoftc::readw(sc, SDHCI_INT_STATUS) };
+
+            // Check for errors.
+            if int_st & SDHCI_INT_ERROR != 0 {
+                // SAFETY: caller contract.
+                let err = unsafe { SdhciSoftc::readw(sc, SDHCI_ERR_INT_STATUS) };
+                crate::kprintln!(
+                    "x1_sdhci{}: DMA {} error (int=0x{:x}, err=0x{:x})",
+                    unsafe { (*sc).index },
+                    if is_write { "write" } else { "read" },
+                    ((int_st as c_int) as i32 as i64) as u64,
+                    ((err as c_int) as i32 as i64) as u64,
+                );
+                // SAFETY: caller contract.
+                unsafe {
+                    SdhciSoftc::writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+                    SdhciSoftc::reset(sc, SDHCI_RESET_DATA);
+                }
+                return neg(crate::bindings::EIO);
+            }
+
+            // Transfer complete -- all data moved.
+            if int_st & SDHCI_INT_DATA_END != 0 {
+                // SAFETY: caller contract.
+                unsafe { SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END) };
+                return 0;
+            }
+
+            // SDMA boundary reached -- reprogram address and continue.
+            if int_st & SDHCI_INT_DMA_END != 0 {
+                // SAFETY: caller contract.
+                unsafe { SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DMA_END) };
+                // Advance to next boundary.
+                dma_addr &= !(SDHCI_SDMA_BOUNDARY as u64 - 1);
+                dma_addr += SDHCI_SDMA_BOUNDARY as u64;
+                // SAFETY: caller contract.
+                unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, dma_addr as u32) };
+            }
+
+            Scheduler::yield_now();
+        }
+
+        crate::kprintln!(
+            "x1_sdhci{}: DMA {} timeout",
+            unsafe { (*sc).index },
+            if is_write { "write" } else { "read" },
+        );
+        // SAFETY: caller contract.
+        unsafe {
+            SdhciSoftc::reset(sc, SDHCI_RESET_DATA);
+        }
+        neg(crate::bindings::ETIMEDOUT)
+    }
+
+    // ===========================================================================
+    // PIO data transfer.
+    // ===========================================================================
+
+    /// Read a single 512-byte block from the card using PIO.
+    ///
+    /// # Safety
+    /// `sc` must be live; `buf` must point to `SDHCI_BLOCK_SIZE_VAL` (512)
+    /// writable bytes, 4-byte aligned.
+    unsafe fn pio_read_block(sc: *mut SdhciSoftc, buf: *mut c_void) -> c_int {
+        let p = buf as *mut u32;
+
+        // Wait for data available.
+        // SAFETY: caller contract.
+        if unsafe { SdhciSoftc::wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
+            crate::kprintln!("x1_sdhci{}: PIO read data timeout", unsafe { (*sc).index });
+            return neg(crate::bindings::ETIMEDOUT);
+        }
+
+        // Clear the data available interrupt.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL) };
+
+        // Read 512 / 4 = 128 words from data buffer port.
+        for i in 0..(SDHCI_BLOCK_SIZE_VAL / 4) as usize {
+            // SAFETY: caller contract; `p` valid for 128 `u32`s.
+            unsafe { *p.add(i) = SdhciSoftc::readl(sc, SDHCI_BUFFER) };
+        }
+
         0
-    } else {
-        crate::kprintln!("sdhci_read_blocks: fallback to bio.");
-        // Read blocks via PIO.
-        for i in 0..nblocks {
-            // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
-            let ret = unsafe { sdhci_pio_read_block(sc, (buf as *mut u8).add((i * SDHCI_BLOCK_SIZE_VAL) as usize) as *mut c_void) };
+    }
+
+    /// Write a single 512-byte block to the card using PIO.
+    ///
+    /// # Safety
+    /// `sc` must be live; `buf` must point to `SDHCI_BLOCK_SIZE_VAL` (512)
+    /// readable bytes, 4-byte aligned.
+    unsafe fn pio_write_block(sc: *mut SdhciSoftc, buf: *const c_void) -> c_int {
+        let p = buf as *const u32;
+
+        // Wait for space available.
+        // SAFETY: caller contract.
+        if unsafe { SdhciSoftc::wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_SPACE_AVAIL as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
+            crate::kprintln!("x1_sdhci{}: PIO write space timeout", unsafe { (*sc).index });
+            return neg(crate::bindings::ETIMEDOUT);
+        }
+
+        // Clear the space available interrupt.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_SPACE_AVAIL) };
+
+        // Write 128 words to data buffer port.
+        for i in 0..(SDHCI_BLOCK_SIZE_VAL / 4) as usize {
+            // SAFETY: caller contract; `p` valid for 128 `u32`s.
+            unsafe { SdhciSoftc::writel(sc, SDHCI_BUFFER, *p.add(i)) };
+        }
+
+        0
+    }
+
+    /// Wait for transfer complete after all blocks transferred.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn wait_xfer_done(sc: *mut SdhciSoftc) -> c_int {
+        // SAFETY: caller contract.
+        if unsafe { SdhciSoftc::wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
+            crate::kprintln!("x1_sdhci{}: transfer complete timeout", unsafe { (*sc).index });
+            return neg(crate::bindings::ETIMEDOUT);
+        }
+
+        // Check for errors.
+        // SAFETY: caller contract.
+        let err = unsafe { SdhciSoftc::readw(sc, SDHCI_ERR_INT_STATUS) };
+        if err != 0 {
+            crate::kprintln!(
+                "x1_sdhci{}: transfer error 0x{:x}",
+                unsafe { (*sc).index },
+                ((err as c_int) as i32 as i64) as u64,
+            );
+            // SAFETY: caller contract.
+            unsafe {
+                SdhciSoftc::writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+                SdhciSoftc::reset(sc, SDHCI_RESET_DATA);
+            }
+            return neg(crate::bindings::EIO);
+        }
+
+        // Clear transfer complete.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END) };
+        0
+    }
+
+    // ===========================================================================
+    // Block read/write (single + multi-block).
+    // ===========================================================================
+
+    /// Read `nblocks` 512-byte blocks starting at `lba` into `buf`. Uses
+    /// SDMA if available, otherwise falls back to PIO. `buf` must point to a
+    /// physically-contiguous buffer (physical address usable as both VA and
+    /// PA due to identity mapping).
+    ///
+    /// # Safety
+    /// `sc` must be live; `buf` must point to `nblocks * 512` writable bytes.
+    unsafe fn read_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *mut c_void) -> c_int {
+        let total = nblocks * SDHCI_BLOCK_SIZE_VAL;
+
+        // SDHC/SDXC/eMMC uses block addressing; SD uses byte addressing.
+        // SAFETY: caller contract.
+        let card_addr = if unsafe { (*sc).card_type } == CARD_TYPE_SD { lba * 512 } else { lba };
+
+        // Set block size and count.
+        // SAFETY: caller contract.
+        unsafe {
+            SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
+            SdhciSoftc::writew(sc, SDHCI_BLOCK_COUNT, nblocks as u16);
+        }
+
+        // Transfer mode: read direction, block count enable.
+        let mut mode = SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN;
+        if nblocks > 1 {
+            mode |= SDHCI_TRNS_MULTI | SDHCI_TRNS_AUTO_CMD12;
+        }
+
+        // SAFETY: caller contract.
+        let use_dma = unsafe { (*sc).use_dma } != 0;
+        if use_dma {
+            // Invalidate cache before device writes to memory.
+            // SAFETY: caller contract.
+            unsafe { dma_cache_inval(buf, total as usize) };
+
+            // Program SDMA system address.
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, buf as u64 as u32) };
+            mode |= SDHCI_TRNS_DMA;
+        }
+
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_TRANSFER_MODE, mode) };
+
+        // Command.
+        let cmd_idx = if nblocks == 1 { MMC_READ_SINGLE_BLOCK } else { MMC_READ_MULTIPLE_BLOCK };
+        let cmd_flags = SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA;
+
+        // SAFETY: caller contract.
+        let ret = unsafe { SdhciSoftc::send_cmd(sc, cmd_idx, card_addr, cmd_flags, ptr::null_mut()) };
+        if ret < 0 {
+            return ret;
+        }
+
+        if use_dma {
+            // SAFETY: caller contract.
+            let ret = unsafe { SdhciSoftc::sdma_wait(sc, buf as u64, false) };
             if ret < 0 {
                 return ret;
             }
+            // Invalidate again to ensure CPU sees DMA-written data.
+            // SAFETY: caller contract.
+            unsafe { dma_cache_inval(buf, total as usize) };
+            0
+        } else {
+            crate::kprintln!("sdhci_read_blocks: fallback to bio.");
+            // Read blocks via PIO.
+            for i in 0..nblocks {
+                // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
+                let ret = unsafe { SdhciSoftc::pio_read_block(sc, (buf as *mut u8).add((i * SDHCI_BLOCK_SIZE_VAL) as usize) as *mut c_void) };
+                if ret < 0 {
+                    return ret;
+                }
+            }
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::wait_xfer_done(sc) }
+        }
+    }
+
+    /// Write `nblocks` 512-byte blocks starting at `lba` from `buf`. Uses
+    /// SDMA if available, otherwise falls back to PIO.
+    ///
+    /// # Safety
+    /// `sc` must be live; `buf` must point to `nblocks * 512` readable bytes.
+    unsafe fn write_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *const c_void) -> c_int {
+        let total = nblocks * SDHCI_BLOCK_SIZE_VAL;
+
+        // SAFETY: caller contract.
+        let card_addr = if unsafe { (*sc).card_type } == CARD_TYPE_SD { lba * 512 } else { lba };
+
+        // SAFETY: caller contract.
+        unsafe {
+            SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
+            SdhciSoftc::writew(sc, SDHCI_BLOCK_COUNT, nblocks as u16);
+        }
+
+        // Transfer mode: write direction, block count enable (no
+        // SDHCI_TRNS_READ = write).
+        let mut mode = SDHCI_TRNS_BLK_CNT_EN;
+        if nblocks > 1 {
+            mode |= SDHCI_TRNS_MULTI | SDHCI_TRNS_AUTO_CMD12;
+        }
+
+        // SAFETY: caller contract.
+        let use_dma = unsafe { (*sc).use_dma } != 0;
+        if use_dma {
+            // Clean cache so device reads CPU's latest data.
+            // SAFETY: caller contract.
+            unsafe { dma_cache_clean(buf as *mut c_void, total as usize) };
+
+            // Program SDMA system address.
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, buf as u64 as u32) };
+            mode |= SDHCI_TRNS_DMA;
+        }
+
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::writew(sc, SDHCI_TRANSFER_MODE, mode) };
+
+        let cmd_idx = if nblocks == 1 { MMC_WRITE_BLOCK } else { MMC_WRITE_MULTIPLE_BLOCK };
+        let cmd_flags = SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA;
+
+        // SAFETY: caller contract.
+        let ret = unsafe { SdhciSoftc::send_cmd(sc, cmd_idx, card_addr, cmd_flags, ptr::null_mut()) };
+        if ret < 0 {
+            return ret;
+        }
+
+        if use_dma {
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::sdma_wait(sc, buf as u64, true) }
+        } else {
+            crate::kprintln!("sdhci_write_blocks: fallback to bio.");
+            // Write blocks via PIO.
+            for i in 0..nblocks {
+                // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
+                let ret = unsafe {
+                    SdhciSoftc::pio_write_block(sc, (buf as *const u8).add((i * SDHCI_BLOCK_SIZE_VAL) as usize) as *const c_void)
+                };
+                if ret < 0 {
+                    return ret;
+                }
+            }
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::wait_xfer_done(sc) }
+        }
+    }
+
+    // ===========================================================================
+    // SD card enumeration.
+    // ===========================================================================
+
+    /// Check for card presence using the Present State register.
+    ///
+    /// # Safety
+    /// `sc` must be live.
+    unsafe fn card_present(sc: *mut SdhciSoftc) -> bool {
+        // SAFETY: caller contract.
+        let state = unsafe { SdhciSoftc::readl(sc, SDHCI_PRESENT_STATE) };
+        state & SDHCI_CARD_INSERTED != 0
+    }
+
+    /// Enumerate an SD card: CMD0 -> CMD8 -> ACMD41 -> CMD2 -> CMD3 -> CMD9
+    /// -> CMD7 -> CMD16. Returns `0` on success.
+    ///
+    /// # Safety
+    /// `sc` must point to a live, exclusively-owned `SdhciSoftc`.
+    unsafe fn enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
+        let mut resp = [0u32; 4];
+
+        // SAFETY: caller contract.
+        unsafe {
+            (*sc).rca = 0;
+            (*sc).card_type = CARD_TYPE_SD;
+        }
+
+        // CMD0: Go idle.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, ptr::null_mut()) };
+        sleep_ms(10);
+
+        // CMD8: Send IF Condition (voltage check for SD 2.0+).
+        // SAFETY: caller contract.
+        let ret = unsafe {
+            SdhciSoftc::send_cmd(sc, SD_SEND_IF_COND, 0x1AA, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
+        };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: CMD8 failed -- legacy SD v1.x card?", unsafe { (*sc).index });
+            // Might be SD v1.x -- try ACMD41 anyway.
+        } else if resp[0] & 0xFF != 0xAA {
+            crate::kprintln!(
+                "x1_sdhci{}: CMD8 bad echo: 0x{:x}",
+                unsafe { (*sc).index },
+                ((resp[0] as i32) as i64) as u64,
+            );
+        }
+
+        // ACMD41: SD_APP_OP_COND -- negotiate operating conditions. Requests
+        // 3.3V range and HCS (high capacity support).
+        let mut tries = 0;
+        loop {
+            // SAFETY: caller contract.
+            let ret = unsafe { SdhciSoftc::send_acmd(sc, SD_APP_OP_COND, MMC_OCR_HCS | MMC_OCR_3V3, SDHCI_CMD_RESP_48, resp.as_mut_ptr()) };
+            if ret < 0 {
+                crate::kprintln!("x1_sdhci{}: ACMD41 failed", unsafe { (*sc).index });
+                return ret;
+            }
+            tries += 1;
+            if tries > 100 {
+                crate::kprintln!("x1_sdhci{}: ACMD41 timeout -- card not ready", unsafe { (*sc).index });
+                return neg(crate::bindings::ETIMEDOUT);
+            }
+            sleep_ms(10);
+            if resp[0] & MMC_OCR_BUSY != 0 {
+                break;
+            }
+        }
+
+        // Check if card is SDHC/SDXC.
+        if resp[0] & MMC_OCR_HCS != 0 {
+            // SAFETY: caller contract.
+            unsafe { (*sc).card_type = CARD_TYPE_SDHC };
+        }
+
+        crate::kprintln!(
+            "x1_sdhci{}: card type: {}",
+            unsafe { (*sc).index },
+            if unsafe { (*sc).card_type } == CARD_TYPE_SDHC { "SDHC/SDXC" } else { "SD" },
+        );
+
+        // CMD2: ALL_SEND_CID -- get card identification.
+        // SAFETY: caller contract.
+        let ret = unsafe { SdhciSoftc::send_cmd(sc, MMC_ALL_SEND_CID, 0, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: CMD2 failed", unsafe { (*sc).index });
+            return ret;
+        }
+
+        // CMD3: SEND_RELATIVE_ADDR -- get RCA.
+        // SAFETY: caller contract.
+        let ret = unsafe {
+            SdhciSoftc::send_cmd(sc, MMC_SET_RELATIVE_ADDR, 0, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
+        };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: CMD3 failed", unsafe { (*sc).index });
+            return ret;
         }
         // SAFETY: caller contract.
-        unsafe { sdhci_wait_xfer_done(sc) }
-    }
-}
+        unsafe { (*sc).rca = (resp[0] >> 16) & 0xFFFF };
+        crate::kprintln!(
+            "x1_sdhci{}: RCA = 0x{:x}",
+            unsafe { (*sc).index },
+            ((unsafe { (*sc).rca } as i32) as i64) as u64,
+        );
 
-/// Write `nblocks` 512-byte blocks starting at `lba` from `buf`. Uses
-/// SDMA if available, otherwise falls back to PIO.
-///
-/// # Safety
-/// `sc` must be live; `buf` must point to `nblocks * 512` readable bytes.
-unsafe fn sdhci_write_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *const c_void) -> c_int {
-    let total = nblocks * SDHCI_BLOCK_SIZE_VAL;
-
-    // SAFETY: caller contract.
-    let card_addr = if unsafe { (*sc).card_type } == CARD_TYPE_SD { lba * 512 } else { lba };
-
-    // SAFETY: caller contract.
-    unsafe {
-        sdhci_writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
-        sdhci_writew(sc, SDHCI_BLOCK_COUNT, nblocks as u16);
-    }
-
-    // Transfer mode: write direction, block count enable (no
-    // SDHCI_TRNS_READ = write).
-    let mut mode = SDHCI_TRNS_BLK_CNT_EN;
-    if nblocks > 1 {
-        mode |= SDHCI_TRNS_MULTI | SDHCI_TRNS_AUTO_CMD12;
-    }
-
-    // SAFETY: caller contract.
-    let use_dma = unsafe { (*sc).use_dma } != 0;
-    if use_dma {
-        // Clean cache so device reads CPU's latest data.
+        // CMD9: SEND_CSD -- get card-specific data (read capacity etc.).
         // SAFETY: caller contract.
-        unsafe { dma_cache_clean(buf as *mut c_void, total as usize) };
-
-        // Program SDMA system address.
+        let rca = unsafe { (*sc).rca };
         // SAFETY: caller contract.
-        unsafe { sdhci_writel(sc, SDHCI_DMA_ADDRESS, buf as u64 as u32) };
-        mode |= SDHCI_TRNS_DMA;
-    }
+        let ret = unsafe { SdhciSoftc::send_cmd(sc, MMC_SEND_CSD, rca << 16, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: CMD9 failed", unsafe { (*sc).index });
+            return ret;
+        }
 
-    // SAFETY: caller contract.
-    unsafe { sdhci_writew(sc, SDHCI_TRANSFER_MODE, mode) };
-
-    let cmd_idx = if nblocks == 1 { MMC_WRITE_BLOCK } else { MMC_WRITE_MULTIPLE_BLOCK };
-    let cmd_flags = SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA;
-
-    // SAFETY: caller contract.
-    let ret = unsafe { sdhci_send_cmd(sc, cmd_idx, card_addr, cmd_flags, ptr::null_mut()) };
-    if ret < 0 {
-        return ret;
-    }
-
-    if use_dma {
+        // Parse CSD to get capacity.
+        //
+        // SDHCI R2 response mapping: the controller strips CRC7+end bit, so
+        // card CSD bit X maps to SDHCI response bit (X - 8).
+        //   resp[0] (offset 0x10) = CSD bits [39:8]
+        //   resp[1] (offset 0x14) = CSD bits [71:40]
+        //   resp[2] (offset 0x18) = CSD bits [103:72]
+        //   resp[3] (offset 0x1C) = CSD bits [127:104]
         // SAFETY: caller contract.
-        unsafe { sdhci_sdma_wait(sc, buf as u64, true) }
-    } else {
-        crate::kprintln!("sdhci_write_blocks: fallback to bio.");
-        // Write blocks via PIO.
-        for i in 0..nblocks {
-            // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
+        let capacity_blocks: u64 = if unsafe { (*sc).card_type } == CARD_TYPE_SDHC {
+            // CSD v2 (SDHC/SDXC): C_SIZE is CSD bits [69:48] (22 bits) ->
+            // SDHCI bits [61:40] -> resp[1] bits [29:8].
+            let c_size = (resp[1] >> 8) & 0x3FFFFF;
+            (c_size as u64 + 1) * 1024
+        } else {
+            // CSD v1: READ_BL_LEN = CSD[83:80] -> resp[2] bits [11:8];
+            //         C_SIZE      = CSD[73:62] -> resp[2][1:0]:resp[1][31:22];
+            //         C_SIZE_MULT = CSD[49:47] -> resp[1] bits [9:7].
+            let read_bl_len = (resp[2] >> 8) & 0xF;
+            let c_size = ((resp[2] & 0x3) << 10) | ((resp[1] >> 22) & 0x3FF);
+            let c_size_mult = (resp[1] >> 7) & 0x7;
+            let mult = 1u32 << (c_size_mult + 2);
+            let blocknr = (c_size + 1) * mult;
+            let block_len = 1u32 << read_bl_len;
+            (blocknr as u64) * (block_len as u64) / 512
+        };
+        // SAFETY: caller contract.
+        unsafe { (*sc).capacity_blocks = capacity_blocks };
+        crate::kprintln!(
+            "x1_sdhci{}: capacity = {} sectors ({} MB)",
+            unsafe { (*sc).index },
+            capacity_blocks,
+            capacity_blocks / 2048,
+        );
+
+        // CMD7: SELECT_CARD -- move card to transfer state.
+        // SAFETY: caller contract.
+        let ret = unsafe {
+            SdhciSoftc::send_cmd(
+                sc,
+                MMC_SELECT_CARD,
+                rca << 16,
+                SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
+                resp.as_mut_ptr(),
+            )
+        };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: CMD7 failed", unsafe { (*sc).index });
+            return ret;
+        }
+
+        // CMD16: SET_BLOCKLEN to 512 (for non-SDHC cards).
+        // SAFETY: caller contract.
+        if unsafe { (*sc).card_type } != CARD_TYPE_SDHC {
+            // SAFETY: caller contract.
             let ret = unsafe {
-                sdhci_pio_write_block(sc, (buf as *const u8).add((i * SDHCI_BLOCK_SIZE_VAL) as usize) as *const c_void)
+                SdhciSoftc::send_cmd(
+                    sc,
+                    MMC_SET_BLOCKLEN,
+                    SDHCI_BLOCK_SIZE_VAL,
+                    SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
+                    resp.as_mut_ptr(),
+                )
             };
             if ret < 0 {
+                crate::kprintln!("x1_sdhci{}: CMD16 failed", unsafe { (*sc).index });
                 return ret;
             }
         }
+
+        // Switch to 4-bit bus width.
         // SAFETY: caller contract.
-        unsafe { sdhci_wait_xfer_done(sc) }
-    }
-}
+        unsafe { (*sc).bus_width = 4 };
+        // SAFETY: caller contract.
+        let ret = unsafe {
+            SdhciSoftc::send_acmd(sc, SD_APP_SET_BUS_WIDTH, 2, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, ptr::null_mut())
+        };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: ACMD6 (set 4-bit) failed, using 1-bit", unsafe { (*sc).index });
+            // SAFETY: caller contract.
+            unsafe {
+                (*sc).bus_width = 1;
+            }
+        } else {
+            // Tell the host controller to use 4-bit mode.
+            // SAFETY: caller contract.
+            let mut ctrl = unsafe { SdhciSoftc::readb(sc, SDHCI_HOST_CONTROL) };
+            ctrl |= SDHCI_CTRL_4BITBUS;
+            // SAFETY: caller contract.
+            unsafe { SdhciSoftc::writeb(sc, SDHCI_HOST_CONTROL, ctrl) };
+        }
 
-// ===========================================================================
-// SD card enumeration.
-// ===========================================================================
+        // Increase clock to 25 MHz (SD default speed).
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::set_clock(sc, 25_000_000) };
 
-/// Check for card presence using the Present State register.
-///
-/// # Safety
-/// `sc` must be live.
-unsafe fn sdhci_card_present(sc: *mut SdhciSoftc) -> bool {
-    // SAFETY: caller contract.
-    let state = unsafe { sdhci_readl(sc, SDHCI_PRESENT_STATE) };
-    state & SDHCI_CARD_INSERTED != 0
-}
-
-/// Enumerate an SD card: CMD0 -> CMD8 -> ACMD41 -> CMD2 -> CMD3 -> CMD9
-/// -> CMD7 -> CMD16. Returns `0` on success.
-///
-/// # Safety
-/// `sc` must point to a live, exclusively-owned `SdhciSoftc`.
-unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
-    let mut resp = [0u32; 4];
-
-    // SAFETY: caller contract.
-    unsafe {
-        (*sc).rca = 0;
-        (*sc).card_type = CARD_TYPE_SD;
+        0
     }
 
-    // CMD0: Go idle.
-    // SAFETY: caller contract.
-    unsafe { sdhci_send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, ptr::null_mut()) };
-    sleep_ms(10);
+    /// Enumerate an eMMC device: CMD0 -> CMD1 -> CMD2 -> CMD3 -> CMD9 ->
+    /// CMD7 -> CMD16. Returns `0` on success.
+    ///
+    /// # Safety
+    /// Same as [`SdhciSoftc::enumerate_sd`].
+    unsafe fn enumerate_emmc(sc: *mut SdhciSoftc) -> c_int {
+        let mut resp = [0u32; 4];
 
-    // CMD8: Send IF Condition (voltage check for SD 2.0+).
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(sc, SD_SEND_IF_COND, 0x1AA, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
-    };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: CMD8 failed -- legacy SD v1.x card?", unsafe { (*sc).index });
-        // Might be SD v1.x -- try ACMD41 anyway.
-    } else if resp[0] & 0xFF != 0xAA {
+        // SAFETY: caller contract.
+        unsafe {
+            (*sc).rca = MMC_RCA_DEFAULT;
+            (*sc).card_type = CARD_TYPE_EMMC;
+        }
+
+        // CMD0: Go idle.
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, ptr::null_mut()) };
+        sleep_ms(10);
+
+        // CMD1: SEND_OP_COND -- negotiate operating conditions. Requests
+        // sector addressing mode + 3.3V. eMMC may take time to power up, so
+        // retry on timeout, with a short 100ms command timeout to avoid long
+        // waits.
+        let mut tries = 0;
+        let mut cmd1_ok = false;
+        loop {
+            // SAFETY: caller contract.
+            let ret = unsafe { SdhciSoftc::send_cmd_to(sc, MMC_SEND_OP_COND, 0x40FF_8080, SDHCI_CMD_RESP_48, resp.as_mut_ptr(), 100) };
+            if ret == 0 {
+                cmd1_ok = true;
+                if resp[0] & MMC_OCR_BUSY != 0 {
+                    break; // card is ready
+                }
+            }
+            // Retry on timeout -- eMMC may still be powering up.
+            tries += 1;
+            if tries > 30 {
+                crate::kprintln!(
+                    "x1_sdhci{}: CMD1 no response after {} attempts -- eMMC not present or not powered",
+                    unsafe { (*sc).index },
+                    tries,
+                );
+                return neg(crate::bindings::ETIMEDOUT);
+            }
+            sleep_ms(10);
+        }
+
+        if !cmd1_ok {
+            crate::kprintln!("x1_sdhci{}: CMD1 never succeeded", unsafe { (*sc).index });
+            return neg(crate::bindings::EIO);
+        }
+
         crate::kprintln!(
-            "x1_sdhci{}: CMD8 bad echo: 0x{:x}",
+            "x1_sdhci{}: eMMC OCR = 0x{:x}",
             unsafe { (*sc).index },
             ((resp[0] as i32) as i64) as u64,
         );
-    }
 
-    // ACMD41: SD_APP_OP_COND -- negotiate operating conditions. Requests
-    // 3.3V range and HCS (high capacity support).
-    let mut tries = 0;
-    loop {
+        // CMD2: ALL_SEND_CID.
         // SAFETY: caller contract.
-        let ret = unsafe { sdhci_send_acmd(sc, SD_APP_OP_COND, MMC_OCR_HCS | MMC_OCR_3V3, SDHCI_CMD_RESP_48, resp.as_mut_ptr()) };
+        let ret = unsafe { SdhciSoftc::send_cmd(sc, MMC_ALL_SEND_CID, 0, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
         if ret < 0 {
-            crate::kprintln!("x1_sdhci{}: ACMD41 failed", unsafe { (*sc).index });
             return ret;
         }
-        tries += 1;
-        if tries > 100 {
-            crate::kprintln!("x1_sdhci{}: ACMD41 timeout -- card not ready", unsafe { (*sc).index });
-            return neg(crate::bindings::ETIMEDOUT);
-        }
-        sleep_ms(10);
-        if resp[0] & MMC_OCR_BUSY != 0 {
-            break;
-        }
-    }
 
-    // Check if card is SDHC/SDXC.
-    if resp[0] & MMC_OCR_HCS != 0 {
+        // CMD3: SET_RELATIVE_ADDR -- eMMC: we assign the RCA.
         // SAFETY: caller contract.
-        unsafe { (*sc).card_type = CARD_TYPE_SDHC };
-    }
+        let rca = unsafe { (*sc).rca };
+        // SAFETY: caller contract.
+        let ret = unsafe {
+            SdhciSoftc::send_cmd(sc, MMC_SET_RELATIVE_ADDR, rca << 16, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
+        };
+        if ret < 0 {
+            return ret;
+        }
 
-    crate::kprintln!(
-        "x1_sdhci{}: card type: {}",
-        unsafe { (*sc).index },
-        if unsafe { (*sc).card_type } == CARD_TYPE_SDHC { "SDHC/SDXC" } else { "SD" },
-    );
+        // CMD9: SEND_CSD -- get card specific data.
+        // SAFETY: caller contract.
+        let ret = unsafe { SdhciSoftc::send_cmd(sc, MMC_SEND_CSD, rca << 16, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
+        if ret < 0 {
+            return ret;
+        }
 
-    // CMD2: ALL_SEND_CID -- get card identification.
-    // SAFETY: caller contract.
-    let ret = unsafe { sdhci_send_cmd(sc, MMC_ALL_SEND_CID, 0, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: CMD2 failed", unsafe { (*sc).index });
-        return ret;
-    }
-
-    // CMD3: SEND_RELATIVE_ADDR -- get RCA.
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(sc, MMC_SET_RELATIVE_ADDR, 0, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
-    };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: CMD3 failed", unsafe { (*sc).index });
-        return ret;
-    }
-    // SAFETY: caller contract.
-    unsafe { (*sc).rca = (resp[0] >> 16) & 0xFFFF };
-    crate::kprintln!(
-        "x1_sdhci{}: RCA = 0x{:x}",
-        unsafe { (*sc).index },
-        ((unsafe { (*sc).rca } as i32) as i64) as u64,
-    );
-
-    // CMD9: SEND_CSD -- get card-specific data (read capacity etc.).
-    // SAFETY: caller contract.
-    let rca = unsafe { (*sc).rca };
-    // SAFETY: caller contract.
-    let ret = unsafe { sdhci_send_cmd(sc, MMC_SEND_CSD, rca << 16, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: CMD9 failed", unsafe { (*sc).index });
-        return ret;
-    }
-
-    // Parse CSD to get capacity.
-    //
-    // SDHCI R2 response mapping: the controller strips CRC7+end bit, so
-    // card CSD bit X maps to SDHCI response bit (X - 8).
-    //   resp[0] (offset 0x10) = CSD bits [39:8]
-    //   resp[1] (offset 0x14) = CSD bits [71:40]
-    //   resp[2] (offset 0x18) = CSD bits [103:72]
-    //   resp[3] (offset 0x1C) = CSD bits [127:104]
-    // SAFETY: caller contract.
-    let capacity_blocks: u64 = if unsafe { (*sc).card_type } == CARD_TYPE_SDHC {
-        // CSD v2 (SDHC/SDXC): C_SIZE is CSD bits [69:48] (22 bits) ->
-        // SDHCI bits [61:40] -> resp[1] bits [29:8].
-        let c_size = (resp[1] >> 8) & 0x3FFFFF;
-        (c_size as u64 + 1) * 1024
-    } else {
-        // CSD v1: READ_BL_LEN = CSD[83:80] -> resp[2] bits [11:8];
-        //         C_SIZE      = CSD[73:62] -> resp[2][1:0]:resp[1][31:22];
-        //         C_SIZE_MULT = CSD[49:47] -> resp[1] bits [9:7].
+        // eMMC CSD: fields use the same SDHCI R2 bit mapping as SD. For
+        // >2GB eMMC, C_SIZE=0xFFF -> read SEC_COUNT from EXT_CSD.
+        // READ_BL_LEN = CSD[83:80] -> resp[2] bits [11:8].
         let read_bl_len = (resp[2] >> 8) & 0xF;
+        // C_SIZE = CSD[73:62] -> resp[2][1:0]:resp[1][31:22].
         let c_size = ((resp[2] & 0x3) << 10) | ((resp[1] >> 22) & 0x3FF);
+        // C_SIZE_MULT = CSD[49:47] -> resp[1] bits [9:7].
         let c_size_mult = (resp[1] >> 7) & 0x7;
-        let mult = 1u32 << (c_size_mult + 2);
-        let blocknr = (c_size + 1) * mult;
-        let block_len = 1u32 << read_bl_len;
-        (blocknr as u64) * (block_len as u64) / 512
-    };
-    // SAFETY: caller contract.
-    unsafe { (*sc).capacity_blocks = capacity_blocks };
-    crate::kprintln!(
-        "x1_sdhci{}: capacity = {} sectors ({} MB)",
-        unsafe { (*sc).index },
-        capacity_blocks,
-        capacity_blocks / 2048,
-    );
+        let mut capacity_blocks: u64 = if c_size == 0xFFF {
+            // Capacity is in EXT_CSD -- we'll read it after SELECT.
+            0
+        } else {
+            let mult = 1u32 << (c_size_mult + 2);
+            let blocknr = (c_size + 1) * mult;
+            let block_len = 1u32 << read_bl_len;
+            (blocknr as u64) * (block_len as u64) / 512
+        };
+        // SAFETY: caller contract.
+        unsafe { (*sc).capacity_blocks = capacity_blocks };
 
-    // CMD7: SELECT_CARD -- move card to transfer state.
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(
-            sc,
-            MMC_SELECT_CARD,
-            rca << 16,
-            SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
-            resp.as_mut_ptr(),
-        )
-    };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: CMD7 failed", unsafe { (*sc).index });
-        return ret;
-    }
-
-    // CMD16: SET_BLOCKLEN to 512 (for non-SDHC cards).
-    // SAFETY: caller contract.
-    if unsafe { (*sc).card_type } != CARD_TYPE_SDHC {
+        // CMD7: SELECT_CARD.
         // SAFETY: caller contract.
         let ret = unsafe {
-            sdhci_send_cmd(
-                sc,
-                MMC_SET_BLOCKLEN,
-                SDHCI_BLOCK_SIZE_VAL,
-                SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
-                resp.as_mut_ptr(),
-            )
+            SdhciSoftc::send_cmd(sc, MMC_SELECT_CARD, rca << 16, SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
         };
         if ret < 0 {
-            crate::kprintln!("x1_sdhci{}: CMD16 failed", unsafe { (*sc).index });
             return ret;
         }
-    }
 
-    // Switch to 4-bit bus width.
-    // SAFETY: caller contract.
-    unsafe { (*sc).bus_width = 4 };
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_acmd(sc, SD_APP_SET_BUS_WIDTH, 2, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, ptr::null_mut())
-    };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: ACMD6 (set 4-bit) failed, using 1-bit", unsafe { (*sc).index });
-        // SAFETY: caller contract.
-        unsafe {
-            (*sc).bus_width = 1;
-        }
-    } else {
-        // Tell the host controller to use 4-bit mode.
-        // SAFETY: caller contract.
-        let mut ctrl = unsafe { sdhci_readb(sc, SDHCI_HOST_CONTROL) };
-        ctrl |= SDHCI_CTRL_4BITBUS;
-        // SAFETY: caller contract.
-        unsafe { sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl) };
-    }
-
-    // Increase clock to 25 MHz (SD default speed).
-    // SAFETY: caller contract.
-    unsafe { sdhci_set_clock(sc, 25_000_000) };
-
-    0
-}
-
-/// Enumerate an eMMC device: CMD0 -> CMD1 -> CMD2 -> CMD3 -> CMD9 ->
-/// CMD7 -> CMD16. Returns `0` on success.
-///
-/// # Safety
-/// Same as [`sdhci_enumerate_sd`].
-unsafe fn sdhci_enumerate_emmc(sc: *mut SdhciSoftc) -> c_int {
-    let mut resp = [0u32; 4];
-
-    // SAFETY: caller contract.
-    unsafe {
-        (*sc).rca = MMC_RCA_DEFAULT;
-        (*sc).card_type = CARD_TYPE_EMMC;
-    }
-
-    // CMD0: Go idle.
-    // SAFETY: caller contract.
-    unsafe { sdhci_send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, ptr::null_mut()) };
-    sleep_ms(10);
-
-    // CMD1: SEND_OP_COND -- negotiate operating conditions. Requests
-    // sector addressing mode + 3.3V. eMMC may take time to power up, so
-    // retry on timeout, with a short 100ms command timeout to avoid long
-    // waits.
-    let mut tries = 0;
-    let mut cmd1_ok = false;
-    loop {
-        // SAFETY: caller contract.
-        let ret = unsafe { sdhci_send_cmd_to(sc, MMC_SEND_OP_COND, 0x40FF_8080, SDHCI_CMD_RESP_48, resp.as_mut_ptr(), 100) };
-        if ret == 0 {
-            cmd1_ok = true;
-            if resp[0] & MMC_OCR_BUSY != 0 {
-                break; // card is ready
-            }
-        }
-        // Retry on timeout -- eMMC may still be powering up.
-        tries += 1;
-        if tries > 30 {
-            crate::kprintln!(
-                "x1_sdhci{}: CMD1 no response after {} attempts -- eMMC not present or not powered",
-                unsafe { (*sc).index },
-                tries,
-            );
-            return neg(crate::bindings::ETIMEDOUT);
-        }
-        sleep_ms(10);
-    }
-
-    if !cmd1_ok {
-        crate::kprintln!("x1_sdhci{}: CMD1 never succeeded", unsafe { (*sc).index });
-        return neg(crate::bindings::EIO);
-    }
-
-    crate::kprintln!(
-        "x1_sdhci{}: eMMC OCR = 0x{:x}",
-        unsafe { (*sc).index },
-        ((resp[0] as i32) as i64) as u64,
-    );
-
-    // CMD2: ALL_SEND_CID.
-    // SAFETY: caller contract.
-    let ret = unsafe { sdhci_send_cmd(sc, MMC_ALL_SEND_CID, 0, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
-    if ret < 0 {
-        return ret;
-    }
-
-    // CMD3: SET_RELATIVE_ADDR -- eMMC: we assign the RCA.
-    // SAFETY: caller contract.
-    let rca = unsafe { (*sc).rca };
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(sc, MMC_SET_RELATIVE_ADDR, rca << 16, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
-    };
-    if ret < 0 {
-        return ret;
-    }
-
-    // CMD9: SEND_CSD -- get card specific data.
-    // SAFETY: caller contract.
-    let ret = unsafe { sdhci_send_cmd(sc, MMC_SEND_CSD, rca << 16, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
-    if ret < 0 {
-        return ret;
-    }
-
-    // eMMC CSD: fields use the same SDHCI R2 bit mapping as SD. For
-    // >2GB eMMC, C_SIZE=0xFFF -> read SEC_COUNT from EXT_CSD.
-    // READ_BL_LEN = CSD[83:80] -> resp[2] bits [11:8].
-    let read_bl_len = (resp[2] >> 8) & 0xF;
-    // C_SIZE = CSD[73:62] -> resp[2][1:0]:resp[1][31:22].
-    let c_size = ((resp[2] & 0x3) << 10) | ((resp[1] >> 22) & 0x3FF);
-    // C_SIZE_MULT = CSD[49:47] -> resp[1] bits [9:7].
-    let c_size_mult = (resp[1] >> 7) & 0x7;
-    let mut capacity_blocks: u64 = if c_size == 0xFFF {
-        // Capacity is in EXT_CSD -- we'll read it after SELECT.
-        0
-    } else {
-        let mult = 1u32 << (c_size_mult + 2);
-        let blocknr = (c_size + 1) * mult;
-        let block_len = 1u32 << read_bl_len;
-        (blocknr as u64) * (block_len as u64) / 512
-    };
-    // SAFETY: caller contract.
-    unsafe { (*sc).capacity_blocks = capacity_blocks };
-
-    // CMD7: SELECT_CARD.
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(sc, MMC_SELECT_CARD, rca << 16, SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
-    };
-    if ret < 0 {
-        return ret;
-    }
-
-    // CMD16: SET_BLOCKLEN to 512.
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(sc, MMC_SET_BLOCKLEN, SDHCI_BLOCK_SIZE_VAL, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
-    };
-    if ret < 0 {
-        return ret;
-    }
-
-    // Read EXT_CSD to get true capacity (CMD8 for eMMC).
-    if capacity_blocks == 0 {
-        let mut ext_csd = [0u8; 512];
-        // SAFETY: caller contract.
-        unsafe {
-            sdhci_writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
-            sdhci_writew(sc, SDHCI_BLOCK_COUNT, 1);
-            sdhci_writew(sc, SDHCI_TRANSFER_MODE, SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN);
-        }
-
+        // CMD16: SET_BLOCKLEN to 512.
         // SAFETY: caller contract.
         let ret = unsafe {
-            sdhci_send_cmd(
+            SdhciSoftc::send_cmd(sc, MMC_SET_BLOCKLEN, SDHCI_BLOCK_SIZE_VAL, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
+        };
+        if ret < 0 {
+            return ret;
+        }
+
+        // Read EXT_CSD to get true capacity (CMD8 for eMMC).
+        if capacity_blocks == 0 {
+            let mut ext_csd = [0u8; 512];
+            // SAFETY: caller contract.
+            unsafe {
+                SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
+                SdhciSoftc::writew(sc, SDHCI_BLOCK_COUNT, 1);
+                SdhciSoftc::writew(sc, SDHCI_TRANSFER_MODE, SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN);
+            }
+
+            // SAFETY: caller contract.
+            let ret = unsafe {
+                SdhciSoftc::send_cmd(
+                    sc,
+                    MMC_SEND_EXT_CSD,
+                    0,
+                    SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+                    resp.as_mut_ptr(),
+                )
+            };
+            if ret == 0 {
+                // SAFETY: caller contract; `ext_csd` a live 512-byte buffer.
+                let ret = unsafe { SdhciSoftc::pio_read_block(sc, ext_csd.as_mut_ptr() as *mut c_void) };
+                if ret == 0 {
+                    // SAFETY: caller contract.
+                    unsafe { SdhciSoftc::wait_xfer_done(sc) };
+                    // SEC_COUNT is at EXT_CSD bytes 212-215 (little-endian).
+                    capacity_blocks = ext_csd[212] as u64
+                        | ((ext_csd[213] as u64) << 8)
+                        | ((ext_csd[214] as u64) << 16)
+                        | ((ext_csd[215] as u64) << 24);
+                    // SAFETY: caller contract.
+                    unsafe { (*sc).capacity_blocks = capacity_blocks };
+                }
+            }
+        }
+
+        crate::kprintln!(
+            "x1_sdhci{}: eMMC capacity = {} sectors ({} MB)",
+            unsafe { (*sc).index },
+            capacity_blocks,
+            capacity_blocks / 2048,
+        );
+
+        // Switch to 8-bit bus width via CMD6 (SWITCH): Access=Write Byte
+        // (0x03), Index=183 (BUS_WIDTH), Value=2 (8-bit).
+        // SAFETY: caller contract.
+        let ret = unsafe {
+            SdhciSoftc::send_cmd(
                 sc,
-                MMC_SEND_EXT_CSD,
-                0,
-                SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+                SD_SWITCH_FUNC,
+                (3 << 24) | (183 << 16) | (2 << 8),
+                SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
                 resp.as_mut_ptr(),
             )
         };
         if ret == 0 {
-            // SAFETY: caller contract; `ext_csd` a live 512-byte buffer.
-            let ret = unsafe { sdhci_pio_read_block(sc, ext_csd.as_mut_ptr() as *mut c_void) };
-            if ret == 0 {
-                // SAFETY: caller contract.
-                unsafe { sdhci_wait_xfer_done(sc) };
-                // SEC_COUNT is at EXT_CSD bytes 212-215 (little-endian).
-                capacity_blocks = ext_csd[212] as u64
-                    | ((ext_csd[213] as u64) << 8)
-                    | ((ext_csd[214] as u64) << 16)
-                    | ((ext_csd[215] as u64) << 24);
-                // SAFETY: caller contract.
-                unsafe { (*sc).capacity_blocks = capacity_blocks };
+            // SAFETY: caller contract.
+            let mut ctrl = unsafe { SdhciSoftc::readb(sc, SDHCI_HOST_CONTROL) };
+            ctrl |= SDHCI_CTRL_8BITBUS;
+            // SAFETY: caller contract.
+            unsafe {
+                SdhciSoftc::writeb(sc, SDHCI_HOST_CONTROL, ctrl);
+                (*sc).bus_width = 8;
             }
+            sleep_ms(1);
+        } else {
+            // SAFETY: caller contract.
+            unsafe {
+                (*sc).bus_width = 1;
+            }
+            crate::kprintln!("x1_sdhci{}: 8-bit bus switch failed, using 1-bit", unsafe { (*sc).index });
         }
+
+        // Increase clock to 26 MHz (eMMC backward-compatible speed).
+        // SAFETY: caller contract.
+        unsafe { SdhciSoftc::set_clock(sc, 26_000_000) };
+
+        0
     }
-
-    crate::kprintln!(
-        "x1_sdhci{}: eMMC capacity = {} sectors ({} MB)",
-        unsafe { (*sc).index },
-        capacity_blocks,
-        capacity_blocks / 2048,
-    );
-
-    // Switch to 8-bit bus width via CMD6 (SWITCH): Access=Write Byte
-    // (0x03), Index=183 (BUS_WIDTH), Value=2 (8-bit).
-    // SAFETY: caller contract.
-    let ret = unsafe {
-        sdhci_send_cmd(
-            sc,
-            SD_SWITCH_FUNC,
-            (3 << 24) | (183 << 16) | (2 << 8),
-            SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
-            resp.as_mut_ptr(),
-        )
-    };
-    if ret == 0 {
-        // SAFETY: caller contract.
-        let mut ctrl = unsafe { sdhci_readb(sc, SDHCI_HOST_CONTROL) };
-        ctrl |= SDHCI_CTRL_8BITBUS;
-        // SAFETY: caller contract.
-        unsafe {
-            sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
-            (*sc).bus_width = 8;
-        }
-        sleep_ms(1);
-    } else {
-        // SAFETY: caller contract.
-        unsafe {
-            (*sc).bus_width = 1;
-        }
-        crate::kprintln!("x1_sdhci{}: 8-bit bus switch failed, using 1-bit", unsafe { (*sc).index });
-    }
-
-    // Increase clock to 26 MHz (eMMC backward-compatible speed).
-    // SAFETY: caller contract.
-    unsafe { sdhci_set_clock(sc, 26_000_000) };
-
-    0
 }
 
 // ===========================================================================
@@ -1825,7 +1829,7 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
 /// callbacks are trait methods now).
 struct SdhciBlkOps;
 
-/// The single shared instance `sdhci_init_one` installs.
+/// The single shared instance `SdhciSoftc::init_one` installs.
 static SDHCI_BLK_OPS: SdhciBlkOps = SdhciBlkOps;
 
 impl crate::dev::blkdev::BlkdevOps for SdhciBlkOps {
@@ -1836,7 +1840,7 @@ impl crate::dev::blkdev::BlkdevOps for SdhciBlkOps {
         Ok(())
     }
     unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> crate::kstd::KResult<()> {
-        match sdhci_submit_bio(blkdev, bio_ptr) {
+        match SdhciSoftc::submit_bio(blkdev, bio_ptr) {
             0 => Ok(()),
             // `Errno::Raw` carries the already-negative cross-module
             // `c_int` verbatim (`Raw(n).neg() == n`), so the dispatch
@@ -1846,77 +1850,79 @@ impl crate::dev::blkdev::BlkdevOps for SdhciBlkOps {
     }
 }
 
-/// `submit_bio` -- process a block I/O request. Iterates over bio
-/// segments and reads/writes blocks via SDMA/PIO.
-fn sdhci_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
-    // SAFETY: `blkdev` is `(*sc).bdev`'s address for the `sc` that
-    // registered it (`sdhci_init_one`'s `blkdev_register(&(*sc).bdev)`
-    // call, mirrored below) -- `bdev` is `SdhciSoftc`'s field, so this
-    // is the same "reverse the embedding" computation as the C
-    // `container_of` macro.
-    let sc = crate::mm::cffi::container_of::<SdhciSoftc, blkdev_t>(blkdev, core::mem::offset_of!(SdhciSoftc, bdev));
+impl SdhciSoftc {
+    /// `submit_bio` -- process a block I/O request. Iterates over bio
+    /// segments and reads/writes blocks via SDMA/PIO.
+    fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+        // SAFETY: `blkdev` is `(*sc).bdev`'s address for the `sc` that
+        // registered it (`SdhciSoftc::init_one`'s `blkdev_register(&(*sc).bdev)`
+        // call, mirrored below) -- `bdev` is `SdhciSoftc`'s field, so this
+        // is the same "reverse the embedding" computation as the C
+        // `container_of` macro.
+        let sc = crate::mm::cffi::container_of::<SdhciSoftc, blkdev_t>(blkdev, core::mem::offset_of!(SdhciSoftc, bdev));
 
-    let mut ret: c_int = 0;
+        let mut ret: c_int = 0;
 
-    // SAFETY: `(*sc).lock` a live, initialised `mutex_t`.
-    let _guard = KMutex::from_ptr(unsafe { &raw mut (*sc).lock }).lock();
-    // SAFETY: `bio_ptr` live (caller/blkdev_submit_bio contract).
-    unsafe { bio_start_io_acct(bio_ptr) };
+        // SAFETY: `(*sc).lock` a live, initialised `mutex_t`.
+        let _guard = KMutex::from_ptr(unsafe { &raw mut (*sc).lock }).lock();
+        // SAFETY: `bio_ptr` live (caller/blkdev_submit_bio contract).
+        unsafe { bio_start_io_acct(bio_ptr) };
 
-    let mut iter = BioIter { blkno: 0, size: 0, size_done: 0, bvec_idx: 0 };
-    // SAFETY: `bio_ptr` live.
-    unsafe { bio_iter_start(bio_ptr, &mut iter) };
-    let mut bvec: bio_vec = bio_vec { bv_page: ptr::null_mut(), len: 0, offset: 0 };
-    // SAFETY: `bio_ptr` live; `bvec` local and live.
-    while unsafe { bio_iter_copy_bvec(bio_ptr, &iter, &raw mut bvec) } {
-        let sector = iter.blkno;
-        let page = bvec.bv_page;
+        let mut iter = BioIter { blkno: 0, size: 0, size_done: 0, bvec_idx: 0 };
+        // SAFETY: `bio_ptr` live.
+        unsafe { bio_iter_start(bio_ptr, &mut iter) };
+        let mut bvec: bio_vec = bio_vec { bv_page: ptr::null_mut(), len: 0, offset: 0 };
+        // SAFETY: `bio_ptr` live; `bvec` local and live.
+        while unsafe { bio_iter_copy_bvec(bio_ptr, &iter, &raw mut bvec) } {
+            let sector = iter.blkno;
+            let page = bvec.bv_page;
 
-        if page.is_null() {
-            ret = neg(crate::bindings::EINVAL);
-            break;
+            if page.is_null() {
+                ret = neg(crate::bindings::EINVAL);
+                break;
+            }
+
+            let pa = __page_to_pa(page) as *mut c_void;
+            if pa.is_null() {
+                ret = neg(crate::bindings::EINVAL);
+                break;
+            }
+
+            let data = (pa as u64 + bvec.offset as u64) as *mut c_void;
+            let nblocks = bvec.len as u32 / SDHCI_BLOCK_SIZE_VAL;
+
+            if nblocks == 0 {
+                ret = neg(crate::bindings::EINVAL);
+                break;
+            }
+
+            // SAFETY: `bio_ptr` live.
+            ret = if unsafe { bio_dir_write(bio_ptr) } {
+                // SAFETY: `sc` live, exclusively accessed under `_guard`;
+                // `data` valid for `nblocks * 512` bytes per `bvec`'s
+                // contract (validated by `bio_validate` before submission).
+                unsafe { SdhciSoftc::write_blocks(sc, sector as u32, nblocks, data) }
+            } else {
+                // SAFETY: same as above.
+                unsafe { SdhciSoftc::read_blocks(sc, sector as u32, nblocks, data) }
+            };
+
+            if ret < 0 {
+                break;
+            }
+
+            iter.size_done += bvec.len;
         }
 
-        let pa = __page_to_pa(page) as *mut c_void;
-        if pa.is_null() {
-            ret = neg(crate::bindings::EINVAL);
-            break;
-        }
-
-        let data = (pa as u64 + bvec.offset as u64) as *mut c_void;
-        let nblocks = bvec.len as u32 / SDHCI_BLOCK_SIZE_VAL;
-
-        if nblocks == 0 {
-            ret = neg(crate::bindings::EINVAL);
-            break;
-        }
+        drop(_guard);
 
         // SAFETY: `bio_ptr` live.
-        ret = if unsafe { bio_dir_write(bio_ptr) } {
-            // SAFETY: `sc` live, exclusively accessed under `_guard`;
-            // `data` valid for `nblocks * 512` bytes per `bvec`'s
-            // contract (validated by `bio_validate` before submission).
-            unsafe { sdhci_write_blocks(sc, sector as u32, nblocks, data) }
-        } else {
-            // SAFETY: same as above.
-            unsafe { sdhci_read_blocks(sc, sector as u32, nblocks, data) }
-        };
-
-        if ret < 0 {
-            break;
+        unsafe {
+            (*bio_ptr).error = ret;
+            bio_complete(bio_ptr);
         }
-
-        iter.size_done += bvec.len;
+        ret
     }
-
-    drop(_guard);
-
-    // SAFETY: `bio_ptr` live.
-    unsafe {
-        (*bio_ptr).error = ret;
-        bio_complete(bio_ptr);
-    }
-    ret
 }
 
 // ===========================================================================
@@ -1926,140 +1932,142 @@ fn sdhci_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
 const EMMC_NAMES: [&core::ffi::CStr; MAX_SDH_INSTANCES] = [c"mmc0", c"mmc1", c"mmc2"];
 const SD_NAMES: [&core::ffi::CStr; MAX_SDH_INSTANCES] = [c"sd0", c"sd1", c"sd2"];
 
-/// Initialise a single SDHCI instance (`idx` indexes `platform.sdhci[]`,
-/// 0/1/2; `is_emmc` non-zero for the eMMC instance). Returns `0` on
-/// success.
-///
-/// # Safety
-/// `idx` must be `< MAX_SDH_INSTANCES`; must be called at most once per
-/// `idx` before any other function in this file observes `sdhci_sc(idx)`.
-unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
-    // SAFETY: caller contract.
-    let sc = unsafe { sdhci_sc(idx) };
+impl SdhciSoftc {
+    /// Initialise a single SDHCI instance (`idx` indexes `platform.sdhci[]`,
+    /// 0/1/2; `is_emmc` non-zero for the eMMC instance). Returns `0` on
+    /// success.
+    ///
+    /// # Safety
+    /// `idx` must be `< MAX_SDH_INSTANCES`; must be called at most once per
+    /// `idx` before any other function in this file observes `SdhciSoftc::sc(idx)`.
+    unsafe fn init_one(idx: usize, is_emmc: bool) -> c_int {
+        // SAFETY: caller contract.
+        let sc = unsafe { SdhciSoftc::sc(idx) };
 
-    // SAFETY: `sc` points at `size_of::<SdhciSoftc>()` bytes this call
-    // exclusively owns.
-    unsafe { memset(sc as *mut c_void, 0, core::mem::size_of::<SdhciSoftc>()) };
-    // SAFETY: `sc` zeroed above, exclusively owned.
-    unsafe {
-        RawMutex::init(&raw mut (*sc).lock, c"x1_sdhci".as_ptr() as *mut c_char);
-        (*sc).index = idx as c_int;
-        (*sc).irq = platform.sdhci[idx].irq as c_int;
+        // SAFETY: `sc` points at `size_of::<SdhciSoftc>()` bytes this call
+        // exclusively owns.
+        unsafe { memset(sc as *mut c_void, 0, core::mem::size_of::<SdhciSoftc>()) };
+        // SAFETY: `sc` zeroed above, exclusively owned.
+        unsafe {
+            RawMutex::init(&raw mut (*sc).lock, c"x1_sdhci".as_ptr() as *mut c_char);
+            (*sc).index = idx as c_int;
+            (*sc).irq = platform.sdhci[idx].irq as c_int;
 
-        // Map SDHCI registers (already identity-mapped by vm.c).
-        (*sc).regs = platform.sdhci[idx].base as *mut u8;
-        crate::kprintln!(
-            "x1_sdhci{}: MMIO base 0x{:x}, IRQ {}",
-            idx as c_int,
-            platform.sdhci[idx].base,
-            platform.sdhci[idx].irq,
-        );
-
-        // Map APMU register (per-instance).
-        if platform.sdhci[idx].apmu_base != 0 && platform.sdhci[idx].apmu_offset != 0 {
-            (*sc).apmu_reg = (platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_offset as u64) as *mut u32;
+            // Map SDHCI registers (already identity-mapped by vm.c).
+            (*sc).regs = platform.sdhci[idx].base as *mut u8;
             crate::kprintln!(
-                "x1_sdhci{}: APMU ctrl @ 0x{:x}",
+                "x1_sdhci{}: MMIO base 0x{:x}, IRQ {}",
                 idx as c_int,
-                platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_offset as u64,
+                platform.sdhci[idx].base,
+                platform.sdhci[idx].irq,
             );
+
+            // Map APMU register (per-instance).
+            if platform.sdhci[idx].apmu_base != 0 && platform.sdhci[idx].apmu_offset != 0 {
+                (*sc).apmu_reg = (platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_offset as u64) as *mut u32;
+                crate::kprintln!(
+                    "x1_sdhci{}: APMU ctrl @ 0x{:x}",
+                    idx as c_int,
+                    platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_offset as u64,
+                );
+            }
+
+            // Map shared AXI register (always at SDH0 offset in APMU); the
+            // shared AXI offset is parsed from the FDT (apmu_axi_offset).
+            if platform.sdhci[idx].apmu_base != 0 && platform.sdhci[idx].apmu_axi_offset != 0 {
+                (*sc).apmu_axi_reg =
+                    (platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_axi_offset as u64) as *mut u32;
+            }
+
+            // Map AIB clock register (APBC base + AIB offset, from FDT).
+            if platform.sdhci[idx].apbc_base != 0 {
+                (*sc).aib_reg = (platform.sdhci[idx].apbc_base as u64 + APBC_AIB_CLK_RST as u64) as *mut u32;
+            }
         }
 
-        // Map shared AXI register (always at SDH0 offset in APMU); the
-        // shared AXI offset is parsed from the FDT (apmu_axi_offset).
-        if platform.sdhci[idx].apmu_base != 0 && platform.sdhci[idx].apmu_axi_offset != 0 {
-            (*sc).apmu_axi_reg =
-                (platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_axi_offset as u64) as *mut u32;
+        // Enable clocks and deassert reset via APMU.
+        // SAFETY: `sc` live, exclusively owned.
+        unsafe { SdhciSoftc::apmu_enable(sc) };
+
+        // Probe read: verify controller is alive after clock enable.
+        // `SDHCI_HOST_VERSION` is a 16-bit register at offset 0xFE -- must
+        // use `SdhciSoftc::readw` (not `SdhciSoftc::readl`) to avoid unaligned MMIO access.
+        // SAFETY: `sc` live.
+        let ver = unsafe { SdhciSoftc::readw(sc, SDHCI_HOST_VERSION) };
+        if ver == 0xFFFF || ver == 0x0000 {
+            crate::kprintln!(
+                "x1_sdhci{}: controller not responding (version=0x{:x}), aborting",
+                idx as c_int,
+                ((ver as c_int) as i32 as i64) as u64,
+            );
+            return -1;
         }
-
-        // Map AIB clock register (APBC base + AIB offset, from FDT).
-        if platform.sdhci[idx].apbc_base != 0 {
-            (*sc).aib_reg = (platform.sdhci[idx].apbc_base as u64 + APBC_AIB_CLK_RST as u64) as *mut u32;
-        }
-    }
-
-    // Enable clocks and deassert reset via APMU.
-    // SAFETY: `sc` live, exclusively owned.
-    unsafe { sdhci_apmu_enable(sc) };
-
-    // Probe read: verify controller is alive after clock enable.
-    // `SDHCI_HOST_VERSION` is a 16-bit register at offset 0xFE -- must
-    // use `sdhci_readw` (not `sdhci_readl`) to avoid unaligned MMIO access.
-    // SAFETY: `sc` live.
-    let ver = unsafe { sdhci_readw(sc, SDHCI_HOST_VERSION) };
-    if ver == 0xFFFF || ver == 0x0000 {
         crate::kprintln!(
-            "x1_sdhci{}: controller not responding (version=0x{:x}), aborting",
+            "x1_sdhci{}: controller alive (version=0x{:x})",
             idx as c_int,
             ((ver as c_int) as i32 as i64) as u64,
         );
-        return -1;
+
+        // Initialise SDHCI controller hardware.
+        // SAFETY: `sc` live.
+        let ret = unsafe { SdhciSoftc::hw_init(sc) };
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: hardware init failed", idx as c_int);
+            return -1;
+        }
+
+        // Check card presence (for SD card slots).
+        // SAFETY: `sc` live.
+        if !is_emmc && !unsafe { SdhciSoftc::card_present(sc) } {
+            crate::kprintln!("x1_sdhci{}: no card detected", idx as c_int);
+            // Not a fatal error -- slot is empty.
+            return 0;
+        }
+
+        // Enumerate the card/device.
+        // SAFETY: `sc` live.
+        let ret = if is_emmc { unsafe { SdhciSoftc::enumerate_emmc(sc) } } else { unsafe { SdhciSoftc::enumerate_sd(sc) } };
+
+        if ret < 0 {
+            crate::kprintln!("x1_sdhci{}: card enumeration failed", idx as c_int);
+            return -1;
+        }
+
+        // SAFETY: `sc` live.
+        unsafe { (*sc).initialized = 1 };
+
+        // Register as a block device.
+        // SAFETY: `sc` live, exclusively owned.
+        unsafe {
+            (*sc).bdev.dev.major = 4; // new major for SD/eMMC
+            (*sc).bdev.dev.minor = idx as c_int + 1;
+            (*sc).bdev.dev.devmode = (S_IFBLK | 0o600) as mode_t;
+            (*sc).bdev.flags.set_readable(1);
+            (*sc).bdev.flags.set_writable(1);
+            (*sc).bdev.block_shift = 0; // 512 bytes per sector
+            (*sc).bdev.ops = Some(&SDHCI_BLK_OPS);
+
+            (*sc).bdev.dev.devname = if is_emmc { EMMC_NAMES[idx].as_ptr() } else { SD_NAMES[idx].as_ptr() };
+        }
+
+        // SAFETY: `sc` live.
+        let ret = unsafe { Blkdev::register(&raw mut (*sc).bdev) };
+        if ret != 0 {
+            crate::kprintln!("x1_sdhci{}: blkdev_register failed: {}", idx as c_int, ret);
+            return -1;
+        }
+
+        crate::kprintln!(
+            "x1_sdhci{}: registered as {} ({} MB, {}-bit bus)",
+            idx as c_int,
+            crate::printf::Cs(unsafe { (*sc).bdev.dev.devname }),
+            unsafe { (*sc).capacity_blocks } / 2048,
+            unsafe { (*sc).bus_width },
+        );
+
+        SDHCI_COUNT.fetch_add(1, Ordering::SeqCst);
+        0
     }
-    crate::kprintln!(
-        "x1_sdhci{}: controller alive (version=0x{:x})",
-        idx as c_int,
-        ((ver as c_int) as i32 as i64) as u64,
-    );
-
-    // Initialise SDHCI controller hardware.
-    // SAFETY: `sc` live.
-    let ret = unsafe { sdhci_hw_init(sc) };
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: hardware init failed", idx as c_int);
-        return -1;
-    }
-
-    // Check card presence (for SD card slots).
-    // SAFETY: `sc` live.
-    if !is_emmc && !unsafe { sdhci_card_present(sc) } {
-        crate::kprintln!("x1_sdhci{}: no card detected", idx as c_int);
-        // Not a fatal error -- slot is empty.
-        return 0;
-    }
-
-    // Enumerate the card/device.
-    // SAFETY: `sc` live.
-    let ret = if is_emmc { unsafe { sdhci_enumerate_emmc(sc) } } else { unsafe { sdhci_enumerate_sd(sc) } };
-
-    if ret < 0 {
-        crate::kprintln!("x1_sdhci{}: card enumeration failed", idx as c_int);
-        return -1;
-    }
-
-    // SAFETY: `sc` live.
-    unsafe { (*sc).initialized = 1 };
-
-    // Register as a block device.
-    // SAFETY: `sc` live, exclusively owned.
-    unsafe {
-        (*sc).bdev.dev.major = 4; // new major for SD/eMMC
-        (*sc).bdev.dev.minor = idx as c_int + 1;
-        (*sc).bdev.dev.devmode = (S_IFBLK | 0o600) as mode_t;
-        (*sc).bdev.flags.set_readable(1);
-        (*sc).bdev.flags.set_writable(1);
-        (*sc).bdev.block_shift = 0; // 512 bytes per sector
-        (*sc).bdev.ops = Some(&SDHCI_BLK_OPS);
-
-        (*sc).bdev.dev.devname = if is_emmc { EMMC_NAMES[idx].as_ptr() } else { SD_NAMES[idx].as_ptr() };
-    }
-
-    // SAFETY: `sc` live.
-    let ret = unsafe { Blkdev::register(&raw mut (*sc).bdev) };
-    if ret != 0 {
-        crate::kprintln!("x1_sdhci{}: blkdev_register failed: {}", idx as c_int, ret);
-        return -1;
-    }
-
-    crate::kprintln!(
-        "x1_sdhci{}: registered as {} ({} MB, {}-bit bus)",
-        idx as c_int,
-        crate::printf::Cs(unsafe { (*sc).bdev.dev.devname }),
-        unsafe { (*sc).capacity_blocks } / 2048,
-        unsafe { (*sc).bus_width },
-    );
-
-    SDHCI_COUNT.fetch_add(1, Ordering::SeqCst);
-    0
 }
 
 // ===========================================================================
@@ -2090,7 +2098,7 @@ extern "C" fn x1_sdhci_init_one_kthread(idx: u64, _arg2: u64) {
     let is_emmc = unsafe { platform.sdhci[i].is_emmc } != 0;
     // SAFETY: `i < MAX_SDH_INSTANCES` (caller contract, see
     // `x1_sdhci_kthread`); called at most once per `i`.
-    if unsafe { sdhci_init_one(i, is_emmc) } < 0 {
+    if unsafe { SdhciSoftc::init_one(i, is_emmc) } < 0 {
         crate::kprintln!("x1_sdhci{}: init failed, skipping", i as c_int);
     }
 }
@@ -2127,24 +2135,26 @@ extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
     // kthread exits -- per-instance threads run independently.
 }
 
-/// `void x1_sdhci_init(void)` -- schedule SDHCI probing as a post-init
-/// kthread. Called from `start_kernel`. The actual hardware probing and
-/// card enumeration run in a dedicated kernel thread so that:
-/// 1. The scheduler is already running -> `sleep_ms()` works.
-/// 2. Boot proceeds without blocking on slow card init.
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn x1_sdhci_init() {
-    // SAFETY: `platform` boot-time-populated by `fdt.rs` before
-    // `start_kernel.c` calls this (documented boot-order contract).
-    if !(unsafe { platform.has_sdhci } != 0) {
-        return;
-    }
+impl SdhciSoftc {
+    /// `void SdhciSoftc::init(void)` -- schedule SDHCI probing as a post-init
+    /// kthread. Called from `start_kernel`. The actual hardware probing and
+    /// card enumeration run in a dedicated kernel thread so that:
+    /// 1. The scheduler is already running -> `sleep_ms()` works.
+    /// 2. Boot proceeds without blocking on slow card init.
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn init() {
+        // SAFETY: `platform` boot-time-populated by `fdt.rs` before
+        // `start_kernel.c` calls this (documented boot-order contract).
+        if !(unsafe { platform.has_sdhci } != 0) {
+            return;
+        }
 
-    let t = crate::proc::thread::Thread::kthread_create(c"x1_sdhci".as_ptr(), x1_sdhci_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
-    if is_err_or_null(t) {
-        crate::kprintln!("x1_sdhci: failed to create init kthread");
-        return;
+        let t = crate::proc::thread::Thread::kthread_create(c"x1_sdhci".as_ptr(), x1_sdhci_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
+        if is_err_or_null(t) {
+            crate::kprintln!("x1_sdhci: failed to create init kthread");
+            return;
+        }
+        Scheduler::wakeup(t);
     }
-    Scheduler::wakeup(t);
 }

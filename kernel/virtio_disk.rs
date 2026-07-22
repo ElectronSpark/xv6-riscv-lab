@@ -1188,7 +1188,7 @@ fn virtio_blkdev_init(diskno: usize) {
     // initializer's implicit zero-fill for every field the designated
     // initializer doesn't list, e.g. `.dev.kobj`/`.dev.type_`/
     // `.dev.unregistering`/`.dev.ops`), same precedent as
-    // `kernel/dev/x1_sdhci.rs`'s `sdhci_init_one`.
+    // `kernel/dev/x1_sdhci.rs`'s `SdhciSoftc::init_one`.
     unsafe {
         memset(dev as *mut c_void, 0, core::mem::size_of::<blkdev_t>());
         (*dev).dev.major = 2;
