@@ -24,7 +24,7 @@ use crate::bindings::{
     vfs_inode_ref, vm_t, workqueue,
 };
 use crate::lock::rcu::Rcu;
-use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
+use crate::machine::Riscv;
 use crate::proc::access::{
     is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
     RqRef, SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadGroupAccess,
@@ -644,9 +644,9 @@ impl Thread {
     /// The currently-running thread on this CPU (`*mut thread`, never null).
     #[inline]
     fn current() -> *mut thread {
-        // SAFETY: `cpu_local_ptr()` indexes into statically-allocated,
+        // SAFETY: `Riscv::cpu_local_ptr()` indexes into statically-allocated,
         // always-initialized per-CPU storage; never null.
-        unsafe { CpuLocalRef::assume(cpu_local_ptr()) }.proc_ptr()
+        unsafe { CpuLocalRef::assume(Riscv::cpu_local_ptr()) }.proc_ptr()
     }
 
     /// Recover the owning `*mut thread` from a `*mut context` that points at
@@ -729,7 +729,7 @@ macro_rules! kassert {
 /// SAFETY: wraps raw field/layout manipulation of a `thread` (and its
 /// embedded `sched_entity`/`utrapframe`) at a stack address computed by
 /// the specific call site — e.g. `kstack_arrange`'s caller-supplied
-/// `kstack`/`kstack_size`, or `idle_thread_init`'s `read_sp()`-derived
+/// `kstack`/`kstack_size`, or `idle_thread_init`'s `Riscv::read_sp()`-derived
 /// boot stack. Validity of every raw pointer touched inside a
 /// `thread_raw_layout! { ... }` body comes from that call site's own
 /// arrangement/ownership logic, not from any single blanket invariant
@@ -979,8 +979,8 @@ extern "C" fn kthread_entry(prev: *mut context) {
         kassert!(!prev.is_null(), "kthread_entry: prev context is NULL");
         let cur = Thread::current();
         Scheduler::context_switch_finish(Thread::from_context(prev), cur, 0);
-        CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
-        intr_on();
+        CpuLocalRef::assume(Riscv::cpu_local_ptr()).set_noff(0);
+        Riscv::intr_on();
         // `rcu_check_callbacks` (kernel/lock/rcu.rs) is a plain safe fn
         // as of P3-D3b; sound to call here because we're on the boot
         // path of a freshly-scheduled kernel thread right after
@@ -1059,7 +1059,7 @@ impl Thread {
         // calls/bit ops; the rest of the body is a `thread_raw_layout! { ... }`
         // invocation, which already supplies its own `unsafe` block.
         let kstack_size = KERNEL_STACK_SIZE;
-        let kstack = (read_sp() & !(kstack_size - 1)) as *mut c_void;
+        let kstack = (Riscv::read_sp() & !(kstack_size - 1)) as *mut c_void;
         kassert!((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size, "idle_thread_init: invalid KERNEL_STACK_ORDER");
         thread_raw_layout! {
             let p = Thread::kstack_arrange(kstack, kstack_size, 0);
@@ -1069,20 +1069,20 @@ impl Thread {
             (*p).kstack = kstack as u64;
             strncpy((*p).name.as_mut_ptr(), c"idle".as_ptr(), (*p).name.len());
             ThreadAccess::assume(p).state_set(THREAD_RUNNING);
-            let cpu = CpuLocalRef::assume(cpu_local_ptr());
+            let cpu = CpuLocalRef::assume(Riscv::cpu_local_ptr());
         cpu.set_proc(p);
         cpu.set_idle_thread(p);
 
-        Rq::cpu_activate(cpuid());
+        Rq::cpu_activate(Riscv::cpuid());
 
         let mut attr: sched_attr = core::mem::zeroed();
         SchedAttr::init(&mut attr);
         attr.priority = IDLE_PRIORITY;
-        attr.affinity_mask = 1u64 << cpuid();
+        attr.affinity_mask = 1u64 << Riscv::cpuid();
         SchedEntity::set_attr((*p).sched_entity, &attr);
 
         Rq::lock_current();
-        let idle_rq = Rq::for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
+        let idle_rq = Rq::for_cpu(IDLE_MAJOR_PRIORITY, Riscv::cpuid());
         // SAFETY: `idle_rq` is the current CPU's live idle run queue (valid
         // cpu/priority indices); the former free `rq_enqueue_task` likewise
         // `assume`d it non-null.
@@ -1093,7 +1093,7 @@ impl Thread {
         core::sync::atomic::fence(Ordering::Release);
         core::ptr::write_volatile(&mut (*se).on_cpu as *mut c_int, 1);
 
-        crate::kprintln!("CPU {} idle process initialized at kstack 0x{:x}", cpuid() as u64, kstack as u64);
+        crate::kprintln!("CPU {} idle process initialized at kstack 0x{:x}", Riscv::cpuid() as u64, kstack as u64);
         }
     }
 }
@@ -1164,8 +1164,8 @@ extern "C" fn init_entry(prev: *mut context) {
     thread_raw_layout! {
         let cur = Thread::current();
         Scheduler::context_switch_finish(Thread::from_context(prev), cur, 0);
-        CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
-        intr_on();
+        CpuLocalRef::assume(Riscv::cpu_local_ptr()).set_noff(0);
+        Riscv::intr_on();
 
         start_kernel_post_init();
 

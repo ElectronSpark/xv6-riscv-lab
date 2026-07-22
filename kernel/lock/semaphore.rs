@@ -314,7 +314,7 @@ impl RawSemaphore {
     pub(crate) fn wait(s: *mut sem_t) -> c_int {
         if s.is_null() { return -(EINVAL as c_int); }
         let s = Self::as_native(s);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
 
         let _g = KSpinlock::from_bindings(Self::lk_ptr(s)).lock();
         let val = Self::value_dec(s);
@@ -323,7 +323,7 @@ impl RawSemaphore {
             return -(EOVERFLOW as c_int);
         }
         if val >= 0 { return 0; }
-        machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+        machine::Riscv::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
         let ret = TqRef::from_ptr(Self::wq_ptr(s)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(s), null_mut()));
         if ret != 0 {
             let wake_ret = Self::sem_do_post(s);
@@ -336,7 +336,7 @@ impl RawSemaphore {
 
     pub(crate) fn wait_interruptible(s: *mut sem_t) -> c_int {
         if s.is_null() { return -(EINVAL as c_int); }
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         loop {
             let ret = Self::trywait(s);
             if ret == 0 { return 0; }
@@ -348,7 +348,7 @@ impl RawSemaphore {
 
     pub(crate) fn timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int {
         if s.is_null() { return -(EINVAL as c_int); }
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
 
         if timeout_ms == 0 {
             return if Self::trywait(s) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
@@ -363,8 +363,8 @@ impl RawSemaphore {
         }
         if val >= 0 { return 0; }
 
-        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-        let start = machine::read_time();
+        let timeout_ticks = machine::Riscv::ms_to_rawticks(timeout_ms);
+        let start = machine::Riscv::read_time();
         let mut ctx = SemTimedCtx {
             sem: s,
             // SAFETY: zero-init of `timer_node` matches C `.timer = {0}`.
@@ -373,7 +373,7 @@ impl RawSemaphore {
             timer_armed: false,
         };
 
-        machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+        machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = TqRef::from_ptr(Self::wq_ptr(s)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
             Some(sem_timed_sleep_cb),
             Some(sem_timed_wake_cb),
@@ -392,7 +392,7 @@ impl RawSemaphore {
                 }
             }
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            if (machine::read_time().wrapping_sub(start)) >= timeout_ticks {
+            if (machine::Riscv::read_time().wrapping_sub(start)) >= timeout_ticks {
                 return -(ETIMEDOUT as c_int);
             }
         }

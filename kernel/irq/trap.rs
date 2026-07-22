@@ -721,7 +721,7 @@ fn kerneltrap_dump_regs(tf: *mut trapframe) {
         );
         crate::kprintln!(
             "tp: 0x{:x}, t0: 0x{:x}, t1: 0x{:x}, t2: 0x{:x}",
-            machine::read_tp(),
+            machine::Riscv::read_tp(),
             (*tf).t0,
             (*tf).t1,
             (*tf).t2,
@@ -779,7 +779,7 @@ fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
         *((tf as u64 - 8) as *mut u64) = (*tf).sepc;
     }
 
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     if p.is_null() {
         crate::kprintln!("kerneltrap: no current thread");
         kerneltrap_dump_regs(tf);
@@ -810,7 +810,7 @@ fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
 #[no_mangle]
 pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
     enter_irq();
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     // SAFETY: `p` is the thread that just trapped from user mode into
     // this handler (uservec's asm contract); `trapframe` is its live
     // utrapframe.
@@ -822,7 +822,7 @@ pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
         );
 
         // Mark the current CPU as offline for this process's VM.
-        Vm::vm_cpu_offline((*p).vm, machine::cpuid());
+        Vm::vm_cpu_offline((*p).vm, machine::Riscv::cpuid());
 
         // redirect traps to kerneltrap() -- since we are on kernel stack
         trapinithart();
@@ -870,7 +870,7 @@ pub(crate) extern "C" fn __user_kirq_return(_irq_sp: u64, _s0: u64) {
 /// `trampoline_utrap` slot, exception path).
 #[no_mangle]
 pub extern "C" fn usertrap() {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
 
     // SAFETY: `p` is the thread that just trapped from user mode
     // (uservec's asm contract); every field access below is on `p`'s own
@@ -885,7 +885,7 @@ pub extern "C" fn usertrap() {
         );
 
         // Mark the current CPU as offline for this process's VM.
-        Vm::vm_cpu_offline((*p).vm, machine::cpuid());
+        Vm::vm_cpu_offline((*p).vm, machine::Riscv::cpuid());
 
         // redirect traps to kerneltrap() -- since we are on kernel stack
         trapinithart();
@@ -902,7 +902,7 @@ pub extern "C" fn usertrap() {
 
                 // an interrupt will change sepc, scause, and sstatus, so
                 // enable only now that we're done with those registers.
-                machine::intr_on();
+                machine::Riscv::intr_on();
 
                 syscall();
             }
@@ -1276,7 +1276,7 @@ pub(crate) extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext)
 // crate-path `use crate::irq::trap::usertrapret`, not `extern`
 // redeclarations) -- demoted.
 pub(crate) extern "C" fn usertrapret() {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
 
     if crate::proc::access::ThreadAccess::from_ptr(p).map_or(0, |ta| ta.killed()) != 0 {
         // If the thread is terminated, exit it.
@@ -1292,7 +1292,7 @@ pub(crate) extern "C" fn usertrapret() {
     // we're about to switch the destination of traps from kerneltrap() to
     // usertrap(), so turn off interrupts until we're back in user space,
     // where usertrap() is correct.
-    machine::intr_off();
+    machine::Riscv::intr_off();
     kassert!(
         CpuLocal::current().spin_depth() == 0,
         c"usertrapret",
@@ -1319,7 +1319,7 @@ pub(crate) extern "C" fn usertrapret() {
     // user space.
 
     // set S Previous Privilege mode to User.
-    let mut x = machine::read_sstatus();
+    let mut x = machine::Riscv::read_sstatus();
     x &= !SSTATUS_SPP; // clear SPP to 0 for user mode
     x |= SSTATUS_SPIE; // enable interrupts in user mode
     write_sstatus(x);
@@ -1329,7 +1329,7 @@ pub(crate) extern "C" fn usertrapret() {
     // CPU.
     // SAFETY: `p` is the current thread; `vm` is its live address space.
     let (trapframe_base, satp) = unsafe {
-        let base = Vm::vm_cpu_online((*p).vm, machine::cpuid());
+        let base = Vm::vm_cpu_online((*p).vm, machine::Riscv::cpuid());
         let satp = make_satp((*(*p).vm).pagetable);
         (base, satp)
     };
@@ -1380,7 +1380,7 @@ pub extern "C" fn kerneltrap(sp: *mut trapframe, s0: u64) {
         crate::kprint!("kerneltrap: not from supervisor mode");
         trap_panic_dump(sp, s0);
     }
-    if machine::intr_get() {
+    if machine::Riscv::intr_get() {
         crate::kprint!("kerneltrap: interrupts enabled");
         trap_panic_dump(sp, s0);
     }
@@ -1438,7 +1438,7 @@ pub(crate) extern "C" fn enter_irq() {
         cpu_set_in_itr();
     }
     kassert!(
-        !machine::intr_get(),
+        !machine::Riscv::intr_get(),
         c"enter_irq",
         c"kerneltrap: interrupts enabled"
     );

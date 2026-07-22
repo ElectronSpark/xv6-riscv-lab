@@ -18,7 +18,7 @@ use crate::bindings::{cpu_local, rq, rq_percpu, sched_attr, sched_entity, thread
 // (static dispatch); the layout-pinned `Rq`/`SchedEntity` `sched_class`
 // fields and the `rqg` table hold `Option<SchedClass>` (`None` == unset).
 use crate::proc::sched::{SchedAttr, SchedClass};
-use crate::machine::{cpuid, intr_get, intr_off, PreemptGuard};
+use crate::machine::{PreemptGuard, Riscv};
 use crate::proc::access::{
     is_err_or_null,
     RqPercpuRef, RqRef, SchedAttrConstRef, SchedAttrRef, SchedEntityRef,
@@ -395,7 +395,7 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 // `idle_thread_init`, *after* that CPU has already made plain
 // (non-atomic) stores publishing its own scheduling state --
 // `CpuLocalRef::set_proc`/`set_idle_thread` (kernel/proc/thread.rs) both
-// run strictly before `rq_cpu_activate(cpuid())`. Readers on
+// run strictly before `rq_cpu_activate(Riscv::cpuid())`. Readers on
 // *other* CPUs gate a cross-CPU, non-atomic read of exactly that state on
 // this bit: `rq_cpu_is_idle` (the reader this analysis was written for;
 // deleted as dead code in P3-D2a, orderings deliberately retained)
@@ -409,7 +409,7 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 // Therefore: `Release` on the writer (`fetch_or`) paired with `Acquire`
 // on every reader (`load`), not `Relaxed`. `fetch_or`'s implicit read
 // side does not need `Acquire`: each CPU only ever sets its *own* bit
-// (`rq_cpu_activate(cpuid())`), so the RMW never needs to observe another
+// (`rq_cpu_activate(Riscv::cpuid())`), so the RMW never needs to observe another
 // CPU's concurrent modification to make a decision -- only to publish
 // after it completes.
 #[inline] fn rqg_active_mask() -> u64 { rqg_active_mask_atomic().load(Ordering::Acquire) }
@@ -423,7 +423,7 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 #[inline] fn rqpc(cpu_id: c_int) -> *mut rq_percpu {
     rqg_percpu_base().wrapping_add(cpu_id as usize)
 }
-#[inline] fn rqpc_current() -> *mut rq_percpu { rqpc(cpuid()) }
+#[inline] fn rqpc_current() -> *mut rq_percpu { rqpc(Riscv::cpuid()) }
 #[inline] fn rqpc_ref<'a>(cpu_id: c_int) -> RqPercpuRef<'a> {
     // SAFETY: `rqpc(cpu_id)` indexes into the statically-allocated, always-initialized
     // per-CPU `rq_percpu` array; every caller passes an in-range `cpu_id`, so
@@ -511,7 +511,7 @@ pub(super) fn for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
 /// Pick the highest-priority ready run queue on the current CPU (was the
 /// free `pick_next_rq`).
 pub(super) fn pick_next() -> *mut rq {
-    let cpu = cpuid();
+    let cpu = Riscv::cpuid();
     let pc = rqpc_ref(cpu);
     let (top_mask, mut secondary_mask) = (pc.ready_mask(), pc.ready_mask_secondary());
     let top_id = bits_ctz8(top_mask);
@@ -660,14 +660,14 @@ fn rq_unlock_irqrestore(cpu_id: c_int, state: c_int) {
 
 impl Rq {
 pub(super) fn lock_current_irqsave() -> c_int {
-    let intr_state = intr_get() as c_int;
-    intr_off();
-    rq_lock_irqsave(cpuid());
+    let intr_state = Riscv::intr_get() as c_int;
+    Riscv::intr_off();
+    rq_lock_irqsave(Riscv::cpuid());
     intr_state
 }
 
 pub(super) fn unlock_current_irqrestore(state: c_int) {
-    rq_unlock_irqrestore(cpuid(), state)
+    rq_unlock_irqrestore(Riscv::cpuid(), state)
 }
 
 pub(super) fn trylock_two(c1: c_int, c2: c_int) -> c_int {
@@ -697,7 +697,7 @@ pub(super) fn lock_current() {
 }
 
 pub(super) fn unlock_current() {
-    Self::unlock(cpuid())
+    Self::unlock(Riscv::cpuid())
 }
 
 pub(super) fn holding_current() -> c_int {
@@ -741,7 +741,7 @@ fn rq_select_task_rq_inner(se: *mut sched_entity, cpumask: cpumask_t) -> KResult
         return Ok(selected);
     }
 
-    let cur_cpu = cpuid();
+    let cur_cpu = Riscv::cpuid();
     if effective_mask & (1u64 << cur_cpu) != 0 {
         let r = Rq::for_cpu(major_prio, cur_cpu);
         if !is_err_or_null(r) { return Ok(r); }

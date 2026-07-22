@@ -108,7 +108,13 @@ use crate::printf::{panic_msg_lock, panic_msg_unlock};
 // their call sites here, so they become plain crate-path imports instead
 // of `extern "C"` redeclarations.
 use crate::backtrace::print_backtrace;
-use crate::sbi::sbi_send_ipi;
+use crate::sbi::Sbi;
+
+/// Zero-sized type gathering the IPI mailbox + per-CPU bring-up
+/// bookkeeping as associated functions. `ipi_irq_handler` (below) stays
+/// a free fn: it is address-taken, stored into an `IrqDesc::handler`
+/// callback slot (`Ipi::init`), so it cannot become an associated fn.
+pub(crate) struct Ipi;
 
 // ===========================================================================
 // Externs.
@@ -168,9 +174,11 @@ const CPU_FLAG_NEEDS_RESCHED: u64 = 1;
 /// Mirrors `kernel/inc/types.h`'s `typedef uint64 cpumask_t;`.
 type cpumask_t = u64;
 
-#[inline]
-fn neg(errno: u32) -> c_int {
-    -(errno as c_int)
+impl Ipi {
+    #[inline]
+    fn neg(errno: u32) -> c_int {
+        -(errno as c_int)
+    }
 }
 
 // ===========================================================================
@@ -179,67 +187,69 @@ fn neg(errno: u32) -> c_int {
 // `printf.rs`'s private `read_fp` (see `RUST_REWRITE.md`'s Wave 3 note).
 // ===========================================================================
 
-/// `kernel/inc/riscv.h`'s `r_sip()`.
-#[inline(always)]
-fn read_sip() -> u64 {
-    let x: u64;
-    // SAFETY: `csrr sip` reads a supervisor CSR; no memory effect, cannot
-    // trap.
-    unsafe {
-        core::arch::asm!("csrr {0}, sip", out(reg) x, options(nomem, nostack, preserves_flags));
+impl Ipi {
+    /// `kernel/inc/riscv.h`'s `r_sip()`.
+    #[inline(always)]
+    fn read_sip() -> u64 {
+        let x: u64;
+        // SAFETY: `csrr sip` reads a supervisor CSR; no memory effect, cannot
+        // trap.
+        unsafe {
+            core::arch::asm!("csrr {0}, sip", out(reg) x, options(nomem, nostack, preserves_flags));
+        }
+        x
     }
-    x
-}
 
-/// `kernel/inc/riscv.h`'s `w_sip()`.
-#[inline(always)]
-fn write_sip(v: u64) {
-    // SAFETY: `csrw sip` writes a supervisor CSR; the only bit this file
-    // ever clears is `SIE_SSIE` (acknowledging the IPI we are currently
-    // handling), which cannot itself violate memory safety.
-    unsafe {
-        core::arch::asm!("csrw sip, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+    /// `kernel/inc/riscv.h`'s `w_sip()`.
+    #[inline(always)]
+    fn write_sip(v: u64) {
+        // SAFETY: `csrw sip` writes a supervisor CSR; the only bit this file
+        // ever clears is `SIE_SSIE` (acknowledging the IPI we are currently
+        // handling), which cannot itself violate memory safety.
+        unsafe {
+            core::arch::asm!("csrw sip, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+        }
     }
-}
 
-/// `kernel/inc/riscv.h`'s `r_fp()`. Same instruction/options as
-/// `printf.rs`'s private `read_fp` -- duplicated per this crate's
-/// established convention for tiny leaf CSR/register helpers.
-#[inline(always)]
-fn read_fp() -> u64 {
-    let fp: u64;
-    // SAFETY: `mv {0}, s0` reads a general-purpose register with no
-    // memory effects and cannot trap.
-    unsafe {
-        core::arch::asm!("mv {0}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
+    /// `kernel/inc/riscv.h`'s `r_fp()`. Same instruction/options as
+    /// `printf.rs`'s private `read_fp` -- duplicated per this crate's
+    /// established convention for tiny leaf CSR/register helpers.
+    #[inline(always)]
+    fn read_fp() -> u64 {
+        let fp: u64;
+        // SAFETY: `mv {0}, s0` reads a general-purpose register with no
+        // memory effects and cannot trap.
+        unsafe {
+            core::arch::asm!("mv {0}, s0", out(reg) fp, options(nomem, nostack, preserves_flags));
+        }
+        fp
     }
-    fp
-}
 
-/// `kernel/inc/riscv.h`'s `w_tp()`. Writes the `tp` register directly --
-/// after this call, `machine::read_tp`/`machine::cpuid`/`CpuLocal::current`
-/// on this hart resolve against the new value.
-#[inline(always)]
-fn write_tp(v: u64) {
-    // SAFETY: writes a general-purpose register with no memory access of
-    // its own; it changes what `mycpu()` resolves to from this point on,
-    // which is exactly `mycpu_init`'s documented purpose.
-    unsafe {
-        core::arch::asm!("mv tp, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+    /// `kernel/inc/riscv.h`'s `w_tp()`. Writes the `tp` register directly --
+    /// after this call, `machine::read_tp`/`machine::cpuid`/`CpuLocal::current`
+    /// on this hart resolve against the new value.
+    #[inline(always)]
+    fn write_tp(v: u64) {
+        // SAFETY: writes a general-purpose register with no memory access of
+        // its own; it changes what `mycpu()` resolves to from this point on,
+        // which is exactly `mycpu_init`'s documented purpose.
+        unsafe {
+            core::arch::asm!("mv tp, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+        }
     }
-}
 
-/// Mirrors `kernel/inc/bits.h`'s `bits_ctz8(x)`: trailing-zero count of the
-/// low byte, or `-1` for a zero input (the macro's own zero-guard). Not a
-/// ported `.c` file -- `bits.h` is header-only (macros/static-inline, no
-/// `bits.c`) -- reimplemented locally like this crate's other tiny leaf
-/// helpers.
-#[inline]
-fn ctz8(x: u8) -> i32 {
-    if x == 0 {
-        -1
-    } else {
-        x.trailing_zeros() as i32
+    /// Mirrors `kernel/inc/bits.h`'s `bits_ctz8(x)`: trailing-zero count of the
+    /// low byte, or `-1` for a zero input (the macro's own zero-guard). Not a
+    /// ported `.c` file -- `bits.h` is header-only (macros/static-inline, no
+    /// `bits.c`) -- reimplemented locally like this crate's other tiny leaf
+    /// helpers.
+    #[inline]
+    fn ctz8(x: u8) -> i32 {
+        if x == 0 {
+            -1
+        } else {
+            x.trailing_zeros() as i32
+        }
     }
 }
 
@@ -274,7 +284,7 @@ fn ctz8(x: u8) -> i32 {
 // struct through `tp` using the `CPU_LOCAL_FLAGS`/`CPU_LOCAL_INTR_SP`
 // macros of asm-offsets.h (interrupt-stack switch on trap entry); the
 // per-hart `tp` spacing itself is `sizeof(struct cpu_local)` (`mycpu_
-// init` below, and `machine::cpuid()`'s divide). The const asserts below
+// init` below, and `machine::Riscv::cpuid()`'s divide). The const asserts below
 // cite the consumers; any drift fails the target build before an image
 // can be linked.
 //
@@ -320,11 +330,11 @@ pub struct CpuLocal {
 // and the pre-nativization bindgen output. `CPU_LOCAL_FLAGS` and
 // `CPU_LOCAL_INTR_SP` are live kernelvec.S loads; the size assert
 // guards the per-hart `tp` stride (kernelvec.S's `(tp)` addressing +
-// `machine::cpuid()`); the rest are pinned for the static asm-offsets.h.
+// `machine::Riscv::cpuid()`); the rest are pinned for the static asm-offsets.h.
 const _: () = {
     assert!(
         core::mem::size_of::<CpuLocal>() == 64,
-        "CPU_LOCAL_SIZE (per-hart tp stride: kernelvec.S `(tp)` addressing, machine::cpuid())"
+        "CPU_LOCAL_SIZE (per-hart tp stride: kernelvec.S `(tp)` addressing, machine::Riscv::cpuid())"
     );
     assert!(core::mem::align_of::<CpuLocal>() == 64, "cpu_local alignment (__ALIGNED_CACHELINE)");
     assert!(core::mem::offset_of!(CpuLocal, proc_) == 0, "CPU_LOCAL_PROC (C field `proc`)");
@@ -370,94 +380,96 @@ pub(crate) static mut cpus: CpuLocalArray = CpuLocalArray([ZERO_CPU_LOCAL; NCPU]
 /// to this file both in C (never `extern`-declared anywhere) and here.
 static CPU_ACTIVE_MASK: AtomicU64 = AtomicU64::new(0);
 
-/// `kernel/ipi/ipi.c`'s `void cpus_init(void)`.
-// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
-// `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn cpus_init() {
-    // SAFETY: `memset`s the whole `cpus` array to zero. Sound under the
-    // same contract the C relied on: `start_kernel.c` calls this only
-    // once, on the boot hart, before any hart (including the boot hart
-    // itself) has written its `tp` to point into this array -- so there
-    // is no concurrent reader/writer at the time of this call.
-    unsafe {
-        core::ptr::write_bytes(
-            (&raw mut cpus) as *mut u8,
-            0,
-            core::mem::size_of::<CpuLocalArray>(),
-        );
+impl Ipi {
+    /// `kernel/ipi/ipi.c`'s `void cpus_init(void)`.
+    // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+    // `extern` redeclaration) -- demoted.
+    pub(crate) extern "C" fn cpus_init() {
+        // SAFETY: `memset`s the whole `cpus` array to zero. Sound under the
+        // same contract the C relied on: `start_kernel.c` calls this only
+        // once, on the boot hart, before any hart (including the boot hart
+        // itself) has written its `tp` to point into this array -- so there
+        // is no concurrent reader/writer at the time of this call.
+        unsafe {
+            core::ptr::write_bytes(
+                (&raw mut cpus) as *mut u8,
+                0,
+                core::mem::size_of::<CpuLocalArray>(),
+            );
+        }
     }
-}
 
-/// Replicates the C `assert(expr, fmt, arg)` expansion for `mycpu_init`'s
-/// one dynamic-argument assert. Same special-casing precedent as
-/// `irq/trap.rs`'s `enter_irq` (its doc comment explains why a fixed
-/// `kassert!`-style macro can't carry a runtime `%d`).
-fn assert_hartid_in_range(hartid: u64) {
-    if hartid < NCPU as u64 {
-        return;
-    }
-    __panic_start();
-    crate::kprintln!(
-        "ASSERTION_FAILURE {}:{}: In function '{}':",
-        "kernel/ipi.rs",
-        line!() as c_int,
-        "mycpu_init",
-    );
-    crate::kprintln!("mycpu_init: invalid hartid {}", hartid);
-    __panic_end();
-}
-
-/// `kernel/ipi/ipi.c`'s `void mycpu_init(uint64 hartid, bool trampoline)`.
-// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
-// `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn mycpu_init(hartid: u64, trampoline: bool) {
-    assert_hartid_in_range(hartid);
-    // SEQ_CST fetch-or in the C (`atomic_or`); weakest-correct is
-    // `Release` -- see the module doc's ordering-map table.
-    CPU_ACTIVE_MASK.fetch_or(1u64 << hartid, Ordering::Release);
-
-    // SAFETY: `cpus` is `#[repr(C)]` with the `[cpu_local; NCPU]` array as
-    // its sole field at offset 0, so casting the whole static's address to
-    // `*mut cpu_local` and indexing by `hartid` (just bounds-checked
-    // above) is exactly `&cpus[hartid]`. Taking the address does not
-    // dereference it.
-    let cpu_ptr = unsafe { (&raw mut cpus as *mut cpu_local).add(hartid as usize) };
-
-    if trampoline {
-        // Convert physical address to virtual address in the trampoline
-        // region: keep the in-page offset, but rebase onto
-        // TRAMPOLINE_CPULOCAL.
-        let offset = (cpu_ptr as u64) & PAGE_MASK;
-        let c = TRAMPOLINE_CPULOCAL + offset;
-        write_tp(c);
+    /// Replicates the C `assert(expr, fmt, arg)` expansion for `mycpu_init`'s
+    /// one dynamic-argument assert. Same special-casing precedent as
+    /// `irq/trap.rs`'s `enter_irq` (its doc comment explains why a fixed
+    /// `kassert!`-style macro can't carry a runtime `%d`).
+    fn assert_hartid_in_range(hartid: u64) {
+        if hartid < NCPU as u64 {
+            return;
+        }
+        __panic_start();
         crate::kprintln!(
-            "hart {} mycpu_init: setting tp to {} - {}",
-            hartid,
-            crate::printf::Ptr(c),
-            crate::printf::Ptr(c + core::mem::size_of::<cpu_local>() as u64),
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            "kernel/ipi.rs",
+            line!() as c_int,
+            "mycpu_init",
         );
-    } else {
-        write_tp(cpu_ptr as u64);
-        crate::kprintln!(
-            "hart {} mycpu_init: setting tp to {} - {}",
-            hartid,
-            crate::printf::Ptr(cpu_ptr as u64),
-            crate::printf::Ptr(cpu_ptr as u64 + core::mem::size_of::<cpu_local>() as u64),
-        );
+        crate::kprintln!("mycpu_init: invalid hartid {}", hartid);
+        __panic_end();
     }
-}
 
-/// `kernel/ipi/ipi.c`'s `cpumask_t get_cpu_active_mask(void)`. No live
-/// caller anywhere in the tree today (C or Rust) -- `cpu_for_each_active`
-/// (`kernel/inc/smp/percpu.h`) is unused too -- preserved for API
-/// completeness / future use, matching the C original's own dead-code
-/// status.
-// P3-1B: demoted from `#[no_mangle]`; `#[allow(dead_code)]` documents the
-// gap (matches this wave's `goldfish_rtc_init`/`sched_timer_add`
-// precedent) instead of silently deleting still-plausible public API.
-#[allow(dead_code)]
-pub(crate) extern "C" fn get_cpu_active_mask() -> cpumask_t {
-    CPU_ACTIVE_MASK.load(Ordering::Acquire)
+    /// `kernel/ipi/ipi.c`'s `void mycpu_init(uint64 hartid, bool trampoline)`.
+    // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+    // `extern` redeclaration) -- demoted.
+    pub(crate) extern "C" fn mycpu_init(hartid: u64, trampoline: bool) {
+        Self::assert_hartid_in_range(hartid);
+        // SEQ_CST fetch-or in the C (`atomic_or`); weakest-correct is
+        // `Release` -- see the module doc's ordering-map table.
+        CPU_ACTIVE_MASK.fetch_or(1u64 << hartid, Ordering::Release);
+
+        // SAFETY: `cpus` is `#[repr(C)]` with the `[cpu_local; NCPU]` array as
+        // its sole field at offset 0, so casting the whole static's address to
+        // `*mut cpu_local` and indexing by `hartid` (just bounds-checked
+        // above) is exactly `&cpus[hartid]`. Taking the address does not
+        // dereference it.
+        let cpu_ptr = unsafe { (&raw mut cpus as *mut cpu_local).add(hartid as usize) };
+
+        if trampoline {
+            // Convert physical address to virtual address in the trampoline
+            // region: keep the in-page offset, but rebase onto
+            // TRAMPOLINE_CPULOCAL.
+            let offset = (cpu_ptr as u64) & PAGE_MASK;
+            let c = TRAMPOLINE_CPULOCAL + offset;
+            Self::write_tp(c);
+            crate::kprintln!(
+                "hart {} mycpu_init: setting tp to {} - {}",
+                hartid,
+                crate::printf::Ptr(c),
+                crate::printf::Ptr(c + core::mem::size_of::<cpu_local>() as u64),
+            );
+        } else {
+            Self::write_tp(cpu_ptr as u64);
+            crate::kprintln!(
+                "hart {} mycpu_init: setting tp to {} - {}",
+                hartid,
+                crate::printf::Ptr(cpu_ptr as u64),
+                crate::printf::Ptr(cpu_ptr as u64 + core::mem::size_of::<cpu_local>() as u64),
+            );
+        }
+    }
+
+    /// `kernel/ipi/ipi.c`'s `cpumask_t get_cpu_active_mask(void)`. No live
+    /// caller anywhere in the tree today (C or Rust) -- `cpu_for_each_active`
+    /// (`kernel/inc/smp/percpu.h`) is unused too -- preserved for API
+    /// completeness / future use, matching the C original's own dead-code
+    /// status.
+    // P3-1B: demoted from `#[no_mangle]`; `#[allow(dead_code)]` documents the
+    // gap (matches this wave's `goldfish_rtc_init`/`sched_timer_add`
+    // precedent) instead of silently deleting still-plausible public API.
+    #[allow(dead_code)]
+    pub(crate) extern "C" fn get_cpu_active_mask() -> cpumask_t {
+        CPU_ACTIVE_MASK.load(Ordering::Acquire)
+    }
 }
 
 // PGSIZE/TRAMPOLINE_CPULOCAL -- mirrors `kernel/inc/mm/memlayout.h`'s
@@ -478,89 +490,91 @@ const TRAMPOLINE_CPULOCAL: u64 = crate::bindings::MAXVA - PGSIZE * 3;
 /// both languages.
 static IPI_PENDING: [AtomicU64; NCPU] = [const { AtomicU64::new(0) }; NCPU];
 
-/// `kernel/ipi/ipi.c`'s `int ipi_send_single(int hartid, int reason)`.
-// P3-1B: only callers are `proc/sched.rs`, `proc/thread_group.rs`, and
-// `proc/signal.rs` (all crate-path `use`, not `extern` redeclarations) --
-// demoted.
-pub(crate) extern "C" fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int {
-    if hartid < 0 || hartid >= NCPU as c_int {
-        return neg(crate::bindings::EINVAL);
-    }
-    if reason < 0 || reason >= NR_IPI_REASON {
-        return neg(crate::bindings::EINVAL);
-    }
-    // SEQ_CST in the C (`atomic_or`); weakest-correct `Release` -- see
-    // module doc's ordering-map table.
-    IPI_PENDING[hartid as usize].fetch_or(1u64 << reason, Ordering::Release);
-    let hart_mask = 1u64 << hartid;
-    sbi_send_ipi(hart_mask, 0) as c_int
-}
-
-/// `kernel/ipi/ipi.c`'s `int ipi_send_mask(unsigned long hart_mask,
-/// unsigned long hart_mask_base, int reason)`.
-///
-/// See the module doc's "two latent C bugs" section: the C indexed
-/// `ipi_pending[i + hart_mask_base]` with no bound check on the sum
-/// (out-of-bounds write, UB, for any `hart_mask_base` that pushes the
-/// index past `NCPU`). Every live caller passes `hart_mask_base = 0`
-/// (verified by full-tree grep); this port uses checked indexing and
-/// silently skips any index that would be out of range, extending the
-/// existing "bits out of bounds are ignored" doc contract rather than
-/// reproducing the memory-corruption UB or introducing a new panic path.
-// P3-1B: no caller anywhere outside this file (`ipi_send_all_but_self`/
-// `ipi_send_all`, both below) -- demoted.
-pub(crate) extern "C" fn ipi_send_mask(hart_mask: u64, hart_mask_base: u64, reason: c_int) -> c_int {
-    if reason < 0 || reason >= NR_IPI_REASON {
-        return neg(crate::bindings::EINVAL);
-    }
-
-    for i in 0..NCPU {
-        if hart_mask & (1u64 << i) == 0 {
-            continue;
+impl Ipi {
+    /// `kernel/ipi/ipi.c`'s `int ipi_send_single(int hartid, int reason)`.
+    // P3-1B: only callers are `proc/sched.rs`, `proc/thread_group.rs`, and
+    // `proc/signal.rs` (all crate-path `use`, not `extern` redeclarations) --
+    // demoted.
+    pub(crate) extern "C" fn send_single(hartid: c_int, reason: c_int) -> c_int {
+        if hartid < 0 || hartid >= NCPU as c_int {
+            return Self::neg(crate::bindings::EINVAL);
         }
-        let idx = i + hart_mask_base as usize;
-        if let Some(slot) = IPI_PENDING.get(idx) {
-            slot.fetch_or(1u64 << reason, Ordering::Release);
+        if reason < 0 || reason >= NR_IPI_REASON {
+            return Self::neg(crate::bindings::EINVAL);
         }
+        // SEQ_CST in the C (`atomic_or`); weakest-correct `Release` -- see
+        // module doc's ordering-map table.
+        IPI_PENDING[hartid as usize].fetch_or(1u64 << reason, Ordering::Release);
+        let hart_mask = 1u64 << hartid;
+        Sbi::send_ipi(hart_mask, 0) as c_int
     }
 
-    sbi_send_ipi(hart_mask, hart_mask_base) as c_int
-}
+    /// `kernel/ipi/ipi.c`'s `int ipi_send_mask(unsigned long hart_mask,
+    /// unsigned long hart_mask_base, int reason)`.
+    ///
+    /// See the module doc's "two latent C bugs" section: the C indexed
+    /// `ipi_pending[i + hart_mask_base]` with no bound check on the sum
+    /// (out-of-bounds write, UB, for any `hart_mask_base` that pushes the
+    /// index past `NCPU`). Every live caller passes `hart_mask_base = 0`
+    /// (verified by full-tree grep); this port uses checked indexing and
+    /// silently skips any index that would be out of range, extending the
+    /// existing "bits out of bounds are ignored" doc contract rather than
+    /// reproducing the memory-corruption UB or introducing a new panic path.
+    // P3-1B: no caller anywhere outside this file (`ipi_send_all_but_self`/
+    // `ipi_send_all`, both below) -- demoted.
+    pub(crate) extern "C" fn send_mask(hart_mask: u64, hart_mask_base: u64, reason: c_int) -> c_int {
+        if reason < 0 || reason >= NR_IPI_REASON {
+            return Self::neg(crate::bindings::EINVAL);
+        }
 
-/// `kernel/ipi/ipi.c`'s `int ipi_send_all_but_self(int reason)`.
-// P3-1B: no caller anywhere outside this file (`ipi_irq_handler`'s
-// `IPI_REASON_CRASH` case, above) -- demoted.
-pub(crate) extern "C" fn ipi_send_all_but_self(reason: c_int) -> c_int {
-    let hart_mask: cpumask_t = ((1u64 << NCPU) - 1) & !(1u64 << (machine::cpuid() as u64));
-    ipi_send_mask(hart_mask, 0, reason)
-}
+        for i in 0..NCPU {
+            if hart_mask & (1u64 << i) == 0 {
+                continue;
+            }
+            let idx = i + hart_mask_base as usize;
+            if let Some(slot) = IPI_PENDING.get(idx) {
+                slot.fetch_or(1u64 << reason, Ordering::Release);
+            }
+        }
 
-/// `kernel/ipi/ipi.c`'s `int ipi_send_all(int reason)`.
-///
-/// See the module doc's "two latent C bugs" section: the C OR'd the
-/// reason bit into every hart's pending mask *before* validating `reason`
-/// (validation only happened inside the trailing `ipi_send_mask` call),
-/// so an out-of-range `reason` was a shift-by-invalid-amount (UB) on the
-/// direct-OR loop even though the call would ultimately have rejected it.
-/// This port validates up front, matching `ipi_send_single`/
-/// `ipi_send_mask`'s already-established contract. The single live
-/// caller (`printf.rs`'s panic path) always passes the compile-time
-/// constant `IPI_REASON_CRASH`, so this is behavior-preserving for the
-/// entire live call graph.
-// P3-1D mesh sweep: caller (`printf.rs`) now imports this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn ipi_send_all(reason: c_int) -> c_int {
-    if reason < 0 || reason >= NR_IPI_REASON {
-        return neg(crate::bindings::EINVAL);
+        Sbi::send_ipi(hart_mask, hart_mask_base) as c_int
     }
 
-    let hart_mask: cpumask_t = (1u64 << NCPU) - 1;
-    for i in 0..NCPU {
-        // SEQ_CST in the C; weakest-correct `Release` -- see module doc.
-        IPI_PENDING[i].fetch_or(1u64 << reason, Ordering::Release);
+    /// `kernel/ipi/ipi.c`'s `int ipi_send_all_but_self(int reason)`.
+    // P3-1B: no caller anywhere outside this file (`ipi_irq_handler`'s
+    // `IPI_REASON_CRASH` case, above) -- demoted.
+    pub(crate) extern "C" fn send_all_but_self(reason: c_int) -> c_int {
+        let hart_mask: cpumask_t = ((1u64 << NCPU) - 1) & !(1u64 << (machine::Riscv::cpuid() as u64));
+        Self::send_mask(hart_mask, 0, reason)
     }
 
-    ipi_send_mask(hart_mask, 0, reason)
+    /// `kernel/ipi/ipi.c`'s `int ipi_send_all(int reason)`.
+    ///
+    /// See the module doc's "two latent C bugs" section: the C OR'd the
+    /// reason bit into every hart's pending mask *before* validating `reason`
+    /// (validation only happened inside the trailing `ipi_send_mask` call),
+    /// so an out-of-range `reason` was a shift-by-invalid-amount (UB) on the
+    /// direct-OR loop even though the call would ultimately have rejected it.
+    /// This port validates up front, matching `ipi_send_single`/
+    /// `ipi_send_mask`'s already-established contract. The single live
+    /// caller (`printf.rs`'s panic path) always passes the compile-time
+    /// constant `IPI_REASON_CRASH`, so this is behavior-preserving for the
+    /// entire live call graph.
+    // P3-1D mesh sweep: caller (`printf.rs`) now imports this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn send_all(reason: c_int) -> c_int {
+        if reason < 0 || reason >= NR_IPI_REASON {
+            return Self::neg(crate::bindings::EINVAL);
+        }
+
+        let hart_mask: cpumask_t = (1u64 << NCPU) - 1;
+        for i in 0..NCPU {
+            // SEQ_CST in the C; weakest-correct `Release` -- see module doc.
+            IPI_PENDING[i].fetch_or(1u64 << reason, Ordering::Release);
+        }
+
+        Self::send_mask(hart_mask, 0, reason)
+    }
 }
 
 // ===========================================================================
@@ -579,9 +593,9 @@ pub(crate) extern "C" fn ipi_send_all(reason: c_int) -> c_int {
 /// runs on the hart the interrupt actually targeted.
 unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
     // Acknowledge: clear SIP.SSIE.
-    write_sip(read_sip() & !SIE_SSIE);
+    Ipi::write_sip(Ipi::read_sip() & !SIE_SSIE);
 
-    let hartid = machine::cpuid();
+    let hartid = machine::Riscv::cpuid();
 
     // ACQ_REL in the C; weakest-correct `Acquire` -- see module doc's
     // ordering-map table (no reader ever observes the "now empty" store
@@ -589,7 +603,7 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
     let mut pending = IPI_PENDING[hartid as usize].swap(0, Ordering::Acquire);
 
     while pending != 0 {
-        let reason = ctz8(pending as u8);
+        let reason = Ipi::ctz8(pending as u8);
         if reason < 0 || reason >= NR_IPI_REASON {
             break;
         }
@@ -605,12 +619,12 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
                 // single-hart early boot (start_kernel/fdt), read-only by
                 // the time any IPI can run.
                 unsafe {
-                    print_backtrace(read_fp(), __physical_memory_start, __physical_memory_end);
+                    print_backtrace(Ipi::read_fp(), __physical_memory_start, __physical_memory_end);
                 }
                 panic_msg_unlock();
-                ipi_send_all_but_self(IPI_REASON_CRASH);
+                Ipi::send_all_but_self(IPI_REASON_CRASH);
                 loop {
-                    machine::wfi();
+                    machine::Riscv::wfi();
                 }
             }
             IPI_REASON_CALL_FUNC => {
@@ -639,40 +653,42 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
     }
 }
 
-/// `kernel/ipi/ipi.c`'s `void ipi_init(void)`.
-// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
-// `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn ipi_init() {
-    // Boot-time, single-threaded, before the handler below is even
-    // registered -- see the module doc's ordering-map table entry for why
-    // this store's ordering is provably unnecessary but kept for fidelity.
-    for slot in IPI_PENDING.iter() {
-        slot.store(0, Ordering::Release);
-    }
+impl Ipi {
+    /// `kernel/ipi/ipi.c`'s `void ipi_init(void)`.
+    // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+    // `extern` redeclaration) -- demoted.
+    pub(crate) extern "C" fn init() {
+        // Boot-time, single-threaded, before the handler below is even
+        // registered -- see the module doc's ordering-map table entry for why
+        // this store's ordering is provably unnecessary but kept for fidelity.
+        for slot in IPI_PENDING.iter() {
+            slot.store(0, Ordering::Release);
+        }
 
-    let mut ipi_desc = IrqDesc {
-        handler: Some(ipi_irq_handler),
-        data: core::ptr::null_mut(),
-        dev: core::ptr::null_mut(),
-        irq: 0,
-        count: 0,
-        // SAFETY: `rcu_head` is plain-old-data; `register_irq_handler`
-        // overwrites it unconditionally (see `irq/irq_core.rs`).
-        rcu_head: unsafe { core::mem::zeroed() },
-    };
-    // SAFETY: `ipi_desc` is a live, fully-initialized `IrqDesc` for the
-    // duration of this call.
-    let ret = unsafe { register_irq_handler(IRQ_S_SOFT, &raw mut ipi_desc) };
-    if ret != 0 {
-        __panic_start();
-        crate::kprintln!(
-            "ASSERTION_FAILURE {}:{}: In function '{}':",
-            "kernel/ipi.rs",
-            line!() as c_int,
-            "ipi_init",
-        );
-        crate::kprintln!("ipi_init: failed to register IPI handler: {}", ret);
-        __panic_end();
+        let mut ipi_desc = IrqDesc {
+            handler: Some(ipi_irq_handler),
+            data: core::ptr::null_mut(),
+            dev: core::ptr::null_mut(),
+            irq: 0,
+            count: 0,
+            // SAFETY: `rcu_head` is plain-old-data; `register_irq_handler`
+            // overwrites it unconditionally (see `irq/irq_core.rs`).
+            rcu_head: unsafe { core::mem::zeroed() },
+        };
+        // SAFETY: `ipi_desc` is a live, fully-initialized `IrqDesc` for the
+        // duration of this call.
+        let ret = unsafe { register_irq_handler(IRQ_S_SOFT, &raw mut ipi_desc) };
+        if ret != 0 {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/ipi.rs",
+                line!() as c_int,
+                "ipi_init",
+            );
+            crate::kprintln!("ipi_init: failed to register IPI handler: {}", ret);
+            __panic_end();
+        }
+        crate::kprintln!("ipi_init: IPI subsystem initialized (IRQ {})", IRQ_S_SOFT);
     }
-    crate::kprintln!("ipi_init: IPI subsystem initialized (IRQ {})", IRQ_S_SOFT);
 }

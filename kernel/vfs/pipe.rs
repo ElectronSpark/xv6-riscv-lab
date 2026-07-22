@@ -300,11 +300,11 @@ const POLLWRNORM: c_short = 0x0100;
 /// fields with the same ordering.
 #[inline(always)]
 fn load_acquire_u32(p: *const u32) -> u32 {
-    crate::machine::smp_load_acquire_i32(p as *const c_int) as u32
+    crate::machine::Riscv::smp_load_acquire_i32(p as *const c_int) as u32
 }
 #[inline(always)]
 fn store_release_u32(p: *mut u32, v: u32) {
-    crate::machine::smp_store_release_i32(p as *mut c_int, v as c_int)
+    crate::machine::Riscv::smp_store_release_i32(p as *mut c_int, v as c_int)
 }
 
 impl Pipe {
@@ -429,7 +429,7 @@ impl Pipe {
         // this call; no other thread can observe it until this function
         // returns it to its caller.
         unsafe {
-            crate::machine::smp_store_release_i32(ptr::addr_of_mut!((*pi).flags), PIPE_FLAGS_RW | flags);
+            crate::machine::Riscv::smp_store_release_i32(ptr::addr_of_mut!((*pi).flags), PIPE_FLAGS_RW | flags);
             (*pi).nwrite = 0;
             (*pi).nread = 0;
             (*pi).data = data as *mut c_char;
@@ -531,7 +531,7 @@ fn pipe_wait_writer(pi: *mut pipe) -> c_int {
         drop(g);
         return 0; // Data available; caller will re-check under reader_lock.
     }
-    crate::machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+    crate::machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
     // SAFETY: non-null `pi`; `g` is held here, matching `tq_wait`'s
     // "release the passed lock before sleeping, reacquire before
     // returning" contract (same idiom as `kernel/lock/mutex.rs`'s
@@ -569,7 +569,7 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
         drop(g);
         return 0; // Space available; caller will re-check under writer_lock.
     }
-    crate::machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+    crate::machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
     // SAFETY: see `pipe_wait_writer`.
     // SAFETY: non-null `pi`; raw field-address computation only.
     let (q, lk) = unsafe {

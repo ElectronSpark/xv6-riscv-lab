@@ -265,7 +265,7 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
                             (*entry).filename = current_file.as_ptr() as *const c_char;
                             (*entry).filename_len = current_file.len() as u16;
 
-                            crate::machine::rb_node_init(&raw mut (*entry).rb);
+                            crate::machine::Riscv::rb_node_init(&raw mut (*entry).rb);
                             crate::rbtree::rb_insert_color(&raw mut KSYM_RB_ROOT, &raw mut (*entry).rb);
                             KSYM_COUNT += 1;
                         }

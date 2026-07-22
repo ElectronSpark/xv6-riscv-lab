@@ -42,10 +42,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{compiler_fence, AtomicPtr, AtomicU32, Ordering};
 
 use crate::bindings::{cpu_local, spinlock_t};
-use crate::machine::{
-    self, cpu_relax, intr_off_save, intr_on, intr_restore, pop_off, push_off, wfi, write_sie,
-    CpuLocal, CPU_FLAG_CRASHED, SIE_SSIE,
-};
+use crate::machine::{self, CpuLocal, Riscv, CPU_FLAG_CRASHED, SIE_SSIE};
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_state`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
 use crate::printf::panic_state;
@@ -219,7 +216,7 @@ impl RawSpinlock {
         // `TICK_S` is `__timebase_frequency` in the C original; the
         // deadlock threshold is `TICK_S * 100`. The volatile read is
         // centralised in `machine::tick_s`.
-        let deadlock_threshold = machine::tick_s().saturating_mul(100);
+        let deadlock_threshold = machine::Riscv::tick_s().saturating_mul(100);
 
         loop {
             if locked.swap(1, Ordering::Acquire) == 0 {
@@ -227,16 +224,16 @@ impl RawSpinlock {
             }
             count = count.wrapping_add(1);
             if count >= 10 {
-                cpu_relax();
+                Riscv::cpu_relax();
             }
             if (count & 0xFFFF) == 0 {
                 let mut cpu = CpuLocal::current();
                 if (cpu.flags() & CPU_FLAG_CRASHED) == 0 && panic_state() != 0 {
                     cpu.flags_or(CPU_FLAG_CRASHED);
-                    write_sie(SIE_SSIE);
-                    intr_on();
+                    Riscv::write_sie(SIE_SSIE);
+                    Riscv::intr_on();
                     loop {
-                        wfi();
+                        Riscv::wfi();
                     }
                 }
             }
@@ -294,14 +291,14 @@ impl RawSpinlock {
 
     /// Try-acquire variant that disables interrupts internally.
     pub(crate) unsafe fn trylock(lk: *mut spinlock_t) -> c_int {
-        push_off();
+        Riscv::push_off();
         let lk = Self::as_native(lk);
         if Self::holding(lk) {
-            pop_off();
+            Riscv::pop_off();
             return 0;
         }
         if Self::locked_atomic(lk).swap(1, Ordering::Acquire) != 0 {
-            pop_off();
+            Riscv::pop_off();
             return 0;
         }
         Self::cpu_atomic(lk).store(CpuLocal::current().as_ptr(), Ordering::Relaxed);
@@ -328,7 +325,7 @@ impl RawSpinlock {
     // by crate path now (directly, via `cffi::raw`'s typed safe wrappers, or
     // via per-file safe-facade adapters).
     pub unsafe fn lock(lk: *mut spinlock_t) {
-        push_off();
+        Riscv::push_off();
         Self::acquire(lk);
     }
 
@@ -338,12 +335,12 @@ impl RawSpinlock {
     // via per-file safe-facade adapters).
     pub unsafe fn unlock(lk: *mut spinlock_t) {
         Self::release(lk);
-        pop_off();
+        Riscv::pop_off();
     }
 
     /// `lock` variant that saves the interrupt-enable flag.
     pub(crate) unsafe fn lock_irqsave(lk: *mut spinlock_t) -> c_int {
-        let intena = intr_off_save();
+        let intena = Riscv::intr_off_save();
         Self::acquire(lk);
         intena
     }
@@ -351,7 +348,7 @@ impl RawSpinlock {
     /// Companion of `lock_irqsave`.
     pub(crate) unsafe fn unlock_irqrestore(lk: *mut spinlock_t, intena: c_int) {
         Self::release(lk);
-        intr_restore(intena);
+        Riscv::intr_restore(intena);
     }
 }
 
@@ -393,5 +390,5 @@ pub(crate) unsafe extern "C" fn spin_wake_cb(data: *mut c_void, sleep_cb_status:
 // needed when the module set grows.
 #[allow(dead_code)]
 fn _link_ll_helpers() {
-    let _ = machine::intr_get;
+    let _ = Riscv::intr_get;
 }

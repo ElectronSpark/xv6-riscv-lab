@@ -563,7 +563,7 @@ impl PageTable {
                 1 => l1_ptr = pte_ptr,
                 _ => {}
             }
-            let pte = Pte(machine::pte_read(pte_ptr));
+            let pte = Pte(machine::Riscv::pte_read(pte_ptr));
             if pte.valid() {
                 // SAFETY: `pte.pa()` is a physical address extracted from a
                 // valid (`pte.valid()`) non-leaf PTE, i.e. it points at a
@@ -574,7 +574,7 @@ impl PageTable {
             } else {
                 let new_pt = PageTable::pgtab_alloc()?;
                 new_pt.zero();
-                machine::pte_write(pte_ptr, pa2pte(new_pt.as_ptr() as u64) | PTE_V);
+                machine::Riscv::pte_write(pte_ptr, pa2pte(new_pt.as_ptr() as u64) | PTE_V);
                 pt = new_pt;
             }
         }
@@ -607,11 +607,11 @@ impl PageTable {
                 PageTable::unwind_partial_map(root, va, a);
                 return Err(crate::mm::cffi::Errno::NoMem);
             };
-            let pte = Pte(machine::pte_read(pte_ptr));
+            let pte = Pte(machine::Riscv::pte_read(pte_ptr));
             if pte.valid() {
                 panic_mappages_remap(a);
             }
-            machine::pte_write(pte_ptr, pa2pte(pa) | (perm as u64) | PTE_V | PTE_A | PTE_D);
+            machine::Riscv::pte_write(pte_ptr, pa2pte(pa) | (perm as u64) | PTE_V | PTE_A | PTE_D);
             if a == last { break; }
             a  += PGSIZE;
             pa += PGSIZE;
@@ -652,7 +652,7 @@ impl PageTable {
             // just mapped by the loop in `map_pages` above, so this walk is
             // guaranteed to resolve to the leaf PTE it wrote.
             if let Some((pte_ptr, _, _)) = PageTable::walk_internal(root, a, false) {
-                machine::pte_write(pte_ptr, 0);
+                machine::Riscv::pte_write(pte_ptr, 0);
             }
             a += PGSIZE;
         }
@@ -713,7 +713,7 @@ impl PageTable {
             let Some((pte_ptr, _, _)) = PageTable::walk_internal(root, a, false) else {
                 panic_vm(b"uvmunmap: walk\0");
             };
-            let pte = Pte(machine::pte_read(pte_ptr));
+            let pte = Pte(machine::Riscv::pte_read(pte_ptr));
             if !pte.valid() {
                 panic_uvmunmap_notmapped(a, pte.pa(), pte.flags());
             }
@@ -721,7 +721,7 @@ impl PageTable {
                 panic_vm(b"uvmunmap: not a leaf\0");
             }
             let pa = pte.pa();
-            machine::pte_write(pte_ptr, 0);
+            machine::Riscv::pte_write(pte_ptr, 0);
             if do_free {
                 // SAFETY: `pa` is the physical address extracted from a valid
                 // leaf PTE (checked via `pte.valid()`/`pte.is_leaf()` above),

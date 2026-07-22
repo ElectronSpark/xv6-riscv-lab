@@ -131,7 +131,7 @@ use crate::mm::{
 // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
 // by crate path now.
 pub(crate) fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     // if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed,
     // in case of overflow
     //   return -1;
@@ -155,7 +155,7 @@ pub(crate) fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
 // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
 // by crate path now.
 pub(crate) fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     // SAFETY: `p` is the live current thread; `buf` is caller-owned space of
     // at least `max` bytes, per this function's C-ABI contract. `vm_copyinstr`
     // nul-terminates `buf` on success (0 return), so `strlen` below reads a
@@ -173,7 +173,7 @@ pub(crate) fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
 // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
 // by crate path now.
 pub(crate) fn argraw(n: c_int) -> u64 {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     // SAFETY: `p` is the live current thread trapping into the kernel via a
     // syscall; `trapframe` is its live `utrapframe`, populated by
     // `uservec`/`usertrap` before `syscall()` (and therefore any `sys_*` ->
@@ -451,7 +451,7 @@ static SYSCALLS: [Option<SyscallFn>; NSYSCALLS] = build_syscalls();
 // P3-1B: only caller is `irq/trap.rs::usertrap` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
 pub(crate) extern "C" fn syscall() {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
 
     // SAFETY: `p` is the live current thread that just trapped into the
     // kernel via `ecall` (this function's only caller, `usertrap()`, is

@@ -349,7 +349,7 @@ pub(crate) fn __do_timer_tick() {
         // called once before this function has any live caller
         // (`scheduler_yield` cannot run before `idle_thread_init`, which
         // `start_kernel.c` sequences after `sched_timer_init`).
-        unsafe { timer_tick(sched_timer_ptr(), machine::read_time()) };
+        unsafe { timer_tick(sched_timer_ptr(), machine::Riscv::read_time()) };
     }
 }
 
@@ -382,8 +382,8 @@ pub(crate) unsafe fn sched_timer_set(tn: *mut timer_node, ms: u64) -> c_int {
     if tn.is_null() {
         return -(crate::bindings::EINVAL as c_int);
     }
-    let expires = machine::read_time() + machine::ms_to_rawticks(ms);
-    let current = machine::current_thread_ptr();
+    let expires = machine::Riscv::read_time() + machine::Riscv::ms_to_rawticks(ms);
+    let current = machine::Riscv::current_thread_ptr();
     // SAFETY: `tn` is non-null per the check above and caller-owned per
     // this function's `# Safety` contract.
     unsafe {
@@ -413,7 +413,7 @@ pub(crate) fn sleep_ms(ms: u64) {
     if ms == 0 {
         return;
     }
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     sched_timer_assert(!p.is_null(), line!(), c"sleep_ms", c"Current thread must not be NULL");
 
     // SAFETY: an all-zero bit pattern is a valid initial `timer_node`
@@ -423,9 +423,9 @@ pub(crate) fn sleep_ms(ms: u64) {
 
     // Disable interrupts for the entire sleep/wake sequence to prevent the
     // timer callback from racing with our state transitions.
-    let intr = machine::intr_off_save();
+    let intr = machine::Riscv::intr_off_save();
 
-    machine::thread_state_set(p, THREAD_INTERRUPTIBLE);
+    machine::Riscv::thread_state_set(p, THREAD_INTERRUPTIBLE);
     // SAFETY: `&raw mut tn` is caller-owned stack storage, live for the
     // rest of this function.
     let ret = unsafe { sched_timer_set(&raw mut tn, ms) };
@@ -433,8 +433,8 @@ pub(crate) fn sleep_ms(ms: u64) {
         // Timer already expired or other transient failure -- just yield
         // the CPU once instead of sleeping, the best approximation for a
         // very short sleep.
-        machine::thread_state_set(p, THREAD_RUNNING);
-        machine::intr_restore(intr);
+        machine::Riscv::thread_state_set(p, THREAD_RUNNING);
+        machine::Riscv::intr_restore(intr);
         Scheduler::yield_now();
         return;
     }
@@ -445,7 +445,7 @@ pub(crate) fn sleep_ms(ms: u64) {
     // SAFETY: `tn` was successfully added by `sched_timer_set` above and
     // is still live stack storage.
     unsafe { sched_timer_done(&raw mut tn) };
-    machine::intr_restore(intr);
+    machine::Riscv::intr_restore(intr);
 }
 
 /// Rust port of `sleep_ms_interruptible()`.
@@ -459,19 +459,19 @@ pub(crate) fn sleep_ms_interruptible(ms: u64) -> u64 {
     if ms == 0 {
         return 0;
     }
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     sched_timer_assert(!p.is_null(), line!(), c"sleep_ms_interruptible", c"Current thread must not be NULL");
 
     // SAFETY: see `sleep_ms`.
     let mut tn: timer_node = unsafe { core::mem::zeroed() };
-    let intr = machine::intr_off_save();
+    let intr = machine::Riscv::intr_off_save();
 
-    machine::thread_state_set(p, THREAD_INTERRUPTIBLE);
+    machine::Riscv::thread_state_set(p, THREAD_INTERRUPTIBLE);
     // SAFETY: see `sleep_ms`.
     let ret = unsafe { sched_timer_set(&raw mut tn, ms) };
     if ret != 0 {
-        machine::thread_state_set(p, THREAD_RUNNING);
-        machine::intr_restore(intr);
+        machine::Riscv::thread_state_set(p, THREAD_RUNNING);
+        machine::Riscv::intr_restore(intr);
         Scheduler::yield_now();
         return 0;
     }
@@ -479,15 +479,15 @@ pub(crate) fn sleep_ms_interruptible(ms: u64) -> u64 {
     Scheduler::yield_now();
 
     let mut remaining_ms = 0u64;
-    let now = machine::read_time();
+    let now = machine::Riscv::read_time();
     if tn.expires > now {
-        remaining_ms = (tn.expires - now) / machine::tick_ms();
+        remaining_ms = (tn.expires - now) / machine::Riscv::tick_ms();
     }
 
     // SAFETY: `tn` was successfully added by `sched_timer_set` above and
     // is still live stack storage.
     unsafe { sched_timer_done(&raw mut tn) };
-    machine::intr_restore(intr);
+    machine::Riscv::intr_restore(intr);
     remaining_ms
 }
 
@@ -569,7 +569,7 @@ pub(crate) unsafe fn sched_timer_add(
     if callback.is_none() {
         return -(crate::bindings::EINVAL as c_int);
     }
-    let deadline = machine::read_time() + machine::ms_to_rawticks(ms);
+    let deadline = machine::Riscv::read_time() + machine::Riscv::ms_to_rawticks(ms);
     // SAFETY: caller contract forwarded unchanged.
     unsafe { sched_timer_add_deadline(callback, data, deadline) }
 }

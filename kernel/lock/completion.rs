@@ -297,10 +297,10 @@ impl RawCompletion {
     pub(crate) fn wait(c: *mut completion_t) {
         if c.is_null() { return; }
         let c = Self::as_native(c);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
         while !Self::try_wait_for_completion_locked(c) {
-            machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
             let _ = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lock_ptr(c), null_mut()));
         }
         if Self::done_get(c) > 0 {
@@ -311,12 +311,12 @@ impl RawCompletion {
     pub(crate) fn wait_interruptible(c: *mut completion_t) -> c_int {
         if c.is_null() { return -(EINVAL as c_int); }
         let c = Self::as_native(c);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
 
         let _g = KSpinlock::from_bindings(Self::lock_ptr(c)).lock();
         while !Self::try_wait_for_completion_locked(c) {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lock_ptr(c), null_mut()));
             if ret != 0
                 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending())
@@ -334,7 +334,7 @@ impl RawCompletion {
     pub(crate) fn wait_timed(c: *mut completion_t,
                                             timeout_ms: u64) -> c_int {
         if c.is_null() { return -(EINVAL as c_int); }
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
 
         if timeout_ms == 0 {
             if Self::try_wait(c) {
@@ -352,16 +352,16 @@ impl RawCompletion {
             return 0;
         }
 
-        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-        let start = machine::read_time();
+        let timeout_ticks = machine::Riscv::ms_to_rawticks(timeout_ms);
+        let start = machine::Riscv::read_time();
 
         while !Self::try_wait_for_completion_locked(c) {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            let now = machine::read_time();
+            let now = machine::Riscv::read_time();
             let elapsed = now.wrapping_sub(start);
             if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
             let remaining_ticks = timeout_ticks - elapsed;
-            let tm = machine::tick_ms();
+            let tm = machine::Riscv::tick_ms();
             let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
             if remaining_ms == 0 { remaining_ms = 1; }
 
@@ -374,7 +374,7 @@ impl RawCompletion {
                 timer_armed: false,
             };
 
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
                 Some(completion_timed_sleep_cb),
                 Some(completion_timed_wake_cb),

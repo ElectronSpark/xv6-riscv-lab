@@ -1346,7 +1346,7 @@ impl FdtBlobInfo {
     /// `new_node` must not already be linked into any tree.
     unsafe fn insert_node(&mut self, parent: *mut FdtNode, new_node: *mut FdtNode) -> bool {
         // SAFETY: `new_node` caller-owned, detached per caller contract.
-        unsafe { machine::rb_node_init(&raw mut (*new_node).rb_entry) };
+        unsafe { machine::Riscv::rb_node_init(&raw mut (*new_node).rb_entry) };
         // SAFETY: `parent`/`new_node` live per caller contract.
         let inserted =
             unsafe { crate::rbtree::rb_insert_color(&raw mut (*parent).children, &raw mut (*new_node).rb_entry) };
@@ -1374,8 +1374,8 @@ impl Fdt {
 unsafe fn list_push_back(head: *mut list_node_t, entry: *mut list_node_t) {
     // SAFETY: caller contract.
     unsafe {
-        let last = machine::list_entry_prev(head);
-        machine::list_entry_insert_after(last, entry);
+        let last = machine::Riscv::list_entry_prev(head);
+        machine::Riscv::list_entry_insert_after(last, entry);
     }
 }
 }
@@ -1388,7 +1388,7 @@ impl Fdt {
 #[inline(always)]
 unsafe fn list_push_front(head: *mut list_node_t, entry: *mut list_node_t) {
     // SAFETY: caller contract.
-    unsafe { machine::list_entry_insert_after(head, entry) };
+    unsafe { machine::Riscv::list_entry_insert_after(head, entry) };
 }
 }
 
@@ -1421,7 +1421,7 @@ unsafe fn build(dtb: *mut c_void) -> *mut FdtBlobInfo {
     // SAFETY: `dtb` valid per the `fdt_valid` check above.
     unsafe {
         Fdt::fdt_rb_root_init(&raw mut (*blob).root);
-        machine::list_entry_init(&raw mut (*blob).all_nodes);
+        machine::Riscv::list_entry_init(&raw mut (*blob).all_nodes);
     }
 
     // Parse memory reservation map (`/memreserve/`).
@@ -1840,7 +1840,7 @@ unsafe fn hlist_entry_init(entry: *mut HlistEntry) {
     // SAFETY: caller contract.
     unsafe {
         (*entry).bucket = ptr::null_mut();
-        machine::list_entry_init(&raw mut (*entry).list_entry);
+        machine::Riscv::list_entry_init(&raw mut (*entry).list_entry);
     }
 }
 }
@@ -1939,7 +1939,7 @@ unsafe fn fdt_alloc_compat_hash_node(compat: *const c_char, len: usize) -> *mut 
         memset(node as *mut c_void, 0, size_of::<FdtCompatHashNode>());
         (*node).compat = compat;
         (*node).compat_len = len;
-        machine::list_entry_init(&raw mut (*node).nodes);
+        machine::Riscv::list_entry_init(&raw mut (*node).nodes);
         Fdt::hlist_entry_init(&raw mut (*node).hash_entry);
     }
     node
@@ -2116,14 +2116,14 @@ unsafe fn build_indexes(&mut self) {
     unsafe {
         let head = &raw mut self.all_nodes;
         let all_nodes = core::iter::successors(
-            Some(machine::list_entry_next(head)).filter(|&p| p != head),
+            Some(machine::Riscv::list_entry_next(head)).filter(|&p| p != head),
             move |&p| {
-                let next = machine::list_entry_next(p);
+                let next = machine::Riscv::list_entry_next(p);
                 (next != head).then_some(next)
             },
         );
         for pos in all_nodes {
-            let node = machine::list_container_of::<FdtNode>(pos, offset_of!(FdtNode, list_entry));
+            let node = machine::Riscv::list_container_of::<FdtNode>(pos, offset_of!(FdtNode, list_entry));
             // Preserved dead branch -- see module doc: `fdt_type` is
             // never `FDT_BEGIN_NODE`, so this never runs.
             if (*node).fdt_type as u32 == FDT_BEGIN_NODE {
@@ -2160,11 +2160,11 @@ pub(crate) unsafe extern "C" fn fdt_compat_lookup(blob: *mut FdtBlobInfo, compat
     }
     // SAFETY: `hash_node` live.
     let head = unsafe { &raw mut (*hash_node).nodes };
-    let first = unsafe { machine::list_entry_next(head) };
+    let first = unsafe { machine::Riscv::list_entry_next(head) };
     if first == head {
         return ptr::null_mut();
     }
-    let link = unsafe { machine::list_container_of::<FdtCompatLink>(first, offset_of!(FdtCompatLink, list_entry)) };
+    let link = unsafe { machine::Riscv::list_container_of::<FdtCompatLink>(first, offset_of!(FdtCompatLink, list_entry)) };
     unsafe { (*link).fdt_node }
 }
 }
@@ -2186,14 +2186,14 @@ pub(crate) unsafe extern "C" fn fdt_compat_next(link: *mut *mut FdtCompatLink) -
     // SAFETY: `*link` live per the check above.
     let cur = unsafe { *link };
     let hash_node = unsafe { (*cur).hash_node };
-    let next = unsafe { machine::list_entry_next(&raw mut (*cur).list_entry) };
+    let next = unsafe { machine::Riscv::list_entry_next(&raw mut (*cur).list_entry) };
     let head = unsafe { &raw mut (*hash_node).nodes };
     if next == head {
         // SAFETY: `link` valid per caller contract.
         unsafe { *link = ptr::null_mut() };
         return ptr::null_mut();
     }
-    let next_link = unsafe { machine::list_container_of::<FdtCompatLink>(next, offset_of!(FdtCompatLink, list_entry)) };
+    let next_link = unsafe { machine::Riscv::list_container_of::<FdtCompatLink>(next, offset_of!(FdtCompatLink, list_entry)) };
     unsafe { *link = next_link };
     unsafe { (*next_link).fdt_node }
 }

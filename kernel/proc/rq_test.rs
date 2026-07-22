@@ -17,7 +17,7 @@ use crate::bindings::{
     cpumask_t, rq, sched_attr, sched_entity, spinlock_t, thread, tq_t,
 };
 use crate::lock::spinlock::RawSpinlock;
-use crate::machine::cpuid;
+use crate::machine::Riscv;
 use crate::proc::access::{is_err_or_null, zeroed_sched_attr, RqRef, SchedEntityRef, ThreadAccess};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 use crate::proc::Rq;
@@ -157,7 +157,7 @@ fn test_yield_priority() {
 fn test_rq_selection() {
     rq_test_raw! {
         crate::kprintln!("TEST: RQ Selection Consistency");
-        let test_cpu = cpuid();
+        let test_cpu = Riscv::cpuid();
 
         Rq::lock(test_cpu);
         let rq1 = Rq::pick_next();
@@ -212,7 +212,7 @@ fn test_priority_ordering() {
     rq_test_raw! {
         crate::kprintln!("TEST: Priority Ordering (Comprehensive)");
         let se = current_sched_entity();
-        let test_cpu = cpuid();
+        let test_cpu = Riscv::cpuid();
 
         let mut original_attr: sched_attr = zeroed_sched_attr();
         SchedEntity::get_attr(se, &mut original_attr);
@@ -416,7 +416,7 @@ fn test_affinity_change() {
 
         crate::kprintln!("  Original affinity mask: 0x{:x}", original_mask as u64);
 
-        let cur_cpu = cpuid();
+        let cur_cpu = Riscv::cpuid();
         attr.affinity_mask = 1u64 << cur_cpu;
         let ret = SchedEntity::set_attr(se, &attr);
         assert_msg(ret == 0, c"rq_test: setattr for affinity failed".as_ptr());
@@ -427,7 +427,7 @@ fn test_affinity_change() {
         crate::kprintln!("  Pinned to CPU {}, mask: 0x{:x}", cur_cpu, attr.affinity_mask as u64);
         Scheduler::yield_now();
 
-        let new_cpu = cpuid();
+        let new_cpu = Riscv::cpuid();
         assert_msg(new_cpu == cur_cpu, c"rq_test: CPU changed despite affinity pin".as_ptr());
 
         attr.affinity_mask = original_mask;
@@ -444,7 +444,7 @@ fn rq_test_run() {
     rq_test_raw! {
         crate::kprintln!("\n========================================");
         crate::kprintln!("Run Queue Priority Integration Tests");
-        crate::kprintln!("Running on CPU {}", cpuid() as i64);
+        crate::kprintln!("Running on CPU {}", Riscv::cpuid() as i64);
         crate::kprintln!("========================================\n");
 
         test_two_layer_mask();

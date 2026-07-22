@@ -45,7 +45,7 @@ use crate::machine;
 // P3-1D mesh sweep: ipi.rs/backtrace.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
-use crate::ipi::ipi_send_all;
+use crate::ipi::Ipi;
 use crate::backtrace::print_backtrace;
 
 // ===========================================================================
@@ -213,7 +213,7 @@ pub fn _kprint(args: core::fmt::Arguments<'_>) {
     // call, only if the previous call (on any core, thanks to the
     // shared atomic) ended with a newline byte.
     if !NNEWLINE.swap(true, Ordering::Acquire) {
-        let _ = write!(Console, "[{}] ", machine::read_time());
+        let _ = write!(Console, "[{}] ", machine::Riscv::read_time());
     }
 
     let _ = Console.write_fmt(args);
@@ -329,7 +329,7 @@ pub(crate) fn __panic_start() {
 
     panic_msg_lock();
     let fp = read_fp();
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     // SAFETY: `p` is checked non-null before every dereference below;
     // `kstack`/`pid`/`name`/`kstack_order` are plain scalar/array
     // fields of `struct thread`, valid for the lifetime of a live
@@ -341,7 +341,7 @@ pub(crate) fn __panic_start() {
             // backtrace.
             crate::kprintln!(
                 "[Core: {}] No thread context, fp={}",
-                machine::cpuid() as i64,
+                machine::Riscv::cpuid() as i64,
                 Ptr(fp),
             );
             if BT_ENABLED.load(Ordering::Relaxed) {
@@ -352,7 +352,7 @@ pub(crate) fn __panic_start() {
         }
         crate::kprintln!(
             "[Core: {}] In thread {} ({}) at {}",
-            machine::cpuid() as i64,
+            machine::Riscv::cpuid() as i64,
             (*p).pid,
             Cs((*p).name.as_ptr()),
             Ptr(fp),
@@ -369,18 +369,18 @@ pub(crate) extern "C" fn trigger_panic() -> ! {
     machine::CpuLocal::current().flags_or(machine::CPU_FLAG_CRASHED);
 
     // Mask all interrupts except software interrupt (IPI).
-    machine::write_sie(machine::SIE_SSIE);
+    machine::Riscv::write_sie(machine::SIE_SSIE);
 
     // Send IPI to all harts (including self) to crash. `ipi_send_all`
     // takes a reason code; no preconditions beyond "callable from any
     // context", which holds here (we are already committed to halting).
-    ipi_send_all(IPI_REASON_CRASH);
+    Ipi::send_all(IPI_REASON_CRASH);
 
     // Enable interrupts so IPI can be received.
-    machine::intr_on();
+    machine::Riscv::intr_on();
 
     loop {
-        machine::wfi();
+        machine::Riscv::wfi();
     }
 }
 

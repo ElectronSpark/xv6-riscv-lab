@@ -13,7 +13,7 @@
 
 use core::ffi::c_int;
 
-use crate::machine::cpuid;
+use crate::machine::Riscv;
 
 /// PLIC MMIO base address. Resolved from the FDT at boot
 /// (`dev/fdt.rs::fdt_apply_platform_config` writes it by direct crate path
@@ -75,7 +75,7 @@ pub(crate) extern "C" fn plicinit() {}
 // P3-1B: only callers are `start_kernel.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
 pub(crate) extern "C" fn plicinithart() {
-    let hart = cpuid() as u32;
+    let hart = Riscv::cpuid() as u32;
     // SAFETY: `s_priority_thresh` computes an address inside the PLIC MMIO
     // window, mapped uncached by `kvmmake` (`mm/vm_pgtab.rs`) for the
     // kernel's whole post-`kvminithart` lifetime; `hart` is this CPU's own
@@ -91,7 +91,7 @@ pub(crate) extern "C" fn plicinithart() {
 // P3-1B: only caller is `irq/irq_core.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
 pub(crate) extern "C" fn plic_claim() -> c_int {
-    let hart = cpuid() as u32;
+    let hart = Riscv::cpuid() as u32;
     // SAFETY: see `plicinithart`; safe to call from any context (including
     // interrupt context) on the owning hart.
     unsafe { core::ptr::read_volatile(s_claim(hart)) as c_int }
@@ -101,7 +101,7 @@ pub(crate) extern "C" fn plic_claim() -> c_int {
 // P3-1B: only caller is `irq/irq_core.rs` (crate-path `use`, not an
 // `extern` redeclaration) -- demoted.
 pub(crate) extern "C" fn plic_complete(irq: c_int) {
-    let hart = cpuid() as u32;
+    let hart = Riscv::cpuid() as u32;
     // SAFETY: see `plic_claim`.
     unsafe {
         core::ptr::write_volatile(s_claim(hart), irq as u32);

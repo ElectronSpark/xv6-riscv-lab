@@ -51,6 +51,12 @@ use crate::machine;
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
 use crate::printf::{__panic_end, __panic_start};
 
+/// Zero-sized type gathering the SBI firmware-call wrappers as
+/// associated functions (`sbi_` prefix dropped: `Sbi::hart_start`,
+/// `Sbi::set_timer`, ...). Mirrors the `Riscv` ZST in
+/// `kernel/machine/machine.rs`.
+pub(crate) struct Sbi;
+
 // ===========================================================================
 // SBI return error codes (`kernel/inc/sbi.h`).
 // ===========================================================================
@@ -186,41 +192,43 @@ impl SbiRet {
     }
 }
 
-/// Generic SBI ecall. Mirrors `kernel/inc/sbi.h`'s `sbi_ecall()` static
-/// inline register-for-register: `a7`=ext, `a6`=fid, `a0..a5`=args,
-/// `a0`/`a1`=(error, value) on return.
-#[inline(always)]
-fn sbi_ecall(
-    ext: i64,
-    fid: i64,
-    arg0: u64,
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-    arg4: u64,
-    arg5: u64,
-) -> SbiRet {
-    let mut a0 = arg0;
-    let mut a1 = arg1;
-    // SAFETY: standard RISC-V SBI calling convention `ecall`. No
-    // `options(...)` given — SBI firmware calls are opaque and may
-    // touch arbitrary memory/state, matching the C version's blanket
-    // `"memory"` clobber (the conservative/default asm! behavior here
-    // is the direct equivalent).
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            inout("a0") a0,
-            inout("a1") a1,
-            in("a2") arg2,
-            in("a3") arg3,
-            in("a4") arg4,
-            in("a5") arg5,
-            in("a6") fid,
-            in("a7") ext,
-        );
+impl Sbi {
+    /// Generic SBI ecall. Mirrors `kernel/inc/sbi.h`'s `sbi_ecall()` static
+    /// inline register-for-register: `a7`=ext, `a6`=fid, `a0..a5`=args,
+    /// `a0`/`a1`=(error, value) on return.
+    #[inline(always)]
+    fn ecall(
+        ext: i64,
+        fid: i64,
+        arg0: u64,
+        arg1: u64,
+        arg2: u64,
+        arg3: u64,
+        arg4: u64,
+        arg5: u64,
+    ) -> SbiRet {
+        let mut a0 = arg0;
+        let mut a1 = arg1;
+        // SAFETY: standard RISC-V SBI calling convention `ecall`. No
+        // `options(...)` given — SBI firmware calls are opaque and may
+        // touch arbitrary memory/state, matching the C version's blanket
+        // `"memory"` clobber (the conservative/default asm! behavior here
+        // is the direct equivalent).
+        unsafe {
+            core::arch::asm!(
+                "ecall",
+                inout("a0") a0,
+                inout("a1") a1,
+                in("a2") arg2,
+                in("a3") arg3,
+                in("a4") arg4,
+                in("a5") arg5,
+                in("a6") fid,
+                in("a7") ext,
+            );
+        }
+        SbiRet { error: a0 as i64, value: a1 as i64 }
     }
-    SbiRet { error: a0 as i64, value: a1 as i64 }
 }
 
 // ===========================================================================
@@ -260,364 +268,366 @@ static SBI_EXT_AVAILABLE: [AtomicBool; SBI_EXT_ID_COUNT] = [
     AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false),
 ];
 
-// ===========================================================================
-// Base extension.
-// ===========================================================================
+impl Sbi {
+    // ===========================================================================
+    // Base extension.
+    // ===========================================================================
 
-pub(crate) fn sbi_get_spec_version() -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_SPEC_VERSION, 0, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_get_impl_id() -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_ID, 0, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_get_impl_version() -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_VERSION, 0, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_probe_extension(extid: i64) -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_PROBE_EXT, extid as u64, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_get_mvendorid() -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MVENDORID, 0, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_get_marchid() -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MARCHID, 0, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_get_mimpid() -> i64 {
-    sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MIMPID, 0, 0, 0, 0, 0, 0).retval()
-}
-
-// ===========================================================================
-// Timer extension.
-// ===========================================================================
-
-pub(crate) fn sbi_set_timer(stime_value: u64) {
-    sbi_ecall(SBI_EXT_TIMER, SBI_TIMER_SET_TIMER, stime_value, 0, 0, 0, 0, 0);
-}
-
-// ===========================================================================
-// IPI extension.
-// ===========================================================================
-
-// P3-1D mesh sweep: caller (`ipi.rs`) now imports this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn sbi_send_ipi(hart_mask: u64, hart_mask_base: u64) -> i64 {
-    sbi_ecall(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask, hart_mask_base, 0, 0, 0, 0).errno()
-}
-
-// ===========================================================================
-// Remote fence extension.
-// ===========================================================================
-
-pub(crate) fn sbi_remote_hfence_i(hart_mask: u64, hart_mask_base: u64) {
-    sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_I, hart_mask, hart_mask_base, 0, 0, 0, 0);
-}
-
-pub(crate) fn sbi_remote_hfence_vma(
-    hart_mask: u64,
-    hart_mask_base: u64,
-    start_addr: u64,
-    size: u64,
-) -> i64 {
-    sbi_ecall(
-        SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VMA,
-        hart_mask, hart_mask_base, start_addr, size, 0, 0,
-    ).errno()
-}
-
-pub(crate) fn sbi_remote_hfence_vma_asid(
-    hart_mask: u64,
-    hart_mask_base: u64,
-    start_addr: u64,
-    size: u64,
-    asid: u64,
-) -> i64 {
-    sbi_ecall(
-        SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VMA_ASID,
-        hart_mask, hart_mask_base, start_addr, size, asid, 0,
-    ).errno()
-}
-
-pub(crate) fn sbi_remote_hfence_gvma_vmid(
-    hart_mask: u64,
-    hart_mask_base: u64,
-    start_addr: u64,
-    size: u64,
-    vmid: u64,
-) -> i64 {
-    sbi_ecall(
-        SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_GVMA_VMID,
-        hart_mask, hart_mask_base, start_addr, size, vmid, 0,
-    ).errno()
-}
-
-pub(crate) fn sbi_remote_hfence_gvma(
-    hart_mask: u64,
-    hart_mask_base: u64,
-    start_addr: u64,
-    size: u64,
-) -> i64 {
-    sbi_ecall(
-        SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_GVMA,
-        hart_mask, hart_mask_base, start_addr, size, 0, 0,
-    ).errno()
-}
-
-pub(crate) fn sbi_remote_hfence_vvma_asid(
-    hart_mask: u64,
-    hart_mask_base: u64,
-    start_addr: u64,
-    size: u64,
-    asid: u64,
-) -> i64 {
-    sbi_ecall(
-        SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VVMA_ASID,
-        hart_mask, hart_mask_base, start_addr, size, asid, 0,
-    ).errno()
-}
-
-pub(crate) fn sbi_remote_hfence_vvma(
-    hart_mask: u64,
-    hart_mask_base: u64,
-    start_addr: u64,
-    size: u64,
-) -> i64 {
-    sbi_ecall(
-        SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VVMA,
-        hart_mask, hart_mask_base, start_addr, size, 0, 0,
-    ).errno()
-}
-
-// ===========================================================================
-// HSM (Hart State Management) extension.
-// ===========================================================================
-
-pub(crate) fn sbi_hart_start(hartid: u64, start_addr: u64, opaque: u64) -> i64 {
-    sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_START, hartid, start_addr, opaque, 0, 0, 0).errno()
-}
-
-pub(crate) fn sbi_hart_stop() -> i64 {
-    sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_STOP, 0, 0, 0, 0, 0, 0).errno()
-}
-
-pub(crate) fn sbi_hart_get_status(hartid: u64) -> i64 {
-    sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_GET_STATUS, hartid, 0, 0, 0, 0, 0).retval()
-}
-
-pub(crate) fn sbi_hart_suspend(suspend_type: u32, resume_addr: u64, opaque: u64) -> i64 {
-    sbi_ecall(
-        SBI_EXT_HSM, SBI_HSM_HART_SUSPEND,
-        suspend_type as u64, resume_addr, opaque, 0, 0, 0,
-    ).errno()
-}
-
-// ===========================================================================
-// System reset extension.
-// ===========================================================================
-
-pub(crate) fn sbi_system_reset(reset_type: u32, reset_reason: u32) {
-    sbi_ecall(
-        SBI_EXT_SRST, SBI_SRST_RESET,
-        reset_type as u64, reset_reason as u64, 0, 0, 0, 0,
-    );
-    // Should not return.
-    loop {
-        machine::wfi();
+    pub(crate) fn get_spec_version() -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_GET_SPEC_VERSION, 0, 0, 0, 0, 0, 0).retval()
     }
-}
 
-pub(crate) fn sbi_shutdown() {
-    sbi_system_reset(SBI_SRST_TYPE_SHUTDOWN, SBI_SRST_REASON_NONE);
-}
+    pub(crate) fn get_impl_id() -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_ID, 0, 0, 0, 0, 0, 0).retval()
+    }
 
-pub(crate) fn sbi_reboot() {
-    sbi_system_reset(SBI_SRST_TYPE_COLD_REBOOT, SBI_SRST_REASON_NONE);
-}
+    pub(crate) fn get_impl_version() -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_VERSION, 0, 0, 0, 0, 0, 0).retval()
+    }
 
-// ===========================================================================
-// Extension probing.
-// ===========================================================================
+    pub(crate) fn probe_extension(extid: i64) -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_PROBE_EXT, extid as u64, 0, 0, 0, 0, 0).retval()
+    }
 
-/// Panics with a message equivalent to the C `assert(..., "Required SBI
-/// extension %s not available!", sbi_ext_names[i])` — same
-/// `__panic_start`/`printf`/`__panic_end` sequence the `assert()` macro
-/// in `kernel/inc/printf.h` expands to.
-fn required_extension_missing(idx: usize) -> ! {
-    __panic_start();
-    crate::kprintln!(
-        "ASSERTION_FAILURE {}:{}: In function '{}':",
-        "kernel/sbi.rs",
-        line!() as c_int,
-        "sbi_probe_extensions",
-    );
-    crate::kprintln!(
-        "Required SBI extension {} not available!",
-        crate::printf::Cs(SBI_EXT_NAMES[idx].as_ptr()),
-    );
-    __panic_end();
-}
+    pub(crate) fn get_mvendorid() -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_GET_MVENDORID, 0, 0, 0, 0, 0, 0).retval()
+    }
 
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn sbi_probe_extensions() {
-    crate::kprintln!("SBI extensions:");
-    for i in 0..SBI_EXT_ID_COUNT {
-        let result = sbi_probe_extension(SBI_EXT_IDS[i]);
-        let available = result > 0;
-        SBI_EXT_AVAILABLE[i].store(available, Ordering::Relaxed);
-        crate::kprintln!(
-            "  {}: {}{}",
-            crate::printf::Cs(SBI_EXT_NAMES[i].as_ptr()),
-            if available { "AVAILABLE" } else { "UNSUPPORTED" },
-            if SBI_EXT_OPTIONAL[i] { " (OPTIONAL)" } else { "" },
+    pub(crate) fn get_marchid() -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_GET_MARCHID, 0, 0, 0, 0, 0, 0).retval()
+    }
+
+    pub(crate) fn get_mimpid() -> i64 {
+        Self::ecall(SBI_EXT_BASE, SBI_BASE_GET_MIMPID, 0, 0, 0, 0, 0, 0).retval()
+    }
+
+    // ===========================================================================
+    // Timer extension.
+    // ===========================================================================
+
+    pub(crate) fn set_timer(stime_value: u64) {
+        Self::ecall(SBI_EXT_TIMER, SBI_TIMER_SET_TIMER, stime_value, 0, 0, 0, 0, 0);
+    }
+
+    // ===========================================================================
+    // IPI extension.
+    // ===========================================================================
+
+    // P3-1D mesh sweep: caller (`ipi.rs`) now imports this via crate-path
+    // `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn send_ipi(hart_mask: u64, hart_mask_base: u64) -> i64 {
+        Self::ecall(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask, hart_mask_base, 0, 0, 0, 0).errno()
+    }
+
+    // ===========================================================================
+    // Remote fence extension.
+    // ===========================================================================
+
+    pub(crate) fn remote_hfence_i(hart_mask: u64, hart_mask_base: u64) {
+        Self::ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_I, hart_mask, hart_mask_base, 0, 0, 0, 0);
+    }
+
+    pub(crate) fn remote_hfence_vma(
+        hart_mask: u64,
+        hart_mask_base: u64,
+        start_addr: u64,
+        size: u64,
+    ) -> i64 {
+        Self::ecall(
+            SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VMA,
+            hart_mask, hart_mask_base, start_addr, size, 0, 0,
+        ).errno()
+    }
+
+    pub(crate) fn remote_hfence_vma_asid(
+        hart_mask: u64,
+        hart_mask_base: u64,
+        start_addr: u64,
+        size: u64,
+        asid: u64,
+    ) -> i64 {
+        Self::ecall(
+            SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VMA_ASID,
+            hart_mask, hart_mask_base, start_addr, size, asid, 0,
+        ).errno()
+    }
+
+    pub(crate) fn remote_hfence_gvma_vmid(
+        hart_mask: u64,
+        hart_mask_base: u64,
+        start_addr: u64,
+        size: u64,
+        vmid: u64,
+    ) -> i64 {
+        Self::ecall(
+            SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_GVMA_VMID,
+            hart_mask, hart_mask_base, start_addr, size, vmid, 0,
+        ).errno()
+    }
+
+    pub(crate) fn remote_hfence_gvma(
+        hart_mask: u64,
+        hart_mask_base: u64,
+        start_addr: u64,
+        size: u64,
+    ) -> i64 {
+        Self::ecall(
+            SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_GVMA,
+            hart_mask, hart_mask_base, start_addr, size, 0, 0,
+        ).errno()
+    }
+
+    pub(crate) fn remote_hfence_vvma_asid(
+        hart_mask: u64,
+        hart_mask_base: u64,
+        start_addr: u64,
+        size: u64,
+        asid: u64,
+    ) -> i64 {
+        Self::ecall(
+            SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VVMA_ASID,
+            hart_mask, hart_mask_base, start_addr, size, asid, 0,
+        ).errno()
+    }
+
+    pub(crate) fn remote_hfence_vvma(
+        hart_mask: u64,
+        hart_mask_base: u64,
+        start_addr: u64,
+        size: u64,
+    ) -> i64 {
+        Self::ecall(
+            SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VVMA,
+            hart_mask, hart_mask_base, start_addr, size, 0, 0,
+        ).errno()
+    }
+
+    // ===========================================================================
+    // HSM (Hart State Management) extension.
+    // ===========================================================================
+
+    pub(crate) fn hart_start(hartid: u64, start_addr: u64, opaque: u64) -> i64 {
+        Self::ecall(SBI_EXT_HSM, SBI_HSM_HART_START, hartid, start_addr, opaque, 0, 0, 0).errno()
+    }
+
+    pub(crate) fn hart_stop() -> i64 {
+        Self::ecall(SBI_EXT_HSM, SBI_HSM_HART_STOP, 0, 0, 0, 0, 0, 0).errno()
+    }
+
+    pub(crate) fn hart_get_status(hartid: u64) -> i64 {
+        Self::ecall(SBI_EXT_HSM, SBI_HSM_HART_GET_STATUS, hartid, 0, 0, 0, 0, 0).retval()
+    }
+
+    pub(crate) fn hart_suspend(suspend_type: u32, resume_addr: u64, opaque: u64) -> i64 {
+        Self::ecall(
+            SBI_EXT_HSM, SBI_HSM_HART_SUSPEND,
+            suspend_type as u64, resume_addr, opaque, 0, 0, 0,
+        ).errno()
+    }
+
+    // ===========================================================================
+    // System reset extension.
+    // ===========================================================================
+
+    pub(crate) fn system_reset(reset_type: u32, reset_reason: u32) {
+        Self::ecall(
+            SBI_EXT_SRST, SBI_SRST_RESET,
+            reset_type as u64, reset_reason as u64, 0, 0, 0, 0,
         );
-        if !(available || SBI_EXT_OPTIONAL[i]) {
-            required_extension_missing(i);
+        // Should not return.
+        loop {
+            machine::Riscv::wfi();
         }
     }
-}
 
-pub(crate) fn sbi_ext_is_available(ext_id: c_int) -> c_int {
-    if ext_id < 0 || ext_id as usize >= SBI_EXT_ID_COUNT {
-        return 0;
+    pub(crate) fn shutdown() {
+        Self::system_reset(SBI_SRST_TYPE_SHUTDOWN, SBI_SRST_REASON_NONE);
     }
-    SBI_EXT_AVAILABLE[ext_id as usize].load(Ordering::Relaxed) as c_int
-}
 
-pub(crate) fn sbi_ext_name(ext_id: c_int) -> *const c_char {
-    if ext_id < 0 || ext_id as usize >= SBI_EXT_ID_COUNT {
-        return UNKNOWN_EXT_NAME.as_ptr();
+    pub(crate) fn reboot() {
+        Self::system_reset(SBI_SRST_TYPE_COLD_REBOOT, SBI_SRST_REASON_NONE);
     }
-    SBI_EXT_NAMES[ext_id as usize].as_ptr()
-}
 
-// ===========================================================================
-// Convenience functions.
-// ===========================================================================
+    // ===========================================================================
+    // Extension probing.
+    // ===========================================================================
 
-pub(crate) fn sbi_error_str(error: i64) -> *const c_char {
-    (match error {
-        SBI_SUCCESS => c"success",
-        SBI_ERR_FAILED => c"failed",
-        SBI_ERR_NOT_SUPPORTED => c"not supported",
-        SBI_ERR_INVALID_PARAM => c"invalid parameter",
-        SBI_ERR_DENIED => c"denied",
-        SBI_ERR_INVALID_ADDRESS => c"invalid address",
-        SBI_ERR_ALREADY_AVAILABLE => c"already available",
-        SBI_ERR_ALREADY_STARTED => c"already started",
-        SBI_ERR_ALREADY_STOPPED => c"already stopped",
-        _ => c"unknown error",
-    })
-    .as_ptr()
-}
+    /// Panics with a message equivalent to the C `assert(..., "Required SBI
+    /// extension %s not available!", sbi_ext_names[i])` — same
+    /// `__panic_start`/`printf`/`__panic_end` sequence the `assert()` macro
+    /// in `kernel/inc/printf.h` expands to.
+    fn required_extension_missing(idx: usize) -> ! {
+        __panic_start();
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            "kernel/sbi.rs",
+            line!() as c_int,
+            "sbi_probe_extensions",
+        );
+        crate::kprintln!(
+            "Required SBI extension {} not available!",
+            crate::printf::Cs(SBI_EXT_NAMES[idx].as_ptr()),
+        );
+        __panic_end();
+    }
 
-pub(crate) fn sbi_hart_state_str(state: i64) -> *const c_char {
-    (match state {
-        SBI_HSM_STATE_STARTED => c"started",
-        SBI_HSM_STATE_STOPPED => c"stopped",
-        SBI_HSM_STATE_START_PENDING => c"start pending",
-        SBI_HSM_STATE_STOP_PENDING => c"stop pending",
-        SBI_HSM_STATE_SUSPENDED => c"suspended",
-        SBI_HSM_STATE_SUSPEND_PENDING => c"suspend pending",
-        SBI_HSM_STATE_RESUME_PENDING => c"resume pending",
-        _ => c"unknown state",
-    })
-    .as_ptr()
-}
-
-pub(crate) fn sbi_print_version() {
-    let spec_ver = sbi_get_spec_version();
-    let impl_id = sbi_get_impl_id();
-    let impl_ver = sbi_get_impl_version();
-
-    let major = (spec_ver >> 24) & 0x7f;
-    let minor = spec_ver & 0xffffff;
-
-    let impl_name: &core::ffi::CStr = match impl_id {
-        0 => c"Berkeley Boot Loader (BBL)",
-        1 => c"OpenSBI",
-        2 => c"Xvisor",
-        3 => c"KVM",
-        4 => c"RustSBI",
-        5 => c"Diosix",
-        _ => c"Unknown",
-    };
-
-    crate::kprintln!("SBI specification v{}.{}", major as c_int, minor as c_int);
-    crate::kprintln!(
-        "SBI implementation: {} (id={}, version=0x{:x})",
-        crate::printf::Cs(impl_name.as_ptr()),
-        impl_id,
-        impl_ver as u64,
-    );
-}
-
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn sbi_start_secondary_harts(start_addr: u64) {
-    let boot_hart = machine::cpuid();
-
-    crate::kprintln!("Starting secondary harts...");
-    for i in 0..crate::bindings::NCPU as c_int {
-        if i == boot_hart {
-            continue;
-        }
-
-        let status = sbi_hart_get_status(i as u64);
-        if status == SBI_HSM_STATE_STOPPED {
-            let ret = sbi_hart_start(i as u64, start_addr, 0);
-            if ret != SBI_SUCCESS
-                && ret != SBI_ERR_ALREADY_AVAILABLE
-                && ret != SBI_ERR_ALREADY_STARTED
-            {
-                crate::kprintln!(
-                    "hart {}: failed to start ({})",
-                    i,
-                    crate::printf::Cs(sbi_error_str(ret)),
-                );
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn probe_extensions() {
+        crate::kprintln!("SBI extensions:");
+        for i in 0..SBI_EXT_ID_COUNT {
+            let result = Self::probe_extension(SBI_EXT_IDS[i]);
+            let available = result > 0;
+            SBI_EXT_AVAILABLE[i].store(available, Ordering::Relaxed);
+            crate::kprintln!(
+                "  {}: {}{}",
+                crate::printf::Cs(SBI_EXT_NAMES[i].as_ptr()),
+                if available { "AVAILABLE" } else { "UNSUPPORTED" },
+                if SBI_EXT_OPTIONAL[i] { " (OPTIONAL)" } else { "" },
+            );
+            if !(available || SBI_EXT_OPTIONAL[i]) {
+                Self::required_extension_missing(i);
             }
         }
     }
-}
 
-// ===========================================================================
-// Early console (before UART init).
-// ===========================================================================
-
-pub(crate) fn sbi_console_putchar(c: c_int) {
-    if SBI_EXT_AVAILABLE[SBI_EXT_ID_DBCN].load(Ordering::Relaxed) {
-        // DBCN write byte — more reliable than the legacy call on some
-        // platforms.
-        sbi_ecall(SBI_EXT_DBCN, SBI_DBCN_WRITE_BYTE, c as u64, 0, 0, 0, 0, 0);
-    } else {
-        // Legacy console putchar, used for early boot before DBCN is
-        // known to be available.
-        sbi_ecall(SBI_EXT_LEGACY_CONSOLE_PUTCHAR, 0, c as u64, 0, 0, 0, 0, 0);
+    pub(crate) fn ext_is_available(ext_id: c_int) -> c_int {
+        if ext_id < 0 || ext_id as usize >= SBI_EXT_ID_COUNT {
+            return 0;
+        }
+        SBI_EXT_AVAILABLE[ext_id as usize].load(Ordering::Relaxed) as c_int
     }
-}
 
-/// # Safety
-/// `s` must point to a valid NUL-terminated string.
-pub(crate) unsafe fn sbi_console_puts(s: *const c_char) {
-    unsafe {
-        let mut p = s;
-        while *p != 0 {
-            sbi_console_putchar(*p as c_int);
-            p = p.add(1);
+    pub(crate) fn ext_name(ext_id: c_int) -> *const c_char {
+        if ext_id < 0 || ext_id as usize >= SBI_EXT_ID_COUNT {
+            return UNKNOWN_EXT_NAME.as_ptr();
+        }
+        SBI_EXT_NAMES[ext_id as usize].as_ptr()
+    }
+
+    // ===========================================================================
+    // Convenience functions.
+    // ===========================================================================
+
+    pub(crate) fn error_str(error: i64) -> *const c_char {
+        (match error {
+            SBI_SUCCESS => c"success",
+            SBI_ERR_FAILED => c"failed",
+            SBI_ERR_NOT_SUPPORTED => c"not supported",
+            SBI_ERR_INVALID_PARAM => c"invalid parameter",
+            SBI_ERR_DENIED => c"denied",
+            SBI_ERR_INVALID_ADDRESS => c"invalid address",
+            SBI_ERR_ALREADY_AVAILABLE => c"already available",
+            SBI_ERR_ALREADY_STARTED => c"already started",
+            SBI_ERR_ALREADY_STOPPED => c"already stopped",
+            _ => c"unknown error",
+        })
+        .as_ptr()
+    }
+
+    pub(crate) fn hart_state_str(state: i64) -> *const c_char {
+        (match state {
+            SBI_HSM_STATE_STARTED => c"started",
+            SBI_HSM_STATE_STOPPED => c"stopped",
+            SBI_HSM_STATE_START_PENDING => c"start pending",
+            SBI_HSM_STATE_STOP_PENDING => c"stop pending",
+            SBI_HSM_STATE_SUSPENDED => c"suspended",
+            SBI_HSM_STATE_SUSPEND_PENDING => c"suspend pending",
+            SBI_HSM_STATE_RESUME_PENDING => c"resume pending",
+            _ => c"unknown state",
+        })
+        .as_ptr()
+    }
+
+    pub(crate) fn print_version() {
+        let spec_ver = Self::get_spec_version();
+        let impl_id = Self::get_impl_id();
+        let impl_ver = Self::get_impl_version();
+
+        let major = (spec_ver >> 24) & 0x7f;
+        let minor = spec_ver & 0xffffff;
+
+        let impl_name: &core::ffi::CStr = match impl_id {
+            0 => c"Berkeley Boot Loader (BBL)",
+            1 => c"OpenSBI",
+            2 => c"Xvisor",
+            3 => c"KVM",
+            4 => c"RustSBI",
+            5 => c"Diosix",
+            _ => c"Unknown",
+        };
+
+        crate::kprintln!("SBI specification v{}.{}", major as c_int, minor as c_int);
+        crate::kprintln!(
+            "SBI implementation: {} (id={}, version=0x{:x})",
+            crate::printf::Cs(impl_name.as_ptr()),
+            impl_id,
+            impl_ver as u64,
+        );
+    }
+
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+    // crate-path `use` instead of an `extern` redeclaration -- demoted.
+    pub(crate) extern "C" fn start_secondary_harts(start_addr: u64) {
+        let boot_hart = machine::Riscv::cpuid();
+
+        crate::kprintln!("Starting secondary harts...");
+        for i in 0..crate::bindings::NCPU as c_int {
+            if i == boot_hart {
+                continue;
+            }
+
+            let status = Self::hart_get_status(i as u64);
+            if status == SBI_HSM_STATE_STOPPED {
+                let ret = Self::hart_start(i as u64, start_addr, 0);
+                if ret != SBI_SUCCESS
+                    && ret != SBI_ERR_ALREADY_AVAILABLE
+                    && ret != SBI_ERR_ALREADY_STARTED
+                {
+                    crate::kprintln!(
+                        "hart {}: failed to start ({})",
+                        i,
+                        crate::printf::Cs(Self::error_str(ret)),
+                    );
+                }
+            }
         }
     }
-}
 
-pub(crate) fn sbi_console_getchar() -> c_int {
-    let ret = sbi_ecall(SBI_EXT_LEGACY_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
-    if ret.error < 0 {
-        return -1;
+    // ===========================================================================
+    // Early console (before UART init).
+    // ===========================================================================
+
+    pub(crate) fn console_putchar(c: c_int) {
+        if SBI_EXT_AVAILABLE[SBI_EXT_ID_DBCN].load(Ordering::Relaxed) {
+            // DBCN write byte — more reliable than the legacy call on some
+            // platforms.
+            Self::ecall(SBI_EXT_DBCN, SBI_DBCN_WRITE_BYTE, c as u64, 0, 0, 0, 0, 0);
+        } else {
+            // Legacy console putchar, used for early boot before DBCN is
+            // known to be available.
+            Self::ecall(SBI_EXT_LEGACY_CONSOLE_PUTCHAR, 0, c as u64, 0, 0, 0, 0, 0);
+        }
     }
-    // Legacy call returns the character in the `error` field.
-    ret.error as c_int
+
+    /// # Safety
+    /// `s` must point to a valid NUL-terminated string.
+    pub(crate) unsafe fn console_puts(s: *const c_char) {
+        unsafe {
+            let mut p = s;
+            while *p != 0 {
+                Self::console_putchar(*p as c_int);
+                p = p.add(1);
+            }
+        }
+    }
+
+    pub(crate) fn console_getchar() -> c_int {
+        let ret = Self::ecall(SBI_EXT_LEGACY_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
+        if ret.error < 0 {
+            return -1;
+        }
+        // Legacy call returns the character in the `error` field.
+        ret.error as c_int
+    }
 }

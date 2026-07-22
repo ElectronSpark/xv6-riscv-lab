@@ -469,7 +469,7 @@ fn test_timestamp_overflow() {
     crate::kprintln!("NEGATIVE TEST: Timestamp Overflow Handling");
     crate::kprintln!("  Testing timestamp update mechanism");
 
-    let cpu = machine::cpuid() as usize;
+    let cpu = machine::Riscv::cpuid() as usize;
     let start_time = get_jiffs();
     let cpu_ts_before = rcu_api::cpu_timestamp(cpu);
 
@@ -497,7 +497,7 @@ fn test_timestamp_overflow() {
 
 /// Read the current thread's RCU read-lock nesting counter.
 fn current_nesting() -> i32 {
-    let p = machine::current_thread_ptr();
+    let p = machine::Riscv::current_thread_ptr();
     if p.is_null() {
         return 0;
     }
@@ -618,7 +618,7 @@ struct ListTestNode {
 }
 
 fn container_of_list_node(entry: *mut list_node_t) -> *mut ListTestNode {
-    machine::list_container_of::<ListTestNode>(entry, offset_of!(ListTestNode, list_entry))
+    machine::Riscv::list_container_of::<ListTestNode>(entry, offset_of!(ListTestNode, list_entry))
 }
 
 fn asan_poison_node(node: *mut ListTestNode) {

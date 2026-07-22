@@ -2802,10 +2802,10 @@ impl Sys {
             if timeout_ms == 0 {
                 return Ok(0);
             }
-            let timeout_ticks = if timeout_ms > 0 { crate::machine::ms_to_rawticks(timeout_ms as u64) } else { 0 };
-            let start = crate::machine::read_time();
+            let timeout_ticks = if timeout_ms > 0 { crate::machine::Riscv::ms_to_rawticks(timeout_ms as u64) } else { 0 };
+            let start = crate::machine::Riscv::read_time();
             loop {
-                if !(timeout_ms < 0 || (crate::machine::read_time() - start) < timeout_ticks) {
+                if !(timeout_ms < 0 || (crate::machine::Riscv::read_time() - start) < timeout_ticks) {
                     break;
                 }
                 sleep_ms(1);
@@ -2831,8 +2831,8 @@ impl Sys {
         // array, just filled in by `either_copyin` above.
         let pfds = unsafe { core::slice::from_raw_parts_mut(pfds_raw, nfds as usize) };
 
-        let timeout_ticks = if timeout_ms > 0 { crate::machine::ms_to_rawticks(timeout_ms as u64) } else { 0 };
-        let start = crate::machine::read_time();
+        let timeout_ticks = if timeout_ms > 0 { crate::machine::Riscv::ms_to_rawticks(timeout_ms as u64) } else { 0 };
+        let start = crate::machine::Riscv::read_time();
         let mut ready: c_int;
         loop {
             ready = Sys::vfs_poll_scan(pfds);
@@ -2842,7 +2842,7 @@ impl Sys {
             if timeout_ms == 0 {
                 break;
             }
-            if timeout_ms > 0 && (crate::machine::read_time() - start) >= timeout_ticks {
+            if timeout_ms > 0 && (crate::machine::Riscv::read_time() - start) >= timeout_ticks {
                 break;
             }
             sleep_ms(1);

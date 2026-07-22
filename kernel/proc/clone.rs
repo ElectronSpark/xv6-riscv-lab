@@ -244,9 +244,9 @@ extern "C" fn forkret_entry(prev: *mut Context) {
 
     Scheduler::context_switch_finish(xv6_thread_from_context(prev), cur, 0);
     xv6_mycpu_clear_noff();
-    crate::machine::intr_on();
+    crate::machine::Riscv::intr_on();
     Rcu::check_callbacks();
-    crate::machine::smp_mb();
+    crate::machine::Riscv::smp_mb();
     usertrapret();
 }
 

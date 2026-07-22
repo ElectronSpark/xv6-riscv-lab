@@ -160,7 +160,7 @@ pub(super) unsafe fn fifo_select_task_rq(
         return (-(EINVAL as isize)) as *mut Rq;
     }
 
-    let cur_cpu = machine::cpuid();
+    let cur_cpu = machine::Riscv::cpuid();
     let mut best_rq: *mut Rq = null_mut();
     let mut best_count: c_int = INT_MAX;
 

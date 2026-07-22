@@ -195,7 +195,7 @@ pub(crate) extern "C" fn sys_sigreturn() -> u64 {
     let p = current();
     // Mirror the C `assert(p != NULL, ...)`. In a non-panic build, halt.
     if p.is_null() {
-        loop { crate::machine::wfi(); }
+        loop { crate::machine::Riscv::wfi(); }
     }
     // Return the restored a0 from the sigframe so the syscall dispatcher
     // doesn't overwrite it (preserves e.g. -EINTR from sigsuspend).

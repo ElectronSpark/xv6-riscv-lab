@@ -990,7 +990,7 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
 
     fence(Ordering::SeqCst);
 
-    debug_assert!(!machine::intr_get(), "virtio_disk_rw: interrupts enabled");
+    debug_assert!(!machine::Riscv::intr_get(), "virtio_disk_rw: interrupts enabled");
     // SAFETY: `diskno` valid; value is the queue number (0).
     unsafe { core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_NOTIFY), 0) };
 

@@ -250,12 +250,7 @@ pub(super) fn ptr_err_or<T>(p: *mut T, err: c_int) -> c_int {
     if is_err(p) { ptr_err(p) } else { err }
 }
 
-pub use crate::machine::{
-    atomic_load_acquire_i32, atomic_store_release_i32, atomic_inc_i32, atomic_dec_unless_i32,
-    atomic_store_release_u64, smp_load_acquire_i32, smp_store_release_i32,
-    smp_load_acquire_state, smp_store_release_state, smp_store_release_u64,
-    smp_load_acquire_u64, smp_rmb,
-};
+use crate::machine::Riscv;
 
 #[derive(Clone, Copy)]
 pub struct SpinLockRef<'a> {
@@ -550,7 +545,7 @@ impl<'a> ThreadGroupAccess<'a> {
     }
     #[inline] pub fn refcount_dec_unless(&self, floor: c_int) -> bool {
         let p = raw_mut_ptr!(self, refcount);
-        atomic_dec_unless_i32(p, floor)
+        Riscv::atomic_dec_unless_i32(p, floor)
     }
     #[inline] pub fn live_threads_load_acquire(&self) -> c_int {
         let ap = raw_mut_ptr!(self, live_threads) as *mut AtomicI32;
@@ -1301,9 +1296,9 @@ impl<'a> SigactsAccess<'a> {
 
     #[inline] pub fn refcount(&self) -> c_int { shim_call!(self, sa_refcount) }
     #[inline] pub fn set_refcount(&self, v: c_int) { shim_call!(self, sa_set_refcount, v) }
-    #[inline] pub fn refcount_inc(&self) { atomic_inc_i32(raw_mut_ptr!(self, refcount)); }
+    #[inline] pub fn refcount_inc(&self) { Riscv::atomic_inc_i32(raw_mut_ptr!(self, refcount)); }
     #[inline] pub fn refcount_dec_unless(&self, floor: c_int) -> bool {
-        atomic_dec_unless_i32(raw_mut_ptr!(self, refcount), floor)
+        Riscv::atomic_dec_unless_i32(raw_mut_ptr!(self, refcount), floor)
     }
     #[inline] pub fn sigterm(&self) -> u64 { shim_call!(self, sa_sigterm) }
     #[inline] pub fn set_sigterm(&self, v: u64) { shim_call!(self, sa_set_sigterm, v) }

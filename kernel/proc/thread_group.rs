@@ -36,7 +36,7 @@ use crate::bindings::{
 // have been inlined at those sites (`ThreadGroup::{init,alloc,alloc_kernel}` and
 // `ThreadGroupAccess::put`) and deleted. `crate::mm::slab_*` are `unsafe fn`,
 // so every inlined site keeps its existing `unsafe`/`u!{}` context.
-use crate::machine::{cpuid, CpuLocal};
+use crate::machine::{CpuLocal, Riscv};
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, ThreadAccess, ThreadGroupAccess,
     ThreadSignalAccess, is_err, list_container_of as container_of,
@@ -48,7 +48,7 @@ use crate::proc::proc_shims::{xv6_panic, xv6_pid_rlock, xv6_pid_runlock, xv6_pid
 // (`extern "C"` redeclarations above); now direct crate-path calls to the
 // real, already-Rust definitions in `sched.rs`.
 use crate::proc::Scheduler;
-use crate::ipi::ipi_send_single;
+use crate::ipi::Ipi;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-N3.
@@ -817,8 +817,8 @@ impl<'a> ThreadGroupAccess<'a> {
                 } else if tta.is_running() {
                     let se = tta.sched_entity_ptr();
                     let target_cpu = SchedEntityRef::assume(se).cpu_id_load_acquire();
-                    if target_cpu != cpuid() {
-                        ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+                    if target_cpu != Riscv::cpuid() {
+                        Ipi::send_single(target_cpu, IPI_REASON_RESCHEDULE);
                     } else {
                         // Inlined former `set_needs_resched()` facade:
                         // mycpu()->flags |= CPU_FLAG_NEEDS_RESCHED.

@@ -38,7 +38,7 @@
 //!   explicitly started. The boot hart releases them from
 //!   [`start_kernel_post_init`] (thread context, **after** the root
 //!   filesystem is mounted and `/bin/init`'s VFS root is installed) by
-//!   `STARTED.store(1, Release)` followed by `sbi_start_secondary_harts(
+//!   `STARTED.store(1, Release)` followed by `Sbi::start_secondary_harts(
 //!   &_entry as *const u8 as u64)` — a Linux-style explicit
 //!   `sbi_hart_start()` per hart, entering at the same `_entry` symbol
 //!   `entry.S`/the boot hart used. `sleep_ms(100)` after the SBI call gives
@@ -95,7 +95,7 @@ use crate::machine;
 // `proc/mod.rs`'s `pub use submodule::*;` crate-level re-export instead
 // (verified individually: none of these seven names is defined more than
 // once anywhere under `proc/`, so the glob resolves unambiguously).
-use crate::ipi::{cpus_init, ipi_init, mycpu_init};
+use crate::ipi::Ipi;
 use crate::irq::irq_core::irq_desc_init;
 use crate::irq::plic::{plicinit, plicinithart};
 use crate::irq::trap::{trapinit, trapinithart};
@@ -226,7 +226,7 @@ use crate::dev::x1_emac::X1EmacSoftc;
 use crate::dev::x1_sdhci::SdhciSoftc;
 use crate::pci::pci_init;
 use crate::ramdisk::ramdisk_init;
-use crate::sbi::{sbi_probe_extensions, sbi_start_secondary_harts};
+use crate::sbi::Sbi;
 use crate::sysnet::sockinit;
 use crate::virtio_disk::virtio_disk_init;
 
@@ -273,7 +273,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         // Apply platform configuration from FDT to kernel globals
         Fdt::fdt_apply_platform_config();
 
-        sbi_probe_extensions();
+        Sbi::probe_extensions();
         ksymbols_init(); // Initialize kernel symbols
         crate::mm::kalloc::Kmem::kinit(); // physical page allocator
         PageTable::kvminit(); // create kernel page table
@@ -281,7 +281,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         PageTable::kvminithart(); // turn on paging
         crate::kprintln!("paging enabled");
         Pipe::pipe_init(); // initialize pipe subsystem
-        mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
+        Ipi::mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
         crate::kprintln!("mycpu initialized");
         Rcu::init(); // RCU subsystem initialization
         DevTable::init(); // Initialize the device table
@@ -294,7 +294,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         trapinithart(); // install kernel trap vector
         plicinit(); // set up interrupt controller
         plicinithart(); // ask PLIC for device interrupts
-        ipi_init(); // inter-processor interrupts
+        Ipi::init(); // inter-processor interrupts
         consoleinit();
         Netdev::init();
         pci_init();
@@ -322,28 +322,28 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
 fn __start_kernel_secondary_hart(hartid: c_int) {
     // SAFETY: boot-time, this-hart-only bring-up sequence; the
     // `smp_cond_load_acquire`-equivalent spin below guarantees the boot
-    // hart's `__start_kernel_main_hart` (and `cpus_init()`/`mycpu_init()`
+    // hart's `__start_kernel_main_hart` (and `Ipi::cpus_init()`/`Ipi::mycpu_init()`
     // called from `start_kernel` before this function) has already run to
     // completion, so `cpus[]` is initialized and this hart's own slot is
     // safe to touch. Matches the C original's call order exactly.
     unsafe {
         // Set tp to physical address first. cpus[] was already zeroed by boot
-        // hart's cpus_init(), and intr_sp will be set by trapinit() before we
+        // hart's Ipi::cpus_init(), and intr_sp will be set by trapinit() before we
         // proceed.
-        mycpu_init(hartid as u64, false);
+        Ipi::mycpu_init(hartid as u64, false);
 
         while STARTED.load(Ordering::Acquire) == 0 {
-            machine::cpu_relax();
+            machine::Riscv::cpu_relax();
         }
 
         // First turn on paging (still using physical TP)
         PageTable::kvminithart(); // turn on paging
         // Now switch TP to trampoline virtual address (paging is now on)
-        mycpu_init(hartid as u64, true);
+        Ipi::mycpu_init(hartid as u64, true);
         Thread::idle_init();
         trapinithart(); // install kernel trap vector
         plicinithart(); // ask PLIC for device interrupts
-        Rcu::cpu_init(machine::cpuid()); // Initialize RCU for this CPU
+        Rcu::cpu_init(machine::Riscv::cpuid()); // Initialize RCU for this CPU
     }
 }
 
@@ -358,8 +358,8 @@ pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: b
         // released (see the module doc) — no concurrent access to `cpus[]`
         // or this hart's own flags is possible yet.
         unsafe {
-            cpus_init();
-            mycpu_init(hartid as u64, false);
+            Ipi::cpus_init();
+            Ipi::mycpu_init(hartid as u64, false);
         }
         machine::CpuLocal::current().flags_or(CPU_FLAG_BOOT_HART);
         __start_kernel_main_hart(hartid, fdt_base);
@@ -382,7 +382,7 @@ pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: b
     // SAFETY: single call per hart, scheduler is up on both the boot-hart
     // and secondary-hart paths by this point.
     unsafe {
-        Rcu::kthread_start_cpu(machine::cpuid());
+        Rcu::kthread_start_cpu(machine::Riscv::cpuid());
     }
 
     // Idle loop
@@ -391,9 +391,9 @@ pub(crate) fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_hart: b
         // callable from any hart once the scheduler is initialized (true
         // on both paths above).
         Scheduler::yield_now();
-        machine::intr_on();
-        machine::wfi();
-        machine::intr_off();
+        machine::Riscv::intr_on();
+        machine::Riscv::wfi();
+        machine::Riscv::intr_off();
     }
 }
 
@@ -479,7 +479,7 @@ pub(crate) fn start_kernel_post_init() {
     // reach their own `smp_cond_load_acquire`-equivalent spin (see the
     // module doc) before boot proceeds.
     unsafe {
-        sbi_start_secondary_harts(&raw const _entry as u64);
+        Sbi::start_secondary_harts(&raw const _entry as u64);
         sleep_ms(100); // Give secondary harts time to start
     }
 

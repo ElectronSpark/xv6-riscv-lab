@@ -163,7 +163,7 @@ const _: () = {
 // FDT/boot-configured globals, exact C names/types preserved. P3-D3c: the
 // whole extern mesh around them is gone -- `start.rs`'s `timerinit()` and
 // `dev/fdt.rs`'s `fdt_apply_platform_config` write `__jiff_ticks` by crate
-// path, and `machine::tick_ms()`/`tick_s()` (through which everything else,
+// path, and `machine::Riscv::tick_ms()`/`tick_s()` (through which everything else,
 // e.g. `lock/spinlock.rs`, reads the timebase) import
 // `__timebase_frequency` by crate path too. Single boot-time writer,
 // read-only thereafter — identical contract to `uart.rs`'s `__uart0_*` /
@@ -335,7 +335,7 @@ fn list_entry_to_node(head: *mut list_node_t, entry: *mut list_node_t) -> *mut t
     if entry.is_null() || entry == head {
         return ptr::null_mut();
     }
-    machine::list_container_of::<timer_node>(entry, offset_of!(timer_node, list_entry))
+    machine::Riscv::list_container_of::<timer_node>(entry, offset_of!(timer_node, list_entry))
 }
 
 /// Mirrors `LIST_FIRST_NODE(&timer->list_head, struct timer_node, list_entry)`.
@@ -345,7 +345,7 @@ fn list_entry_to_node(head: *mut list_node_t, entry: *mut list_node_t) -> *mut t
 unsafe fn first_node(timer: *mut timer_root) -> *mut timer_node {
     // SAFETY: caller contract.
     let head = unsafe { &raw mut (*timer).list_head };
-    list_entry_to_node(head, machine::list_entry_next(head))
+    list_entry_to_node(head, machine::Riscv::list_entry_next(head))
 }
 
 /// Mirrors `LIST_NEXT_NODE(&timer->list_head, node, list_entry)`.
@@ -357,7 +357,7 @@ unsafe fn next_node(timer: *mut timer_root, node: *mut timer_node) -> *mut timer
     // SAFETY: caller contract.
     let head = unsafe { &raw mut (*timer).list_head };
     let entry = unsafe { &raw mut (*node).list_entry };
-    list_entry_to_node(head, machine::list_entry_next(entry))
+    list_entry_to_node(head, machine::Riscv::list_entry_next(entry))
 }
 
 /// Mirrors `__timer_update_next_tick()`.
@@ -383,7 +383,7 @@ unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
     // SAFETY: `__jiff_ticks` has a single boot-time writer (see the module
     // doc), read-only from every hart/interrupt context thereafter.
     let jiff_ticks = unsafe { __jiff_ticks };
-    machine::write_stimecmp(machine::read_time() + jiff_ticks);
+    machine::Riscv::write_stimecmp(machine::Riscv::read_time() + jiff_ticks);
 
     if is_boot_hart() {
         // SAFETY: `data` is `&raw mut TICKS` (an `AtomicU64`), set once in
@@ -424,7 +424,7 @@ pub(crate) unsafe fn timer_init(timer: *mut timer_root) {
     // SAFETY: `timer` was just zeroed above and is exclusively owned here.
     unsafe {
         rb_root_init(&raw mut (*timer).root, &raw const TIMER_ROOT_OPTS as *mut rb_root_opts);
-        machine::list_entry_init(&raw mut (*timer).list_head);
+        machine::Riscv::list_entry_init(&raw mut (*timer).list_head);
         (*timer).next_tick = 0;
         (*timer).current_tick = 0;
         (*timer).flags.set_valid(1);
@@ -488,8 +488,8 @@ pub(crate) unsafe fn timer_node_init(
     // the C `memset(node, 0, sizeof(struct timer_node))`.
     unsafe {
         ptr::write_bytes(node as *mut u8, 0, core::mem::size_of::<timer_node>());
-        machine::rb_node_init(&raw mut (*node).rb);
-        machine::list_entry_init(&raw mut (*node).list_entry);
+        machine::Riscv::rb_node_init(&raw mut (*node).rb);
+        machine::Riscv::list_entry_init(&raw mut (*node).list_entry);
         (*node).expires = expires;
         (*node).callback = callback;
         (*node).data = data;
@@ -544,7 +544,7 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
         // SAFETY: `timer`/`node` are live; `list_head` is a valid list
         // sentinel (initialized by `timer_init`).
         unsafe {
-            machine::list_entry_insert_after(&raw mut (*timer).list_head, &raw mut (*node).list_entry);
+            machine::Riscv::list_entry_insert_after(&raw mut (*timer).list_head, &raw mut (*node).list_entry);
             (*timer).next_tick = (*node).expires;
         }
     } else {
@@ -553,7 +553,7 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
         // the same order by this function's own invariant).
         let prev_node = (prev as *mut u8).wrapping_sub(offset_of!(timer_node, rb)) as *mut timer_node;
         unsafe {
-            machine::list_entry_insert_after(&raw mut (*prev_node).list_entry, &raw mut (*node).list_entry);
+            machine::Riscv::list_entry_insert_after(&raw mut (*prev_node).list_entry, &raw mut (*node).list_entry);
         }
     }
     // SAFETY: see above.
@@ -571,7 +571,7 @@ unsafe fn timer_remove_unlocked(timer: *mut timer_root, node: *mut timer_node) {
     // SAFETY: caller contract.
     unsafe {
         crate::rbtree::rb_delete_node_color(&raw mut (*timer).root, &raw mut (*node).rb);
-        machine::list_entry_detach(&raw mut (*node).list_entry);
+        machine::Riscv::list_entry_detach(&raw mut (*node).list_entry);
         (*node).timer = ptr::null_mut();
         update_next_tick(timer);
     }

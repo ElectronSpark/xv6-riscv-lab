@@ -15,16 +15,12 @@ use crate::bindings::{
     context, cpumask_t, rb_node, rb_root, rq, sched_entity, spinlock_t, thread,
     thread_state, tnode_t, ttree_t,
 };
-use crate::machine::{
-    cpu_local_ptr, cpu_relax, cpuid as cpuid_rs, intr_get, intr_off_save, intr_restore, pop_off,
-    push_off,
-};
+use crate::machine::Riscv;
 use crate::lock::rcu::Rcu;
 use crate::proc::proc_shims::xv6_panic;
 use crate::lock::spinlock::RawSpinlock;
 use crate::proc::access::{
-    is_err_or_null, smp_load_acquire_i32, smp_load_acquire_state, smp_rmb,
-    smp_store_release_state, CpuLocalRef, RqRef, SchedEntityRef, SpinLockRef, ThreadAccess,
+    is_err_or_null, CpuLocalRef, RqRef, SchedEntityRef, SpinLockRef, ThreadAccess,
     TnodeRef, TtreeRef,
 };
 // NO-STANDALONE-FN: the `ttree_init`/`ttree_wait`/`ttree_wakeup_key` and
@@ -42,7 +38,7 @@ use crate::proc::access::{
 // `Rq::method(..)` at the sites below.
 use crate::proc::Rq;
 use crate::timer::sched_timer::__do_timer_tick;
-use crate::ipi::ipi_send_single;
+use crate::ipi::Ipi;
 
 // ===========================================================================
 // Native scheduler-policy dispatch — P3-10e (user directive: fully adapt
@@ -397,9 +393,9 @@ fn page_free(ptr: *mut c_void, order: c_int) {
 }
 
 #[inline] fn cpu_access<'a>() -> CpuLocalRef<'a> {
-    // SAFETY: `cpu_local_ptr()` indexes into statically-allocated, always-initialized
+    // SAFETY: `Riscv::cpu_local_ptr()` indexes into statically-allocated, always-initialized
     // per-CPU storage; never null.
-    unsafe { CpuLocalRef::assume(cpu_local_ptr()) }
+    unsafe { CpuLocalRef::assume(Riscv::cpu_local_ptr()) }
 }
 #[inline] fn current_thread() -> *mut thread { Scheduler::cpu_access().proc_ptr() }
 
@@ -612,7 +608,7 @@ fn switch_to_impl(cur: *mut thread, target: *mut thread) -> *mut thread {
 
 fn switch_to_internal(p: *mut thread) -> *mut thread {
     Scheduler::sched_assert_holding();
-    kassert!(!intr_get(), "Interrupts must be disabled before switching to a thread");
+    kassert!(!Riscv::intr_get(), "Interrupts must be disabled before switching to a thread");
     let proc = Scheduler::current_thread();
     let intena = Scheduler::cpu_access().intena();
     let mut spin_depth_expected = 1;
@@ -623,7 +619,7 @@ fn switch_to_internal(p: *mut thread) -> *mut thread {
 
     let prev = Scheduler::switch_to_impl(proc, p);
 
-    kassert!(!intr_get(), "Interrupts must be disabled after switching");
+    kassert!(!Riscv::intr_get(), "Interrupts must be disabled after switching");
     kassert!(Scheduler::current_thread() == proc, "Yield returned to a different thread");
     kassert!(Scheduler::thread_running(proc), "Thread state must be RUNNING after yield");
     Scheduler::cpu_access().set_intena(intena);
@@ -636,12 +632,12 @@ impl Scheduler {
 fn scheduler_yield_inner() {
     __do_timer_tick();
     // SAFETY: `rq_flush_wake_list` (kernel/proc/rq.rs) is `unsafe` because
-    // it walks the wake list through raw pointers; `cpuid_rs()` always
+    // it walks the wake list through raw pointers; `Riscv::cpuid()` always
     // yields a valid, in-range CPU id into the statically-allocated,
     // always-initialized per-CPU `rq_percpu` storage this function
     // indexes, and the function itself range-checks it again before
     // touching anything.
-    unsafe { Rq::flush_wake_list(cpuid_rs()); }
+    unsafe { Rq::flush_wake_list(Riscv::cpuid()); }
 
     let intr = Rq::lock_current_irqsave();
     let proc = Scheduler::current_thread();
@@ -670,7 +666,7 @@ fn scheduler_yield_inner() {
     }
 
     // SAFETY: see the matching call above.
-    unsafe { Rq::flush_wake_list(cpuid_rs()); }
+    unsafe { Rq::flush_wake_list(Riscv::cpuid()); }
     // Plain safe fn as of P3-D3b (its `#[no_mangle] extern "C"` export
     // is gone).
     Rcu::check_callbacks();
@@ -682,7 +678,7 @@ impl Scheduler { pub(crate) fn yield_now() { Scheduler::scheduler_yield_inner() 
 // ---------------- scheduler_sleep ---------------------------------------
 impl Scheduler {
 fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) {
-    let intr = intr_off_save();
+    let intr = Riscv::intr_off_save();
     let proc = Scheduler::current_thread();
     kassert!(!proc.is_null(), "PCB is NULL");
     kassert!(Scheduler::state_is_sleeping(sleep_state),
@@ -696,7 +692,7 @@ fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) 
     if lk_holding {
         lk.expect("BUG: scheduler_sleep lk_holding true but lk is None").lock();
     }
-    intr_restore(intr);
+    Riscv::intr_restore(intr);
 }
 }
 
@@ -724,23 +720,23 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
         RawSpinlock::lock(&raw mut (*se).pi_lock);
 
         if p == Scheduler::current_thread() {
-            smp_rmb();
+            Riscv::smp_rmb();
             if from_stopped {
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 return;
             }
-            let old_state = smp_load_acquire_state(&(*p).state as *const _);
+            let old_state = Riscv::smp_load_acquire_state(&(*p).state as *const _);
             if !Scheduler::state_is_sleeping(old_state) {
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 return;
             }
-            smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
+            Riscv::smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
             RawSpinlock::unlock(&raw mut (*se).pi_lock);
             return;
         }
 
-        smp_rmb();
-        let mut old_state = smp_load_acquire_state(&(*p).state as *const _);
+        Riscv::smp_rmb();
+        let mut old_state = Riscv::smp_load_acquire_state(&(*p).state as *const _);
         if from_stopped {
             if old_state != THREAD_STOPPED {
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
@@ -753,19 +749,19 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
 
         // retry loop
         loop {
-            push_off();
+            Riscv::push_off();
             let rq = Rq::select_task_rq(se, (*se).affinity_mask);
             kassert!(!is_err_or_null(rq), "do_scheduler_wakeup: rq_select_task_rq failed");
-            let mut origin_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
+            let mut origin_cpuid = Riscv::smp_load_acquire_i32(&(*se).cpu_id as *const _);
             let target_cpu = (*rq).cpu_id;
             if origin_cpuid < 0 { origin_cpuid = target_cpu; }
 
             if Rq::trylock_two(origin_cpuid, target_cpu) == 0 {
-                pop_off();
+                Riscv::pop_off();
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
-                for _ in 0..10 { cpu_relax(); }
+                for _ in 0..10 { Riscv::cpu_relax(); }
                 RawSpinlock::lock(&raw mut (*se).pi_lock);
-                old_state = smp_load_acquire_state(&(*p).state as *const _);
+                old_state = Riscv::smp_load_acquire_state(&(*p).state as *const _);
                 if from_stopped {
                     if old_state != THREAD_STOPPED {
                         RawSpinlock::unlock(&raw mut (*se).pi_lock);
@@ -777,14 +773,14 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
                 }
                 continue;
             }
-            pop_off();
+            Riscv::pop_off();
 
-            let current_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
+            let current_cpuid = Riscv::smp_load_acquire_i32(&(*se).cpu_id as *const _);
             if current_cpuid >= 0 && current_cpuid != origin_cpuid {
                 Rq::unlock_two(origin_cpuid, target_cpu);
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 RawSpinlock::lock(&raw mut (*se).pi_lock);
-                old_state = smp_load_acquire_state(&(*p).state as *const _);
+                old_state = Riscv::smp_load_acquire_state(&(*p).state as *const _);
                 if from_stopped {
                     if old_state != THREAD_STOPPED {
                         RawSpinlock::unlock(&raw mut (*se).pi_lock);
@@ -797,20 +793,20 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
                 continue;
             }
 
-            smp_store_release_state(&raw mut (*p).state, THREAD_WAKENING);
+            Riscv::smp_store_release_state(&raw mut (*p).state, THREAD_WAKENING);
 
-            if smp_load_acquire_i32(&(*se).on_rq as *const _) != 0 {
-                smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
+            if Riscv::smp_load_acquire_i32(&(*se).on_rq as *const _) != 0 {
+                Riscv::smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 Rq::unlock_two(origin_cpuid, target_cpu);
                 return;
             }
 
-            if smp_load_acquire_i32(&(*se).on_cpu as *const _) != 0 {
+            if Riscv::smp_load_acquire_i32(&(*se).on_cpu as *const _) != 0 {
                 Rq::add_wake_list(origin_cpuid, se);
                 RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 Rq::unlock_two(origin_cpuid, target_cpu);
-                ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
+                Ipi::send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
                 return;
             }
 
@@ -1036,7 +1032,7 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
     // invariant.
     let next_se_ref = unsafe { SchedEntityRef::assume(next_se) };
     next_se_ref.on_cpu_store_release(1);
-    next_se_ref.set_cpu_id(cpuid_rs());
+    next_se_ref.set_cpu_id(Riscv::cpuid());
     if Scheduler::thread_zombie(prev) {
         // SAFETY: `prev` is proven non-null by the diverging `kassert!` above;
         // its embedded `sched_entity` is live by kernel invariant.

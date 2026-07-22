@@ -173,7 +173,7 @@ static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
 impl NullRandDev {
     fn xorshift64star() -> u64 {
         let mut x = RAND_STATE.load(Ordering::Relaxed);
-        x ^= crate::machine::read_time();
+        x ^= crate::machine::Riscv::read_time();
         // SAFETY: `xv6_current_thread()` always returns a live, non-null
         // pointer (the running thread) -- only its bit pattern is used here,
         // as XOR-mixing entropy, matching the C's `(uint64)current`; the

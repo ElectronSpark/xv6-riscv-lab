@@ -312,7 +312,7 @@ fn hlist_hash_uint64(key: u64) -> u64 {
 /// self-linked node is either a detached entry or an empty list head).
 #[inline(always)]
 fn ln_is_detached(entry: *mut list_node_t) -> bool {
-    machine::list_entry_is_detached(entry as *const list_node_t)
+    machine::Riscv::list_entry_is_detached(entry as *const list_node_t)
 }
 
 /// Mirrors `LIST_IS_EMPTY(head)` -- same formula as [`ln_is_detached`],
@@ -326,25 +326,25 @@ fn ln_is_empty(head: *mut list_node_t) -> bool {
 /// Mirrors `list_node_push_front(head, node, member)`.
 #[inline(always)]
 fn ln_push_front(head: *mut list_node_t, node: *mut list_node_t) {
-    machine::list_entry_insert_after(head, node);
+    machine::Riscv::list_entry_insert_after(head, node);
 }
 
 /// Mirrors `list_node_push_back(head, node, member)`.
 #[inline(always)]
 fn ln_push_back(head: *mut list_node_t, node: *mut list_node_t) {
-    let tail = machine::list_entry_prev(head);
-    machine::list_entry_insert_after(tail, node);
+    let tail = machine::Riscv::list_entry_prev(head);
+    machine::Riscv::list_entry_insert_after(tail, node);
 }
 
 /// Mirrors `list_node_pop_front(head, type, member)`: detaches and
 /// returns the first node, or null if `head` is empty.
 #[inline(always)]
 fn ln_pop_front(head: *mut list_node_t) -> *mut list_node_t {
-    let first = machine::list_entry_next(head);
+    let first = machine::Riscv::list_entry_next(head);
     if first == head {
         return core::ptr::null_mut();
     }
-    machine::list_entry_detach(first);
+    machine::Riscv::list_entry_detach(first);
     first
 }
 
@@ -572,8 +572,8 @@ pub(crate) fn binit() {
     // boot (function contract) before any other entry point in this
     // file can observe `BCACHE`/`BUF_STORAGE`, so no concurrent access
     // is possible yet.
-    machine::list_entry_init(&raw mut bc.free_list);
-    machine::list_entry_init(&raw mut bc.dirty_list);
+    machine::Riscv::list_entry_init(&raw mut bc.free_list);
+    machine::Riscv::list_entry_init(&raw mut bc.dirty_list);
     bc.dirty_count = 0;
 
     let mut func = hlist_func_t {
@@ -595,8 +595,8 @@ pub(crate) fn binit() {
 
         for i in 0..NBUF {
             let b: *mut buf = buf_at(i);
-            machine::list_entry_init(&raw mut (*b).free_entry);
-            machine::list_entry_init(&raw mut (*b).dirty_entry);
+            machine::Riscv::list_entry_init(&raw mut (*b).free_entry);
+            machine::Riscv::list_entry_init(&raw mut (*b).dirty_entry);
             (*b).dirty = 0;
             RawMutex::init(&raw mut (*b).lock, c"buffer".as_ptr() as *mut core::ffi::c_char);
             ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
@@ -625,7 +625,7 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
         unsafe {
             let fe = &raw mut (*b).free_entry;
             if !ln_is_detached(fe) {
-                machine::list_entry_detach(fe);
+                machine::Riscv::list_entry_detach(fe);
             }
             (*b).refcnt += 1;
         }
@@ -776,7 +776,7 @@ pub(crate) fn bwrite(b: *mut buf) {
                 (*b).dirty = 0;
                 let de = &raw mut (*b).dirty_entry;
                 if !ln_is_detached(de) {
-                    machine::list_entry_detach(de);
+                    machine::Riscv::list_entry_detach(de);
                     bc.dirty_count -= 1;
                 }
             }
@@ -829,7 +829,7 @@ pub(crate) fn bsync() {
         // SAFETY: `b` live, `bc` held.
         let (fe, refcnt_zero) = unsafe { (&raw mut (*b).free_entry, (*b).refcnt == 0) };
         if refcnt_zero && !ln_is_detached(fe) {
-            machine::list_entry_detach(fe);
+            machine::Riscv::list_entry_detach(fe);
         }
         // SAFETY: `b` live, `bc` held.
         unsafe { (*b).refcnt += 1 };
@@ -917,7 +917,7 @@ pub(crate) fn bpin(b: *mut buf) {
     unsafe {
         let fe = &raw mut (*b).free_entry;
         if (*b).refcnt == 0 && !ln_is_detached(fe) {
-            machine::list_entry_detach(fe);
+            machine::Riscv::list_entry_detach(fe);
         }
         (*b).refcnt += 1;
     }

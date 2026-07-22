@@ -40,7 +40,7 @@ use crate::bindings::{
 };
 use crate::lock::spinlock::spin_sleep_cb;
 use crate::lock::spinlock::spin_wake_cb;
-use crate::machine::{intr_off_save, intr_restore};
+use crate::machine::Riscv;
 use crate::proc::access::{
     err_ptr_errno as err_ptr, is_err, is_err_or_null, ptr_err_errno as ptr_err,
     tnode_from_list_entry, tnode_from_tree_entry, write_out, ListNodeRef, TnodeRef, TqRef,
@@ -506,7 +506,7 @@ impl<'a> TqRef<'a> {
         callback_data: *mut c_void,
         rdata: *mut u64,
     ) -> c_int {
-        let intr = intr_off_save();
+        let intr = Riscv::intr_off_save();
         let mut waiter: tnode_t = zeroed_tnode();
         let waiter_ptr = &raw mut waiter;
         let wr = TnodeRef::from_ptr(waiter_ptr).unwrap();
@@ -534,7 +534,7 @@ impl<'a> TqRef<'a> {
                 xv6_panic(c"Failed to remove interrupted waiter from queue".as_ptr());
             }
         }
-        intr_restore(intr);
+        Riscv::intr_restore(intr);
 
         if !rdata.is_null() {
             write_out(rdata, wr.data());
@@ -672,7 +672,7 @@ impl<'a> TtreeRef<'a> {
         callback_data: *mut c_void,
         rdata: *mut u64,
     ) -> c_int {
-        let intr = intr_off_save();
+        let intr = Riscv::intr_off_save();
         let mut waiter: tnode_t = zeroed_tnode();
         let waiter_ptr = &raw mut waiter;
         let wr = TnodeRef::from_ptr(waiter_ptr).unwrap();
@@ -702,7 +702,7 @@ impl<'a> TtreeRef<'a> {
                 xv6_panic(c"Failed to remove interrupted waiter from tree".as_ptr());
             }
         }
-        intr_restore(intr);
+        Riscv::intr_restore(intr);
 
         if !rdata.is_null() {
             write_out(rdata, wr.data());

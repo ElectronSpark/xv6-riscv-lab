@@ -946,7 +946,7 @@ impl Tty {
             }
         }
         // Fallback: no session or no fg group -- signal current process.
-        let cur = crate::machine::current_thread_ptr();
+        let cur = crate::machine::Riscv::current_thread_ptr();
         if let Some(ta) = crate::proc::access::ThreadAccess::from_ptr(cur) { ta.kill_proc(signum); }
     }
 }
@@ -1171,8 +1171,8 @@ impl Tty {
             // Wait for at least one character. All ring reads/writes are safe
             // guarded field accesses through `guard`.
             while guard.raw_r == guard.raw_w {
-                let cur = crate::machine::current_thread_ptr();
-                crate::machine::thread_state_set(cur, crate::bindings::thread_state_THREAD_INTERRUPTIBLE);
+                let cur = crate::machine::Riscv::current_thread_ptr();
+                crate::machine::Riscv::thread_state_set(cur, crate::bindings::thread_state_THREAD_INTERRUPTIBLE);
                 // Park on the raw wait queue. `wait_on` (`tq_wait`) atomically
                 // releases THIS lock, sleeps, and re-acquires it on wake --
                 // same lost-wakeup-free protocol as the C
@@ -1235,7 +1235,7 @@ impl Tty {
 pub(super) unsafe fn load_acquire_u32(p: *const u32) -> u32 {
     // SAFETY: caller provides a valid, aligned `*const u32` (matches
     // `smp_load_acquire_i32`'s own contract, modulo the reinterpret).
-    unsafe { crate::machine::smp_load_acquire_i32(p as *const c_int) as u32 }
+    unsafe { crate::machine::Riscv::smp_load_acquire_i32(p as *const c_int) as u32 }
 }
 
 // NO-STANDALONE-FN: `tty_poll` relocated to `Tty::poll`, dropping the
@@ -1502,7 +1502,7 @@ impl Tty {
                 }
                 // Caller must be in the same session as the tty.
                 let sess = unsafe { (*t).session };
-                let cur = crate::machine::current_thread_ptr();
+                let cur = crate::machine::Riscv::current_thread_ptr();
                 let same_session = !sess.is_null() && unsafe { (*sess).sid == (*cur).sid };
                 if !same_session {
                     return -ENOTTY;
@@ -1514,7 +1514,7 @@ impl Tty {
                 // Set controlling terminal: the calling process must be a
                 // session leader and must not already have a controlling
                 // terminal (enforced by `session_set_ctrl_tty`).
-                let cur = crate::machine::current_thread_ptr();
+                let cur = crate::machine::Riscv::current_thread_ptr();
                 // N-R6d-2a: `thread.session` is a generational `Sid`; resolve it to
                 // a live `*mut session`. `pid_wlock` is held for this path (the
                 // `session_set_ctrl_tty` below asserts it), so `session_lookup` is

@@ -206,7 +206,7 @@ impl RawRwsem {
         // Null-queue path unreachable; empty valid queue -> null (former
         // `tq_wakeup`). `thread_pid` filters null/ERR to -1 identically.
         let next = TqRef::from_ptr(Self::wq_ptr(l)).map_or(core::ptr::null_mut(), |r| r.wakeup_one(0, 0));
-        let pid = machine::thread_pid(next);
+        let pid = machine::Riscv::thread_pid(next);
         if pid != -1 {
             Self::set_holder(l, pid);
         }
@@ -327,10 +327,10 @@ impl RawRwsem {
     pub(crate) fn acquire_read(l: *mut rwsem_t) -> c_int {
         if l.is_null() { return -1; }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         while Self::reader_should_wait(l) {
-            machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(l), null_mut()));
             if ret != 0 { return ret; }
         }
@@ -353,11 +353,11 @@ impl RawRwsem {
     pub(crate) fn acquire_read_interruptible(l: *mut rwsem_t) -> c_int {
         if l.is_null() { return -(EINVAL as c_int); }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         while Self::reader_should_wait(l) {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(l), null_mut()));
             if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         }
@@ -371,14 +371,14 @@ impl RawRwsem {
             return if Self::try_acquire_read(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
         }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
-        let start = machine::read_time();
-        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-        let tm = machine::tick_ms();
+        let cur = machine::Riscv::current_thread_ptr();
+        let start = machine::Riscv::read_time();
+        let timeout_ticks = machine::Riscv::ms_to_rawticks(timeout_ms);
+        let tm = machine::Riscv::tick_ms();
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         while Self::reader_should_wait(l) {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            let elapsed = machine::read_time().wrapping_sub(start);
+            let elapsed = machine::Riscv::read_time().wrapping_sub(start);
             if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
             let remaining_ticks = timeout_ticks - elapsed;
             let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
@@ -390,7 +390,7 @@ impl RawRwsem {
                 timeout_ms: remaining_ms,
                 timer_armed: false,
             };
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
                 Some(rwsem_timed_sleep_cb),
                 Some(rwsem_timed_wake_cb),
@@ -406,11 +406,11 @@ impl RawRwsem {
     pub(crate) fn acquire_write(l: *mut rwsem_t) -> c_int {
         if l.is_null() { return -1; }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         while Self::writer_should_wait(l, pid) {
-            machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(l), null_mut()));
             if ret != 0 { return ret; }
         }
@@ -421,8 +421,8 @@ impl RawRwsem {
     pub(crate) fn try_acquire_write(l: *mut rwsem_t) -> c_int {
         if l.is_null() { return -(EINVAL as c_int); }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         if Self::get_holder(l) == pid { return -(EDEADLK as c_int); }
         if !Self::writer_should_wait(l, pid) {
@@ -436,13 +436,13 @@ impl RawRwsem {
     pub(crate) fn acquire_write_interruptible(l: *mut rwsem_t) -> c_int {
         if l.is_null() { return -(EINVAL as c_int); }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         if Self::get_holder(l) == pid { return -(EDEADLK as c_int); }
         while Self::writer_should_wait(l, pid) {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(l), null_mut()));
             if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
         }
@@ -456,16 +456,16 @@ impl RawRwsem {
             return if Self::try_acquire_write(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
         }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
-        let start = machine::read_time();
-        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-        let tm = machine::tick_ms();
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
+        let start = machine::Riscv::read_time();
+        let timeout_ticks = machine::Riscv::ms_to_rawticks(timeout_ms);
+        let tm = machine::Riscv::tick_ms();
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         if Self::get_holder(l) == pid { return -(EDEADLK as c_int); }
         while Self::writer_should_wait(l, pid) {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            let elapsed = machine::read_time().wrapping_sub(start);
+            let elapsed = machine::Riscv::read_time().wrapping_sub(start);
             if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
             let remaining_ticks = timeout_ticks - elapsed;
             let mut remaining_ms = if tm == 0 { 1 } else { (remaining_ticks + tm - 1) / tm };
@@ -477,7 +477,7 @@ impl RawRwsem {
                 timeout_ms: remaining_ms,
                 timer_armed: false,
             };
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
                 Some(rwsem_timed_sleep_cb),
                 Some(rwsem_timed_wake_cb),
@@ -493,8 +493,8 @@ impl RawRwsem {
     pub(crate) fn release(l: *mut rwsem_t) {
         if l.is_null() { return; }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
-        let self_pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let self_pid = machine::Riscv::thread_pid(cur);
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         if Self::get_holder(l) == self_pid && self_pid != -1 {
             Self::set_holder(l, -1);
@@ -513,9 +513,9 @@ impl RawRwsem {
     pub(crate) fn is_write_holding(l: *mut rwsem_t) -> bool {
         if l.is_null() { return false; }
         let l = Self::as_native(l);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         if cur.is_null() { return false; }
-        let pid = machine::thread_pid(cur);
+        let pid = machine::Riscv::thread_pid(cur);
         let _g = KSpinlock::from_bindings(Self::lk_ptr(l)).lock();
         Self::get_holder(l) == pid
     }

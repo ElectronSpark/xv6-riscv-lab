@@ -183,7 +183,7 @@ impl Rcu {
 /// hold a `PreemptGuard` regardless.
 #[inline]
 fn with_current_thread<R>(f: impl FnOnce(&mut thread) -> R) -> Option<R> {
-    let t = machine::current_thread_ptr();
+    let t = machine::Riscv::current_thread_ptr();
     if t.is_null() {
         return None;
     }
@@ -655,7 +655,7 @@ impl Rcu {
     // --- read side ---
 
     fn read_lock_impl() {
-        machine::push_off();
+        machine::Riscv::push_off();
         with_current_thread(|t| t.rcu_read_lock_nesting += 1);
     }
 
@@ -673,7 +673,7 @@ impl Rcu {
             // Late panic: we've already decremented; the kpanic does not return.
             Self::kpanic_unbalanced_unlock(panic_args.0, panic_args.1);
         }
-        machine::pop_off();
+        machine::Riscv::pop_off();
     }
 
     fn is_watching_impl() -> bool {
@@ -738,7 +738,7 @@ impl Rcu {
         if RCU_STATE.gp_in_progress.load(Ordering::Acquire) != 0 {
             return;
         }
-        let now = machine::read_time();
+        let now = machine::Riscv::read_time();
         RCU_STATE.gp_start_timestamp.store(now, Ordering::Release);
         RCU_STATE.gp_in_progress.store(1, Ordering::Release);
     }
@@ -763,7 +763,7 @@ impl Rcu {
     fn note_context_switch_impl() {
         let preempt = PreemptGuard::new();
         let cpu = preempt.cpuid();
-        let now = machine::read_time();
+        let now = machine::Riscv::read_time();
         Self::cpu_rcu_ts(cpu).store(now, Ordering::Release);
         RCU_CPU_DATA[cpu].qs_count.fetch_add(1, Ordering::Release);
         Self::advance_gp();
@@ -789,7 +789,7 @@ impl Rcu {
             allocated
         };
 
-        RawRcuHead::head_init(head, func, data, machine::read_time(), caller_supplied);
+        RawRcuHead::head_init(head, func, data, machine::Riscv::read_time(), caller_supplied);
 
         // Enqueue under preempt-off so the per-CPU list cannot race with
         // the local kthread draining it.
@@ -869,7 +869,7 @@ impl Rcu {
     // --- synchronize ---
 
     fn synchronize_impl() {
-        let sync_ts = machine::read_time();
+        let sync_ts = machine::Riscv::read_time();
         Self::note_context_switch_impl();
 
         let max_wait: c_int = 100_000;
@@ -893,7 +893,7 @@ impl Rcu {
     }
 
     fn barrier_impl() {
-        let barrier_ts = machine::read_time();
+        let barrier_ts = machine::Riscv::read_time();
         Self::synchronize_impl();
 
         let max_wait: c_int = 100_000;
@@ -938,7 +938,7 @@ impl Rcu {
             }
             RCU_STATE.expedited_in_progress.store(1, Ordering::Release);
             RCU_STATE.expedited_seq.fetch_add(1, Ordering::AcqRel);
-            machine::read_time()
+            machine::Riscv::read_time()
         };
 
         let max_wait: c_int = 10_000;
@@ -994,13 +994,13 @@ impl Rcu {
 // --- per-CPU drainer kthread ---
 
 extern "C" fn rcu_cb_kthread(cpu_id: u64, _arg2: u64) -> c_int {
-    if machine::cpuid() as u64 != cpu_id {
+    if machine::Riscv::cpuid() as u64 != cpu_id {
         Rcu::kpanic_msg(c"PANIC: RCU kthread started on wrong CPU\n");
     }
     Rcu::print_kthread_started(cpu_id);
 
     loop {
-        if machine::cpuid() as u64 != cpu_id {
+        if machine::Riscv::cpuid() as u64 != cpu_id {
             Rcu::kpanic_msg(c"PANIC: RCU kthread running on wrong CPU\n");
         }
 

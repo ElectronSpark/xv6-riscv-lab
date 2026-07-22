@@ -140,37 +140,37 @@ const _: () = {
 impl Vma {
     #[inline]
     fn xv6_vm_list_insert_after_list_entry(prev: *mut vma, node: *mut vma) {
-        list_entry_insert_after(machine::vma_list_entry_ptr(prev), machine::vma_list_entry_ptr(node));
+        list_entry_insert_after(machine::Riscv::vma_list_entry_ptr(prev), machine::Riscv::vma_list_entry_ptr(node));
     }
 
     #[inline]
     fn xv6_vm_list_insert_after_free_list_entry(prev: *mut vma, node: *mut vma) {
         list_entry_insert_after(
-            machine::vma_free_list_entry_ptr(prev),
-            machine::vma_free_list_entry_ptr(node),
+            machine::Riscv::vma_free_list_entry_ptr(prev),
+            machine::Riscv::vma_free_list_entry_ptr(node),
         );
     }
 
     #[inline]
     fn xv6_vm_list_detach_list_entry(node: *mut vma) {
-        list_entry_detach(machine::vma_list_entry_ptr(node));
+        list_entry_detach(machine::Riscv::vma_list_entry_ptr(node));
     }
 
     #[inline]
     fn xv6_vm_list_detach_free_list_entry(node: *mut vma) {
-        list_entry_detach(machine::vma_free_list_entry_ptr(node));
+        list_entry_detach(machine::Riscv::vma_free_list_entry_ptr(node));
     }
 
     #[inline]
     fn xv6_vm_vma_left(v: *mut vma) -> *mut vma {
-        if v.is_null() || machine::vma_vm_ptr(v).is_null() {
+        if v.is_null() || machine::Riscv::vma_vm_ptr(v).is_null() {
             return core::ptr::null_mut();
         }
-        let p = rb_prev_node(machine::vma_rb_entry_ptr(v));
+        let p = rb_prev_node(machine::Riscv::vma_rb_entry_ptr(v));
         if p.is_null() {
             return core::ptr::null_mut();
         }
-        machine::list_container_of::<vma>(
+        machine::Riscv::list_container_of::<vma>(
             p as *mut list_node_t,
             core::mem::offset_of!(vma, rb_entry),
         )
@@ -178,14 +178,14 @@ impl Vma {
 
     #[inline]
     fn xv6_vm_vma_right(v: *mut vma) -> *mut vma {
-        if v.is_null() || machine::vma_vm_ptr(v).is_null() {
+        if v.is_null() || machine::Riscv::vma_vm_ptr(v).is_null() {
             return core::ptr::null_mut();
         }
-        let n = rb_next_node(machine::vma_rb_entry_ptr(v));
+        let n = rb_next_node(machine::Riscv::vma_rb_entry_ptr(v));
         if n.is_null() {
             return core::ptr::null_mut();
         }
-        machine::list_container_of::<vma>(
+        machine::Riscv::list_container_of::<vma>(
             n as *mut list_node_t,
             core::mem::offset_of!(vma, rb_entry),
         )
@@ -522,7 +522,7 @@ impl Vma {
 
     #[inline]
     fn vma_size(v: *mut vma) -> u64 {
-        machine::vma_end(v) - machine::vma_start(v)
+        machine::Riscv::vma_end(v) - machine::Riscv::vma_start(v)
     }
 
     /// Allocate a VMA covering `[va, va+size)` with `flags`. If `va == 0`, the
@@ -807,23 +807,23 @@ impl Vma {
 
     #[inline]
     fn vma_size_of(v: *mut vma) -> u64 {
-        machine::vma_end(v) - machine::vma_start(v)
+        machine::Riscv::vma_end(v) - machine::Riscv::vma_start(v)
     }
 
     /// File-backed page fault — allocate a fresh anonymous page and copy in the
     /// matching page from the file's page cache (zero-filling holes past EOF).
     /// Mirrors the C `__vma_fault_file_page`.
     fn vma_fault_file_page(vma_ptr: *mut vma, va: u64) -> *mut c_void {
-        let Some(f) = machine::VfsFileRef::from_raw(machine::vma_file(vma_ptr)) else {
+        let Some(f) = machine::VfsFileRef::from_raw(machine::Riscv::vma_file(vma_ptr)) else {
             return core::ptr::null_mut();
         };
         let inode = FsStruct::vfs_inode_deref(f.inode_slot_ptr());
         if inode.is_null() {
             return core::ptr::null_mut();
         }
-        let pc = machine::vfs_inode_pcache_ptr(inode);
+        let pc = machine::Riscv::vfs_inode_pcache_ptr(inode);
 
-        let file_off = machine::vma_pgoff(vma_ptr) + (va - machine::vma_start(vma_ptr));
+        let file_off = machine::Riscv::vma_pgoff(vma_ptr) + (va - machine::Riscv::vma_start(vma_ptr));
 
         let pa = page_alloc(0, PAGE_TYPE_ANON);
         if pa.is_null() {
@@ -843,7 +843,7 @@ impl Vma {
             .unwrap_or_else(|| xv6_vm_panic(b"vma_fault_file_page: page_alloc returned untracked pa\0".as_ptr() as *const c_char));
 
         // Inode size is loff_t (signed). Treat negative sizes as 0.
-        let inode_size = machine::vfs_inode_size(inode);
+        let inode_size = machine::Riscv::vfs_inode_size(inode);
         let inode_size_u = if inode_size < 0 { 0u64 } else { inode_size as u64 };
 
         if file_off >= inode_size_u {
@@ -890,7 +890,7 @@ impl Vma {
     /// PTE validation for a writable fault. Mirrors the C `__vma_validate_pte_rxw`.
     fn vma_validate_pte_rxw(vma_ptr: *mut vma, pte: *mut u64) -> Result<(), crate::mm::cffi::Errno> {
         use crate::mm::cffi::Errno;
-        let pte_val = machine::pte_read(pte);
+        let pte_val = machine::Riscv::pte_read(pte);
         if (pte_val & (PTE_W as u64)) != 0 {
             return Ok(());
         }
@@ -924,7 +924,7 @@ impl Vma {
         }
 
         flags |= (PTE_V | PTE_W | PTE_A | PTE_D) as u64;
-        let vflags = machine::vma_flags(vma_ptr);
+        let vflags = machine::Riscv::vma_flags(vma_ptr);
         if (vflags & (PROT_READ as u64)) != 0 {
             flags |= PTE_R as u64;
         }
@@ -934,14 +934,14 @@ impl Vma {
         if (vflags & (VMA_FLAG_USER as u64)) != 0 {
             flags |= PTE_U as u64;
         }
-        machine::pte_write(pte, pa_to_pte(pa as u64) | flags);
+        machine::Riscv::pte_write(pte, pa_to_pte(pa as u64) | flags);
         Ok(())
     }
 
     /// PTE validation for a read/exec fault. Mirrors the C `__vma_validate_pte_rx`.
     fn vma_validate_pte_rx(vma_ptr: *mut vma, pte: *mut u64) -> Result<(), crate::mm::cffi::Errno> {
         use crate::mm::cffi::Errno;
-        let pte_val = machine::pte_read(pte);
+        let pte_val = machine::Riscv::pte_read(pte);
         let mut pa = pte_to_pa(pte_val) as *mut c_void;
         let mut flags = pte_flags(pte_val);
 
@@ -951,14 +951,14 @@ impl Vma {
                 return Err(Errno::NoMem);
             }
             memset(pa, 0, PGSIZE as usize);
-            if (machine::vma_flags(vma_ptr) & (PROT_WRITE as u64)) != 0 {
+            if (machine::Riscv::vma_flags(vma_ptr) & (PROT_WRITE as u64)) != 0 {
                 flags |= PTE_W as u64;
             }
         } else if (pte_val & (PTE_V as u64)) == 0 {
             return Err(Errno::Fault);
         }
 
-        let vflags = machine::vma_flags(vma_ptr);
+        let vflags = machine::Riscv::vma_flags(vma_ptr);
         if (vflags & (PROT_READ as u64)) != 0 {
             flags |= PTE_R as u64;
         }
@@ -969,7 +969,7 @@ impl Vma {
             flags |= PTE_U as u64;
         }
         flags |= (PTE_V | PTE_A | PTE_D) as u64;
-        machine::pte_write(pte, pa_to_pte(pa as u64) | flags);
+        machine::Riscv::pte_write(pte, pa_to_pte(pa as u64) | flags);
         xv6_vm_sfence_vma();
         Ok(())
     }
@@ -977,7 +977,7 @@ impl Vma {
     /// Combined dispatcher used by `vma_validate`. Mirrors `__vma_validate_pte`.
     fn vma_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> Result<(), crate::mm::cffi::Errno> {
         use crate::mm::cffi::Errno;
-        let pte_val = machine::pte_read(pte);
+        let pte_val = machine::Riscv::pte_read(pte);
         let pte_user = (pte_val & (PTE_U as u64)) != 0;
         let vma_user = (flags & (VMA_FLAG_USER as u64)) != 0;
         if pte_val != 0 && (pte_user ^ vma_user) {
@@ -1051,14 +1051,14 @@ impl Vm {
 
     #[inline]
     fn xv6_vm_first_vma(vm_ptr: *mut vm) -> *mut vma {
-        first_in_list(machine::vm_list_ptr(vm_ptr), core::mem::offset_of!(vma, list_entry))
+        first_in_list(machine::Riscv::vm_list_ptr(vm_ptr), core::mem::offset_of!(vma, list_entry))
     }
 
     #[inline]
     fn xv6_vm_next_vma(vm_ptr: *mut vm, cur: *mut vma) -> *mut vma {
         next_in_list(
-            machine::vm_list_ptr(vm_ptr),
-            machine::vma_list_entry_ptr(cur),
+            machine::Riscv::vm_list_ptr(vm_ptr),
+            machine::Riscv::vma_list_entry_ptr(cur),
             core::mem::offset_of!(vma, list_entry),
         )
     }
@@ -1066,7 +1066,7 @@ impl Vm {
     #[inline]
     fn xv6_vm_last_free(vm_ptr: *mut vm) -> *mut vma {
         last_in_list(
-            machine::vm_free_list_ptr(vm_ptr),
+            machine::Riscv::vm_free_list_ptr(vm_ptr),
             core::mem::offset_of!(vma, free_list_entry),
         )
     }
@@ -1074,8 +1074,8 @@ impl Vm {
     #[inline]
     fn xv6_vm_prev_free(vm_ptr: *mut vm, cur: *mut vma) -> *mut vma {
         prev_in_list(
-            machine::vm_free_list_ptr(vm_ptr),
-            machine::vma_free_list_entry_ptr(cur),
+            machine::Riscv::vm_free_list_ptr(vm_ptr),
+            machine::Riscv::vma_free_list_entry_ptr(cur),
             core::mem::offset_of!(vma, free_list_entry),
         )
     }
@@ -1113,26 +1113,26 @@ impl Vm {
     #[inline]
     fn xv6_vm_list_push_back_list_entry(vm_ptr: *mut vm, v: *mut vma) {
         // push_back = insert before head, i.e. insert after head->prev.
-        let head = machine::vm_list_ptr(vm_ptr);
-        list_entry_insert_after(machine::list_entry_prev(head), machine::vma_list_entry_ptr(v));
+        let head = machine::Riscv::vm_list_ptr(vm_ptr);
+        list_entry_insert_after(machine::Riscv::list_entry_prev(head), machine::Riscv::vma_list_entry_ptr(v));
     }
 
     #[inline]
     fn xv6_vm_list_push_back_free_list_entry(vm_ptr: *mut vm, v: *mut vma) {
-        let head = machine::vm_free_list_ptr(vm_ptr);
-        list_entry_insert_after(machine::list_entry_prev(head), machine::vma_free_list_entry_ptr(v));
+        let head = machine::Riscv::vm_free_list_ptr(vm_ptr);
+        list_entry_insert_after(machine::Riscv::list_entry_prev(head), machine::Riscv::vma_free_list_entry_ptr(v));
     }
 
     #[inline]
     fn xv6_vm_list_push_front_free_list_entry(vm_ptr: *mut vm, v: *mut vma) {
-        let head = machine::vm_free_list_ptr(vm_ptr);
-        list_entry_insert_after(head, machine::vma_free_list_entry_ptr(v));
+        let head = machine::Riscv::vm_free_list_ptr(vm_ptr);
+        list_entry_insert_after(head, machine::Riscv::vma_free_list_entry_ptr(v));
     }
 
     #[inline]
     fn xv6_vm_assert_vm_write_held(vm_ptr: *mut vm, msg: *const c_char) {
         if current_thread().is_null() { return; }
-        if RawRwsem::is_write_holding(machine::vm_rw_lock_ptr(vm_ptr)) { return; }
+        if RawRwsem::is_write_holding(machine::Riscv::vm_rw_lock_ptr(vm_ptr)) { return; }
         __panic_start();
         if msg.is_null() {
             crate::kprintln!("PANIC: vm rwsem must be write-held");
@@ -1903,10 +1903,10 @@ impl Vm {
             ret = 0;
         } else if _g.stack.is_null() {
             ret = -(EINVAL as c_int);
-        } else if machine::vma_start(_g.stack) <= va {
+        } else if machine::Riscv::vma_start(_g.stack) <= va {
             ret = 0;
         } else {
-            let ustack_bottom_after = machine::vma_start(_g.stack)
+            let ustack_bottom_after = machine::Riscv::vma_start(_g.stack)
                 .wrapping_sub((USERSTACK_GROWTH as u64) << PAGE_SHIFT);
             if ustack_bottom_after < USTACK_MAX_BOTTOM as u64 {
                 ret = -(ENOMEM as c_int);
@@ -1931,7 +1931,7 @@ impl Vm {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
-            if (machine::vma_flags(_g.heap) & crate::bindings::VMA_FLAG_GROWSUP as u64) == 0 {
+            if (machine::Riscv::vma_flags(_g.heap) & crate::bindings::VMA_FLAG_GROWSUP as u64) == 0 {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
@@ -1945,7 +1945,7 @@ impl Vm {
                     ret = -(EINVAL as c_int);
                     break 'done;
                 }
-            } else if (change_size as u64) > (UHEAP_MAX_TOP as u64) - machine::vma_end(_g.heap) {
+            } else if (change_size as u64) > (UHEAP_MAX_TOP as u64) - machine::Riscv::vma_end(_g.heap) {
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
@@ -1956,7 +1956,7 @@ impl Vm {
                 ret = 0;
                 break 'done;
             }
-            let new_end = machine::vma_end(_g.heap).wrapping_add(delta as u64);
+            let new_end = machine::Riscv::vma_end(_g.heap).wrapping_add(delta as u64);
             let right = Vma::xv6_vm_vma_right(_g.heap);
 
             if delta < 0 {
@@ -1966,11 +1966,11 @@ impl Vm {
                     break 'done;
                 }
                 Vma::__vma_set_free(splitted);
-                if !right.is_null() && machine::vma_flags(right) == PROT_NONE as u64 {
+                if !right.is_null() && machine::Riscv::vma_flags(right) == PROT_NONE as u64 {
                     Vma::vma_merge(splitted, right);
                 }
             } else {
-                if right.is_null() || machine::vma_flags(right) != PROT_NONE as u64 {
+                if right.is_null() || machine::Riscv::vma_flags(right) != PROT_NONE as u64 {
                     ret = -(ENOMEM as c_int);
                     break 'done;
                 }
@@ -1990,7 +1990,7 @@ impl Vm {
                 // `machine::vma_flags` exists), so this one write stays a raw
                 // deref.
                 unsafe {
-                    (*right).flags = machine::vma_flags(_g.heap);
+                    (*right).flags = machine::Riscv::vma_flags(_g.heap);
                 }
                 let new_heap = Vma::vma_merge(right, _g.heap);
                 _g.heap = new_heap;
@@ -2028,12 +2028,12 @@ impl Vm {
         // allocates into `dst`, never frees a `src` vma), so the lazy successor
         // iterator is stable.
         for vma_cur in Vm::vm_vma_iter(src) {
-            if machine::vma_flags(vma_cur) != PROT_NONE as u64 {
+            if machine::Riscv::vma_flags(vma_cur) != PROT_NONE as u64 {
                 let new_vma = Vma::vma_alloc(
                     dst,
-                    machine::vma_start(vma_cur),
+                    machine::Riscv::vma_start(vma_cur),
                     Vma::vma_size_of(vma_cur),
-                    machine::vma_flags(vma_cur),
+                    machine::Riscv::vma_flags(vma_cur),
                 );
                 if new_vma.is_null() {
                     drop(_dst_g);
@@ -2154,8 +2154,8 @@ impl Vm {
             }
             let vma_ptr = Vm::vm_find_area(vm_ptr, start);
             if vma_ptr.is_null()
-                || machine::vma_start(vma_ptr) != start
-                || machine::vma_end(vma_ptr) < start + size as u64
+                || machine::Riscv::vma_start(vma_ptr) != start
+                || machine::Riscv::vma_end(vma_ptr) < start + size as u64
             {
                 ret = -(EINVAL as c_int);
                 break 'done;
@@ -2201,11 +2201,11 @@ impl Vm {
                     ret = -(ENOMEM as c_int);
                     break 'done;
                 }
-            if addr < machine::vma_start(vma_ptr) || addr + size > machine::vma_end(vma_ptr) {
+            if addr < machine::Riscv::vma_start(vma_ptr) || addr + size > machine::Riscv::vma_end(vma_ptr) {
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
-            let old_flags = machine::vma_flags(vma_ptr);
+            let old_flags = machine::Riscv::vma_flags(vma_ptr);
             let new_flags = (old_flags & !(PROT_MASK as u64)) | ((prot as u64) & PROT_MASK as u64);
             let pte_flags = vma2pte_flags(new_flags);
 
@@ -2228,7 +2228,7 @@ impl Vm {
                 }
             }
 
-            if addr == machine::vma_start(vma_ptr) && addr + size == machine::vma_end(vma_ptr) {
+            if addr == machine::Riscv::vma_start(vma_ptr) && addr + size == machine::Riscv::vma_end(vma_ptr) {
                 (*vma_ptr).flags = new_flags;
             }
 
@@ -2269,8 +2269,8 @@ impl Vm {
                 }
                 let vma_ptr = Vm::vm_find_area(vm_ptr, old_addr);
                 if vma_ptr.is_null()
-                    || machine::vma_start(vma_ptr) != old_addr
-                    || machine::vma_end(vma_ptr) != old_addr + old_size
+                    || machine::Riscv::vma_start(vma_ptr) != old_addr
+                    || machine::Riscv::vma_end(vma_ptr) != old_addr + old_size
                 {
                     break 'done;
                 }
@@ -2302,7 +2302,7 @@ impl Vm {
                 let expand_size = new_size - old_size;
                 let expand_start = old_addr + old_size;
                 let next_vma = Vm::vm_find_area(vm_ptr, expand_start);
-                if next_vma.is_null() || machine::vma_start(next_vma) >= expand_start + expand_size {
+                if next_vma.is_null() || machine::Riscv::vma_start(next_vma) >= expand_start + expand_size {
                     (*vma_ptr).end = old_addr + new_size;
                     ret = old_addr;
                     break 'done;
@@ -2314,7 +2314,7 @@ impl Vm {
                 if new_location == 0 {
                     break 'done;
                 }
-                let new_vma = Vma::vma_alloc(vm_ptr, new_location, new_size, machine::vma_flags(vma_ptr));
+                let new_vma = Vma::vma_alloc(vm_ptr, new_location, new_size, machine::Riscv::vma_flags(vma_ptr));
                 if new_vma.is_null() {
                     break 'done;
                 }
@@ -2379,11 +2379,11 @@ impl Vm {
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
-            if addr < machine::vma_start(vma_ptr) || addr + size > machine::vma_end(vma_ptr) {
+            if addr < machine::Riscv::vma_start(vma_ptr) || addr + size > machine::Riscv::vma_end(vma_ptr) {
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
-            if !machine::vma_file(vma_ptr).is_null() {
+            if !machine::Riscv::vma_file(vma_ptr).is_null() {
                 // Kept at SeqCst: 1:1 port of the C source's explicit
                 // full barrier guarding the file-backed-dirty-state
                 // check that follows; `vm_msync` is not a hot path.
@@ -2432,7 +2432,7 @@ impl Vm {
                     for i in 0..num_pages {
                         let va = addr_in + (i as u64) * (PGSIZE as u64);
                         *vec.add(i) = 0;
-                        if va < machine::vma_start(vma_ptr) || va >= machine::vma_end(vma_ptr) {
+                        if va < machine::Riscv::vma_start(vma_ptr) || va >= machine::Riscv::vma_end(vma_ptr) {
                             vma_ptr = Vm::vm_find_area(vm_ptr, va);
                             if vma_ptr.is_null() {
                                 continue;
@@ -2484,7 +2484,7 @@ impl Vm {
                     ret = -(ENOMEM as c_int);
                     break 'done;
                 }
-                if addr < machine::vma_start(vma_ptr) || addr + size > machine::vma_end(vma_ptr) {
+                if addr < machine::Riscv::vma_start(vma_ptr) || addr + size > machine::Riscv::vma_end(vma_ptr) {
                     ret = -(ENOMEM as c_int);
                     break 'done;
                 }
@@ -2765,7 +2765,7 @@ mod ffi {
     }
 pub(crate) use crate::lock::rwsem::RawRwsem;
 pub(crate) use crate::mm::vm_pgtab::{vm_dump_flags, xv6_vm_sfence_vma, PageTable};
-pub(crate) use crate::sbi::sbi_remote_hfence_vma;
+pub(crate) use crate::sbi::Sbi;
     // P3-1C mesh sweep: vfs/fs.rs is in scope for this wave; its
     // `vfs_inode_deref` is now a plain crate-path re-export (signature is
     // identical, no opaque-pointer mismatch). vfs/fdtable.rs's
@@ -2867,18 +2867,18 @@ use crate::mm::mm_safe::PageHandle;
 // --- mycpu / cpuid replicas (match the C macros byte-for-byte) -----------
 #[inline(always)]
 fn xv6_vm_mycpu() -> *mut crate::bindings::cpu_local {
-    machine::cpu_local_ptr()
+    machine::Riscv::cpu_local_ptr()
 }
 
 
 pub(crate) fn xv6_vm_cpuid() -> c_int {
-    machine::cpuid()
+    machine::Riscv::cpuid()
 }
 
 // --- SBI remote hfence ---------------------------------------------------
 #[inline(always)]
 fn xv6_vm_sbi_remote_hfence_vma(hart_mask: u64) {
-    sbi_remote_hfence_vma(hart_mask, 0, 0, 0);
+    Sbi::remote_hfence_vma(hart_mask, 0, 0, 0);
 }
 
 
@@ -2892,7 +2892,7 @@ fn xv6_vm_px0(va: u64) -> u64 {
 // --- current thread accessors -------------------------------------------
 #[inline(always)]
 fn current_thread() -> *mut crate::bindings::thread {
-    machine::current_thread_ptr()
+    machine::Riscv::current_thread_ptr()
 }
 
 #[inline]
@@ -2928,18 +2928,18 @@ fn xv6_vm_inode_is_reg(file: *mut vfs_file) -> c_int {
     let inode = FsStruct::vfs_inode_deref(f.inode_slot_ptr());
     if inode.is_null() { return 0; }
     // S_ISREG: (mode & S_IFMT) == S_IFREG, with S_IFMT=0170000, S_IFREG=0100000.
-    let mode = machine::vfs_inode_mode(inode);
+    let mode = machine::Riscv::vfs_inode_mode(inode);
     if (mode & 0o170000) == 0o100000 { 1 } else { 0 }
 }
 
 // --- list_entry / rb_node initializers (formerly out-of-line wrappers) --
 #[inline]
 fn xv6_vm_rb_node_init(node: *mut rb_node) {
-    machine::rb_node_init(node);
+    machine::Riscv::rb_node_init(node);
 }
 #[inline]
 fn xv6_vm_list_entry_init(entry: *mut list_node_t) {
-    machine::list_entry_init(entry);
+    machine::Riscv::list_entry_init(entry);
 }
 
 // --- list walk helpers (mirror LIST_FIRST/NEXT/LAST/PREV_NODE macros) ---
@@ -2950,20 +2950,20 @@ fn xv6_vm_list_entry_init(entry: *mut list_node_t) {
 
 #[inline]
 fn first_in_list(head: *mut list_node_t, member_off: usize) -> *mut vma {
-    let first = machine::list_entry_next(head);
+    let first = machine::Riscv::list_entry_next(head);
     if first as *const list_node_t == head as *const list_node_t {
         core::ptr::null_mut()
     } else {
-        machine::list_container_of::<vma>(first, member_off)
+        machine::Riscv::list_container_of::<vma>(first, member_off)
     }
 }
 #[inline]
 fn last_in_list(head: *mut list_node_t, member_off: usize) -> *mut vma {
-    let last = machine::list_entry_prev(head);
+    let last = machine::Riscv::list_entry_prev(head);
     if last as *const list_node_t == head as *const list_node_t {
         core::ptr::null_mut()
     } else {
-        machine::list_container_of::<vma>(last, member_off)
+        machine::Riscv::list_container_of::<vma>(last, member_off)
     }
 }
 #[inline]
@@ -2972,11 +2972,11 @@ fn next_in_list(
     cur_entry: *mut list_node_t,
     member_off: usize,
 ) -> *mut vma {
-    let nxt = machine::list_entry_next(cur_entry);
+    let nxt = machine::Riscv::list_entry_next(cur_entry);
     if nxt as *const list_node_t == head as *const list_node_t {
         core::ptr::null_mut()
     } else {
-        machine::list_container_of::<vma>(nxt, member_off)
+        machine::Riscv::list_container_of::<vma>(nxt, member_off)
     }
 }
 #[inline]
@@ -2985,11 +2985,11 @@ fn prev_in_list(
     cur_entry: *mut list_node_t,
     member_off: usize,
 ) -> *mut vma {
-    let p = machine::list_entry_prev(cur_entry);
+    let p = machine::Riscv::list_entry_prev(cur_entry);
     if p as *const list_node_t == head as *const list_node_t {
         core::ptr::null_mut()
     } else {
-        machine::list_container_of::<vma>(p, member_off)
+        machine::Riscv::list_container_of::<vma>(p, member_off)
     }
 }
 
@@ -2999,11 +2999,11 @@ fn prev_in_list(
 // --- list insert / detach (mirror list.h inlines) -----------------------
 #[inline]
 fn list_entry_insert_after(prev: *mut list_node_t, new: *mut list_node_t) {
-    machine::list_entry_insert_after(prev, new);
+    machine::Riscv::list_entry_insert_after(prev, new);
 }
 #[inline]
 fn list_entry_detach(entry: *mut list_node_t) {
-    machine::list_entry_detach(entry);
+    machine::Riscv::list_entry_detach(entry);
 }
 
 
@@ -3106,7 +3106,7 @@ pub(crate) extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
     // `vma`; `machine::vma_start` is the existing safe accessor for the
     // one field this needs and carries its own soundness argument for the
     // raw dereference behind it, so this function stays fully safe.
-    machine::vma_start(vma_ptr)
+    machine::Riscv::vma_start(vma_ptr)
 }
 
 
@@ -3226,7 +3226,7 @@ fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
 
 #[inline(always)]
 fn list_node_is_detached(entry: *const list_node_t) -> bool {
-    machine::list_entry_is_detached(entry)
+    machine::Riscv::list_entry_is_detached(entry)
 }
 
 

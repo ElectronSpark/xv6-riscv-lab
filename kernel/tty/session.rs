@@ -1488,7 +1488,7 @@ impl SessionTable {
     /// of a new session and the process-group leader of a new process
     /// group. POSIX: must not be called by a process-group leader.
     pub(crate) extern "C" fn setsid() -> pid_t {
-        let p = crate::machine::current_thread_ptr();
+        let p = crate::machine::Riscv::current_thread_ptr();
         let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
 
         ProcTable::wlock();
@@ -1582,7 +1582,7 @@ impl SessionTable {
 
     pub(crate) extern "C" fn getsid(pid: pid_t) -> pid_t {
         if pid == 0 {
-            let cur = crate::machine::current_thread_ptr();
+            let cur = crate::machine::Riscv::current_thread_ptr();
             // SAFETY: `cur` is the live current thread.
             return unsafe { (*cur).sid };
         }

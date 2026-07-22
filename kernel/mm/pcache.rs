@@ -1202,7 +1202,7 @@ impl NodeHandle {
     /// `__thread_state_set(current, THREAD_UNINTERRUPTIBLE)` followed by
     /// `tq_wait_cb` parked on the pcache's tree_lock.
     fn io_wait(self, p: *mut Pcache) -> c_int {
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         if !cur.is_null() {
             // SAFETY: `cur` is the live current thread; a SeqCst atomic
             // store into its `state` field matches the C macro's
@@ -2114,7 +2114,7 @@ impl Pcache {
         Pcache::set_flusher_running(true);
         RawCompletion::reinit(Pcache::global_completion());
         let pcb = (unsafe { *PCACHE_FLUSHER_THREAD_PCB.get() });
-        if machine::current_thread_ptr() != pcb {
+        if machine::Riscv::current_thread_ptr() != pcb {
             Pcache::wakeup(pcb);
         }
     }

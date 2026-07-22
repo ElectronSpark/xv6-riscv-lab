@@ -136,7 +136,7 @@ impl RawRwlock {
     /// `RWLOCK_EXPEDITE_THRESHOLD` = `TICK_MS << 2`, i.e. 4ms of raw ticks).
     #[inline(always)]
     fn expedite_threshold() -> u64 {
-        machine::tick_ms() << 2
+        machine::Riscv::tick_ms() << 2
     }
 
     // -----------------------------------------------------------------
@@ -228,7 +228,7 @@ impl RawRwlock {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    Self::holder_atomic(rw).store(machine::cpuid(), Ordering::Release);
+                    Self::holder_atomic(rw).store(machine::Riscv::cpuid(), Ordering::Release);
                     return true;
                 }
                 Err(cur) => {
@@ -265,7 +265,7 @@ impl RawRwlock {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    Self::holder_atomic(rw).store(machine::cpuid(), Ordering::Release);
+                    Self::holder_atomic(rw).store(machine::Riscv::cpuid(), Ordering::Release);
                     return true;
                 }
                 Err(cur) => val = cur,
@@ -278,9 +278,9 @@ impl RawRwlock {
     /// Brackets the read in push_off/pop_off so `cpuid()` cannot change out
     /// from under the comparison.
     fn w_holding(rw: *mut rwlock_t) -> bool {
-        machine::push_off();
-        let ret = machine::cpuid() == Self::holder_atomic(rw).load(Ordering::Acquire);
-        machine::pop_off();
+        machine::Riscv::push_off();
+        let ret = machine::Riscv::cpuid() == Self::holder_atomic(rw).load(Ordering::Acquire);
+        machine::Riscv::pop_off();
         ret
     }
 
@@ -317,7 +317,7 @@ impl RawRwlock {
     fn racquire_inner(rw: *mut rwlock_t) {
         if rw.is_null() { return; }
         while !Self::try_rlock(rw) {
-            machine::cpu_relax();
+            machine::Riscv::cpu_relax();
         }
     }
 
@@ -328,12 +328,12 @@ impl RawRwlock {
 
     fn wacquire_inner(rw: *mut rwlock_t) {
         if rw.is_null() { return; }
-        let start = machine::read_time();
+        let start = machine::Riscv::read_time();
         let threshold = Self::expedite_threshold();
         let mut expedite = false;
         while !Self::try_wlock(rw, expedite) {
-            machine::cpu_relax();
-            if !expedite && machine::read_time().wrapping_sub(start) >= threshold {
+            machine::Riscv::cpu_relax();
+            if !expedite && machine::Riscv::read_time().wrapping_sub(start) >= threshold {
                 expedite = true;
             }
         }
@@ -342,14 +342,14 @@ impl RawRwlock {
     fn wacquire_expedited_inner(rw: *mut rwlock_t) {
         if rw.is_null() { return; }
         while !Self::try_wlock(rw, true) {
-            machine::cpu_relax();
+            machine::Riscv::cpu_relax();
         }
     }
 
     fn graceful_wacquire_inner(rw: *mut rwlock_t) {
         if rw.is_null() { return; }
         while !Self::try_wlock(rw, false) {
-            machine::cpu_relax();
+            machine::Riscv::cpu_relax();
         }
     }
 
@@ -360,23 +360,23 @@ impl RawRwlock {
     }
 
     fn rlock_inner(rw: *mut rwlock_t) {
-        machine::push_off();
+        machine::Riscv::push_off();
         Self::racquire_inner(rw);
     }
 
     fn runlock_inner(rw: *mut rwlock_t) {
         Self::rrelease_inner(rw);
-        machine::pop_off();
+        machine::Riscv::pop_off();
     }
 
     fn wlock_inner(rw: *mut rwlock_t) {
-        machine::push_off();
+        machine::Riscv::push_off();
         Self::wacquire_inner(rw);
     }
 
     fn wunlock_inner(rw: *mut rwlock_t) {
         Self::writer_release_inner(rw);
-        machine::pop_off();
+        machine::Riscv::pop_off();
     }
 
     // ===================================================================
@@ -415,12 +415,12 @@ impl RawRwlock {
     pub(crate) unsafe fn wlock(rw: *mut rwlock_t) { Self::wlock_inner(rw); }
 
     pub(crate) unsafe fn wlock_expedited(rw: *mut rwlock_t) {
-        machine::push_off();
+        machine::Riscv::push_off();
         Self::wacquire_expedited_inner(rw);
     }
 
     pub(crate) unsafe fn graceful_wlock(rw: *mut rwlock_t) {
-        machine::push_off();
+        machine::Riscv::push_off();
         Self::graceful_wacquire_inner(rw);
     }
 
@@ -431,37 +431,37 @@ impl RawRwlock {
     // -----------------------------------------------------------------
 
     pub(crate) unsafe fn rlock_irqsave(rw: *mut rwlock_t) -> c_int {
-        let intena = machine::intr_off_save();
+        let intena = machine::Riscv::intr_off_save();
         Self::racquire_inner(rw);
         intena
     }
 
     pub(crate) unsafe fn runlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
         Self::rrelease_inner(rw);
-        machine::intr_restore(intena);
+        machine::Riscv::intr_restore(intena);
     }
 
     pub(crate) unsafe fn wlock_irqsave(rw: *mut rwlock_t) -> c_int {
-        let intena = machine::intr_off_save();
+        let intena = machine::Riscv::intr_off_save();
         Self::wacquire_inner(rw);
         intena
     }
 
     pub(crate) unsafe fn wlock_expedited_irqsave(rw: *mut rwlock_t) -> c_int {
-        let intena = machine::intr_off_save();
+        let intena = machine::Riscv::intr_off_save();
         Self::wacquire_expedited_inner(rw);
         intena
     }
 
     pub(crate) unsafe fn graceful_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
-        let intena = machine::intr_off_save();
+        let intena = machine::Riscv::intr_off_save();
         Self::graceful_wacquire_inner(rw);
         intena
     }
 
     pub(crate) unsafe fn wunlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
         Self::writer_release_inner(rw);
-        machine::intr_restore(intena);
+        machine::Riscv::intr_restore(intena);
     }
 
     // -----------------------------------------------------------------

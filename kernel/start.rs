@@ -117,11 +117,11 @@ pub extern "C" fn start(hartid: c_int, fdt_base: *mut c_void) {
         .is_ok();
 
     // Disable paging for now.
-    machine::write_satp(0);
+    machine::Riscv::write_satp(0);
 
     // Enable supervisor-mode interrupts.
-    machine::write_sie(
-        machine::read_sie() | machine::SIE_SEIE | machine::SIE_STIE | machine::SIE_SSIE,
+    machine::Riscv::write_sie(
+        machine::Riscv::read_sie() | machine::SIE_SEIE | machine::SIE_STIE | machine::SIE_SSIE,
     );
 
     // Ask for clock interrupts.
@@ -156,16 +156,16 @@ use crate::timer::timer_core::__jiff_ticks;
 fn timerinit() {
     // Calculate jiffy ticks — one-time calculation, so no optimisation
     // needed. `HZ` (`kernel/inc/timer/timer.h`) is a fixed `1000`, so
-    // `TIMEBASE_FREQUENCY / HZ` is exactly `machine::tick_ms()`.
+    // `TIMEBASE_FREQUENCY / HZ` is exactly `machine::Riscv::tick_ms()`.
     // SAFETY: single-writer at this boot stage (see the `extern` doc
     // above) — no other hart or interrupt handler observes
     // `__jiff_ticks` yet.
     unsafe {
-        __jiff_ticks = machine::tick_ms();
+        __jiff_ticks = machine::Riscv::tick_ms();
     }
 
     // Ask for the very first timer interrupt.
     // SAFETY: reads the value just stored above.
     let jiff_ticks = unsafe { __jiff_ticks };
-    machine::write_stimecmp(machine::read_time() + jiff_ticks);
+    machine::Riscv::write_stimecmp(machine::Riscv::read_time() + jiff_ticks);
 }

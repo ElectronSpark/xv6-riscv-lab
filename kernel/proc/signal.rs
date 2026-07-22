@@ -393,7 +393,7 @@ const _: () = {
         "thread_signal.term_signal offset"
     );
 };
-use crate::machine::{cpuid, CpuLocal};
+use crate::machine::{CpuLocal, Riscv};
 use crate::proc::proc_shims::{
     xv6_current_thread, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
 };
@@ -401,11 +401,11 @@ use crate::proc::proc_shims::{
 // `scheduler_wakeup_stopped` as plain crate-path imports (their former
 // `extern "C"` redeclarations in the block below are gone).
 use crate::proc::Scheduler;
-use crate::ipi::ipi_send_single;
+use crate::ipi::Ipi;
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, SigactsAccess, SpinLockRef, ThreadAccess,
-    ThreadGroupAccess, ThreadSignalAccess, ThreadSignalPtrRef, atomic_dec_unless_i32,
-    atomic_inc_i32, is_err, list_container_of as container_of,
+    ThreadGroupAccess, ThreadSignalAccess, ThreadSignalPtrRef,
+    is_err, list_container_of as container_of,
     list_node_detach_raw, list_node_init_raw, list_node_is_empty_raw, list_node_next_raw,
     list_node_push_back_raw, write_out,
 };
@@ -1094,7 +1094,7 @@ impl SigActs {
         if psa.is_null() { return ptr::null_mut(); }
         raw_sig_abi! {
             if (clone_flags & CLONE_SIGHAND) != 0 {
-                atomic_inc_i32(&raw mut (*psa).refcount);
+                Riscv::atomic_inc_i32(&raw mut (*psa).refcount);
                 return psa;
             }
             let sa = slab_alloc(SigActs::sigacts_pool()) as *mut sigacts_t;
@@ -1150,7 +1150,7 @@ impl<'a> SigactsAccess<'a> {
     pub(crate) fn put(&self) {
         let sa = self.as_ptr();
         raw_sig_abi! {
-            if !atomic_dec_unless_i32(&raw mut (*sa).refcount, 1) {
+            if !Riscv::atomic_dec_unless_i32(&raw mut (*sa).refcount, 1) {
                 slab_free(sa as *mut c_void);
             }
         }
@@ -1268,8 +1268,8 @@ impl Signal {
                     let se = ta.sched_entity_ptr();
                     if !se.is_null() {
                         let target = SchedEntityRef::assume(se).cpu_id_load_acquire();
-                        if target != cpuid() {
-                            ipi_send_single(target, IPI_REASON_RESCHEDULE);
+                        if target != Riscv::cpuid() {
+                            Ipi::send_single(target, IPI_REASON_RESCHEDULE);
                         } else {
                             Signal::set_needs_resched();
                         }

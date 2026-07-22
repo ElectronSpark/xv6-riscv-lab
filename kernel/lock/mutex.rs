@@ -173,7 +173,7 @@ impl RawMutex {
         // returning -1; in that case we leave the holder unchanged to
         // match the C `assert(!IS_ERR(...))` shape (do not propagate the
         // bogus value into `holder`).
-        let pid = machine::thread_pid(next);
+        let pid = machine::Riscv::thread_pid(next);
         if pid != -1 {
             Self::set_holder(m, pid);
         }
@@ -282,8 +282,8 @@ impl RawMutex {
 
     pub(crate) fn lock(m: *mut mutex_t) {
         let m = Self::as_native(m);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
 
         if Self::try_set_holder(m, pid) { return; }
 
@@ -291,7 +291,7 @@ impl RawMutex {
         if Self::try_set_holder(m, pid) { return; }
 
         while Self::get_holder(m) != pid {
-            machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
             let _ = TqRef::from_ptr(Self::wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(m), null_mut()));
         }
     }
@@ -304,25 +304,25 @@ impl RawMutex {
 
     pub(crate) fn is_holding(m: *mut mutex_t) -> c_int {
         let m = Self::as_native(m);
-        let cur = machine::current_thread_ptr();
+        let cur = machine::Riscv::current_thread_ptr();
         if cur.is_null() { return 0; }
         // SeqCst load to match `__atomic_load_n(..., SEQ_CST)` in C.
         let h = Self::holder_atomic(m).load(Ordering::SeqCst);
-        if h == machine::thread_pid(cur) { 1 } else { 0 }
+        if h == machine::Riscv::thread_pid(cur) { 1 } else { 0 }
     }
 
     pub(crate) fn trylock(m: *mut mutex_t) -> c_int {
         let m = Self::as_native(m);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
         if Self::try_set_holder(m, pid) { 1 } else { 0 }
     }
 
     pub(crate) fn lock_interruptible(m: *mut mutex_t) -> c_int {
         if m.is_null() { return -(EINVAL as c_int); }
         let m = Self::as_native(m);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
 
         if Self::try_set_holder(m, pid) { return 0; }
 
@@ -331,7 +331,7 @@ impl RawMutex {
 
         while Self::get_holder(m) != pid {
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(Self::lk_ptr(m), null_mut()));
             if ret != 0 && crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) && Self::get_holder(m) != pid {
                 return -(EINTR as c_int);
@@ -343,8 +343,8 @@ impl RawMutex {
     pub(crate) fn lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
         if m.is_null() { return -(EINVAL as c_int); }
         let m = Self::as_native(m);
-        let cur = machine::current_thread_ptr();
-        let pid = machine::thread_pid(cur);
+        let cur = machine::Riscv::current_thread_ptr();
+        let pid = machine::Riscv::thread_pid(cur);
 
         if Self::try_set_holder(m, pid) { return 0; }
         if timeout_ms == 0 { return -(ETIMEDOUT as c_int); }
@@ -352,12 +352,12 @@ impl RawMutex {
         let _g = KSpinlock::from_bindings(Self::lk_ptr(m)).lock();
         if Self::try_set_holder(m, pid) { return 0; }
 
-        let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
-        let start = machine::read_time();
-        let tm = machine::tick_ms();
+        let timeout_ticks = machine::Riscv::ms_to_rawticks(timeout_ms);
+        let start = machine::Riscv::read_time();
+        let tm = machine::Riscv::tick_ms();
 
         while Self::get_holder(m) != pid {
-            let now = machine::read_time();
+            let now = machine::Riscv::read_time();
             let elapsed = now.wrapping_sub(start);
             if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
             let remaining_ticks = timeout_ticks - elapsed;
@@ -371,7 +371,7 @@ impl RawMutex {
                 timeout_ms: remaining_ms,
                 timer_armed: false,
             };
-            machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
+            machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::wq_ptr(m)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
                 Some(mutex_timed_sleep_cb),
                 Some(mutex_timed_wake_cb),

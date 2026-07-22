@@ -467,8 +467,8 @@ unsafe fn dma_cache_inval(addr: *mut c_void, size: usize) {
 /// # Safety
 /// `reg` must be a live MMIO register pointer.
 unsafe fn sdhci_apmu_wait_fc(reg: *mut u32, timeout_us: c_int) -> c_int {
-    let deadline = machine::read_time() + machine::tick_s() * timeout_us as u64 / 1_000_000;
-    while machine::read_time() < deadline {
+    let deadline = machine::Riscv::read_time() + machine::Riscv::tick_s() * timeout_us as u64 / 1_000_000;
+    while machine::Riscv::read_time() < deadline {
         // SAFETY: caller contract.
         if unsafe { ptr::read_volatile(reg) } & SDH_APMU_CLK_FC == 0 {
             return 0;
@@ -636,8 +636,8 @@ impl SdhciSoftc {
     /// `sc` must be live; `reg` a valid 4-byte-aligned register offset
     /// (this helper always uses `SdhciSoftc::readl`).
     unsafe fn wait_bit(sc: *mut SdhciSoftc, reg: u32, mask: u32, set: bool, timeout_ms: c_int) -> c_int {
-        let deadline = machine::read_time() + machine::tick_s() * timeout_ms as u64 / 1000;
-        while machine::read_time() < deadline {
+        let deadline = machine::Riscv::read_time() + machine::Riscv::tick_s() * timeout_ms as u64 / 1000;
+        while machine::Riscv::read_time() < deadline {
             // SAFETY: caller contract.
             let val = unsafe { SdhciSoftc::readl(sc, reg) };
             if set {
@@ -664,8 +664,8 @@ impl SdhciSoftc {
         // SAFETY: caller contract.
         unsafe { SdhciSoftc::writeb(sc, SDHCI_SOFTWARE_RESET, mask) };
 
-        let deadline = machine::read_time() + machine::tick_s() * 100 / 1000;
-        while machine::read_time() < deadline {
+        let deadline = machine::Riscv::read_time() + machine::Riscv::tick_s() * 100 / 1000;
+        while machine::Riscv::read_time() < deadline {
             // SAFETY: caller contract.
             if unsafe { SdhciSoftc::readb(sc, SDHCI_SOFTWARE_RESET) } & mask == 0 {
                 return 0;
@@ -984,9 +984,9 @@ impl SdhciSoftc {
     /// `sc` must be live.
     unsafe fn sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool) -> c_int {
         let mut dma_addr = dma_addr_in;
-        let deadline = machine::read_time() + machine::tick_s() * SDHCI_TIMEOUT_MS as u64 / 1000;
+        let deadline = machine::Riscv::read_time() + machine::Riscv::tick_s() * SDHCI_TIMEOUT_MS as u64 / 1000;
 
-        while machine::read_time() < deadline {
+        while machine::Riscv::read_time() < deadline {
             // SAFETY: caller contract.
             let int_st = unsafe { SdhciSoftc::readw(sc, SDHCI_INT_STATUS) };
 

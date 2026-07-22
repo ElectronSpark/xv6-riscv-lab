@@ -205,15 +205,15 @@ pub(crate) extern "C" fn consputc(c: c_int) {
     if !UART_INITIALIZED.load(Ordering::Relaxed) {
         // Use SBI for early console output before UART is ready.
         if c == BACKSPACE {
-            crate::sbi::sbi_console_putchar('\u{8}' as c_int);
-            crate::sbi::sbi_console_putchar(' ' as c_int);
-            crate::sbi::sbi_console_putchar('\u{8}' as c_int);
+            crate::sbi::Sbi::console_putchar('\u{8}' as c_int);
+            crate::sbi::Sbi::console_putchar(' ' as c_int);
+            crate::sbi::Sbi::console_putchar('\u{8}' as c_int);
         } else {
             // Convert \n to \r\n for proper terminal output.
             if c == '\n' as c_int {
-                crate::sbi::sbi_console_putchar('\r' as c_int);
+                crate::sbi::Sbi::console_putchar('\r' as c_int);
             }
-            crate::sbi::sbi_console_putchar(c);
+            crate::sbi::Sbi::console_putchar(c);
         }
         return;
     }
@@ -459,7 +459,7 @@ unsafe fn consoleread(
             // Wait until the interrupt handler has put some input into
             // cons.buf.
             while cons.r == cons.w {
-                if crate::proc::access::ThreadAccess::from_ptr(crate::machine::current_thread_ptr()).map_or(0, |ta| ta.killed()) != 0 {
+                if crate::proc::access::ThreadAccess::from_ptr(crate::machine::Riscv::current_thread_ptr()).map_or(0, |ta| ta.killed()) != 0 {
                     drop(cons);
                     // Copy any pending data before returning.
                     if batch_count > 0 {
@@ -803,7 +803,7 @@ extern "C" fn sbi_console_poll_thread(_arg1: u64, _arg2: u64) {
         let mut got_input = false;
         for _ in 0..32 {
             // Read up to 32 chars per cycle.
-            let c = crate::sbi::sbi_console_getchar();
+            let c = crate::sbi::Sbi::console_getchar();
             if c >= 0 {
                 consoleintr(c);
                 got_input = true;
@@ -888,7 +888,7 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
         // instead of a manual `for i in 0..n { buf[i] }` index walk.
         for &byte in &buf[..n as usize] {
             if !UART_INITIALIZED.load(Ordering::Relaxed) {
-                crate::sbi::sbi_console_putchar(byte as c_int);
+                crate::sbi::Sbi::console_putchar(byte as c_int);
             } else {
                 crate::uart::uartputc_sync(byte as c_int);
             }

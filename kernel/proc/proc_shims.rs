@@ -50,8 +50,7 @@ unsafe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
 unsafe fn slab_free(obj: *mut c_void) {
     crate::mm::slab_free(obj)
 }
-use crate::proc::access::smp_load_acquire_i32;
-use crate::machine::smp_load_acquire_u64;
+use crate::machine::Riscv;
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
@@ -176,7 +175,7 @@ macro_rules! list_push_back_fields {
 // "no concurrent writer" precondition is needed — that's the whole point of
 // routing counters like `live_threads`/`refcount`/`group_exit` through it.
 macro_rules! atomic_load_i32_field {
-    ($ptr:expr, $($field:tt)+) => {{ smp_load_acquire_i32(field_ptr_const!($ptr, $($field)+)) }};
+    ($ptr:expr, $($field:tt)+) => {{ Riscv::smp_load_acquire_i32(field_ptr_const!($ptr, $($field)+)) }};
 }
 
 // SAFETY: see `field_ptr_mut!` for pointer validity. `atomic_fetch_sub_i32`
@@ -313,7 +312,7 @@ pub(super) fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
 // which expands to an interrupt-safe load of `mycpu()->proc`. We replicate
 // the same sstatus.SIE save/restore dance in Rust inline asm.
 pub(crate) fn xv6_current_thread() -> *mut thread {
-    crate::machine::current_thread_ptr()
+    crate::machine::Riscv::current_thread_ptr()
 }
 
 // SECTION 1 leftovers: thread_state_short / thread_state_to_str. Pure
@@ -633,7 +632,7 @@ unsafe fn thread_user_space(p: *mut thread) -> bool {
     }
     // SAFETY: `p` was just checked non-null above; see the fn-level
     // contract for the rest. Plain atomic acquire load — no lock needed.
-    let flags = u! { smp_load_acquire_u64(&(*p).flags as *const u64) };
+    let flags = u! { Riscv::smp_load_acquire_u64(&(*p).flags as *const u64) };
     (flags & (1u64 << THREAD_FLAG_USER_SPACE)) != 0
 }
 
@@ -659,7 +658,7 @@ unsafe fn thread_state_load(p: *mut thread) -> c_int {
     }
     // SAFETY: `p` was just checked non-null above. Plain atomic acquire
     // load of `state`, matching `__thread_state_get` — no lock needed.
-    u! { smp_load_acquire_i32(&(*p).state as *const _ as *const c_int) }
+    u! { Riscv::smp_load_acquire_i32(&(*p).state as *const _ as *const c_int) }
 }
 
 // ===========================================================================
@@ -936,7 +935,7 @@ pub(super) fn xv6_tg_is_exiting(tg: *mut thread_group) -> c_int {
     // SAFETY: see `atomic_load_i32_field!` — `tg` was just checked
     // non-null above; `smp_load_acquire_i32` is a safe atomic acquire load
     // so no additional exclusivity is required.
-    u! { (smp_load_acquire_i32(&raw const (*tg).group_exit) != 0) as c_int }
+    u! { (Riscv::smp_load_acquire_i32(&raw const (*tg).group_exit) != 0) as c_int }
 }
 
 // ===========================================================================
@@ -1226,11 +1225,11 @@ pub(super) fn xv6_exit_reap_zombie(
         let mut spin_count: i32 = 0;
         loop {
             let se = (*child).sched_entity;
-            let on_cpu = smp_load_acquire_i32(&raw const (*se).on_cpu);
+            let on_cpu = Riscv::smp_load_acquire_i32(&raw const (*se).on_cpu);
             if on_cpu == 0 {
                 break;
             }
-            crate::machine::cpu_relax();
+            crate::machine::Riscv::cpu_relax();
             spin_count += 1;
             if spin_count > 1000 {
                 xv6_thread_state_set(parent, THREAD_STATE_RUNNING);
@@ -1273,7 +1272,7 @@ pub(super) fn xv6_exit_reap_zombie(
         //     but a corrupt/garbage status word is worse than a slightly
         //     wrong signal number.
         // -------------------------------------------------------------------
-        let killed = (smp_load_acquire_u64(&(*child).flags as *const u64)
+        let killed = (Riscv::smp_load_acquire_u64(&(*child).flags as *const u64)
             & (1u64 << THREAD_FLAG_KILLED)) != 0;
         *xstate_out = if killed {
             const SIGKILL_FALLBACK: c_int = 9;

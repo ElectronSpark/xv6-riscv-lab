@@ -102,7 +102,7 @@ impl TtyDev {
     /// `kernel/tty/session.rs`).
     #[inline]
     fn ctrl_tty() -> *mut tty {
-        let t = crate::machine::current_thread_ptr();
+        let t = crate::machine::Riscv::current_thread_ptr();
         if t.is_null() {
             return core::ptr::null_mut();
         }
