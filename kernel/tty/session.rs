@@ -531,45 +531,57 @@ unsafe impl Sync for SessionTableCell {}
 static SESSION_TABLE: SessionTableCell =
     SessionTableCell(core::cell::UnsafeCell::new(GenTable::new()));
 
-/// Insert `s` into the registry, returning its generational key (discarded
-/// by `session_alloc`, which addresses the session by its stable pointer for
-/// this pilot). `None` only if the table is full — impossible given
-/// [`NSESSION`]'s sizing, handled defensively by the caller.
-///
-/// Caller must hold `pid_wlock` (matches every `session_alloc` site:
-/// `session_init`/kthread-hierarchy at boot and `session_setsid`).
-fn session_table_insert(s: *mut session) -> Option<Sid> {
-    ProcTable::assert_wholding();
-    let nn = NonNull::new(s)?;
-    // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
-    // registry is exclusive — no other hart holds a reference into the table
-    // (readers need `pid_rlock`, excluded by our write lock).
-    let table = unsafe { &mut *SESSION_TABLE.0.get() };
-    let sid = table.insert(nn)?;
-    // N-R6d-2a: cache the freshly-issued key in the session itself so the
-    // `thread.session`/`pgroup.session` back-edge accessors can stamp it in
-    // O(1) (`session_key_of`) instead of an O(N) `GenTable::key_of` scan.
-    // SAFETY: `s` is live and exclusively ours here — just allocated,
-    // pre-publication, under `pid_wlock`; the `&mut self` `self_sid` write is
-    // uncontended.
-    unsafe { (*s).set_key(sid) };
-    Some(sid)
-}
+// ---------------------------------------------------------------------------
+// `SessionTable` — zero-sized marker hosting every table-level (global
+// registry) operation. Unlike `Session` (whose methods take a `*mut session`
+// receiver naming one live session), these operate on the single global
+// `SESSION_TABLE` static -- `SessionTable` plays the same namespacing role
+// `Rcu` plays for `kernel/lock/rcu.rs`'s singleton-global operations.
+// ---------------------------------------------------------------------------
 
-/// Remove `s` from the registry (by its stable pointer — the cached
-/// `self_sid` is only ever read while the session is live), bumping the slot
-/// generation so any
-/// outstanding [`Sid`] to it goes stale. A no-op if `s` was never inserted.
-///
-/// Caller must hold `pid_wlock` (the session teardown/free path — matches
-/// where the old code unlinked `session_list`).
-fn session_table_remove(s: *mut session) {
-    ProcTable::assert_wholding();
-    let Some(nn) = NonNull::new(s) else { return };
-    // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`, as in
-    // `session_table_insert`.
-    let table = unsafe { &mut *SESSION_TABLE.0.get() };
-    table.remove_ptr(nn);
+pub(crate) struct SessionTable;
+
+impl SessionTable {
+    /// Insert `s` into the registry, returning its generational key (discarded
+    /// by `session_alloc`, which addresses the session by its stable pointer for
+    /// this pilot). `None` only if the table is full — impossible given
+    /// [`NSESSION`]'s sizing, handled defensively by the caller.
+    ///
+    /// Caller must hold `pid_wlock` (matches every `session_alloc` site:
+    /// `session_init`/kthread-hierarchy at boot and `session_setsid`).
+    fn insert(s: *mut session) -> Option<Sid> {
+        ProcTable::assert_wholding();
+        let nn = NonNull::new(s)?;
+        // SAFETY: `pid_wlock` is held (asserted above), so this `&mut` to the
+        // registry is exclusive — no other hart holds a reference into the table
+        // (readers need `pid_rlock`, excluded by our write lock).
+        let table = unsafe { &mut *SESSION_TABLE.0.get() };
+        let sid = table.insert(nn)?;
+        // N-R6d-2a: cache the freshly-issued key in the session itself so the
+        // `thread.session`/`pgroup.session` back-edge accessors can stamp it in
+        // O(1) (`session_key_of`) instead of an O(N) `GenTable::key_of` scan.
+        // SAFETY: `s` is live and exclusively ours here — just allocated,
+        // pre-publication, under `pid_wlock`; the `&mut self` `self_sid` write is
+        // uncontended.
+        unsafe { (*s).set_key(sid) };
+        Some(sid)
+    }
+
+    /// Remove `s` from the registry (by its stable pointer — the cached
+    /// `self_sid` is only ever read while the session is live), bumping the slot
+    /// generation so any
+    /// outstanding [`Sid`] to it goes stale. A no-op if `s` was never inserted.
+    ///
+    /// Caller must hold `pid_wlock` (the session teardown/free path — matches
+    /// where the old code unlinked `session_list`).
+    fn remove(s: *mut session) {
+        ProcTable::assert_wholding();
+        let Some(nn) = NonNull::new(s) else { return };
+        // SAFETY: `pid_wlock` is held (asserted above) — exclusive `&mut`, as in
+        // `SessionTable::insert`.
+        let table = unsafe { &mut *SESSION_TABLE.0.get() };
+        table.remove_ptr(nn);
+    }
 }
 
 /// Generation-checked lookup: resolve a [`Sid`] to a live session pointer,
@@ -582,16 +594,18 @@ fn session_table_remove(s: *mut session) {
 ///
 /// Caller must hold `pid_lock` (reader or writer); the returned pointer is
 /// only stable under that same protection.
-#[allow(dead_code)]
-pub(crate) fn session_lookup(sid: Sid) -> Option<*mut session> {
-    // SAFETY: the caller holds `pid_lock` (read or write), which excludes
-    // every `&mut self` mutator (they hold the write lock) — so this shared
-    // reference into the registry is race-free for its (short, non-looping
-    // over shared-mutable-state) lifetime. No `&Session` is formed here; the
-    // raw pointer is handed straight back (freeze-hazard note in the
-    // `GenTable` doc).
-    let table = unsafe { &*SESSION_TABLE.0.get() };
-    table.get(sid).map(|nn| nn.as_ptr())
+impl SessionTable {
+    #[allow(dead_code)]
+    pub(crate) fn lookup(sid: Sid) -> Option<*mut session> {
+        // SAFETY: the caller holds `pid_lock` (read or write), which excludes
+        // every `&mut self` mutator (they hold the write lock) — so this shared
+        // reference into the registry is race-free for its (short, non-looping
+        // over shared-mutable-state) lifetime. No `&Session` is formed here; the
+        // raw pointer is handed straight back (freeze-hazard note in the
+        // `GenTable` doc).
+        let table = unsafe { &*SESSION_TABLE.0.get() };
+        table.get(sid).map(|nn| nn.as_ptr())
+    }
 }
 
 /// Encode a `*mut session` as the generational [`Sid`] to store in a back-edge
@@ -602,13 +616,15 @@ pub(crate) fn session_lookup(sid: Sid) -> Option<*mut session> {
 ///
 /// Caller holds `pid_wlock` (every `set_session` site does — the read of
 /// `self_sid` on a live session is race-free under it).
-pub(crate) fn session_key_of(s: *mut session) -> Sid {
-    match core::ptr::NonNull::new(s) {
-        None => Sid::NONE,
-        // SAFETY: `s` is a live `*mut session` (caller passes an owned/looked-up
-        // session under `pid_wlock`); the `&self` `self_sid` read is single and
-        // non-looping.
-        Some(nn) => unsafe { (*nn.as_ptr()).key() },
+impl Session {
+    pub(crate) fn key_of(s: *mut session) -> Sid {
+        match core::ptr::NonNull::new(s) {
+            None => Sid::NONE,
+            // SAFETY: `s` is a live `*mut session` (caller passes an owned/looked-up
+            // session under `pid_wlock`); the `&self` `self_sid` read is single and
+            // non-looping.
+            Some(nn) => unsafe { (*nn.as_ptr()).key() },
+        }
     }
 }
 
@@ -616,14 +632,16 @@ pub(crate) fn session_key_of(s: *mut session) -> Sid {
 /// `*mut session`. The `GenTable` replacement for walking `session_list`;
 /// used by `proc/proc_shims.rs::session_for_each_all` (process-hierarchy
 /// dump). Caller must hold `pid_lock` (reader or writer).
-pub(crate) fn session_for_each(mut f: impl FnMut(*mut session)) {
-    // SAFETY: caller holds `pid_lock` (read or write) — excludes all
-    // writers, so this shared reference into the registry is race-free; the
-    // scan hands the callback raw `NonNull`/`*mut` pointers, never `&Session`
-    // (freeze-hazard note in the `GenTable` doc).
-    let table = unsafe { &*SESSION_TABLE.0.get() };
-    for nn in table.iter() {
-        f(nn.as_ptr());
+impl SessionTable {
+    pub(crate) fn for_each(mut f: impl FnMut(*mut session)) {
+        // SAFETY: caller holds `pid_lock` (read or write) — excludes all
+        // writers, so this shared reference into the registry is race-free; the
+        // scan hands the callback raw `NonNull`/`*mut` pointers, never `&Session`
+        // (freeze-hazard note in the `GenTable` doc).
+        let table = unsafe { &*SESSION_TABLE.0.get() };
+        for nn in table.iter() {
+            f(nn.as_ptr());
+        }
     }
 }
 
@@ -631,57 +649,59 @@ pub(crate) fn session_for_each(mut f: impl FnMut(*mut session)) {
 // Boot-time initialisation.
 // ===========================================================================
 
-/// # Safety
-/// `initproc` must be a live `thread` with a non-null `thread_group` and
-/// `pgroup` (mirrors the C original's unconditional derefs).
-pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
-    // SAFETY: see fn doc; this runs once at boot before any other
-    // `session_*` entry point, so `SESSION_CACHE` is exclusively ours to
-    // initialize. (The registry `SESSION_TABLE` is a const-initialized empty
-    // `GenTable` — no runtime init needed, unlike the retired `session_list`
-    // head this used to self-link here.)
-    unsafe {
-        let ret = slab_cache_init(
-            SESSION_CACHE.get(),
-            c"session_cache".as_ptr() as *mut c_char,
-            core::mem::size_of::<session>(),
-            crate::bindings::SLAB_FLAG_STATIC as u64,
-        );
-        session_assert_errno!(
-            ret == 0,
-            "session_init",
-            "session_init: failed to init session_cache, errno={}",
-            ret,
-        );
+impl SessionTable {
+    /// # Safety
+    /// `initproc` must be a live `thread` with a non-null `thread_group` and
+    /// `pgroup` (mirrors the C original's unconditional derefs).
+    pub(crate) unsafe extern "C" fn init(initproc: *mut thread) {
+        // SAFETY: see fn doc; this runs once at boot before any other
+        // `session_*` entry point, so `SESSION_CACHE` is exclusively ours to
+        // initialize. (The registry `SESSION_TABLE` is a const-initialized empty
+        // `GenTable` — no runtime init needed, unlike the retired `session_list`
+        // head this used to self-link here.)
+        unsafe {
+            let ret = slab_cache_init(
+                SESSION_CACHE.get(),
+                c"session_cache".as_ptr() as *mut c_char,
+                core::mem::size_of::<session>(),
+                crate::bindings::SLAB_FLAG_STATIC as u64,
+            );
+            session_assert_errno!(
+                ret == 0,
+                "session_init",
+                "session_init: failed to init session_cache, errno={}",
+                ret,
+            );
 
-        let tg = (*initproc).thread_group;
-        session_assert!(!tg.is_null(), "session_init", "session_init: initproc has no thread_group");
+            let tg = (*initproc).thread_group;
+            session_assert!(!tg.is_null(), "session_init", "session_init: initproc has no thread_group");
 
-        // N-R6d-2b: `thread.pgroup` is now a generational `Pgid`; resolve it to
-        // a live `*mut pgroup` under `pid_wlock` (held by `userinit`). Init was
-        // just given its boot pgroup by `pgroup_init`, so this resolves exactly
-        // as the old raw-pointer read did.
-        let pg = Pgroup::lookup((*initproc).pgroup).unwrap_or(ptr::null_mut());
-        session_assert!(!pg.is_null(), "session_init", "session_init: initproc has no pgroup");
+            // N-R6d-2b: `thread.pgroup` is now a generational `Pgid`; resolve it to
+            // a live `*mut pgroup` under `pid_wlock` (held by `userinit`). Init was
+            // just given its boot pgroup by `pgroup_init`, so this resolves exactly
+            // as the old raw-pointer read did.
+            let pg = Pgroup::lookup((*initproc).pgroup).unwrap_or(ptr::null_mut());
+            session_assert!(!pg.is_null(), "session_init", "session_init: initproc has no pgroup");
 
-        let s_raw = session_alloc((*initproc).pid);
-        session_assert!(!s_raw.is_null(), "session_init", "session_init: session_alloc failed");
-        // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
-        // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
-        // contract). This is the permanent, boot-created session 1 --
-        // initproc is always a member, so it never empties and the
-        // baseline-drop in `session_remove_thread`/`session_remove_pg`
-        // (P3-BUG3) never fires for it; the reference is simply handed
-        // back out via `into_raw` below and stays held for the life of
-        // the system.
-        let s = SRef::from_raw(s_raw);
+            let s_raw = Self::alloc((*initproc).pid);
+            session_assert!(!s_raw.is_null(), "session_init", "session_init: session_alloc failed");
+            // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
+            // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
+            // contract). This is the permanent, boot-created session 1 --
+            // initproc is always a member, so it never empties and the
+            // baseline-drop in `session_remove_thread`/`session_remove_pg`
+            // (P3-BUG3) never fires for it; the reference is simply handed
+            // back out via `into_raw` below and stays held for the life of
+            // the system.
+            let s = SRef::from_raw(s_raw);
 
-        session_add_pg(SRef::as_ptr(&s), pg);
-        session_add_thread(SRef::as_ptr(&s), initproc);
-        // N-R6d-2b: `fg_pgrp` is a `Pgid`; store `pg`'s own key (O(1) via its
-        // cached `self_pgid`).
-        (*SRef::as_ptr(&s)).fg_pgrp = Pgroup::key_of(pg);
-        let _ = SRef::into_raw(s);
+            Session::add_pg(SRef::as_ptr(&s), pg);
+            Session::add_thread(SRef::as_ptr(&s), initproc);
+            // N-R6d-2b: `fg_pgrp` is a `Pgid`; store `pg`'s own key (O(1) via its
+            // cached `self_pgid`).
+            (*SRef::as_ptr(&s)).fg_pgrp = Pgroup::key_of(pg);
+            let _ = SRef::into_raw(s);
+        }
     }
 }
 
@@ -689,173 +709,181 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
 // Allocation / reference counting.
 // ===========================================================================
 
-/// # Safety
-/// The returned pointer, if non-null, is freshly allocated,
-/// exclusively-owned slab memory whose `list_node_t` members are
-/// initialized; every other field is left zeroed for the caller to fill
-/// in (mirrors the C original's `memset` + partial `list_entry_init`
-/// calls).
-unsafe fn __session_alloc() -> *mut session {
-    // SAFETY: `slab_alloc` returns either null or a pointer to
-    // `size_of::<session>()` freshly allocated bytes from
-    // `SESSION_CACHE` (initialized by `session_init` before any caller
-    // can reach here).
-    unsafe {
-        let s = slab_alloc(SESSION_CACHE.get()) as *mut session;
+impl Session {
+    /// # Safety
+    /// The returned pointer, if non-null, is freshly allocated,
+    /// exclusively-owned slab memory whose `list_node_t` members are
+    /// initialized; every other field is left zeroed for the caller to fill
+    /// in (mirrors the C original's `memset` + partial `list_entry_init`
+    /// calls).
+    unsafe fn alloc_raw() -> *mut session {
+        // SAFETY: `slab_alloc` returns either null or a pointer to
+        // `size_of::<session>()` freshly allocated bytes from
+        // `SESSION_CACHE` (initialized by `session_init` before any caller
+        // can reach here).
+        unsafe {
+            let s = slab_alloc(SESSION_CACHE.get()) as *mut session;
+            if s.is_null() {
+                return ptr::null_mut();
+            }
+            core::ptr::write_bytes(s as *mut u8, 0, core::mem::size_of::<session>());
+            ll_init(&raw mut (*s).global_entry);
+            ll_init(&raw mut (*s).threads);
+            ll_init(&raw mut (*s).pgrps);
+            s
+        }
+    }
+}
+
+impl SessionTable {
+    pub(crate) extern "C" fn alloc(sid: pid_t) -> *mut session {
+        // SAFETY: `s`, once non-null, is exclusively ours (just allocated by
+        // `Session::alloc_raw`) until it is registered in `SESSION_TABLE` and
+        // returned to the caller.
+        unsafe {
+            let s = Session::alloc_raw();
+            if s.is_null() {
+                return ptr::null_mut();
+            }
+            (*s).sid = sid;
+            (*s).ctrl_tty = ptr::null_mut();
+            // N-R6d-2b: `fg_pgrp` is a `Pgid`; `NONE` is the "no foreground group"
+            // edge (the analog of the old null pointer).
+            (*s).fg_pgrp = Pgid::NONE;
+            (*s).ref_cnt = 1;
+            (*s).t_cnt = 0;
+            (*s).pg_cnt = 0;
+            // Register in the generational session table (N-R6a) — the
+            // replacement for `ll_push_back(&session_list, ...)`. On the
+            // impossible "table full" case (see `NSESSION`'s sizing) fail the
+            // alloc cleanly: free the slab object and return null, exactly the
+            // contract `session_alloc` already has for allocation failure,
+            // rather than hand back an unregistered session.
+            if Self::insert(s).is_none() {
+                slab_free(s as *mut c_void);
+                return ptr::null_mut();
+            }
+            s
+        }
+    }
+}
+
+impl Session {
+    /// # Safety
+    /// `s`, if non-null, must be a live `session` (mirrors the C original's
+    /// unconditional deref once past the null check).
+    pub(crate) unsafe extern "C" fn ref_(s: *mut session) {
         if s.is_null() {
-            return ptr::null_mut();
+            return;
         }
-        core::ptr::write_bytes(s as *mut u8, 0, core::mem::size_of::<session>());
-        ll_init(&raw mut (*s).global_entry);
-        ll_init(&raw mut (*s).threads);
-        ll_init(&raw mut (*s).pgrps);
-        s
+        // SAFETY: see fn doc. `s->ref_cnt` is a plain (non-`_Atomic`) `int`
+        // field in the C struct, RMW'd there via `atomic_inc` ==
+        // `__atomic_fetch_add(..., __ATOMIC_SEQ_CST)`; `AtomicI32::from_ptr`
+        // over the same field pointer reproduces that exactly (matches
+        // `kernel/proc/proc_shims.rs`'s `atomic_fetch_sub_i32` precedent).
+        unsafe {
+            AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
-pub(crate) extern "C" fn session_alloc(sid: pid_t) -> *mut session {
-    // SAFETY: `s`, once non-null, is exclusively ours (just allocated by
-    // `__session_alloc`) until it is registered in `SESSION_TABLE` and
-    // returned to the caller.
-    unsafe {
-        let s = __session_alloc();
+impl Session {
+    /// # Safety
+    /// `s`, if non-null, must be a live `session` (mirrors the C original's
+    /// unconditional deref once past the null check).
+    ///
+    /// # Off-by-one fix (Phase 3 P3-9e, 2026-07-14)
+    ///
+    /// The C original's `atomic_dec(&s->ref_cnt)` macro expands to
+    /// `__atomic_fetch_sub(..., __ATOMIC_SEQ_CST)`, which -- per the GCC/C11
+    /// atomic builtin contract -- returns the value *before* the
+    /// subtraction, not after. The C code then named that pre-decrement
+    /// value `new_val` and freed when `new_val == 0`, i.e. only on the call
+    /// that decrements ref_cnt from 0 to -1 -- one call *past* the
+    /// legitimate "last owner drops its reference" transition (1 -> 0).
+    /// Ported here 1:1 in Wave 12 (`RUST_REWRITE.md` Iteration 24) and
+    /// flagged as a leaks-not-double-frees bug.
+    ///
+    /// Fixed here: the free condition now compares the pre-decrement value
+    /// against `1` (the call that actually drives `ref_cnt` to `0`),
+    /// matching every other refcount in this crate (`kobject_put` frees on
+    /// its *post*-decrement `count == 0`; `vfs_iput`'s CAS loop is
+    /// equivalent) instead of the C's off-by-one. The `session_assert!`
+    /// bound tightens from `>= 0` to `>= 1` to match: under correct pairing
+    /// the pre-decrement value can never legitimately be `<= 0` any more
+    /// (that would mean this call is decrementing a reference that had
+    /// already reached zero -- a double-unref/use-after-free bug in the
+    /// *caller*, not a normal teardown step), so a future such bug now
+    /// fails loudly instead of silently falling through to a (previously
+    /// unreachable) free branch.
+    ///
+    /// No double-free risk from tightening the free condition: `fetch_sub`
+    /// is a single atomic RMW, so under any concurrent race at most one
+    /// caller ever observes the pre-decrement value `== 1` -- the same
+    /// "exactly one hart sees the zero transition" guarantee
+    /// `kobject_put`/`vfs_iput` already rely on.
+    ///
+    /// # The baseline-reference leak (P3-BUG3) -- now CLOSED
+    ///
+    /// Found while verifying the off-by-one fix above: fixing the comparison
+    /// made `session_unref` free correctly whenever the pre-decrement count
+    /// reaches `1`, but [`session_alloc`]'s baseline `ref_cnt = 1` was never
+    /// separately dropped on ordinary teardown -- only on
+    /// [`session_setsid`]'s `pgroup_alloc`-failure path. A successful
+    /// `setsid()` ends at `ref_cnt == 3` (baseline + 1 pg + 1 thread); the
+    /// leader exiting drops the thread ref (3->2) and the process group
+    /// emptying drops the pg ref (2->1), leaving the session parked at
+    /// `ref_cnt == 1` (the baseline) forever -- a per-session leak on every
+    /// ordinary interactive `setsid`.
+    ///
+    /// Closed here: [`session_remove_thread`] and [`session_remove_pg`] now
+    /// drop the baseline reference iff their removal *emptied* the session
+    /// (`pg_cnt == 0 && t_cnt == 0`), captured BEFORE the member `session_unref`
+    /// so it reads live counts. The mechanism is use-after-free-safe by the
+    /// invariant `ref_cnt == baseline(1 while non-empty) + pg_cnt + t_cnt`:
+    /// while the departing member's own reference is still held the count is
+    /// `>= 2`, so the member unref can never free (it only ever lowers
+    /// `ref_cnt` to the baseline `1`); the explicit baseline unref on the
+    /// empty transition is therefore the *unique* free point, and
+    /// `empty -> freed` is terminal (the free sets `exited = 1`, after which
+    /// [`session_add_thread`]/[`session_add_pg`] reject new members with
+    /// `-ESRCH`). All raw `*mut session` back-pointers (`thread.session`,
+    /// `pgroup.session`, `fg_pgrp`, `tty.session`) are cleared before their
+    /// unref, so none dangles. The boot session ([`session_init`]/initproc)
+    /// and the kernel session (`kernel/proc/thread.rs`'s `KERNEL_SESSION`,
+    /// whose `is_kernel` pgroup is never removed) always retain a member, so
+    /// neither ever empties and neither is ever freed. See `RUST_REWRITE.md`
+    /// Iteration 82 (Known issue marked FIXED as P3-BUG3).
+    pub(crate) unsafe extern "C" fn unref(s: *mut session) {
         if s.is_null() {
-            return ptr::null_mut();
+            return;
         }
-        (*s).sid = sid;
-        (*s).ctrl_tty = ptr::null_mut();
-        // N-R6d-2b: `fg_pgrp` is a `Pgid`; `NONE` is the "no foreground group"
-        // edge (the analog of the old null pointer).
-        (*s).fg_pgrp = Pgid::NONE;
-        (*s).ref_cnt = 1;
-        (*s).t_cnt = 0;
-        (*s).pg_cnt = 0;
-        // Register in the generational session table (N-R6a) — the
-        // replacement for `ll_push_back(&session_list, ...)`. On the
-        // impossible "table full" case (see `NSESSION`'s sizing) fail the
-        // alloc cleanly: free the slab object and return null, exactly the
-        // contract `session_alloc` already has for allocation failure,
-        // rather than hand back an unregistered session.
-        if session_table_insert(s).is_none() {
-            slab_free(s as *mut c_void);
-            return ptr::null_mut();
-        }
-        s
-    }
-}
-
-/// # Safety
-/// `s`, if non-null, must be a live `session` (mirrors the C original's
-/// unconditional deref once past the null check).
-pub(crate) unsafe extern "C" fn session_ref(s: *mut session) {
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: see fn doc. `s->ref_cnt` is a plain (non-`_Atomic`) `int`
-    // field in the C struct, RMW'd there via `atomic_inc` ==
-    // `__atomic_fetch_add(..., __ATOMIC_SEQ_CST)`; `AtomicI32::from_ptr`
-    // over the same field pointer reproduces that exactly (matches
-    // `kernel/proc/proc_shims.rs`'s `atomic_fetch_sub_i32` precedent).
-    unsafe {
-        AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-/// # Safety
-/// `s`, if non-null, must be a live `session` (mirrors the C original's
-/// unconditional deref once past the null check).
-///
-/// # Off-by-one fix (Phase 3 P3-9e, 2026-07-14)
-///
-/// The C original's `atomic_dec(&s->ref_cnt)` macro expands to
-/// `__atomic_fetch_sub(..., __ATOMIC_SEQ_CST)`, which -- per the GCC/C11
-/// atomic builtin contract -- returns the value *before* the
-/// subtraction, not after. The C code then named that pre-decrement
-/// value `new_val` and freed when `new_val == 0`, i.e. only on the call
-/// that decrements ref_cnt from 0 to -1 -- one call *past* the
-/// legitimate "last owner drops its reference" transition (1 -> 0).
-/// Ported here 1:1 in Wave 12 (`RUST_REWRITE.md` Iteration 24) and
-/// flagged as a leaks-not-double-frees bug.
-///
-/// Fixed here: the free condition now compares the pre-decrement value
-/// against `1` (the call that actually drives `ref_cnt` to `0`),
-/// matching every other refcount in this crate (`kobject_put` frees on
-/// its *post*-decrement `count == 0`; `vfs_iput`'s CAS loop is
-/// equivalent) instead of the C's off-by-one. The `session_assert!`
-/// bound tightens from `>= 0` to `>= 1` to match: under correct pairing
-/// the pre-decrement value can never legitimately be `<= 0` any more
-/// (that would mean this call is decrementing a reference that had
-/// already reached zero -- a double-unref/use-after-free bug in the
-/// *caller*, not a normal teardown step), so a future such bug now
-/// fails loudly instead of silently falling through to a (previously
-/// unreachable) free branch.
-///
-/// No double-free risk from tightening the free condition: `fetch_sub`
-/// is a single atomic RMW, so under any concurrent race at most one
-/// caller ever observes the pre-decrement value `== 1` -- the same
-/// "exactly one hart sees the zero transition" guarantee
-/// `kobject_put`/`vfs_iput` already rely on.
-///
-/// # The baseline-reference leak (P3-BUG3) -- now CLOSED
-///
-/// Found while verifying the off-by-one fix above: fixing the comparison
-/// made `session_unref` free correctly whenever the pre-decrement count
-/// reaches `1`, but [`session_alloc`]'s baseline `ref_cnt = 1` was never
-/// separately dropped on ordinary teardown -- only on
-/// [`session_setsid`]'s `pgroup_alloc`-failure path. A successful
-/// `setsid()` ends at `ref_cnt == 3` (baseline + 1 pg + 1 thread); the
-/// leader exiting drops the thread ref (3->2) and the process group
-/// emptying drops the pg ref (2->1), leaving the session parked at
-/// `ref_cnt == 1` (the baseline) forever -- a per-session leak on every
-/// ordinary interactive `setsid`.
-///
-/// Closed here: [`session_remove_thread`] and [`session_remove_pg`] now
-/// drop the baseline reference iff their removal *emptied* the session
-/// (`pg_cnt == 0 && t_cnt == 0`), captured BEFORE the member `session_unref`
-/// so it reads live counts. The mechanism is use-after-free-safe by the
-/// invariant `ref_cnt == baseline(1 while non-empty) + pg_cnt + t_cnt`:
-/// while the departing member's own reference is still held the count is
-/// `>= 2`, so the member unref can never free (it only ever lowers
-/// `ref_cnt` to the baseline `1`); the explicit baseline unref on the
-/// empty transition is therefore the *unique* free point, and
-/// `empty -> freed` is terminal (the free sets `exited = 1`, after which
-/// [`session_add_thread`]/[`session_add_pg`] reject new members with
-/// `-ESRCH`). All raw `*mut session` back-pointers (`thread.session`,
-/// `pgroup.session`, `fg_pgrp`, `tty.session`) are cleared before their
-/// unref, so none dangles. The boot session ([`session_init`]/initproc)
-/// and the kernel session (`kernel/proc/thread.rs`'s `KERNEL_SESSION`,
-/// whose `is_kernel` pgroup is never removed) always retain a member, so
-/// neither ever empties and neither is ever freed. See `RUST_REWRITE.md`
-/// Iteration 82 (Known issue marked FIXED as P3-BUG3).
-pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: see fn doc; same `AtomicI32::from_ptr` reasoning as
-    // `session_ref`.
-    unsafe {
-        let old_val = AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_sub(1, Ordering::SeqCst);
-        session_assert!(old_val >= 1, "session_unref", "Session reference count would go non-positive");
-        if old_val == 1 {
-            (*s).flags.set_exited(1);
-            // Make sure a still-attached controlling tty never keeps a
-            // dangling `tty->session` back-pointer into slab memory this
-            // call is about to free (previously "defensive"/dead code
-            // under the off-by-one bug; now the live path the last
-            // dropped reference actually takes).
-            // SAFETY: `pid_wlock` held (this free branch requires it) and
-            // `ref_cnt` just reached zero — sole owner, so `&mut *s` is
-            // exclusive.
-            (*s).detach_ctrl_tty();
-            // Deregister from the generational session table (N-R6a) — the
-            // replacement for the `session_list` unlink. This bumps the
-            // slot's generation, so any outstanding `Sid` to this session
-            // now resolves to `None` (the generational liveness guarantee);
-            // `session_table_remove` asserts `pid_wlock` is held, exactly as
-            // this free branch already required for the `session_list` unlink
-            // and slab free.
-            session_table_remove(s);
-            slab_free(s as *mut c_void);
+        // SAFETY: see fn doc; same `AtomicI32::from_ptr` reasoning as
+        // `session_ref`.
+        unsafe {
+            let old_val = AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_sub(1, Ordering::SeqCst);
+            session_assert!(old_val >= 1, "session_unref", "Session reference count would go non-positive");
+            if old_val == 1 {
+                (*s).flags.set_exited(1);
+                // Make sure a still-attached controlling tty never keeps a
+                // dangling `tty->session` back-pointer into slab memory this
+                // call is about to free (previously "defensive"/dead code
+                // under the off-by-one bug; now the live path the last
+                // dropped reference actually takes).
+                // SAFETY: `pid_wlock` held (this free branch requires it) and
+                // `ref_cnt` just reached zero — sole owner, so `&mut *s` is
+                // exclusive.
+                (*s).detach_ctrl_tty();
+                // Deregister from the generational session table (N-R6a) — the
+                // replacement for the `session_list` unlink. This bumps the
+                // slot's generation, so any outstanding `Sid` to this session
+                // now resolves to `None` (the generational liveness guarantee);
+                // `SessionTable::remove` asserts `pid_wlock` is held, exactly as
+                // this free branch already required for the `session_list` unlink
+                // and slab free.
+                SessionTable::remove(s);
+                slab_free(s as *mut c_void);
+            }
         }
     }
 }
@@ -903,38 +931,40 @@ pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
 // `KERNEL_SESSION` static).
 // ---------------------------------------------------------------------------
 
-/// `kobject_try_get`/`vfs_idup_not_zero` analog for `session`: attempt to
-/// upgrade a bare, liveness-unproven `*mut session` (e.g. one just read
-/// out of `session_list` without holding a reference of its own) by
-/// incrementing `ref_cnt` only if it has not already reached zero.
-/// Returns `false` if a concurrent final `session_unref` already zeroed
-/// (and is freeing, or has freed) `*s`.
-///
-/// Not part of `session.h`'s C ABI (no `#[no_mangle]`) -- this is an
-/// `SRef`-only addition; `session_ref`/`session_unref` above are
-/// preserved 1:1 (beyond the off-by-one fix) and untouched.
-///
-/// # Safety
-/// `s` must be non-null and point to a `session` that is still valid to
-/// dereference for the duration of this call (e.g. still under
-/// `pid_rlock`/`pid_wlock`, or otherwise known live) -- the same
-/// precondition `kobject_try_get`/`vfs_idup_not_zero` have.
-unsafe fn session_try_ref(s: *mut session) -> bool {
-    // SAFETY: see fn doc; same `AtomicI32::from_ptr` reasoning as
-    // `session_ref`/`session_unref`.
-    let rc = unsafe { AtomicI32::from_ptr(&raw mut (*s).ref_cnt) };
-    let mut old = rc.load(Ordering::SeqCst);
-    loop {
-        if old <= 0 {
-            return false;
-        }
-        // SeqCst on both success and failure: matches this field's one
-        // established ordering (see the module section doc above)
-        // rather than introducing a second, independently-reasoned
-        // Acquire/Relaxed split.
-        match rc.compare_exchange(old, old + 1, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => return true,
-            Err(cur) => old = cur,
+impl Session {
+    /// `kobject_try_get`/`vfs_idup_not_zero` analog for `session`: attempt to
+    /// upgrade a bare, liveness-unproven `*mut session` (e.g. one just read
+    /// out of `session_list` without holding a reference of its own) by
+    /// incrementing `ref_cnt` only if it has not already reached zero.
+    /// Returns `false` if a concurrent final `session_unref` already zeroed
+    /// (and is freeing, or has freed) `*s`.
+    ///
+    /// Not part of `session.h`'s C ABI (no `#[no_mangle]`) -- this is an
+    /// `SRef`-only addition; `session_ref`/`session_unref` above are
+    /// preserved 1:1 (beyond the off-by-one fix) and untouched.
+    ///
+    /// # Safety
+    /// `s` must be non-null and point to a `session` that is still valid to
+    /// dereference for the duration of this call (e.g. still under
+    /// `pid_rlock`/`pid_wlock`, or otherwise known live) -- the same
+    /// precondition `kobject_try_get`/`vfs_idup_not_zero` have.
+    unsafe fn try_ref(s: *mut session) -> bool {
+        // SAFETY: see fn doc; same `AtomicI32::from_ptr` reasoning as
+        // `session_ref`/`session_unref`.
+        let rc = unsafe { AtomicI32::from_ptr(&raw mut (*s).ref_cnt) };
+        let mut old = rc.load(Ordering::SeqCst);
+        loop {
+            if old <= 0 {
+                return false;
+            }
+            // SeqCst on both success and failure: matches this field's one
+            // established ordering (see the module section doc above)
+            // rather than introducing a second, independently-reasoned
+            // Acquire/Relaxed split.
+            match rc.compare_exchange(old, old + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return true,
+                Err(cur) => old = cur,
+            }
         }
     }
 }
@@ -974,7 +1004,7 @@ impl SRef {
         debug_assert!(!ptr.is_null(), "SRef::try_from_raw: ptr is NULL");
         // SAFETY: caller guarantees `ptr` is live for the duration of
         // this call (fn doc).
-        if unsafe { session_try_ref(ptr) } {
+        if unsafe { Session::try_ref(ptr) } {
             // SAFETY: `ptr` was just proven non-null-derived and live by
             // the successful `session_try_ref` above, which also
             // established the held reference this `SRef` now owns.
@@ -1012,7 +1042,7 @@ impl Clone for SRef {
         // `session_ref`'s precondition (an already-held reference to
         // increment from) holds; matches `KArc::clone`/`IRef::clone`'s
         // use of `kobject_get`/`vfs_idup` under the same reasoning.
-        unsafe { session_ref(self.ptr.as_ptr()) };
+        unsafe { Session::ref_(self.ptr.as_ptr()) };
         SRef { ptr: self.ptr }
     }
 }
@@ -1026,7 +1056,7 @@ impl Drop for SRef {
         // precondition (`pid_wlock` held -- module doc's lock-ordering
         // note): both current call sites (`session_init`,
         // `session_setsid`) drop/into_raw while still holding it.
-        unsafe { session_unref(self.ptr.as_ptr()) };
+        unsafe { Session::unref(self.ptr.as_ptr()) };
     }
 }
 
@@ -1048,150 +1078,154 @@ impl Deref for SRef {
 // Thread membership.
 // ===========================================================================
 
-/// Add a thread to a session's thread list. Sets `t->session`/`t->sid`.
-///
-/// # Safety
-/// `s` and `t`, if non-null, must be live (mirrors the C original's
-/// unconditional derefs once past the null checks). Caller must hold
-/// `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thread) -> c_int {
-    ProcTable::assert_wholding();
-    if s.is_null() || t.is_null() {
-        return -EINVAL;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        if (*s).flags.exited() != 0 {
-            return -ESRCH;
-        }
-        // N-R6d-2a: `thread.session` is now a generational `Sid`. A live thread
-        // never holds a stale key (it is detached from its session before that
-        // session can be freed), so `!is_none()` is the exact structural
-        // analog of the old `!is_null()` "already in a session" guard.
-        if !(*t).session.is_none() {
-            return -EEXIST;
-        }
-        (*t).session = session_key_of(s);
-        (*t).sid = (*s).sid;
-        ll_init(&raw mut (*t).sid_entry);
-        ll_push_back(&raw mut (*s).threads, &raw mut (*t).sid_entry);
-        (*s).t_cnt += 1;
-        session_ref(s);
-    }
-    0
-}
-
-/// Remove a thread from its session's thread list. Clears
-/// `t->session`/`t->sid`.
-///
-/// # Safety
-/// `s` and `t`, if non-null, must be live. Caller must hold `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut thread) -> c_int {
-    ProcTable::assert_wholding();
-    if s.is_null() || t.is_null() {
-        return -EINVAL;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        // N-R6d-2a: compare the stored `Sid` against `s`'s own key (both name
-        // the same live session iff equal) — the `Sid` analog of `!= s`.
-        if (*t).session != session_key_of(s) {
+impl Session {
+    /// Add a thread to a session's thread list. Sets `t->session`/`t->sid`.
+    ///
+    /// # Safety
+    /// `s` and `t`, if non-null, must be live (mirrors the C original's
+    /// unconditional derefs once past the null checks). Caller must hold
+    /// `pid_wlock`.
+    pub(crate) unsafe extern "C" fn add_thread(s: *mut session, t: *mut thread) -> c_int {
+        ProcTable::assert_wholding();
+        if s.is_null() || t.is_null() {
             return -EINVAL;
         }
-        if !ll_is_detached(&raw mut (*t).sid_entry) {
-            ll_detach(&raw mut (*t).sid_entry);
+        // SAFETY: see fn doc.
+        unsafe {
+            if (*s).flags.exited() != 0 {
+                return -ESRCH;
+            }
+            // N-R6d-2a: `thread.session` is now a generational `Sid`. A live thread
+            // never holds a stale key (it is detached from its session before that
+            // session can be freed), so `!is_none()` is the exact structural
+            // analog of the old `!is_null()` "already in a session" guard.
+            if !(*t).session.is_none() {
+                return -EEXIST;
+            }
+            (*t).session = Self::key_of(s);
+            (*t).sid = (*s).sid;
+            ll_init(&raw mut (*t).sid_entry);
+            ll_push_back(&raw mut (*s).threads, &raw mut (*t).sid_entry);
+            (*s).t_cnt += 1;
+            Self::ref_(s);
         }
-        (*s).t_cnt -= 1;
-        (*t).session = Sid::NONE;
-        // Capture the empty transition BEFORE the member unref below (counts
-        // are already decremented here). While this member's own reference is
-        // still held, `ref_cnt >= 2` (baseline + this ref), so the member
-        // `session_unref` can never free — it only ever brings `ref_cnt` down
-        // to the baseline.
-        let now_empty = (*s).pg_cnt == 0 && (*s).t_cnt == 0;
-        (*t).sid = 0;
-        session_unref(s);
-        if now_empty {
-            // P3-BUG3 fix: the last member just left, so drop `session_alloc`'s
-            // baseline reference — this is the unique free point for the now
-            // empty session (otherwise it leaks forever at `ref_cnt == 1`).
-            // MUST be the last use of `s`: it may free the pointee.
-            session_unref(s);
-        }
+        0
     }
-    0
+
+    /// Remove a thread from its session's thread list. Clears
+    /// `t->session`/`t->sid`.
+    ///
+    /// # Safety
+    /// `s` and `t`, if non-null, must be live. Caller must hold `pid_wlock`.
+    pub(crate) unsafe extern "C" fn remove_thread(s: *mut session, t: *mut thread) -> c_int {
+        ProcTable::assert_wholding();
+        if s.is_null() || t.is_null() {
+            return -EINVAL;
+        }
+        // SAFETY: see fn doc.
+        unsafe {
+            // N-R6d-2a: compare the stored `Sid` against `s`'s own key (both name
+            // the same live session iff equal) — the `Sid` analog of `!= s`.
+            if (*t).session != Self::key_of(s) {
+                return -EINVAL;
+            }
+            if !ll_is_detached(&raw mut (*t).sid_entry) {
+                ll_detach(&raw mut (*t).sid_entry);
+            }
+            (*s).t_cnt -= 1;
+            (*t).session = Sid::NONE;
+            // Capture the empty transition BEFORE the member unref below (counts
+            // are already decremented here). While this member's own reference is
+            // still held, `ref_cnt >= 2` (baseline + this ref), so the member
+            // `session_unref` can never free — it only ever brings `ref_cnt` down
+            // to the baseline.
+            let now_empty = (*s).pg_cnt == 0 && (*s).t_cnt == 0;
+            (*t).sid = 0;
+            Self::unref(s);
+            if now_empty {
+                // P3-BUG3 fix: the last member just left, so drop `session_alloc`'s
+                // baseline reference — this is the unique free point for the now
+                // empty session (otherwise it leaks forever at `ref_cnt == 1`).
+                // MUST be the last use of `s`: it may free the pointee.
+                Self::unref(s);
+            }
+        }
+        0
+    }
 }
 
 // ===========================================================================
 // Process group membership.
 // ===========================================================================
 
-/// # Safety
-/// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup) -> c_int {
-    ProcTable::assert_wholding();
-    if s.is_null() || pg.is_null() {
-        return -EINVAL;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        if (*s).flags.exited() != 0 {
-            return -ESRCH;
-        }
-        // N-R6d-2a: `pgroup.session` is a generational `Sid` (see the thread
-        // edge above) — `!is_none()` is the structural analog of `!is_null()`.
-        if !(*pg).session.is_none() {
-            return -EEXIST;
-        }
-        (*pg).session = session_key_of(s);
-        ll_init(&raw mut (*pg).list_entry);
-        ll_push_back(&raw mut (*s).pgrps, &raw mut (*pg).list_entry);
-        (*s).pg_cnt += 1;
-        session_ref(s);
-    }
-    0
-}
-
-/// # Safety
-/// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgroup) -> c_int {
-    ProcTable::assert_wholding();
-    if s.is_null() || pg.is_null() {
-        return -EINVAL;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        // N-R6d-2a: `Sid` analog of `!= s` (see `session_remove_thread`).
-        if (*pg).session != session_key_of(s) {
+impl Session {
+    /// # Safety
+    /// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
+    pub(crate) unsafe extern "C" fn add_pg(s: *mut session, pg: *mut pgroup) -> c_int {
+        ProcTable::assert_wholding();
+        if s.is_null() || pg.is_null() {
             return -EINVAL;
         }
-        if !ll_is_detached(&raw mut (*pg).list_entry) {
-            ll_detach(&raw mut (*pg).list_entry);
+        // SAFETY: see fn doc.
+        unsafe {
+            if (*s).flags.exited() != 0 {
+                return -ESRCH;
+            }
+            // N-R6d-2a: `pgroup.session` is a generational `Sid` (see the thread
+            // edge above) — `!is_none()` is the structural analog of `!is_null()`.
+            if !(*pg).session.is_none() {
+                return -EEXIST;
+            }
+            (*pg).session = Self::key_of(s);
+            ll_init(&raw mut (*pg).list_entry);
+            ll_push_back(&raw mut (*s).pgrps, &raw mut (*pg).list_entry);
+            (*s).pg_cnt += 1;
+            Self::ref_(s);
         }
-        (*s).pg_cnt -= 1;
-        // If the foreground pgroup is being removed, clear it. N-R6d-2b: compare
-        // the stored `Pgid` against `pg`'s own key (both name the same live
-        // pgroup iff equal) — the `Pgid` analog of `== pg`.
-        if (*s).fg_pgrp == Pgroup::key_of(pg) {
-            (*s).fg_pgrp = Pgid::NONE;
-        }
-        (*pg).session = Sid::NONE;
-        // Capture the empty transition BEFORE the member unref below (counts
-        // are already decremented here). While this member's own reference is
-        // still held, `ref_cnt >= 2` (baseline + this ref), so the member
-        // `session_unref` can never free — it only ever brings `ref_cnt` down
-        // to the baseline.
-        let now_empty = (*s).pg_cnt == 0 && (*s).t_cnt == 0;
-        session_unref(s);
-        if now_empty {
-            // P3-BUG3 fix: the last member just left, so drop `session_alloc`'s
-            // baseline reference — this is the unique free point for the now
-            // empty session (otherwise it leaks forever at `ref_cnt == 1`).
-            // MUST be the last use of `s`: it may free the pointee.
-            session_unref(s);
-        }
+        0
     }
-    0
+
+    /// # Safety
+    /// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
+    pub(crate) unsafe extern "C" fn remove_pg(s: *mut session, pg: *mut pgroup) -> c_int {
+        ProcTable::assert_wholding();
+        if s.is_null() || pg.is_null() {
+            return -EINVAL;
+        }
+        // SAFETY: see fn doc.
+        unsafe {
+            // N-R6d-2a: `Sid` analog of `!= s` (see `session_remove_thread`).
+            if (*pg).session != Self::key_of(s) {
+                return -EINVAL;
+            }
+            if !ll_is_detached(&raw mut (*pg).list_entry) {
+                ll_detach(&raw mut (*pg).list_entry);
+            }
+            (*s).pg_cnt -= 1;
+            // If the foreground pgroup is being removed, clear it. N-R6d-2b: compare
+            // the stored `Pgid` against `pg`'s own key (both name the same live
+            // pgroup iff equal) — the `Pgid` analog of `== pg`.
+            if (*s).fg_pgrp == Pgroup::key_of(pg) {
+                (*s).fg_pgrp = Pgid::NONE;
+            }
+            (*pg).session = Sid::NONE;
+            // Capture the empty transition BEFORE the member unref below (counts
+            // are already decremented here). While this member's own reference is
+            // still held, `ref_cnt >= 2` (baseline + this ref), so the member
+            // `session_unref` can never free — it only ever brings `ref_cnt` down
+            // to the baseline.
+            let now_empty = (*s).pg_cnt == 0 && (*s).t_cnt == 0;
+            Self::unref(s);
+            if now_empty {
+                // P3-BUG3 fix: the last member just left, so drop `session_alloc`'s
+                // baseline reference — this is the unique free point for the now
+                // empty session (otherwise it leaks forever at `ref_cnt == 1`).
+                // MUST be the last use of `s`: it may free the pointee.
+                Self::unref(s);
+            }
+        }
+        0
+    }
 }
 
 // ===========================================================================
@@ -1231,130 +1265,134 @@ impl Session {
     }
 }
 
-/// Attach, replace, or detach (`new_tty == NULL`) a session's
-/// controlling terminal.
-///
-/// # SIGINT-delivery fix (mandated, Wave 12 -- see the module doc)
-///
-/// The C original only ever did `s->ctrl_tty = tty`. That left
-/// `tty->session` permanently null, which broke
-/// `kernel/tty/tty.rs::tty_signal_fg_pgroup`'s only way of finding a
-/// session from a `tty` -- so ^C/^\/^Z could never reach the terminal's
-/// foreground process group. This port wires up both sides of the
-/// relationship:
-///
-/// - Sets `new_tty->session = s` (the missing back-pointer) so
-///   `tty_signal_fg_pgroup` can find `s` from `t` and route the signal
-///   via `session_get_fg_pgid` + `pgroup_kill`, instead of falling back
-///   to killing `current_thread_ptr()` (dead on the console, since that
-///   fallback thread is a kernel feeder thread, not the foreground job).
-/// - Takes a [`tty_ref`] on `new_tty` for as long as `s` designates it
-///   as the controlling terminal, and [`tty_unref`]s whatever `old_tty`
-///   this replaces (or is cleared to null) via
-///   [`Session::detach_ctrl_tty`] -- so the tty can never be freed out
-///   from under a session that still points to it, and the ref/unref
-///   pairing stays balanced no matter how many times the controlling
-///   tty is attached, replaced, or cleared. `session_hangup` and
-///   `session_unref`'s finalization branch both go through the same
-///   detach helper, so every teardown path clears the back-pointer too.
-///
-/// Re-setting the same `new_tty` that is already `s`'s `ctrl_tty` is a
-/// no-op (skips the ref/unref dance entirely) rather than an unbalanced
-/// unref+ref of the same tty.
-///
-/// # Safety
-/// `s`, if non-null, must be live. `new_tty`, if non-null, must be a
-/// live `tty` previously returned by `tty_alloc` (mirrors
-/// [`tty_ref`]/[`tty_unref`]'s own contract). Caller must hold
-/// `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *mut tty) {
-    ProcTable::assert_wholding();
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        if (*s).flags.exited() != 0 {
+impl Session {
+    /// Attach, replace, or detach (`new_tty == NULL`) a session's
+    /// controlling terminal.
+    ///
+    /// # SIGINT-delivery fix (mandated, Wave 12 -- see the module doc)
+    ///
+    /// The C original only ever did `s->ctrl_tty = tty`. That left
+    /// `tty->session` permanently null, which broke
+    /// `kernel/tty/tty.rs::tty_signal_fg_pgroup`'s only way of finding a
+    /// session from a `tty` -- so ^C/^\/^Z could never reach the terminal's
+    /// foreground process group. This port wires up both sides of the
+    /// relationship:
+    ///
+    /// - Sets `new_tty->session = s` (the missing back-pointer) so
+    ///   `tty_signal_fg_pgroup` can find `s` from `t` and route the signal
+    ///   via `session_get_fg_pgid` + `pgroup_kill`, instead of falling back
+    ///   to killing `current_thread_ptr()` (dead on the console, since that
+    ///   fallback thread is a kernel feeder thread, not the foreground job).
+    /// - Takes a [`tty_ref`] on `new_tty` for as long as `s` designates it
+    ///   as the controlling terminal, and [`tty_unref`]s whatever `old_tty`
+    ///   this replaces (or is cleared to null) via
+    ///   [`Session::detach_ctrl_tty`] -- so the tty can never be freed out
+    ///   from under a session that still points to it, and the ref/unref
+    ///   pairing stays balanced no matter how many times the controlling
+    ///   tty is attached, replaced, or cleared. `session_hangup` and
+    ///   `session_unref`'s finalization branch both go through the same
+    ///   detach helper, so every teardown path clears the back-pointer too.
+    ///
+    /// Re-setting the same `new_tty` that is already `s`'s `ctrl_tty` is a
+    /// no-op (skips the ref/unref dance entirely) rather than an unbalanced
+    /// unref+ref of the same tty.
+    ///
+    /// # Safety
+    /// `s`, if non-null, must be live. `new_tty`, if non-null, must be a
+    /// live `tty` previously returned by `tty_alloc` (mirrors
+    /// [`tty_ref`]/[`tty_unref`]'s own contract). Caller must hold
+    /// `pid_wlock`.
+    pub(crate) unsafe extern "C" fn set_ctrl_tty(s: *mut session, new_tty: *mut tty) {
+        ProcTable::assert_wholding();
+        if s.is_null() {
             return;
         }
-        if (*s).ctrl_tty == new_tty {
-            return;
-        }
-        // SAFETY: `pid_wlock` held (asserted at fn entry) — `&mut *s` exclusive.
-        (*s).detach_ctrl_tty();
-        (*s).ctrl_tty = new_tty;
-        if !new_tty.is_null() {
-            (*new_tty).session = s;
-            tty_ref(new_tty);
+        // SAFETY: see fn doc.
+        unsafe {
+            if (*s).flags.exited() != 0 {
+                return;
+            }
+            if (*s).ctrl_tty == new_tty {
+                return;
+            }
+            // SAFETY: `pid_wlock` held (asserted at fn entry) — `&mut *s` exclusive.
+            (*s).detach_ctrl_tty();
+            (*s).ctrl_tty = new_tty;
+            if !new_tty.is_null() {
+                (*new_tty).session = s;
+                tty_ref(new_tty);
+            }
         }
     }
-}
 
-/// # Safety
-/// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_get_ctrl_tty(s: *mut session) -> *mut tty {
-    ProcTable::assert_wholding();
-    if s.is_null() {
-        return ptr::null_mut();
+    /// # Safety
+    /// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
+    pub(crate) unsafe extern "C" fn get_ctrl_tty(s: *mut session) -> *mut tty {
+        ProcTable::assert_wholding();
+        if s.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: see fn doc.
+        unsafe { (*s).ctrl_tty }
     }
-    // SAFETY: see fn doc.
-    unsafe { (*s).ctrl_tty }
 }
 
 // ===========================================================================
 // Foreground process group.
 // ===========================================================================
 
-/// # Safety
-/// `s`, if non-null, must be live.
-pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t) {
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        if (*s).flags.exited() != 0 {
+impl Session {
+    /// # Safety
+    /// `s`, if non-null, must be live.
+    pub(crate) unsafe extern "C" fn set_fg_pgid(s: *mut session, pgid: pid_t) {
+        if s.is_null() {
             return;
         }
-        let pg = Pgroup::get(pgid);
-        if is_err(pg) {
-            return;
+        // SAFETY: see fn doc.
+        unsafe {
+            if (*s).flags.exited() != 0 {
+                return;
+            }
+            let pg = Pgroup::get(pgid);
+            if is_err(pg) {
+                return;
+            }
+            if (*pg).flags.exited() != 0 {
+                return; // cannot set an exited pgroup as foreground
+            }
+            // N-R6d-2a: `Sid` analog of `!= s` — the pgroup must belong to `s`.
+            if (*pg).session != Self::key_of(s) {
+                return; // pgroup must belong to this session
+            }
+            // N-R6d-2b: store `pg`'s generational key (O(1) via its `self_pgid`).
+            (*s).fg_pgrp = Pgroup::key_of(pg);
         }
-        if (*pg).flags.exited() != 0 {
-            return; // cannot set an exited pgroup as foreground
-        }
-        // N-R6d-2a: `Sid` analog of `!= s` — the pgroup must belong to `s`.
-        if (*pg).session != session_key_of(s) {
-            return; // pgroup must belong to this session
-        }
-        // N-R6d-2b: store `pg`'s generational key (O(1) via its `self_pgid`).
-        (*s).fg_pgrp = Pgroup::key_of(pg);
     }
-}
 
-/// # Safety
-/// `s`, if non-null, must be live.
-pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
-    if s.is_null() {
-        return -1;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        // N-R6d-2b: `fg_pgrp` is a generational `Pgid`. Read the key (a plain
-        // aligned field read on the live session), then resolve it to a live
-        // pgroup under `pid_rlock` (required by `pgroup_lookup`) — both callers
-        // (`tty_signal_fg_pgroup`, `TIOCGPGRP`) hold no pid_lock, so take it
-        // here for the short, non-looping lookup. A `NONE`/stale key resolves to
-        // null → -1, exactly the old "no foreground group" outcome.
-        let pgid = (*s).fg_pgrp;
-        if pgid.is_none() {
+    /// # Safety
+    /// `s`, if non-null, must be live.
+    pub(crate) unsafe extern "C" fn get_fg_pgid(s: *mut session) -> pid_t {
+        if s.is_null() {
             return -1;
         }
-        xv6_pid_rlock();
-        let fg = Pgroup::lookup(pgid).unwrap_or(ptr::null_mut());
-        let ret = if fg.is_null() { -1 } else { (*fg).pgid };
-        xv6_pid_runlock();
-        ret
+        // SAFETY: see fn doc.
+        unsafe {
+            // N-R6d-2b: `fg_pgrp` is a generational `Pgid`. Read the key (a plain
+            // aligned field read on the live session), then resolve it to a live
+            // pgroup under `pid_rlock` (required by `pgroup_lookup`) — both callers
+            // (`tty_signal_fg_pgroup`, `TIOCGPGRP`) hold no pid_lock, so take it
+            // here for the short, non-looping lookup. A `NONE`/stale key resolves to
+            // null → -1, exactly the old "no foreground group" outcome.
+            let pgid = (*s).fg_pgrp;
+            if pgid.is_none() {
+                return -1;
+            }
+            xv6_pid_rlock();
+            let fg = Pgroup::lookup(pgid).unwrap_or(ptr::null_mut());
+            let ret = if fg.is_null() { -1 } else { (*fg).pgid };
+            xv6_pid_runlock();
+            ret
+        }
     }
 }
 
@@ -1373,223 +1411,227 @@ use crate::proc::access::{ThreadAccess, ThreadGroupAccess};
 // setsid / getsid (POSIX).
 // ===========================================================================
 
-/// Send SIGHUP + SIGCONT to a thread's thread group.
-///
-/// # Safety
-/// `t` must be a live `thread`.
-unsafe fn __hangup_signal_tg(t: *mut thread) {
-    // SAFETY: see fn doc.
-    unsafe {
-        let tg = (*t).thread_group;
-        if tg.is_null() {
+impl Session {
+    /// Send SIGHUP + SIGCONT to a thread's thread group.
+    ///
+    /// # Safety
+    /// `t` must be a live `thread`.
+    unsafe fn hangup_signal_tg(t: *mut thread) {
+        // SAFETY: see fn doc.
+        unsafe {
+            let tg = (*t).thread_group;
+            if tg.is_null() {
+                return;
+            }
+            // `ksiginfo` is a `list_node_t` (two raw pointers), two `*mut
+            // thread` fields, an `i32`, and a `siginfo_t` (itself all
+            // `i32`/raw-pointer/union-of-primitives fields) -- every field
+            // is valid when null/zero, same reasoning as
+            // `kernel/proc/access.rs::zeroed_ksiginfo` (duplicated locally
+            // here per this file's established cross-module convention).
+            let mut info: ksiginfo = core::mem::zeroed();
+            info.signo = SIGHUP;
+            ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&raw mut info));
+            info.signo = SIGCONT;
+            ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&raw mut info));
+        }
+    }
+
+    /// Mark a session as exited and send SIGHUP (then SIGCONT) to its
+    /// foreground process group -- or do nothing if it has none. Also
+    /// disassociates the controlling terminal (via
+    /// [`Session::detach_ctrl_tty`], which also clears the tty's
+    /// back-pointer -- see the module doc's SIGINT-fix section).
+    ///
+    /// Called when the session leader exits or the controlling terminal is
+    /// disconnected. Currently has no live caller in the tree (matches the
+    /// C original, which was likewise never wired to a SIGHUP-on-hangup
+    /// trigger) -- kept and force-linked per this project's "port every
+    /// declared public symbol" rule; future SIGHUP wiring is out of this
+    /// wave's scope.
+    ///
+    /// # Safety
+    /// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
+    pub(crate) unsafe extern "C" fn hangup(s: *mut session) {
+        if s.is_null() {
             return;
         }
-        // `ksiginfo` is a `list_node_t` (two raw pointers), two `*mut
-        // thread` fields, an `i32`, and a `siginfo_t` (itself all
-        // `i32`/raw-pointer/union-of-primitives fields) -- every field
-        // is valid when null/zero, same reasoning as
-        // `kernel/proc/access.rs::zeroed_ksiginfo` (duplicated locally
-        // here per this file's established cross-module convention).
-        let mut info: ksiginfo = core::mem::zeroed();
-        info.signo = SIGHUP;
-        ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&raw mut info));
-        info.signo = SIGCONT;
-        ThreadGroupAccess::from_ptr(tg).map_or(-EINVAL, |tga| tga.signal_send(&raw mut info));
+        // SAFETY: see fn doc.
+        unsafe {
+            if (*s).flags.exited() != 0 {
+                return;
+            }
+            ProcTable::assert_wholding();
+
+            (*s).flags.set_exited(1);
+
+            // N-R6d-2b: resolve the foreground pgroup `Pgid` to a live pointer (null
+            // if `NONE`/stale) under the held `pid_wlock` (asserted above).
+            let fg = Pgroup::lookup((*s).fg_pgrp).unwrap_or(ptr::null_mut());
+            if !fg.is_null() && (*fg).flags.exited() == 0 {
+                let head = &raw mut (*fg).threads;
+                let off = core::mem::offset_of!(thread, pg_entry);
+                crate::list_for_each!(head, off, t, {
+                    Self::hangup_signal_tg(t as *mut thread);
+                });
+            }
+
+            // SAFETY: `pid_wlock` held (asserted above) — `&mut *s` exclusive.
+            (*s).detach_ctrl_tty();
+            (*s).fg_pgrp = Pgid::NONE;
+        }
     }
 }
 
-/// Mark a session as exited and send SIGHUP (then SIGCONT) to its
-/// foreground process group -- or do nothing if it has none. Also
-/// disassociates the controlling terminal (via
-/// [`Session::detach_ctrl_tty`], which also clears the tty's
-/// back-pointer -- see the module doc's SIGINT-fix section).
-///
-/// Called when the session leader exits or the controlling terminal is
-/// disconnected. Currently has no live caller in the tree (matches the
-/// C original, which was likewise never wired to a SIGHUP-on-hangup
-/// trigger) -- kept and force-linked per this project's "port every
-/// declared public symbol" rule; future SIGHUP wiring is out of this
-/// wave's scope.
-///
-/// # Safety
-/// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
-pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
-    if s.is_null() {
-        return;
-    }
-    // SAFETY: see fn doc.
-    unsafe {
-        if (*s).flags.exited() != 0 {
-            return;
-        }
-        ProcTable::assert_wholding();
+impl SessionTable {
+    /// Create a new session: the calling thread becomes the session leader
+    /// of a new session and the process-group leader of a new process
+    /// group. POSIX: must not be called by a process-group leader.
+    pub(crate) extern "C" fn setsid() -> pid_t {
+        let p = crate::machine::current_thread_ptr();
+        let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
 
-        (*s).flags.set_exited(1);
+        ProcTable::wlock();
 
-        // N-R6d-2b: resolve the foreground pgroup `Pgid` to a live pointer (null
-        // if `NONE`/stale) under the held `pid_wlock` (asserted above).
-        let fg = Pgroup::lookup((*s).fg_pgrp).unwrap_or(ptr::null_mut());
-        if !fg.is_null() && (*fg).flags.exited() == 0 {
-            let head = &raw mut (*fg).threads;
-            let off = core::mem::offset_of!(thread, pg_entry);
-            crate::list_for_each!(head, off, t, {
-                __hangup_signal_tg(t as *mut thread);
-            });
-        }
+        // SAFETY: `p` is the live current thread (kernel invariant --
+        // `current_thread_ptr` always returns a valid running thread's
+        // pointer); `pid_wlock` is held from here until every return path
+        // below explicitly unlocks first.
+        unsafe {
+            if (*p).pgid == tgid {
+                ProcTable::wunlock();
+                return -EPERM;
+            }
 
-        // SAFETY: `pid_wlock` held (asserted above) — `&mut *s` exclusive.
-        (*s).detach_ctrl_tty();
-        (*s).fg_pgrp = Pgid::NONE;
-    }
-}
+            let s_raw = Self::alloc(tgid);
+            if s_raw.is_null() {
+                ProcTable::wunlock();
+                return -ENOMEM;
+            }
+            // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
+            // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
+            // contract). Owned locally until this function either transfers
+            // it out permanently (success, via `into_raw` below -- the new
+            // session's baseline reference, same as `session_init`'s) or
+            // lets it `Drop` (the `pgroup_alloc`-failure branch just below,
+            // replacing the previous manual `session_unref(s)` call there).
+            let s = SRef::from_raw(s_raw);
 
-/// Create a new session: the calling thread becomes the session leader
-/// of a new session and the process-group leader of a new process
-/// group. POSIX: must not be called by a process-group leader.
-pub(crate) extern "C" fn session_setsid() -> pid_t {
-    let p = crate::machine::current_thread_ptr();
-    let tgid = ThreadAccess::from_ptr(p).map_or(-1, |ta| ta.resolve_tgid());
+            let tg = (*p).thread_group;
+            let pg = Pgroup::alloc(tgid, tg);
+            if pg.is_null() {
+                // Deliberate fix (Wave 12): the C original called
+                // `slab_free(s)` directly here, bypassing the registry
+                // deregistration that `session_unref` performs.
+                // `session_alloc` (above) already registered `s` in the
+                // global `SESSION_TABLE` (N-R6a; formerly `session_list`), so a
+                // direct free would leave a dangling `NonNull<Session>` in the
+                // table -- a use-after-free the next time anything scans it
+                // (e.g. `session_for_each`). `s->ref_cnt == 1` here (nothing
+                // else has referenced `s` yet), so dropping `s` (-> the
+                // sole owner's `session_unref`) is exactly the "sole owner
+                // drops its reference" case and correctly deregisters (via
+                // `session_table_remove`, bumping the slot generation so any
+                // stray `Sid` goes stale) before freeing. P3-9e: with the
+                // `session_unref` off-by-one fixed (see that fn's doc), this
+                // drop now actually frees `s` instead of leaking it -- explicit
+                // `drop(s)` here (not a plain scope-end `Drop`) so the
+                // free/deregister runs *before* `pid_wunlock()`, preserving the
+                // original code's lock ordering (`SESSION_TABLE`/`session_unref`'s
+                // finalization branch require `pid_wlock` held, same as every
+                // other mutation site -- module doc).
+                drop(s);
+                ProcTable::wunlock();
+                return -ENOMEM;
+            }
 
-    ProcTable::wlock();
+            if !tg.is_null() {
+                Pgroup::remove_tg(tg);
+            }
+            Pgroup::remove_thread(p);
+            // N-R6d-2a: resolve the thread's stored session `Sid` to a live pointer
+            // (null if `NONE`/stale) before removing it from that session — same
+            // "detach from current session if any" as the old raw-pointer read.
+            let cur_sess = Self::lookup((*p).session).unwrap_or(ptr::null_mut());
+            if !cur_sess.is_null() {
+                Session::remove_thread(cur_sess, p);
+            }
 
-    // SAFETY: `p` is the live current thread (kernel invariant --
-    // `current_thread_ptr` always returns a valid running thread's
-    // pointer); `pid_wlock` is held from here until every return path
-    // below explicitly unlocks first.
-    unsafe {
-        if (*p).pgid == tgid {
+            Session::add_pg(SRef::as_ptr(&s), pg);
+            if !tg.is_null() {
+                Pgroup::add_tg(pg, tg);
+            }
+            Pgroup::add_thread(pg, p);
+            Session::add_thread(SRef::as_ptr(&s), p);
+            // N-R6d-2b: becomes foreground group — store `pg`'s generational key.
+            (*SRef::as_ptr(&s)).fg_pgrp = Pgroup::key_of(pg);
+
+            // Success: hand `s`'s baseline reference back out as a bare
+            // pointer without dropping it. The baseline is now released
+            // automatically once the session empties -- when the leader exits
+            // and its process group goes away, `session_remove_thread`/
+            // `session_remove_pg` drop it on the empty transition (P3-BUG3, see
+            // `session_unref`'s doc). Until then it keeps the live session
+            // pinned, exactly as before.
+            let _ = SRef::into_raw(s);
+
             ProcTable::wunlock();
-            return -EPERM;
         }
-
-        let s_raw = session_alloc(tgid);
-        if s_raw.is_null() {
-            ProcTable::wunlock();
-            return -ENOMEM;
-        }
-        // P3-9e: `SRef` over `session_alloc`'s freshly-taken reference
-        // (its `ref_cnt == 1` postcondition -- `SRef::from_raw`'s exact
-        // contract). Owned locally until this function either transfers
-        // it out permanently (success, via `into_raw` below -- the new
-        // session's baseline reference, same as `session_init`'s) or
-        // lets it `Drop` (the `pgroup_alloc`-failure branch just below,
-        // replacing the previous manual `session_unref(s)` call there).
-        let s = SRef::from_raw(s_raw);
-
-        let tg = (*p).thread_group;
-        let pg = Pgroup::alloc(tgid, tg);
-        if pg.is_null() {
-            // Deliberate fix (Wave 12): the C original called
-            // `slab_free(s)` directly here, bypassing the registry
-            // deregistration that `session_unref` performs.
-            // `session_alloc` (above) already registered `s` in the
-            // global `SESSION_TABLE` (N-R6a; formerly `session_list`), so a
-            // direct free would leave a dangling `NonNull<Session>` in the
-            // table -- a use-after-free the next time anything scans it
-            // (e.g. `session_for_each`). `s->ref_cnt == 1` here (nothing
-            // else has referenced `s` yet), so dropping `s` (-> the
-            // sole owner's `session_unref`) is exactly the "sole owner
-            // drops its reference" case and correctly deregisters (via
-            // `session_table_remove`, bumping the slot generation so any
-            // stray `Sid` goes stale) before freeing. P3-9e: with the
-            // `session_unref` off-by-one fixed (see that fn's doc), this
-            // drop now actually frees `s` instead of leaking it -- explicit
-            // `drop(s)` here (not a plain scope-end `Drop`) so the
-            // free/deregister runs *before* `pid_wunlock()`, preserving the
-            // original code's lock ordering (`SESSION_TABLE`/`session_unref`'s
-            // finalization branch require `pid_wlock` held, same as every
-            // other mutation site -- module doc).
-            drop(s);
-            ProcTable::wunlock();
-            return -ENOMEM;
-        }
-
-        if !tg.is_null() {
-            Pgroup::remove_tg(tg);
-        }
-        Pgroup::remove_thread(p);
-        // N-R6d-2a: resolve the thread's stored session `Sid` to a live pointer
-        // (null if `NONE`/stale) before removing it from that session — same
-        // "detach from current session if any" as the old raw-pointer read.
-        let cur_sess = session_lookup((*p).session).unwrap_or(ptr::null_mut());
-        if !cur_sess.is_null() {
-            session_remove_thread(cur_sess, p);
-        }
-
-        session_add_pg(SRef::as_ptr(&s), pg);
-        if !tg.is_null() {
-            Pgroup::add_tg(pg, tg);
-        }
-        Pgroup::add_thread(pg, p);
-        session_add_thread(SRef::as_ptr(&s), p);
-        // N-R6d-2b: becomes foreground group — store `pg`'s generational key.
-        (*SRef::as_ptr(&s)).fg_pgrp = Pgroup::key_of(pg);
-
-        // Success: hand `s`'s baseline reference back out as a bare
-        // pointer without dropping it. The baseline is now released
-        // automatically once the session empties -- when the leader exits
-        // and its process group goes away, `session_remove_thread`/
-        // `session_remove_pg` drop it on the empty transition (P3-BUG3, see
-        // `session_unref`'s doc). Until then it keeps the live session
-        // pinned, exactly as before.
-        let _ = SRef::into_raw(s);
-
-        ProcTable::wunlock();
-    }
-    tgid
-}
-
-pub(crate) extern "C" fn session_getsid(pid: pid_t) -> pid_t {
-    if pid == 0 {
-        let cur = crate::machine::current_thread_ptr();
-        // SAFETY: `cur` is the live current thread.
-        return unsafe { (*cur).sid };
-    }
-    if pid < 0 {
-        return -EINVAL;
+        tgid
     }
 
-    Rcu::read_lock();
-    let target = ProcTable::get_thread(pid);
-    if is_err(target) {
+    pub(crate) extern "C" fn getsid(pid: pid_t) -> pid_t {
+        if pid == 0 {
+            let cur = crate::machine::current_thread_ptr();
+            // SAFETY: `cur` is the live current thread.
+            return unsafe { (*cur).sid };
+        }
+        if pid < 0 {
+            return -EINVAL;
+        }
+
+        Rcu::read_lock();
+        let target = ProcTable::get_thread(pid);
+        if is_err(target) {
+            Rcu::read_unlock();
+            return -ESRCH;
+        }
+        // SAFETY: `target` is a live thread (not an ERR_PTR, checked above)
+        // for as long as the RCU read-side critical section is held.
+        let sid = unsafe { (*target).sid };
         Rcu::read_unlock();
-        return -ESRCH;
-    }
-    // SAFETY: `target` is a live thread (not an ERR_PTR, checked above)
-    // for as long as the RCU read-side critical section is held.
-    let sid = unsafe { (*target).sid };
-    Rcu::read_unlock();
 
-    sid
-}
-
-/// Look up a session by its SID.
-///
-/// Finds the thread whose `pid == sid` (the session leader) via
-/// `get_pid_thread`, then returns its session pointer.
-///
-/// Returns the session pointer, or `ERR_PTR(-ESRCH)` if not found. The
-/// caller must be inside an `Rcu::read_lock()` section, or hold
-/// `pid_lock`; the returned pointer is only stable under that same
-/// protection.
-pub(crate) extern "C" fn get_session(sid: pid_t) -> *mut session {
-    result_to_errptr(get_session_inner(sid))
-}
-
-fn get_session_inner(sid: pid_t) -> KResult<*mut session> {
-    let t = ProcTable::get_thread(sid);
-    if is_err(t) {
-        return Err(Errno::Srch);
+        sid
     }
-    // SAFETY: `t` is a live thread (not an ERR_PTR, checked above) for
-    // as long as the caller's RCU read-side section / `pid_lock` hold
-    // lasts (fn doc).
-    // N-R6d-2a: resolve the thread's session `Sid` to a live pointer — a stale
-    // key (session freed) resolves to null → `Srch`, the correct "session gone"
-    // answer this getsid path already returns for a null session.
-    let s = session_lookup(unsafe { (*t).session }).unwrap_or(ptr::null_mut());
-    if s.is_null() {
-        return Err(Errno::Srch);
+
+    /// Look up a session by its SID.
+    ///
+    /// Finds the thread whose `pid == sid` (the session leader) via
+    /// `get_pid_thread`, then returns its session pointer.
+    ///
+    /// Returns the session pointer, or `ERR_PTR(-ESRCH)` if not found. The
+    /// caller must be inside an `Rcu::read_lock()` section, or hold
+    /// `pid_lock`; the returned pointer is only stable under that same
+    /// protection.
+    pub(crate) extern "C" fn get(sid: pid_t) -> *mut session {
+        result_to_errptr(Self::get_inner(sid))
     }
-    Ok(s)
+
+    fn get_inner(sid: pid_t) -> KResult<*mut session> {
+        let t = ProcTable::get_thread(sid);
+        if is_err(t) {
+            return Err(Errno::Srch);
+        }
+        // SAFETY: `t` is a live thread (not an ERR_PTR, checked above) for
+        // as long as the caller's RCU read-side section / `pid_lock` hold
+        // lasts (fn doc).
+        // N-R6d-2a: resolve the thread's session `Sid` to a live pointer — a stale
+        // key (session freed) resolves to null → `Srch`, the correct "session gone"
+        // answer this getsid path already returns for a null session.
+        let s = Self::lookup(unsafe { (*t).session }).unwrap_or(ptr::null_mut());
+        if s.is_null() {
+            return Err(Errno::Srch);
+        }
+        Ok(s)
+    }
 }

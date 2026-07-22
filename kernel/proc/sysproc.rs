@@ -146,7 +146,7 @@ use crate::proc::Pgroup;
 // P3-1C mesh sweep: tty/session.rs is in scope for this wave; identical
 // `pid_t`/`c_int` signatures, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
-use crate::tty::session::{session_getsid, session_setsid};
+use crate::tty::session::SessionTable;
 use crate::timer::sched_timer::sleep_ms_interruptible;
 use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
 // P3-1B2: `thread_group_exit`/`thread_tgid`/`signal_pending` used to be
@@ -478,14 +478,14 @@ pub(crate) extern "C" fn sys_getpgid() -> u64 {
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
-pub(crate) extern "C" fn sys_setsid() -> u64 { session_setsid() as u64 }
+pub(crate) extern "C" fn sys_setsid() -> u64 { SessionTable::setsid() as u64 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_getsid() -> u64 {
     let mut pid: c_int = 0;
     argint(0, &mut pid);
-    session_getsid(pid) as u64
+    SessionTable::getsid(pid) as u64
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s

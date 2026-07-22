@@ -70,9 +70,7 @@ use crate::proc::access::TqRef;
 // `#[no_mangle]` exports are gone (identical signatures).
 use crate::proc::Pgroup;
 
-use super::session::{
-    session_get_fg_pgid, session_lookup, session_set_ctrl_tty, session_set_fg_pgid,
-};
+use super::session::{Session, SessionTable};
 use super::termios::termios_init_default;
 // P3-1C mesh sweep: vfs/pipe.rs is in scope for this wave; converted from
 // `extern "C"` redeclarations to plain crate-path items (identical
@@ -918,7 +916,7 @@ impl Tty {
         if !sess.is_null() {
             // SAFETY: `sess` is non-null (checked) and, per the C
             // original's lock-free access, a live `session` for `self`.
-            let fg = unsafe { session_get_fg_pgid(sess) };
+            let fg = unsafe { Session::get_fg_pgid(sess) };
             if fg > 0 {
                 Pgroup::kill(fg, signum);
                 return;
@@ -1442,7 +1440,7 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             // SAFETY: `t` is live (fn doc).
             let sess = unsafe { (*t).session };
             if !sess.is_null() {
-                unsafe { *pgidp = session_get_fg_pgid(sess) };
+                unsafe { *pgidp = Session::get_fg_pgid(sess) };
             }
             0
         }
@@ -1459,7 +1457,7 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             if !same_session {
                 return -ENOTTY;
             }
-            unsafe { session_set_fg_pgid(sess, pgid) };
+            unsafe { Session::set_fg_pgid(sess, pgid) };
             0
         }
         TIOCSCTTY => {
@@ -1472,11 +1470,11 @@ pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_voi
             // `session_set_ctrl_tty` below asserts it), so `session_lookup` is
             // race-free; a `NONE`/stale key resolves to null → `EPERM`, exactly
             // the old "no session leader" outcome.
-            let sess = session_lookup(unsafe { (*cur).session }).unwrap_or(core::ptr::null_mut());
+            let sess = SessionTable::lookup(unsafe { (*cur).session }).unwrap_or(core::ptr::null_mut());
             if sess.is_null() {
                 return -EPERM;
             }
-            unsafe { session_set_ctrl_tty(sess, t) };
+            unsafe { Session::set_ctrl_tty(sess, t) };
             0
         }
         _ => {

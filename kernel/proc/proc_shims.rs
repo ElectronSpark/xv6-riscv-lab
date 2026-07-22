@@ -1010,7 +1010,7 @@ pub(super) fn session_for_each_all(
     // writer, so the registry scan is race-free); `cb` is the caller's
     // C-ABI dump callback, invoked once per live session pointer exactly as
     // the old `session_list` walk did.
-    crate::tty::session::session_for_each(|s| unsafe { cb(s, arg) });
+    crate::tty::session::SessionTable::for_each(|s| unsafe { cb(s, arg) });
 }
 
 // ===========================================================================

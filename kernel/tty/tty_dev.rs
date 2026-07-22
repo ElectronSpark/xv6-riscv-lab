@@ -50,7 +50,7 @@ use crate::dev::cdev::{cdev_register, CdevOps};
 // `safe`; every call site already sits inside an `unsafe extern "C" fn`
 // body except `ctrl_tty()`'s `session_get_ctrl_tty` call, which gets an
 // explicit `unsafe { }` block below.
-use super::session::{session_get_ctrl_tty, session_lookup};
+use super::session::{Session, SessionTable};
 use super::tty::{tty_close, tty_ioctl, tty_open, tty_poll, tty_read, tty_write};
 
 /// `S_IFCHR` (`kernel/inc/uabi/stat.h`).
@@ -109,12 +109,12 @@ fn ctrl_tty() -> *mut tty {
     // Resolve the `Sid` to a live session under `pid_wlock` (required by
     // `session_lookup`); a stale key (session freed) resolves to null → no
     // controlling tty, the same answer the old null-pointer path gave.
-    let session = session_lookup(sid).unwrap_or(core::ptr::null_mut());
+    let session = SessionTable::lookup(sid).unwrap_or(core::ptr::null_mut());
     let t = if session.is_null() {
         core::ptr::null_mut()
     } else {
         // SAFETY: `session` is a live session pointer just resolved above.
-        unsafe { session_get_ctrl_tty(session) }
+        unsafe { Session::get_ctrl_tty(session) }
     };
     ProcTable::wunlock();
     t

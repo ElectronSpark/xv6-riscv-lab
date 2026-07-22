@@ -156,7 +156,7 @@ mod raw {
     /// file's only call site always did.
     pub fn session_remove_thread(s: *mut Session, t: *mut Thread) {
         unsafe {
-            crate::tty::session::session_remove_thread(
+            crate::tty::session::Session::remove_thread(
                 s as *mut c_void as *mut crate::bindings::session,
                 t as *mut c_void as *mut crate::bindings::thread,
             );

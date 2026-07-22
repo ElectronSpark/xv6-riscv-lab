@@ -200,7 +200,7 @@ fn vfs_fdtable_clone(src: *mut VfsFdtable, flags: c_int) -> *mut VfsFdtable {
 #[inline(always)]
 fn session_add_thread(s: *mut Session, t: *mut Thread) {
     unsafe {
-        crate::tty::session::session_add_thread(
+        crate::tty::session::Session::add_thread(
             s as *mut c_void as *mut crate::bindings::session,
             t as *mut c_void as *mut crate::bindings::thread,
         );

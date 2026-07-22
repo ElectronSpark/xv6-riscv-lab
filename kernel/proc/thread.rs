@@ -32,7 +32,7 @@ use crate::proc::access::{
 };
 use crate::proc::thread_group::ThreadGroup;
 use crate::kstd::{result_to_errptr, Errno, GenKey, GenTable, KResult};
-use crate::tty::session::{session_key_of, session_lookup, Sid};
+use crate::tty::session::{Session, SessionTable, Sid};
 use crate::proc::pgroup::{Pgid, Pgroup};
 use core::ptr::NonNull;
 use crate::proc::proc_shims::xv6_panic;
@@ -506,13 +506,13 @@ impl<'a> ThreadAccess<'a> {
         // SAFETY: `self` wraps a live `*mut thread` (handle contract); reading
         // its own `session` `Sid` field is a plain aligned word read.
         let sid: Sid = unsafe { (*self.as_ptr()).session };
-        session_lookup(sid).unwrap_or(ptr::null_mut())
+        SessionTable::lookup(sid).unwrap_or(ptr::null_mut())
     }
 
     /// Store `s` as this thread's `session` edge: `s == null` → [`Sid::NONE`],
     /// otherwise `s`'s own cached [`Sid`]. Caller holds `pid_wlock`.
     pub(super) fn session_store(&self, s: *mut session) {
-        let sid = session_key_of(s);
+        let sid = Session::key_of(s);
         // SAFETY: writing this live thread's own `session` field under the
         // caller's `pid_wlock` (exclusive) is race-free.
         unsafe {
@@ -772,7 +772,7 @@ impl Thread {
         unsafe { PgroupAccess::assume(pg) }.mark_kernel();
 
         // Inlined former `session_alloc` facade (the sole call site).
-        let s = crate::tty::session::session_alloc(KERNEL_HIERARCHY_ID) as *mut c_void;
+        let s = crate::tty::session::SessionTable::alloc(KERNEL_HIERARCHY_ID) as *mut c_void;
         kassert!(!s.is_null(), "kthread hierarchy: session_alloc failed");
         // SAFETY: `s` is proven non-null by the diverging `kassert!` above.
         unsafe { SessionAccess::assume(s as *mut session) }.mark_kernel();
@@ -780,7 +780,7 @@ impl Thread {
         // Inlined former `session_add_pg` facade (the sole call site).
         // SAFETY: `s`/`pg` are the just-allocated, non-null session/pgroup
         // (proven by the `kassert!`s above) — matches the callee's contract.
-        let ret = unsafe { crate::tty::session::session_add_pg(s as *mut session, pg) };
+        let ret = unsafe { crate::tty::session::Session::add_pg(s as *mut session, pg) };
         kassert!(ret == 0, "kthread hierarchy: session_add_pg failed");
         let ret = Pgroup::add_tg(pg, tg);
         kassert!(ret == 0, "kthread hierarchy: pgroup_add_tg failed");
@@ -807,7 +807,7 @@ impl Thread {
         // SAFETY: the kernel hierarchy's session (initialized once) and the
         // caller's own live thread `p` — matches the callee's contract.
         let ret = unsafe {
-            crate::tty::session::session_add_thread(
+            crate::tty::session::Session::add_thread(
                 KERNEL_SESSION.load(Ordering::Acquire) as *mut session, p)
         };
         kassert!(ret == 0, "kthread hierarchy: session_add_thread failed");
@@ -1208,7 +1208,7 @@ impl Thread {
             crate::proc::pgroup::Pgroup::init(p as *mut c_void as *mut crate::proc::pgroup::Thread);
             // Inlined former `session_init` facade (the sole call site); the
             // surrounding `thread_raw_layout!` already provides the unsafe context.
-            crate::tty::session::session_init(p);
+            crate::tty::session::SessionTable::init(p);
             ProcTable::wunlock();
 
             crate::kprintln!("Init process kernel stack size order: {}", (*p).kstack_order);

@@ -252,14 +252,14 @@ impl Pgroup {
         // is race-free under the caller's `pid_lock` (writers need the exclusive
         // `pid_wlock`).
         let sid = unsafe { (*pg).session_sid() };
-        crate::tty::session::session_lookup(sid).unwrap_or(ptr::null_mut())
+        crate::tty::session::SessionTable::lookup(sid).unwrap_or(ptr::null_mut())
     }
 
     /// Store `s` as pgroup `pg`'s `session` edge: `s == null` → `Sid::NONE`,
     /// otherwise `s`'s own cached [`Sid`] (`session.self_sid`). Caller holds
     /// `pid_wlock` (every `set_session` site does).
     pub(super) fn session_store(pg: *mut Pgroup, s: *mut Session) {
-        let sid = crate::tty::session::session_key_of(s);
+        let sid = crate::tty::session::Session::key_of(s);
         // SAFETY: `pg` is a live `*mut pgroup`; the exclusive `&mut self` write of
         // its own `session` field under the caller's `pid_wlock` is race-free.
         unsafe {
@@ -439,7 +439,7 @@ use crate::proc::access::ThreadAccess;
 /// exactly as both call sites in this file always did.
 fn session_add_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
     unsafe {
-        crate::tty::session::session_add_pg(
+        crate::tty::session::Session::add_pg(
             s as *mut c_void as *mut crate::bindings::session,
             pg as *mut c_void as *mut crate::bindings::pgroup,
         )
@@ -448,7 +448,7 @@ fn session_add_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
 /// SAFETY: see `session_add_pg`.
 fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
     unsafe {
-        crate::tty::session::session_remove_pg(
+        crate::tty::session::Session::remove_pg(
             s as *mut c_void as *mut crate::bindings::session,
             pg as *mut c_void as *mut crate::bindings::pgroup,
         )
