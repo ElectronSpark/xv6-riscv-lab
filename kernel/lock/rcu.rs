@@ -56,7 +56,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, Ordering};
 
 use crate::bindings::{
-    cpu_local, rcu_callback_t, rcu_head_t, slab_cache_t, spinlock_t, thread,
+    cpu_local, rcu_head_t, slab_cache_t, spinlock_t, thread,
     tq_t, NCPU, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
 use crate::machine::{self, PreemptGuard};
@@ -230,11 +230,31 @@ const KERNEL_STACK_ORDER: c_int = 2;
 // live bindgen type + cross-compiler `_Static_assert` probe (toolchain
 // gcc, rv64gc/lp64d — scratchpad p3n7_static_assert_probe.c); both
 // agree on every value asserted below (no pipe-style divergence).
+/// TRAIT-OPS (final wave, Part B): RCU deferred-free callback -- was the
+/// `rcu_callback_t` slot (`Option<unsafe extern "C" fn(*mut c_void)>`,
+/// 8 bytes) on [`RawRcuHead::func`]; now `Option<&'static dyn
+/// RcuCallback>` (16 bytes). Every in-tree registrant (the 4 real users
+/// -- `dev.rs`'s device-major free, `proc/thread.rs`'s
+/// `thread_destroy_rcu_callback`, `irq_core.rs`'s `rcu_free_irq_desc`,
+/// `vfs_syscall.rs`'s `vfs_fd_rcucb` -- plus every `rcu_test.rs` site)
+/// always supplies `Some(...)`, but `Option` is kept (unlike this wave's
+/// `TqWait`) because the public `Rcu::call`/`api::call` surface
+/// documents "no callback" as a legitimate caller intent (`call_impl`'s
+/// `let Some(cb) = func else { return; }` early-return path), not just
+/// dead historical plumbing.
+pub(crate) trait RcuCallback: Sync {
+    /// # Safety
+    /// Must only be invoked by the RCU subsystem, once a grace period has
+    /// elapsed since the callback was registered, with the exact `data`
+    /// pointer the registrant originally passed to `Rcu::call`/`api::call`.
+    unsafe fn run(&self, data: *mut c_void);
+}
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RawRcuHead {
     pub next: *mut RawRcuHead,
-    pub func: rcu_callback_t,
+    pub func: Option<&'static dyn RcuCallback>,
     pub data: *mut c_void,
     pub timestamp: u64,
     /// Anonymous C bitfield struct `{ uint64 embedded_head : 1; }`.
@@ -256,14 +276,29 @@ impl RawRcuHead {
 // pre-nativization bindgen output via the temporary in-tree
 // `offset_of!` gate and cross-checked by the gcc `_Static_assert`
 // probe (see the representation note above).
+//
+// TRAIT-OPS (final wave, Part B): `func` (bare fn pointer -> `Option<&'static
+// dyn RcuCallback>` fat pointer) grew 8 -> 16 bytes, so `data`/`timestamp`/
+// `flags` each shift +8 and the struct's own size grows 40 -> 48 -- an
+// honest growth (no tail padding to absorb it here), same shape as Wave 8's
+// `TimerNode::callback` growth (`af98d3e`). ASM-LAYOUT GATE (see the
+// embedder notes at each `rcu_head`-embedding struct: `proc/thread.rs`'s
+// `Thread`, `irq/irq_core.rs`'s `IrqDesc`, `dev/dev.rs`'s `DeviceMajor`):
+// none is referenced by any `.S` file by field offset, and `rcu_head` is
+// the LAST field in every embedder, so this +8 growth only shifts each
+// embedder's own *trailing* padding/size, never an earlier field's offset.
 const _: () = {
-    assert!(core::mem::size_of::<RawRcuHead>() == 40, "rcu_head size");
+    assert!(core::mem::size_of::<RawRcuHead>() == 48, "rcu_head size");
     assert!(core::mem::align_of::<RawRcuHead>() == 8, "rcu_head alignment");
     assert!(core::mem::offset_of!(RawRcuHead, next) == 0, "rcu_head.next offset");
     assert!(core::mem::offset_of!(RawRcuHead, func) == 8, "rcu_head.func offset");
-    assert!(core::mem::offset_of!(RawRcuHead, data) == 16, "rcu_head.data offset");
-    assert!(core::mem::offset_of!(RawRcuHead, timestamp) == 24, "rcu_head.timestamp offset");
-    assert!(core::mem::offset_of!(RawRcuHead, flags) == 32, "rcu_head anonymous-bitfield offset");
+    assert!(core::mem::offset_of!(RawRcuHead, data) == 24, "rcu_head.data offset");
+    assert!(core::mem::offset_of!(RawRcuHead, timestamp) == 32, "rcu_head.timestamp offset");
+    assert!(core::mem::offset_of!(RawRcuHead, flags) == 40, "rcu_head anonymous-bitfield offset");
+    // Honest fat-pointer proof (`TimerCallback`/`IrqHandler`/`WorkHandler`
+    // precedent): a null-data-pointer niche, no extra discriminant byte.
+    assert!(core::mem::size_of::<Option<&'static dyn RcuCallback>>() == 16, "rcu callback fat-ptr size");
+    assert!(core::mem::align_of::<Option<&'static dyn RcuCallback>>() == 8, "rcu callback fat-ptr align");
 };
 
 // ---------------------------------------------------------------------------
@@ -447,7 +482,7 @@ impl Rcu {
 
 /// Read all the fields needed to invoke a callback in one unsafe deref.
 struct HeadFields {
-    func: rcu_callback_t,
+    func: Option<&'static dyn RcuCallback>,
     data: *mut c_void,
     embedded: bool,
 }
@@ -486,7 +521,7 @@ impl RawRcuHead {
     #[inline]
     fn head_init(
         h: *mut RawRcuHead,
-        func: rcu_callback_t,
+        func: Option<&'static dyn RcuCallback>,
         data: *mut c_void,
         ts: u64,
         embedded: bool,
@@ -504,14 +539,14 @@ impl RawRcuHead {
     }
 }
 
-/// Invoke a callback function pointer.
+/// Invoke an [`RcuCallback`] trait-object callback.
 ///
 /// # Safety
-/// `cb` must be a valid C-ABI callback; `data` must satisfy `cb`'s
-/// contract.
+/// `cb` must be a valid [`RcuCallback`] impl for this deferred-free
+/// registration; `data` must satisfy `cb`'s contract.
 #[inline]
-unsafe fn invoke_cb(cb: unsafe extern "C" fn(*mut c_void), data: *mut c_void) {
-    unsafe { cb(data); }
+unsafe fn invoke_cb(cb: &'static dyn RcuCallback, data: *mut c_void) {
+    unsafe { cb.run(data); }
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +806,7 @@ impl Rcu {
 
     // --- call_rcu ---
 
-    fn call_impl(head: *mut RawRcuHead, func: rcu_callback_t, data: *mut c_void) {
+    fn call_impl(head: *mut RawRcuHead, func: Option<&'static dyn RcuCallback>, data: *mut c_void) {
         let Some(cb) = func else { return; };
 
         let caller_supplied = !head.is_null();
@@ -782,7 +817,7 @@ impl Rcu {
             if allocated.is_null() {
                 // Allocation failure → degrade to synchronous behaviour.
                 Self::synchronize_impl();
-                // SAFETY: caller-provided C callback; FFI contract.
+                // SAFETY: caller-provided `RcuCallback` impl; its contract.
                 unsafe { invoke_cb(cb, data); }
                 return;
             }
@@ -1338,21 +1373,21 @@ pub mod api {
     #[inline]
     pub fn kthread_start_cpu(cpu: c_int) { Rcu::kthread_start_cpu_impl(cpu) }
 
-    /// Schedule `func(data)` after a grace period.
+    /// Schedule `func.run(data)` after a grace period.
     ///
     /// If `head` is null, a slab-allocated head is used and freed by
     /// the drainer; otherwise the caller-supplied head is kept and
     /// the caller owns it again once `func` returns.
     ///
     /// # Safety
-    /// * `func` must be a valid C-ABI callback.
+    /// * `func` must be a valid [`RcuCallback`] impl.
     /// * `data` must be valid for `func`'s contract.
     /// * If `head` is non-null it must point at a `rcu_head_t` that
     ///   outlives the callback invocation.
     #[inline]
     pub unsafe fn call(
         head: *mut rcu_head_t,
-        func: rcu_callback_t,
+        func: Option<&'static dyn RcuCallback>,
         data: *mut c_void,
     ) {
         // SAFETY: layout equivalence between `rcu_head_t` and the
@@ -1399,7 +1434,7 @@ impl Rcu {
     /// Same contract as [`api::call`].
     pub(crate) unsafe fn call(
         head: *mut rcu_head_t,
-        func: rcu_callback_t,
+        func: Option<&'static dyn RcuCallback>,
         data: *mut c_void,
     ) {
         // SAFETY: see the identical cast in `api::call`.

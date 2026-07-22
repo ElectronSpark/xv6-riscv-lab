@@ -391,7 +391,20 @@ impl WorkHandler for VfsFputWorkHandler {
 }
 static VFS_FPUT_WORK_HANDLER: VfsFputWorkHandler = VfsFputWorkHandler;
 
-unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
+/// TRAIT-OPS: stateless ZST installed as `Some(&VFS_FD_RCUCB)` at
+/// `Sys::vfs_fput_call_rcu`'s `Rcu::call(...)` below -- replaces the
+/// former address-taken `extern "C" fn` callback.
+struct VfsFdRcucb;
+impl crate::lock::rcu::RcuCallback for VfsFdRcucb {
+    unsafe fn run(&self, data: *mut c_void) {
+        // SAFETY: `data` is the `vfs_file*` `vfs_fput_call_rcu` published to
+        // `Rcu::call` below; `vfs_fd_rcucb_impl` has the identical contract.
+        unsafe { vfs_fd_rcucb_impl(data) };
+    }
+}
+static VFS_FD_RCUCB: VfsFdRcucb = VfsFdRcucb;
+
+unsafe fn vfs_fd_rcucb_impl(data: *mut c_void) {
     let file = data as *mut vfs_file;
     let wq = Vfs::vfs_get_deferred_iput_wq();
 
@@ -417,11 +430,11 @@ unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
 impl Sys {
     fn vfs_fput_call_rcu(file: *mut vfs_file) {
         // SAFETY: `head` is null (the callee slab-allocates and owns the
-        // head); `vfs_fd_rcucb` is a valid `rcu_callback_t` whose `data`
+        // head); `VFS_FD_RCUCB` is a valid `RcuCallback` whose `data`
         // contract is exactly the `vfs_file*` passed here. (P3-D3b: this
         // file's old extern redeclaration asserted `safe fn`; the real
         // `crate::lock::rcu::call_rcu` is `unsafe fn`.)
-        unsafe { crate::lock::rcu::Rcu::call(ptr::null_mut(), Some(vfs_fd_rcucb), file as *mut c_void) };
+        unsafe { crate::lock::rcu::Rcu::call(ptr::null_mut(), Some(&VFS_FD_RCUCB), file as *mut c_void) };
     }
 }
 

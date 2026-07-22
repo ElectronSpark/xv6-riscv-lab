@@ -229,10 +229,17 @@ pub struct DeviceInstance {
 // precondition). Deleted: the stale P3-N4 C-fidelity size/offset pins
 // for the moved fields and the whole `device_ops` table block (the
 // table type itself no longer exists).
+// TRAIT-OPS (final wave, Part B): `rcu_head_t`'s `func` slot grew 8 -> 16
+// bytes (fn pointer -> `Option<&'static dyn RcuCallback>` fat pointer, see
+// `lock/rcu.rs`'s `RawRcuHead`), so `rcu_head_t` itself grows 40 -> 48.
+// `rcu_head` is `DeviceMajor`'s LAST field and the struct has no
+// `align(64)` tail to absorb the growth, so `size_of::<DeviceMajor>()`
+// grows 56 -> 64; `rcu_head`'s own offset (16) is unaffected. ASM-LAYOUT
+// GATE: `DeviceMajor` is never referenced by any `.S` file.
 const _: () = {
-    assert!(core::mem::size_of::<crate::bindings::rcu_head_t>() == 40, "rcu_head_t size");
+    assert!(core::mem::size_of::<crate::bindings::rcu_head_t>() == 48, "rcu_head_t size");
     assert!(core::mem::align_of::<crate::bindings::rcu_head_t>() == 8, "rcu_head_t alignment");
-    assert!(core::mem::size_of::<DeviceMajor>() == 56, "device_major size");
+    assert!(core::mem::size_of::<DeviceMajor>() == 64, "device_major size");
     assert!(core::mem::align_of::<DeviceMajor>() == 8, "device_major alignment");
     assert!(core::mem::offset_of!(DeviceMajor, num_minors) == 0, "device_major.num_minors offset");
     assert!(core::mem::offset_of!(DeviceMajor, minors) == 8, "device_major.minors offset");
@@ -265,7 +272,7 @@ const _: () = {
 // P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
 // that its `#[no_mangle]` export is gone; reached by crate path (the call
 // site below already sits in an `unsafe` block).
-use crate::lock::rcu::Rcu;
+use crate::lock::rcu::{Rcu, RcuCallback};
 
 // P3-D3a: the mm page/slab entry points are genuinely `unsafe fn` in
 // `crate::mm::{page,slab}` now that their `#[no_mangle]` exports are
@@ -464,7 +471,7 @@ impl DevTable {
     }
 
     // -----------------------------------------------------------------
-    // device_major_t lifecycle (type_alloc / type_free / [`dev_type_rcu_free`]).
+    // device_major_t lifecycle (type_alloc / type_free / [`DevTypeRcuFree`]).
     // -----------------------------------------------------------------
 
     fn type_alloc() -> *mut device_major_t {
@@ -675,7 +682,7 @@ impl DevTable {
             unsafe {
                 Rcu::call(
                     &raw mut (*to_free).rcu_head,
-                    Some(dev_type_rcu_free),
+                    Some(&DEV_TYPE_RCU_FREE),
                     to_free as *mut c_void,
                 );
             }
@@ -748,16 +755,18 @@ impl DevTable {
     }
 }
 
-/// RCU callback (`call_rcu`'s `rcu_callback_t`) to free a `device_major_t`
-/// after the grace period.
+/// RCU callback to free a `device_major_t` after the grace period.
 ///
-/// FLOOR: address-taken `extern "C"` RCU callback (installed as a bare
-/// fn-pointer at `DevTable::unregister_from_table`'s `Rcu::call(...,
-/// Some(dev_type_rcu_free), ...)` above) -- kept a free fn per this wave's
-/// floor rule.
-extern "C" fn dev_type_rcu_free(data: *mut c_void) {
-    DevTable::type_free(data as *mut device_major_t);
+/// TRAIT-OPS: stateless ZST installed as `Some(&DEV_TYPE_RCU_FREE)` at
+/// `DevTable::unregister_from_table`'s `Rcu::call(...)` above -- replaces
+/// the former address-taken `extern "C" fn` callback.
+struct DevTypeRcuFree;
+impl RcuCallback for DevTypeRcuFree {
+    unsafe fn run(&self, data: *mut c_void) {
+        DevTable::type_free(data as *mut device_major_t);
+    }
 }
+static DEV_TYPE_RCU_FREE: DevTypeRcuFree = DevTypeRcuFree;
 
 /// `KobjectRelease` implementor for `device_t`'s kobject: unregister the
 /// device from the table, then invoke its own release operation.

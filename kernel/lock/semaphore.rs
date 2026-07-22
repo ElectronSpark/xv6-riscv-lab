@@ -30,6 +30,7 @@ const SEM_VALUE_MAX: c_int = 2_147_483_640;
 // delegators were deleted; each call site builds a `TqRef` handle via
 // `from_ptr` and invokes the corresponding inherent method.
 use crate::proc::access::TqRef;
+use crate::proc::thread_queue::TqWait;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -201,45 +202,55 @@ impl SemTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-extern "C" fn sem_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
-    // SAFETY: see `SemTimedCtx::from_raw`.
-    let ctx = match u! { SemTimedCtx::from_raw(data) } {
-        Some(c) => c, None => return 0,
-    };
-    let sem = ctx.sem_ptr();
-    if sem.is_null() { return 0; }
+// TRAIT-OPS (final wave): was the address-taken `extern "C"` timer-callback
+// pair passed *by value* as `Option<unsafe extern "C" fn(...)>` arguments
+// to `TqRef::wait_cb`; the sole call site (`timedwait` below) now passes a
+// single `&'static dyn TqWait` instead. Bodies moved verbatim.
+struct SemTimedTqWait;
 
-    ctx.set_armed(false);
-    let timeout_ms = ctx.timeout();
-    if timeout_ms > 0 {
-        let tn = ctx.timer_node_ptr();
-        if sched_timer_set(tn, timeout_ms) == 0 {
-            ctx.set_armed(true);
-        }
-    }
-    let status = RawSpinlock::is_holding(RawSemaphore::lk_ptr(sem));
-    if status != 0 {
-        RawSpinlock::unlock(RawSemaphore::lk_ptr(sem));
-    }
-    status
-}}
+impl TqWait for SemTimedTqWait {
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int { u! {
+        // SAFETY: see `SemTimedCtx::from_raw`.
+        let ctx = match u! { SemTimedCtx::from_raw(data) } {
+            Some(c) => c, None => return 0,
+        };
+        let sem = ctx.sem_ptr();
+        if sem.is_null() { return 0; }
 
-extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
-    // SAFETY: see `SemTimedCtx::from_raw`.
-    let ctx = match u! { SemTimedCtx::from_raw(data) } {
-        Some(c) => c, None => return,
-    };
-    let sem = ctx.sem_ptr();
-    if sem.is_null() { return; }
-    if ctx.armed() {
-        let tn = ctx.timer_node_ptr();
-        sched_timer_done(tn);
         ctx.set_armed(false);
-    }
-    if sleep_cb_status != 0 {
-        RawSpinlock::lock(RawSemaphore::lk_ptr(sem));
-    }
-}}
+        let timeout_ms = ctx.timeout();
+        if timeout_ms > 0 {
+            let tn = ctx.timer_node_ptr();
+            if sched_timer_set(tn, timeout_ms) == 0 {
+                ctx.set_armed(true);
+            }
+        }
+        let status = RawSpinlock::is_holding(RawSemaphore::lk_ptr(sem));
+        if status != 0 {
+            RawSpinlock::unlock(RawSemaphore::lk_ptr(sem));
+        }
+        status
+    }}
+
+    unsafe fn wake(&self, data: *mut c_void, sleep_cb_status: c_int) { u! {
+        // SAFETY: see `SemTimedCtx::from_raw`.
+        let ctx = match u! { SemTimedCtx::from_raw(data) } {
+            Some(c) => c, None => return,
+        };
+        let sem = ctx.sem_ptr();
+        if sem.is_null() { return; }
+        if ctx.armed() {
+            let tn = ctx.timer_node_ptr();
+            sched_timer_done(tn);
+            ctx.set_armed(false);
+        }
+        if sleep_cb_status != 0 {
+            RawSpinlock::lock(RawSemaphore::lk_ptr(sem));
+        }
+    }}
+}
+
+static SEM_TIMED_TQ_WAIT: SemTimedTqWait = SemTimedTqWait;
 
 impl RawSemaphore {
     // -----------------------------------------------------------------
@@ -375,8 +386,7 @@ impl RawSemaphore {
 
         machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = TqRef::from_ptr(Self::wq_ptr(s)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-            Some(sem_timed_sleep_cb),
-            Some(sem_timed_wake_cb),
+            &SEM_TIMED_TQ_WAIT,
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         ));

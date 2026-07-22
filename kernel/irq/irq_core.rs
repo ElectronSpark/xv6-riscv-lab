@@ -104,10 +104,16 @@ pub struct IrqDesc {
 // growth (unlike `Pcache`'s `align(64)`), so `size_of::<IrqDesc>()`
 // grows 80 -> 88. `IRQ_DESCS` stores `AtomicPtr<IrqDesc>` (a plain
 // pointer, not an embedded struct), so its array sizing is unaffected.
+//
+// TRAIT-OPS (final wave, Part B): `rcu_head`'s own `func` slot also grew
+// 8 -> 16 bytes (see `lock/rcu.rs`'s `RawRcuHead`), so `rcu_head_t` itself
+// grows 40 -> 48. `rcu_head` is `IrqDesc`'s LAST field, so its own offset
+// (48) is unaffected; `size_of::<IrqDesc>()` grows again, 88 -> 96.
+// ASM-LAYOUT GATE: `IrqDesc` is never referenced by any `.S` file.
 const _: () = {
     assert!(core::mem::size_of::<Option<&'static dyn IrqHandler>>() == 16, "irq handler fat pointer size");
     assert!(core::mem::align_of::<Option<&'static dyn IrqHandler>>() == 8, "irq handler fat pointer alignment");
-    assert!(core::mem::size_of::<IrqDesc>() == 88, "irq_desc size");
+    assert!(core::mem::size_of::<IrqDesc>() == 96, "irq_desc size");
     assert!(core::mem::align_of::<IrqDesc>() == 8, "irq_desc alignment");
     assert!(core::mem::offset_of!(IrqDesc, handler) == 0, "irq_desc.handler offset");
     assert!(core::mem::offset_of!(IrqDesc, data) == 16, "irq_desc.data offset");
@@ -138,7 +144,7 @@ unsafe extern "C" {
 // safe fns (as the old `safe fn` redeclarations asserted); `call_rcu` is
 // genuinely `unsafe fn` and its single call site below already sits in an
 // `unsafe` block.
-use crate::lock::rcu::Rcu;
+use crate::lock::rcu::{Rcu, RcuCallback};
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -245,13 +251,20 @@ impl IrqCore {
     }
 }
 
-unsafe extern "C" fn rcu_free_irq_desc(data: *mut c_void) {
-    // SAFETY: `data` is the `IrqDesc*` `unregister_irq_handler` published
-    // to `call_rcu` below; by the time RCU invokes this callback, the
-    // grace period has elapsed and no reader can still hold a reference,
-    // so this is the sole (now exclusive) owner returning the allocation.
-    unsafe { IrqCore::slab_free(data) };
+/// TRAIT-OPS: stateless ZST installed as `Some(&RCU_FREE_IRQ_DESC)` at
+/// `IrqCore::unregister_irq_handler`'s `Rcu::call(...)` below -- replaces
+/// the former address-taken `extern "C" fn` callback.
+struct RcuFreeIrqDesc;
+impl RcuCallback for RcuFreeIrqDesc {
+    unsafe fn run(&self, data: *mut c_void) {
+        // SAFETY: `data` is the `IrqDesc*` `unregister_irq_handler` published
+        // to `call_rcu` below; by the time RCU invokes this callback, the
+        // grace period has elapsed and no reader can still hold a reference,
+        // so this is the sole (now exclusive) owner returning the allocation.
+        unsafe { IrqCore::slab_free(data) };
+    }
 }
+static RCU_FREE_IRQ_DESC: RcuFreeIrqDesc = RcuFreeIrqDesc;
 
 impl IrqCore {
     /// Rust port of `irq_desc_init()`, called once from `start_kernel.c`.
@@ -371,11 +384,11 @@ impl IrqCore {
         // SAFETY: `old_desc` is non-null (checked above) and was allocated via
         // `slab_alloc(irq_desc_slab_ptr())`; `call_rcu` only touches the
         // `rcu_head` field until the grace period elapses, then hands the
-        // whole pointer to `rcu_free_irq_desc`, which returns it to the same
+        // whole pointer to `RcuFreeIrqDesc::run`, which returns it to the same
         // allocator it came from -- non-blocking deferred free, matching the
         // C original.
         unsafe {
-            Rcu::call(&raw mut (*old_desc).rcu_head, Some(rcu_free_irq_desc), old_desc as *mut c_void);
+            Rcu::call(&raw mut (*old_desc).rcu_head, Some(&RCU_FREE_IRQ_DESC), old_desc as *mut c_void);
         }
         0
     }

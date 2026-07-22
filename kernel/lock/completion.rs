@@ -41,6 +41,7 @@ const MAX_COMPLETIONS: c_int = 65535;
 // each call site builds a `TqRef` handle via `from_ptr` and invokes the
 // corresponding inherent method.
 use crate::proc::access::TqRef;
+use crate::proc::thread_queue::TqWait;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -208,48 +209,58 @@ impl CompletionTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-extern "C" fn completion_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
-    // SAFETY: see `CompletionTimedCtx::from_raw`.
-    let ctx = match u! { CompletionTimedCtx::from_raw(data) } {
-        Some(c) => c, None => return 0,
-    };
-    let comp = ctx.comp_ptr();
-    if comp.is_null() { return 0; }
+// TRAIT-OPS (final wave): was the address-taken `extern "C"` timer-callback
+// pair passed *by value* as `Option<unsafe extern "C" fn(...)>` arguments
+// to `TqRef::wait_cb`; the sole call site (`wait_timed` below) now passes
+// a single `&'static dyn TqWait` instead. Bodies moved verbatim.
+struct CompletionTimedTqWait;
 
-    ctx.set_armed(false);
-    let timeout_ms = ctx.timeout();
-    if timeout_ms > 0 {
-        let tn = ctx.timer_node_ptr();
-        if sched_timer_set(tn, timeout_ms) == 0 {
-            ctx.set_armed(true);
-        }
-    }
+impl TqWait for CompletionTimedTqWait {
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int { u! {
+        // SAFETY: see `CompletionTimedCtx::from_raw`.
+        let ctx = match u! { CompletionTimedCtx::from_raw(data) } {
+            Some(c) => c, None => return 0,
+        };
+        let comp = ctx.comp_ptr();
+        if comp.is_null() { return 0; }
 
-    let status = RawSpinlock::is_holding(RawCompletion::lock_ptr(comp));
-    if status != 0 {
-        RawSpinlock::unlock(RawCompletion::lock_ptr(comp));
-    }
-    status
-}}
-
-extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
-    // SAFETY: see `CompletionTimedCtx::from_raw`.
-    let ctx = match u! { CompletionTimedCtx::from_raw(data) } {
-        Some(c) => c, None => return,
-    };
-    let comp = ctx.comp_ptr();
-    if comp.is_null() { return; }
-
-    if ctx.armed() {
-        let tn = ctx.timer_node_ptr();
-        sched_timer_done(tn);
         ctx.set_armed(false);
-    }
+        let timeout_ms = ctx.timeout();
+        if timeout_ms > 0 {
+            let tn = ctx.timer_node_ptr();
+            if sched_timer_set(tn, timeout_ms) == 0 {
+                ctx.set_armed(true);
+            }
+        }
 
-    if sleep_cb_status != 0 {
-        RawSpinlock::lock(RawCompletion::lock_ptr(comp));
-    }
-}}
+        let status = RawSpinlock::is_holding(RawCompletion::lock_ptr(comp));
+        if status != 0 {
+            RawSpinlock::unlock(RawCompletion::lock_ptr(comp));
+        }
+        status
+    }}
+
+    unsafe fn wake(&self, data: *mut c_void, sleep_cb_status: c_int) { u! {
+        // SAFETY: see `CompletionTimedCtx::from_raw`.
+        let ctx = match u! { CompletionTimedCtx::from_raw(data) } {
+            Some(c) => c, None => return,
+        };
+        let comp = ctx.comp_ptr();
+        if comp.is_null() { return; }
+
+        if ctx.armed() {
+            let tn = ctx.timer_node_ptr();
+            sched_timer_done(tn);
+            ctx.set_armed(false);
+        }
+
+        if sleep_cb_status != 0 {
+            RawSpinlock::lock(RawCompletion::lock_ptr(comp));
+        }
+    }}
+}
+
+static COMPLETION_TIMED_TQ_WAIT: CompletionTimedTqWait = CompletionTimedTqWait;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -376,8 +387,7 @@ impl RawCompletion {
 
             machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::queue_ptr(c)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-                Some(completion_timed_sleep_cb),
-                Some(completion_timed_wake_cb),
+                &COMPLETION_TIMED_TQ_WAIT,
                 &mut ctx as *mut _ as *mut c_void,
                 null_mut(),
             ));

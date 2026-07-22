@@ -24,7 +24,7 @@ use core::ptr::{addr_of, addr_of_mut, null_mut};
 use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::bindings::{list_node_t, rcu_head_t, spinlock_t, thread};
-use crate::lock::rcu::{self as rcu, api as rcu_api, KRcuRead, RcuPtr};
+use crate::lock::rcu::{self as rcu, api as rcu_api, KRcuRead, RcuCallback, RcuPtr};
 use crate::machine;
 use crate::sync::KSpinlock;
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
@@ -262,14 +262,19 @@ fn test_synchronize_rcu() {
 // Test 4: call_rcu() Callbacks
 // ============================================================================
 
-unsafe extern "C" fn test_callback(data: *mut c_void) {
-    // SAFETY: `data` is the `Box`-like `*mut i32` allocated in
-    // `test_call_rcu` and handed to `call_rcu` unchanged.
-    let value = data as *mut i32;
-    crate::kprintln!("  Callback invoked with value: {}", *value);
-    CALLBACK_INVOKED.fetch_add(1, Ordering::Release);
-    kmm_free(data);
+/// TRAIT-OPS test ZST (was the address-taken `extern "C" fn` callback).
+struct TestCallback;
+impl RcuCallback for TestCallback {
+    unsafe fn run(&self, data: *mut c_void) {
+        // SAFETY: `data` is the `Box`-like `*mut i32` allocated in
+        // `test_call_rcu` and handed to `call_rcu` unchanged.
+        let value = data as *mut i32;
+        crate::kprintln!("  Callback invoked with value: {}", unsafe { *value });
+        CALLBACK_INVOKED.fetch_add(1, Ordering::Release);
+        kmm_free(data);
+    }
 }
+static TEST_CALLBACK: TestCallback = TestCallback;
 
 fn test_call_rcu() {
     crate::kprintln!("TEST: call_rcu() Callbacks");
@@ -288,9 +293,9 @@ fn test_call_rcu() {
     }
 
     // SAFETY: `head` is a freshly allocated, exclusively-owned
-    // `rcu_head_t`; `test_callback` matches the required ABI; `data`
+    // `rcu_head_t`; `TEST_CALLBACK` matches the required contract; `data`
     // stays valid until the callback (which owns and frees it) runs.
-    unsafe { rcu_api::call(head, Some(test_callback), data as *mut c_void); }
+    unsafe { rcu_api::call(head, Some(&TEST_CALLBACK), data as *mut c_void); }
     crate::kprintln!("  Callback registered");
 
     rcu_api::synchronize();
@@ -399,10 +404,15 @@ fn test_grace_period() {
 
 static NEGATIVE_CALLBACK_COUNT: AtomicI32 = AtomicI32::new(0);
 
-unsafe extern "C" fn negative_callback(data: *mut c_void) {
-    NEGATIVE_CALLBACK_COUNT.fetch_add(1, Ordering::Release);
-    kmm_free(data);
+/// TRAIT-OPS test ZST (was the address-taken `extern "C" fn` callback).
+struct NegativeCallback;
+impl RcuCallback for NegativeCallback {
+    unsafe fn run(&self, data: *mut c_void) {
+        NEGATIVE_CALLBACK_COUNT.fetch_add(1, Ordering::Release);
+        kmm_free(data);
+    }
 }
+static NEGATIVE_CALLBACK: NegativeCallback = NegativeCallback;
 
 fn test_callback_not_invoked_early() {
     crate::kprintln!("NEGATIVE TEST: Callback Not Invoked Synchronously in call_rcu");
@@ -420,7 +430,7 @@ fn test_callback_not_invoked_early() {
     }
 
     // SAFETY: see `test_call_rcu`.
-    unsafe { rcu_api::call(head, Some(negative_callback), data as *mut c_void); }
+    unsafe { rcu_api::call(head, Some(&NEGATIVE_CALLBACK), data as *mut c_void); }
 
     let early_count = NEGATIVE_CALLBACK_COUNT.load(Ordering::Acquire);
     kassert(early_count == 0, c"Callback should NOT be invoked synchronously in call_rcu\n");
@@ -660,12 +670,17 @@ fn asan_check_node(node: *mut ListTestNode, context: &CStr) {
     }
 }
 
-unsafe extern "C" fn list_node_free_callback(data: *mut c_void) {
-    let node = data as *mut ListTestNode;
-    asan_poison_node(node);
-    LIST_CALLBACK_COUNT.fetch_add(1, Ordering::Release);
-    kmm_free(node as *mut c_void);
+/// TRAIT-OPS test ZST (was the address-taken `extern "C" fn` callback).
+struct ListNodeFreeCallback;
+impl RcuCallback for ListNodeFreeCallback {
+    unsafe fn run(&self, data: *mut c_void) {
+        let node = data as *mut ListTestNode;
+        asan_poison_node(node);
+        LIST_CALLBACK_COUNT.fetch_add(1, Ordering::Release);
+        kmm_free(node as *mut c_void);
+    }
 }
+static LIST_NODE_FREE_CALLBACK: ListNodeFreeCallback = ListNodeFreeCallback;
 
 /// `Sync` newtype for `static` storage of a POD C struct initialised at
 /// runtime via a `*_init` call (mirrors `rcu.rs`'s own `StaticCell`).
@@ -748,10 +763,10 @@ fn test_list_rcu_basic() {
             let node = container_of_list_node(pos);
             list_del_rcu(pos);
             // SAFETY: `node`/`&mut (*node).rcu_head` outlive the callback
-            // (freed only inside it); `list_node_free_callback` matches
-            // the required ABI.
+            // (freed only inside it); `LIST_NODE_FREE_CALLBACK` matches
+            // the required contract.
             unsafe {
-                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(list_node_free_callback), node as *mut c_void);
+                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&LIST_NODE_FREE_CALLBACK), node as *mut c_void);
             }
             pos = next;
         }
@@ -836,7 +851,7 @@ fn test_list_rcu_concurrent_rw() {
                 let node = container_of_list_node(first);
                 list_del_rcu(first);
                 unsafe {
-                    rcu_api::call(addr_of_mut!((*node).rcu_head), Some(list_node_free_callback), node as *mut c_void);
+                    rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&LIST_NODE_FREE_CALLBACK), node as *mut c_void);
                 }
             }
         }
@@ -857,7 +872,7 @@ fn test_list_rcu_concurrent_rw() {
             let node = container_of_list_node(pos);
             list_del_rcu(pos);
             unsafe {
-                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(list_node_free_callback), node as *mut c_void);
+                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&LIST_NODE_FREE_CALLBACK), node as *mut c_void);
             }
             pos = next;
         }
@@ -888,10 +903,15 @@ const STRESS_READER_ITER_INIT: AtomicI32 = AtomicI32::new(0);
 static STRESS_READER_ITERATIONS: [AtomicI32; STRESS_READERS] = [STRESS_READER_ITER_INIT; STRESS_READERS];
 static STRESS_READERS_DONE: AtomicI32 = AtomicI32::new(0);
 
-unsafe extern "C" fn stress_node_free_callback(data: *mut c_void) {
-    STRESS_CALLBACKS_INVOKED.fetch_add(1, Ordering::Release);
-    kmm_free(data);
+/// TRAIT-OPS test ZST (was the address-taken `extern "C" fn` callback).
+struct StressNodeFreeCallback;
+impl RcuCallback for StressNodeFreeCallback {
+    unsafe fn run(&self, data: *mut c_void) {
+        STRESS_CALLBACKS_INVOKED.fetch_add(1, Ordering::Release);
+        kmm_free(data);
+    }
 }
+static STRESS_NODE_FREE_CALLBACK: StressNodeFreeCallback = StressNodeFreeCallback;
 
 // ----------------------------------------------------------------------
 // STRESS TEST 1: 100,000 call_rcu() Operations
@@ -916,10 +936,10 @@ fn test_stress_call_rcu() {
             }
             // SAFETY: freshly allocated, exclusively owned.
             unsafe { (*data).value = batch * STRESS_BATCH_SIZE + i; }
-            // SAFETY: `data as *mut c_void` is what `stress_node_free_callback`
+            // SAFETY: `data as *mut c_void` is what `STRESS_NODE_FREE_CALLBACK`
             // frees; the embedded `rcu_head` outlives the callback.
             unsafe {
-                rcu_api::call(addr_of_mut!((*data).rcu_head), Some(stress_node_free_callback), data as *mut c_void);
+                rcu_api::call(addr_of_mut!((*data).rcu_head), Some(&STRESS_NODE_FREE_CALLBACK), data as *mut c_void);
             }
         }
         // Ensure the grace period completes so callbacks can be processed
@@ -1020,7 +1040,7 @@ fn test_stress_list_rcu() {
                 let node = container_of_list_node(first);
                 list_del_rcu(first);
                 unsafe {
-                    rcu_api::call(addr_of_mut!((*node).rcu_head), Some(stress_node_free_callback), node as *mut c_void);
+                    rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&STRESS_NODE_FREE_CALLBACK), node as *mut c_void);
                 }
                 total_removed += 1;
             }
@@ -1056,7 +1076,7 @@ fn test_stress_list_rcu() {
             let node = container_of_list_node(pos);
             list_del_rcu(pos);
             unsafe {
-                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(stress_node_free_callback), node as *mut c_void);
+                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&STRESS_NODE_FREE_CALLBACK), node as *mut c_void);
             }
             remaining += 1;
             pos = next;
@@ -1164,7 +1184,7 @@ fn test_stress_mixed_workload() {
                 let node = container_of_list_node(first);
                 list_del_rcu(first);
                 unsafe {
-                    rcu_api::call(addr_of_mut!((*node).rcu_head), Some(stress_node_free_callback), node as *mut c_void);
+                    rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&STRESS_NODE_FREE_CALLBACK), node as *mut c_void);
                 }
             }
         }
@@ -1194,7 +1214,7 @@ fn test_stress_mixed_workload() {
             let node = container_of_list_node(pos);
             list_del_rcu(pos);
             unsafe {
-                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(stress_node_free_callback), node as *mut c_void);
+                rcu_api::call(addr_of_mut!((*node).rcu_head), Some(&STRESS_NODE_FREE_CALLBACK), node as *mut c_void);
             }
             pos = next;
         }

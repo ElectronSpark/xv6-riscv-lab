@@ -23,7 +23,7 @@ use crate::bindings::{
     thread_group, thread_signal_t, thread_state, utrapframe, vfs_fdtable, vfs_inode,
     vfs_inode_ref, vm_t, workqueue,
 };
-use crate::lock::rcu::Rcu;
+use crate::lock::rcu::{Rcu, RcuCallback};
 use crate::machine::Riscv;
 use crate::proc::access::{
     is_err, is_err_or_null, ptr_err, list_node_init_raw, CpuLocalRef, PgroupAccess,
@@ -255,8 +255,24 @@ pub struct Thread {
     // ===== Signal (large, pushed to end) =====
     pub signal: thread_signal_t,
     // ===== RCU deferred freeing (must be last) =====
+    //
+    // TRAIT-OPS (final wave, Part B) ASM-LAYOUT GATE: `rcu_head_t`'s `func`
+    // slot grew 8 -> 16 bytes (fn pointer -> `Option<&'static dyn
+    // RcuCallback>`, see `lock/rcu.rs`'s `RawRcuHead`), so `rcu_head_t`
+    // itself grows 40 -> 48. `rcu_head` is `Thread`'s LAST field, so this
+    // offset (1072) is unaffected; the struct's `align(64)` tail absorbs
+    // the +8 growth (1072+48=1120, still <= the existing 1152 rounding),
+    // so `size_of::<Thread>()` stays 1152 too -- net-neutral, exactly like
+    // `Ttree`'s `root` growth this campaign. Checked against every `.S`
+    // file (`entry.S`/`swtch.S`/`kernelvec.S`/`trampoline.S`/
+    // `sig_trampoline.S`): none references `struct thread`/`rcu_head` by
+    // offset -- `swtch.S` only indexes `struct context`'s own 112-byte
+    // block, and `asm-offsets.h`'s `THREAD_*` defines (including
+    // `THREAD_RCU_HEAD`/`THREAD_SIZE`) are documented "unconsumed... kept
+    // as pinned reference values" (no `.S` file reads them) -- so this
+    // growth is safe even before checking the struct-size math above.
     pub rcu_head: rcu_head_t,
-    // struct align(64) tail-pads 1112 -> 1152, exactly as bindgen/gcc.
+    // struct align(64) tail-pads 1120 -> 1152 (was 1112 -> 1152 pre-TRAIT-OPS).
 }
 
 // P3-N9 hardcoded layout proof — every field of the hub, values captured
@@ -267,6 +283,9 @@ pub struct Thread {
 // (THREAD_LOCK..THREAD_RCU_HEAD, THREAD_SIZE — no .S consumer exists,
 // see the block note above).
 const _: () = {
+    // TRAIT-OPS (final wave, Part B): `rcu_head`'s growth is absorbed by
+    // the `align(64)` tail -- see the field-site note above -- so this
+    // stays 1152 unchanged.
     assert!(core::mem::size_of::<Thread>() == 1152, "thread size (THREAD_SIZE)");
     assert!(core::mem::align_of::<Thread>() == 64, "thread alignment");
     assert!(core::mem::offset_of!(Thread, lock) == 0, "thread.lock offset");
@@ -617,7 +636,7 @@ unsafe extern "C" {
 use crate::mm::Vm;
 
 // NO-STANDALONE-FN: the former `page_free` FFI facade (a thin forward to
-// `crate::mm::page_free`) had a single call site (`thread_destroy_rcu_callback`)
+// `crate::mm::page_free`) had a single call site (`ThreadDestroyRcuCallback::run`)
 // and has been inlined there and deleted.
 
 // P3-1C mesh sweep: tty/session.rs and vfs/{fs,inode,fdtable}.rs are in
@@ -1098,22 +1117,27 @@ impl Thread {
     }
 }
 
-// FLOOR (extern "C", reached by address via `call_rcu`, never a Rust call):
-// the RCU deferred-free callback stays a free `extern "C" fn`.
-extern "C" fn thread_destroy_rcu_callback(data: *mut c_void) {
-    // `.kstack_addr()`/`.kstack_order()` are safe calls; the two `unsafe { }`
-    // blocks below (`ThreadAccess::assume`, the inlined `crate::mm::page_free`)
-    // are justified in-line.
-    // SAFETY: `thread_destroy_rcu_callback` is only ever invoked by the RCU subsystem
-    // with the `data` pointer registered for this specific thread's deferred
-    // destruction, so `data` is always a live `*mut thread` being destroyed,
-    // never null.
-    let t = unsafe { ThreadAccess::assume(data as *mut thread) };
-    // Inlined former `page_free` FFI facade (the sole call site).
-    // SAFETY: `t.kstack_addr()` originates from `page_alloc` in `kstack_arrange`
-    // (see `crate::mm::page::page_free`'s contract).
-    unsafe { crate::mm::page::Page::page_free(t.kstack_addr() as *mut c_void, t.kstack_order() as u64) };
+/// TRAIT-OPS: stateless ZST installed as `Some(&THREAD_DESTROY_RCU_CALLBACK)`
+/// at `ThreadAccess::destroy`'s `Rcu::call(...)` below -- replaces the
+/// former address-taken `extern "C" fn` callback.
+struct ThreadDestroyRcuCallback;
+impl RcuCallback for ThreadDestroyRcuCallback {
+    unsafe fn run(&self, data: *mut c_void) {
+        // `.kstack_addr()`/`.kstack_order()` are safe calls; the two `unsafe { }`
+        // blocks below (`ThreadAccess::assume`, the inlined `crate::mm::page_free`)
+        // are justified in-line.
+        // SAFETY: `ThreadDestroyRcuCallback::run` is only ever invoked by the RCU
+        // subsystem with the `data` pointer registered for this specific thread's
+        // deferred destruction, so `data` is always a live `*mut thread` being
+        // destroyed, never null.
+        let t = unsafe { ThreadAccess::assume(data as *mut thread) };
+        // Inlined former `page_free` FFI facade (the sole call site).
+        // SAFETY: `t.kstack_addr()` originates from `page_alloc` in `kstack_arrange`
+        // (see `crate::mm::page::page_free`'s contract).
+        unsafe { crate::mm::page::Page::page_free(t.kstack_addr() as *mut c_void, t.kstack_order() as u64) };
+    }
 }
+static THREAD_DESTROY_RCU_CALLBACK: ThreadDestroyRcuCallback = ThreadDestroyRcuCallback;
 
 // NO-STANDALONE-FN: the thread destructor that used to be the free fn
 // `thread_destroy` is now a handle method on `ThreadAccess` (it tears down this
@@ -1152,7 +1176,7 @@ impl<'a> ThreadAccess<'a> {
                 self.set_thread_group(ptr::null_mut());
             }
 
-            Rcu::call(&mut (*p).rcu_head, Some(thread_destroy_rcu_callback), p as *mut c_void);
+            Rcu::call(&mut (*p).rcu_head, Some(&THREAD_DESTROY_RCU_CALLBACK), p as *mut c_void);
         }
     }
 }

@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::bindings::rwlock as rwlock_t;
 use crate::machine;
+use crate::proc::thread_queue::TqWait;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3A.
@@ -483,58 +484,81 @@ impl RawRwlock {
 // ---------------------------------------------------------------------------
 // Sleep / wakeup callbacks for rwlock-protected thread-queue waits
 //
-// FLOOR (left as free fns): kept `extern "C"` (not demoted to an
-// associated fn like their neighbors): `mm/pcache.rs` (out of this file,
-// in-scope but a separate module) passes these *by value* as
-// `Option<unsafe extern "C" fn(...)>` callback arguments to `tq_wait_cb` —
-// same fn-pointer-type-coercion reasoning as
-// `lock::spinlock::spin_sleep_cb`/`spin_wake_cb`'s identical note. Bodies
-// updated to call the renamed `RawRwlock::*_inner` associated fns.
-// `#[no_mangle]` is still dropped: nothing resolves these by C symbol name.
+// TRAIT-OPS (final wave): `rwlock_r_sleep_cb`/`rwlock_r_wake_cb` used to be
+// an address-taken `extern "C" fn` pair; `mm/pcache.rs`'s sole call site
+// (`Pcache::io_wait`) passed them *by value* as `Option<unsafe extern "C"
+// fn(...)>` arguments to `TqRef::wait_cb` -- same fn-pointer-type-coercion
+// reasoning as `lock::spinlock`'s retired `spin_sleep_cb`/`spin_wake_cb`.
+// That call site now passes a single `&'static dyn TqWait`
+// (`&RWLOCK_R_TQ_WAIT`) instead, so the pair collapses into one ZST.
+// `rwlock_w_sleep_cb`/`rwlock_w_wake_cb` had zero in-tree callers already
+// (pre-existing dead code -- they were plain `unsafe fn`, never coerced to
+// an `extern "C"` fn-pointer slot); converted anyway for consistency, so
+// no bare fn-ptr slot remains in this family. Bodies moved verbatim.
 // ---------------------------------------------------------------------------
 
 const RW_CB_STATUS_READER: c_int = 1;
 const RW_CB_STATUS_WRITER: c_int = 2;
 
-pub(crate) unsafe extern "C" fn rwlock_r_sleep_cb(data: *mut c_void) -> c_int {
-    if data.is_null() { return 0; }
-    let rw = data as *mut rwlock_t;
-    RawRwlock::runlock_inner(rw);
-    let mut status = RW_CB_STATUS_READER;
-    if RawRwlock::w_holding(rw) {
-        // The reader may also hold the write lock (write→read recursion).
-        RawRwlock::wunlock_inner(rw);
-        status |= RW_CB_STATUS_WRITER;
-    }
-    status
-}
+/// TRAIT-OPS: the rwlock-reader [`TqWait`] impl -- installed as
+/// `&'static RWLOCK_R_TQ_WAIT` at `mm/pcache.rs`'s `io_wait` call site.
+pub(crate) struct RwlockRTqWait;
 
-pub(crate) unsafe extern "C" fn rwlock_r_wake_cb(data: *mut c_void, status: c_int) {
-    if data.is_null() { return; }
-    let rw = data as *mut rwlock_t;
-    if (status & RW_CB_STATUS_WRITER) != 0 {
-        RawRwlock::wlock_inner(rw);
-    }
-    if (status & RW_CB_STATUS_READER) != 0 {
-        RawRwlock::rlock_inner(rw);
-    }
-}
-
-pub(crate) unsafe fn rwlock_w_sleep_cb(data: *mut c_void) -> c_int {
-    if !data.is_null() {
+impl TqWait for RwlockRTqWait {
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int {
+        if data.is_null() { return 0; }
         let rw = data as *mut rwlock_t;
-        RawRwlock::wunlock_inner(rw);
+        RawRwlock::runlock_inner(rw);
+        let mut status = RW_CB_STATUS_READER;
+        if RawRwlock::w_holding(rw) {
+            // The reader may also hold the write lock (write→read recursion).
+            RawRwlock::wunlock_inner(rw);
+            status |= RW_CB_STATUS_WRITER;
+        }
+        status
     }
-    RW_CB_STATUS_WRITER
+
+    unsafe fn wake(&self, data: *mut c_void, status: c_int) {
+        if data.is_null() { return; }
+        let rw = data as *mut rwlock_t;
+        if (status & RW_CB_STATUS_WRITER) != 0 {
+            RawRwlock::wlock_inner(rw);
+        }
+        if (status & RW_CB_STATUS_READER) != 0 {
+            RawRwlock::rlock_inner(rw);
+        }
+    }
 }
 
-pub(crate) unsafe fn rwlock_w_wake_cb(data: *mut c_void, status: c_int) {
-    if data.is_null() { return; }
-    if (status & RW_CB_STATUS_WRITER) != 0 {
-        let rw = data as *mut rwlock_t;
-        RawRwlock::wlock_inner(rw);
+pub(crate) static RWLOCK_R_TQ_WAIT: RwlockRTqWait = RwlockRTqWait;
+
+/// TRAIT-OPS: the rwlock-writer [`TqWait`] impl. No in-tree installer
+/// (pre-existing dead code, see the module note above); kept as a
+/// `pub(crate)` ZST + static so a future writer-side timed wait can adopt
+/// it the same way the reader side does.
+#[allow(dead_code)]
+pub(crate) struct RwlockWTqWait;
+
+impl TqWait for RwlockWTqWait {
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int {
+        if !data.is_null() {
+            let rw = data as *mut rwlock_t;
+            RawRwlock::wunlock_inner(rw);
+        }
+        RW_CB_STATUS_WRITER
+    }
+
+    unsafe fn wake(&self, data: *mut c_void, status: c_int) {
+        if data.is_null() { return; }
+        if (status & RW_CB_STATUS_WRITER) != 0 {
+            let rw = data as *mut rwlock_t;
+            RawRwlock::wlock_inner(rw);
+        }
     }
 }
+
+#[allow(dead_code)]
+pub(crate) static RWLOCK_W_TQ_WAIT: RwlockWTqWait = RwlockWTqWait;
 
 // ===========================================================================
 // Rust-native typed handle

@@ -72,8 +72,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::bindings::{
     completion_t, list_node_t, page_t, rb_node, rb_root,
-    rwlock, sleep_callback_t, slab_cache_t, spinlock_t, thread, thread_state_THREAD_UNINTERRUPTIBLE,
-    tq_t, wakeup_callback_t, work_struct, workqueue, EAGAIN, EBUSY, EINPROGRESS, EINTR, EINVAL,
+    rwlock, slab_cache_t, spinlock_t, thread, thread_state_THREAD_UNINTERRUPTIBLE,
+    tq_t, work_struct, workqueue, EAGAIN, EBUSY, EINPROGRESS, EINTR, EINVAL,
     EIO, SLAB_FLAG_EMBEDDED,
 };
 use crate::bintree::RbOps;
@@ -428,7 +428,7 @@ pub(crate) use crate::printf::Printf;
 pub(crate) use crate::timer::sched_timer::SchedTimer;
 pub(crate) use crate::timer::timer_core::TimerCore;
 pub(crate) use crate::lock::completion::RawCompletion;
-pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
+pub(crate) use crate::lock::rwlock::RWLOCK_R_TQ_WAIT;
 // P3-D3b: `kthread_create` (proc/thread.rs) and the proc/workqueue.rs
 // entry points are plain safe Rust fns now that their `#[no_mangle]`
 // exports are gone; re-exported here so the module-wide `use ffi::*`
@@ -1279,8 +1279,7 @@ impl NodeHandle {
             }
         }
         let _ = TqRef::from_ptr(unsafe { addr_of_mut!((*self.raw()).io_waiters) }).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-            Some(rwlock_r_sleep_cb),
-            Some(rwlock_r_wake_cb),
+            &RWLOCK_R_TQ_WAIT,
             unsafe { addr_of_mut!((*p).tree_lock) as *mut c_void },
             ptr::null_mut(),
         ));

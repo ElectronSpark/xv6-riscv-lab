@@ -34,12 +34,11 @@ use core::ptr::null_mut;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::bindings::{
-    rb_node, rb_root, sleep_callback_t, spinlock as spinlock_t,
-    thread, tnode as tnode_t, tq as tq_t, ttree as ttree_t, uint64, wakeup_callback_t,
+    rb_node, rb_root, spinlock as spinlock_t,
+    thread, tnode as tnode_t, tq as tq_t, ttree as ttree_t, uint64,
 };
 use crate::bintree::RbOps;
-use crate::lock::spinlock::spin_sleep_cb;
-use crate::lock::spinlock::spin_wake_cb;
+use crate::lock::spinlock::SPIN_TQ_WAIT;
 use crate::machine::Riscv;
 use crate::proc::access::{
     err_ptr_errno as err_ptr, is_err, is_err_or_null, ptr_err_errno as ptr_err,
@@ -324,6 +323,49 @@ static TQ_RB_OPS: TqRbOps = TqRbOps;
 static TQ_RDOWN_RB_OPS: TqRdownRbOps = TqRdownRbOps;
 
 // ---------------------------------------------------------------------------
+// TRAIT-OPS (final wave): sleep/wake callback pair -> `TqWait` trait (was
+// the `sleep_callback_t`/`wakeup_callback_t` `Option<unsafe extern "C" fn>`
+// pair threaded through `Tq::wait_cb`/`Ttree::wait_cb`). This is THE
+// scheduler sleep path underlying every lock's wait -- fire order and
+// which side of the lock each half runs on are preserved exactly (see the
+// two `wait_cb` bodies below).
+// ---------------------------------------------------------------------------
+
+/// Sleep/wake callback pair for [`TqRef::wait_cb`]/[`TtreeRef::wait_cb`].
+///
+/// `sleep` fires right after the stack-local waiter node has been pushed
+/// onto the queue/tree, *before* [`Scheduler::yield_now`] parks the
+/// calling thread -- historically the `sleep_callback_t` slot, whose
+/// canonical body (see [`crate::lock::spinlock::SpinTqWait`]) releases
+/// the caller's lock and reports whether it had been held. Its return
+/// value (`sleep_cb_status`) is threaded through unchanged to `wake`.
+///
+/// `wake` fires immediately after the parked thread is rescheduled
+/// (post-yield), *before* the interrupted-waiter dequeue check --
+/// historically the `wakeup_callback_t` slot, whose canonical body
+/// reacquires the lock iff `sleep` reported it had released one.
+///
+/// Grep-exhaustive over every in-tree `wait_cb` caller (the two `wait`
+/// methods below, plus `mutex.rs`/`completion.rs`/`rwsem.rs` (x2)/
+/// `semaphore.rs`/`mm/pcache.rs`): every one always supplies a live
+/// callback pair -- the old `Option<...>` slot's `None` arm was
+/// unreachable dead code -- so `wait_cb` below takes a bare `&'static
+/// dyn TqWait`, not `Option<&'static dyn TqWait>`, and this trait has no
+/// default no-op methods.
+pub(crate) trait TqWait: Sync {
+    /// # Safety
+    /// Must only be invoked by `wait_cb`, with the same `data` pointer
+    /// the caller originally supplied to it (this specific impl knows
+    /// the pointee's real type).
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int;
+
+    /// # Safety
+    /// As `sleep`; `sleep_cb_status` must be the value `sleep` returned
+    /// for this same wait.
+    unsafe fn wake(&self, data: *mut c_void, sleep_cb_status: c_int);
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 // NO-STANDALONE-FN: the `name_or_null` helper and the `q_root_opts`/
@@ -518,8 +560,7 @@ impl<'a> TqRef<'a> {
     /// NO-STANDALONE-FN: `pub(crate)` (former `tq_wait_cb` delegator deleted).
     pub(crate) fn wait_cb(
         &self,
-        sleep_callback: sleep_callback_t,
-        wakeup_callback: wakeup_callback_t,
+        cb: &'static dyn TqWait,
         callback_data: *mut c_void,
         rdata: *mut u64,
     ) -> c_int {
@@ -533,18 +574,13 @@ impl<'a> TqRef<'a> {
             xv6_panic(c"Failed to push thread to sleep queue".as_ptr());
         }
 
-        let mut cb_status: c_int = 0;
-        if let Some(cb) = sleep_callback {
-            // SAFETY: `cb` is a caller-supplied `sleep_callback_t` fn-ptr
-            // invoked with the matching `callback_data` (the spinlock ptr
-            // for `wait`); the C-ABI callback contract is the caller's.
-            cb_status = unsafe { cb(callback_data) };
-        }
+        // SAFETY: `cb` is the caller-supplied `TqWait` impl invoked with
+        // the matching `callback_data` (the spinlock/ctx ptr for `wait`);
+        // the callback contract is the caller's.
+        let cb_status = unsafe { cb.sleep(callback_data) };
         Scheduler::yield_now();
-        if let Some(cb) = wakeup_callback {
-            // SAFETY: as above, for the paired `wakeup_callback_t`.
-            unsafe { cb(callback_data, cb_status); }
-        }
+        // SAFETY: as above; `cb_status` is `sleep`'s own return value.
+        unsafe { cb.wake(callback_data, cb_status); }
 
         if wr.is_enqueued() {
             if self.remove(waiter_ptr) != 0 {
@@ -564,7 +600,7 @@ impl<'a> TqRef<'a> {
     /// NO-STANDALONE-FN: `pub(crate)` (former `tq_wait` delegator deleted).
     #[inline]
     pub(crate) fn wait(&self, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
-        self.wait_cb(Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
+        self.wait_cb(&SPIN_TQ_WAIT, lock as *mut c_void, rdata)
     }
 
     /// Pop and wake a single waiter. (Former free fn `tq_wakeup_one`,
@@ -684,8 +720,7 @@ impl<'a> TtreeRef<'a> {
     fn wait_cb(
         &self,
         key: uint64,
-        sleep_callback: sleep_callback_t,
-        wakeup_callback: wakeup_callback_t,
+        cb: &'static dyn TqWait,
         callback_data: *mut c_void,
         rdata: *mut u64,
     ) -> c_int {
@@ -701,18 +736,13 @@ impl<'a> TtreeRef<'a> {
             xv6_panic(c"Failed to push thread to sleep tree".as_ptr());
         }
 
-        let mut cb_status: c_int = 0;
-        if let Some(cb) = sleep_callback {
-            // SAFETY: `cb` is a caller-supplied `sleep_callback_t` fn-ptr
-            // invoked with the matching `callback_data` (the spinlock ptr
-            // for `wait`); the C-ABI callback contract is the caller's.
-            cb_status = unsafe { cb(callback_data) };
-        }
+        // SAFETY: `cb` is the caller-supplied `TqWait` impl invoked with
+        // the matching `callback_data` (the spinlock/ctx ptr for `wait`);
+        // the callback contract is the caller's.
+        let cb_status = unsafe { cb.sleep(callback_data) };
         Scheduler::yield_now();
-        if let Some(cb) = wakeup_callback {
-            // SAFETY: as above, for the paired `wakeup_callback_t`.
-            unsafe { cb(callback_data, cb_status); }
-        }
+        // SAFETY: as above; `cb_status` is `sleep`'s own return value.
+        unsafe { cb.wake(callback_data, cb_status); }
 
         if wr.is_enqueued() {
             if self.remove(waiter_ptr) != 0 {
@@ -732,7 +762,7 @@ impl<'a> TtreeRef<'a> {
     /// `crate::proc::sched` (former `ttree_wait` delegator deleted).
     #[inline]
     pub(super) fn wait(&self, key: uint64, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
-        self.wait_cb(key, Some(spin_sleep_cb), Some(spin_wake_cb), lock as *mut c_void, rdata)
+        self.wait_cb(key, &SPIN_TQ_WAIT, lock as *mut c_void, rdata)
     }
 
     /// Wake the smallest-key waiter matching `key`. (Former free fn

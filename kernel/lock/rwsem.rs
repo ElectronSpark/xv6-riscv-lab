@@ -23,6 +23,7 @@ use crate::sync::KSpinlock;
 // `tq_wakeup`/`tq_wakeup_all` free-fn delegators were deleted; each call
 // site builds a `TqRef` handle via `from_ptr` and invokes the method.
 use crate::proc::access::TqRef;
+use crate::proc::thread_queue::TqWait;
 
 // P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
 // now that its `#[no_mangle]` export is gone. The old redeclaration here
@@ -255,46 +256,54 @@ impl RwsemTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-// FLOOR (left as free fns): address-taken `extern "C"` timer callbacks
-// passed *by value* as `Option<unsafe extern "C" fn(...)>` arguments to
-// `TqRef::wait_cb` -- same fn-pointer-type-coercion reasoning as
-// `lock::spinlock::spin_sleep_cb`/`spin_wake_cb`. Bodies updated to call
-// the renamed `RawRwsem::lk_ptr` associated fn.
-extern "C" fn rwsem_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
-    // SAFETY: see `RwsemTimedCtx::from_raw`.
-    let ctx = match u! { RwsemTimedCtx::from_raw(data) } {
-        Some(c) => c, None => return 0,
-    };
-    let l = ctx.lock_ptr();
-    if l.is_null() { return 0; }
+// TRAIT-OPS (final wave): was the address-taken `extern "C"` timer-callback
+// pair passed *by value* as `Option<unsafe extern "C" fn(...)>` arguments
+// to `TqRef::wait_cb` -- same fn-pointer-type-coercion reasoning as
+// `lock::spinlock`'s old `spin_sleep_cb`/`spin_wake_cb`, now retired the
+// same way. Both `acquire_read_timed` and `acquire_write_timed` below
+// share this one impl (identical body either way -- only `RawRwsem::lk_ptr`
+// is touched). Bodies moved verbatim.
+struct RwsemTimedTqWait;
 
-    ctx.set_armed(false);
-    let timeout_ms = ctx.timeout();
-    if timeout_ms > 0 {
-        let tn = ctx.timer_node_ptr();
-        if sched_timer_set(tn, timeout_ms) == 0 {
-            ctx.set_armed(true);
-        }
-    }
-    let status = RawSpinlock::is_holding(RawRwsem::lk_ptr(l));
-    if status != 0 { RawSpinlock::unlock(RawRwsem::lk_ptr(l)); }
-    status
-}}
+impl TqWait for RwsemTimedTqWait {
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int { u! {
+        // SAFETY: see `RwsemTimedCtx::from_raw`.
+        let ctx = match u! { RwsemTimedCtx::from_raw(data) } {
+            Some(c) => c, None => return 0,
+        };
+        let l = ctx.lock_ptr();
+        if l.is_null() { return 0; }
 
-extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
-    // SAFETY: see `RwsemTimedCtx::from_raw`.
-    let ctx = match u! { RwsemTimedCtx::from_raw(data) } {
-        Some(c) => c, None => return,
-    };
-    let l = ctx.lock_ptr();
-    if l.is_null() { return; }
-    if ctx.armed() {
-        let tn = ctx.timer_node_ptr();
-        sched_timer_done(tn);
         ctx.set_armed(false);
-    }
-    if sleep_cb_status != 0 { RawSpinlock::lock(RawRwsem::lk_ptr(l)); }
-}}
+        let timeout_ms = ctx.timeout();
+        if timeout_ms > 0 {
+            let tn = ctx.timer_node_ptr();
+            if sched_timer_set(tn, timeout_ms) == 0 {
+                ctx.set_armed(true);
+            }
+        }
+        let status = RawSpinlock::is_holding(RawRwsem::lk_ptr(l));
+        if status != 0 { RawSpinlock::unlock(RawRwsem::lk_ptr(l)); }
+        status
+    }}
+
+    unsafe fn wake(&self, data: *mut c_void, sleep_cb_status: c_int) { u! {
+        // SAFETY: see `RwsemTimedCtx::from_raw`.
+        let ctx = match u! { RwsemTimedCtx::from_raw(data) } {
+            Some(c) => c, None => return,
+        };
+        let l = ctx.lock_ptr();
+        if l.is_null() { return; }
+        if ctx.armed() {
+            let tn = ctx.timer_node_ptr();
+            sched_timer_done(tn);
+            ctx.set_armed(false);
+        }
+        if sleep_cb_status != 0 { RawSpinlock::lock(RawRwsem::lk_ptr(l)); }
+    }}
+}
+
+static RWSEM_TIMED_TQ_WAIT: RwsemTimedTqWait = RwsemTimedTqWait;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -392,8 +401,7 @@ impl RawRwsem {
             };
             machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::rq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-                Some(rwsem_timed_sleep_cb),
-                Some(rwsem_timed_wake_cb),
+                &RWSEM_TIMED_TQ_WAIT,
                 &mut ctx as *mut _ as *mut c_void,
                 null_mut(),
             ));
@@ -479,8 +487,7 @@ impl RawRwsem {
             };
             machine::Riscv::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
             let ret = TqRef::from_ptr(Self::wq_ptr(l)).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait_cb(
-                Some(rwsem_timed_sleep_cb),
-                Some(rwsem_timed_wake_cb),
+                &RWSEM_TIMED_TQ_WAIT,
                 &mut ctx as *mut _ as *mut c_void,
                 null_mut(),
             ));

@@ -16,10 +16,9 @@
 //! body is byte-identical to its old free-fn form; only the wrapping
 //! `impl` block, the fn name (leading `spin_` stripped from the public
 //! API), and call-site qualification changed. `spin_sleep_cb`/
-//! `spin_wake_cb` stay free fns (floor: address-taken
-//! `extern "C" fn` pointers coerced into `Option<unsafe extern "C" fn>`
-//! callback slots -- converting to an associated fn would break that
-//! coercion).
+//! `spin_wake_cb` (fn-pointer-callback-slot -> trait-dispatch campaign,
+//! final wave) are now the [`SpinTqWait`] ZST's `TqWait::sleep`/`wake`
+//! impl, installed as `&'static SPIN_TQ_WAIT`.
 //!
 //! Centralised-unsafe pattern: every raw atomic access on
 //! `spinlock_t::locked` and `spinlock_t::cpu` is encapsulated in one
@@ -46,6 +45,7 @@ use crate::machine::{self, CpuLocal, Riscv, CPU_FLAG_CRASHED, SIE_SSIE};
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_state`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
 use crate::printf::Printf;
+use crate::proc::thread_queue::TqWait;
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3A, nativized in Wave P3-N2.
@@ -354,38 +354,49 @@ impl RawSpinlock {
 }
 
 // ---------------------------------------------------------------------------
-// Sleep/wake callbacks used by `tq_wait()` / `ttree_wait()`. Their
-// declarations live in `kernel/inc/lock/spinlock.h`.
+// Sleep/wake callback used by `TqRef::wait()` / `TtreeRef::wait()`. Its
+// C declarations used to live in `kernel/inc/lock/spinlock.h`.
 //
-// NOT demoted to a plain Rust fn like their neighbors: `proc/thread_queue.rs`
-// (out of this wave's scope) passes these *by value* as
-// `Option<unsafe extern "C" fn(...)>` callback arguments to
-// `tq_wait_cb_impl`/`ttree_wait_cb_impl` (function-pointer coercion, not a
-// symbol-table lookup) — the `extern "C"` calling convention is therefore
-// part of the function's *type*, not just its link-time symbol name, and
-// must stay for the coercion to type-check. `#[no_mangle]` is still dropped:
-// nothing resolves these by C symbol name (no out-of-scope extern-block
-// declares them), only by the Rust-level fn-pointer value.
+// TRAIT-OPS (final wave): `spin_sleep_cb`/`spin_wake_cb` used to be a pair
+// of address-taken `extern "C" fn`s coerced into `Option<unsafe extern "C"
+// fn>` callback slots at every `tq_wait`/`ttree_wait` call site. Both
+// call sites (`thread_queue.rs`'s own `Tq::wait`/`Ttree::wait`) now pass a
+// single `&'static dyn TqWait` instead, so the pair collapses into one
+// ZST implementing that trait; no `extern "C"`/fn-pointer coercion is
+// needed any more. Bodies moved verbatim.
 // ---------------------------------------------------------------------------
 
-pub(crate) unsafe extern "C" fn spin_sleep_cb(data: *mut c_void) -> c_int {
-    if data.is_null() {
-        return 0;
+/// TRAIT-OPS: the spinlock-backed [`TqWait`] impl -- installed as
+/// `&'static SPIN_TQ_WAIT` at every plain (non-timed) `wait()` call site.
+pub(crate) struct SpinTqWait;
+
+impl TqWait for SpinTqWait {
+    /// # Safety
+    /// See [`TqWait::sleep`]; `data` must be the `*mut spinlock_t` the
+    /// waiter's caller was holding.
+    unsafe fn sleep(&self, data: *mut c_void) -> c_int {
+        if data.is_null() {
+            return 0;
+        }
+        let lk = data as *mut spinlock_t;
+        let status = RawSpinlock::is_holding(lk);
+        if status != 0 {
+            RawSpinlock::unlock(lk);
+        }
+        status
     }
-    let lk = data as *mut spinlock_t;
-    let status = RawSpinlock::is_holding(lk);
-    if status != 0 {
-        RawSpinlock::unlock(lk);
+
+    /// # Safety
+    /// See [`TqWait::wake`].
+    unsafe fn wake(&self, data: *mut c_void, sleep_cb_status: c_int) {
+        if !data.is_null() && sleep_cb_status != 0 {
+            let lk = data as *mut spinlock_t;
+            RawSpinlock::lock(lk);
+        }
     }
-    status
 }
 
-pub(crate) unsafe extern "C" fn spin_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
-    if !data.is_null() && sleep_cb_status != 0 {
-        let lk = data as *mut spinlock_t;
-        RawSpinlock::lock(lk);
-    }
-}
+pub(crate) static SPIN_TQ_WAIT: SpinTqWait = SpinTqWait;
 
 // Re-export `machine::*` we touch so `#![allow(unused_imports)]` is not
 // needed when the module set grows.
