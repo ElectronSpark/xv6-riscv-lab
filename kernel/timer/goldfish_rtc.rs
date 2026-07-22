@@ -175,27 +175,35 @@ impl GoldfishRtc {
     }
 }
 
-/// RTC interrupt handler. Called when the alarm fires; sets up the next
+/// [`IrqHandler`] implementor for the goldfish RTC alarm interrupt
+/// (fn-pointer-callback-slot -> trait-dispatch campaign; was the free
+/// fn `goldfish_rtc_intr` + `Some(goldfish_rtc_intr)` in
+/// `goldfish_rtc_init`'s `IrqDesc.handler`, now folded into this ZST +
+/// trait impl). Called when the alarm fires; sets up the next
 /// 1-second alarm. Unreachable today (see the module doc), but ported
-/// faithfully since `goldfish_rtc_init` below installs it. Kept as a free
-/// fn: its address is taken (`Some(goldfish_rtc_intr)`) as an
-/// `IrqDesc::handler` fn-pointer value.
-unsafe extern "C" fn goldfish_rtc_intr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
-    RTC_ALARM_COUNT.fetch_add(1, Ordering::SeqCst);
-    GoldfishRtc::rtc_clear_interrupt();
-    GoldfishRtc::goldfish_rtc_set_alarm_sec(1);
+/// faithfully since `goldfish_rtc_init` below installs it.
+struct GoldfishRtcIrqHandler;
 
-    // Print a message every 10 seconds for debugging.
-    let count = GoldfishRtc::goldfish_rtc_get_alarm_count();
-    if count % 10 == 0 {
-        let now_sec = GoldfishRtc::goldfish_rtc_read_sec();
-        crate::kprintln!(
-            "goldfish_rtc: alarm #{}, unix time: {}",
-            count as u64,
-            now_sec as u64
-        );
+impl crate::irq::irq_core::IrqHandler for GoldfishRtcIrqHandler {
+    unsafe fn handle(&self, _irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
+        RTC_ALARM_COUNT.fetch_add(1, Ordering::SeqCst);
+        GoldfishRtc::rtc_clear_interrupt();
+        GoldfishRtc::goldfish_rtc_set_alarm_sec(1);
+
+        // Print a message every 10 seconds for debugging.
+        let count = GoldfishRtc::goldfish_rtc_get_alarm_count();
+        if count % 10 == 0 {
+            let now_sec = GoldfishRtc::goldfish_rtc_read_sec();
+            crate::kprintln!(
+                "goldfish_rtc: alarm #{}, unix time: {}",
+                count as u64,
+                now_sec as u64
+            );
+        }
     }
 }
+
+static GOLDFISH_RTC_IRQ_HANDLER: GoldfishRtcIrqHandler = GoldfishRtcIrqHandler;
 
 impl GoldfishRtc {
     /// Rust port of `goldfish_rtc_init()`. Registers the alarm IRQ handler and
@@ -227,7 +235,7 @@ impl GoldfishRtc {
         );
 
         let mut rtc_irq_desc = IrqDesc {
-            handler: Some(goldfish_rtc_intr),
+            handler: Some(&GOLDFISH_RTC_IRQ_HANDLER),
             data: core::ptr::null_mut(),
             dev: core::ptr::null_mut(),
             irq: 0,

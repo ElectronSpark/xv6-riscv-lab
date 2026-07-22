@@ -1030,14 +1030,18 @@ unsafe fn rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mut c_void, si
 }
 } // impl Disk (rw)
 
-/// Mirrors `virtio_disk_intr`.
-///
-/// FLOOR: address-taken IRQ handler slot (`Some(virtio_disk_intr)` in
-/// [`Disk::blkdev_init`]'s `IrqDesc.handler` below) -- kept a free fn
-/// per this crate's established floor convention (matches `uart.rs`'s
-/// `uartintr`, `e1000.rs`'s `e1000_intr`), body updated to call the
-/// relocated `Disk`/`BioIter` associated fns.
-extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
+/// [`IrqHandler`] implementor for the virtio disks
+/// (fn-pointer-callback-slot -> trait-dispatch campaign; was the free
+/// fn `virtio_disk_intr` + `Some(virtio_disk_intr)` in
+/// [`Disk::blkdev_init`]'s `IrqDesc.handler` below, now folded into
+/// this ZST + trait impl, matching the `VirtioDiskOps`
+/// implementor precedent below). One shared instance serves every
+/// disk -- `data` carries the per-registration disk index, exactly as
+/// the old free fn did.
+struct VirtioDiskIrqHandler;
+
+impl crate::irq::irq_core::IrqHandler for VirtioDiskIrqHandler {
+    unsafe fn handle(&self, _irq: c_int, data: *mut c_void, _dev: *mut c_void) {
     let diskno = data as usize;
     // SAFETY: `diskno` was registered with a valid disk index in
     // `virtio_blkdev_init` below.
@@ -1126,7 +1130,10 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
 
     // `d` drops here -> releases the lock (was the explicit `spin_unlock`).
     drop(d);
+    }
 }
+
+static VIRTIO_DISK_IRQ_HANDLER: VirtioDiskIrqHandler = VirtioDiskIrqHandler;
 
 // ===========================================================================
 // Block device interface.
@@ -1244,7 +1251,7 @@ fn blkdev_init(diskno: usize) {
     // `IrqDesc` for the duration of this call.
     let ret = unsafe {
         let mut virtio_irq = IrqDesc {
-            handler: Some(virtio_disk_intr),
+            handler: Some(&VIRTIO_DISK_IRQ_HANDLER),
             data: diskno as *mut c_void,
             dev: &raw mut (*dev).dev as *mut device_t,
             irq: 0,

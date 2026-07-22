@@ -401,30 +401,38 @@ impl TimerCore {
 // other than the atomic ops below.
 // ===========================================================================
 
-/// Kept as a free fn: its address is taken (`Some(clockintr)`) as an
-/// `IrqDesc::handler` value in [`TimerCore::timer_init`].
-unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
-    // Ask for the next timer interrupt. This also clears the interrupt
-    // request. `__jiff_ticks` is about a tenth of a second.
-    // SAFETY: `__jiff_ticks` has a single boot-time writer (see the module
-    // doc), read-only from every hart/interrupt context thereafter.
-    let jiff_ticks = unsafe { __jiff_ticks };
-    machine::Riscv::write_stimecmp(machine::Riscv::read_time() + jiff_ticks);
+/// [`IrqHandler`] implementor for the CLINT timer
+/// (fn-pointer-callback-slot -> trait-dispatch campaign; was the free
+/// fn `clockintr` + `Some(clockintr)` in [`TimerCore::timer_init`]'s
+/// `IrqDesc.handler`, now folded into this ZST + trait impl).
+struct ClockIrqHandler;
 
-    if TimerCore::is_boot_hart() {
-        // SAFETY: `data` is `&raw mut TICKS` (an `AtomicU64`), set once in
-        // `timer_init` and never changed; `AtomicU64` has the same size and
-        // alignment as the `uint64` the C original reinterpreted via
-        // `__atomic_fetch_add((uint64 *)data, ...)` (cf. `irq/irq_core.rs`'s
-        // `count_atomic`).
-        let ticks = unsafe { &*(data as *const AtomicU64) };
-        ticks.fetch_add(1, Ordering::SeqCst);
-        crate::timer::sched_timer::SchedTimer::sched_timer_tick();
-    }
-    if Scheduler::holding() == 0 {
-        TimerCore::set_needs_resched();
+impl crate::irq::irq_core::IrqHandler for ClockIrqHandler {
+    unsafe fn handle(&self, _irq: c_int, data: *mut c_void, _dev: *mut c_void) {
+        // Ask for the next timer interrupt. This also clears the interrupt
+        // request. `__jiff_ticks` is about a tenth of a second.
+        // SAFETY: `__jiff_ticks` has a single boot-time writer (see the module
+        // doc), read-only from every hart/interrupt context thereafter.
+        let jiff_ticks = unsafe { __jiff_ticks };
+        machine::Riscv::write_stimecmp(machine::Riscv::read_time() + jiff_ticks);
+
+        if TimerCore::is_boot_hart() {
+            // SAFETY: `data` is `&raw mut TICKS` (an `AtomicU64`), set once in
+            // `timer_init` and never changed; `AtomicU64` has the same size and
+            // alignment as the `uint64` the C original reinterpreted via
+            // `__atomic_fetch_add((uint64 *)data, ...)` (cf. `irq/irq_core.rs`'s
+            // `count_atomic`).
+            let ticks = unsafe { &*(data as *const AtomicU64) };
+            ticks.fetch_add(1, Ordering::SeqCst);
+            crate::timer::sched_timer::SchedTimer::sched_timer_tick();
+        }
+        if Scheduler::holding() == 0 {
+            TimerCore::set_needs_resched();
+        }
     }
 }
+
+static CLOCK_IRQ_HANDLER: ClockIrqHandler = ClockIrqHandler;
 
 // ===========================================================================
 // Public API — exact C names/signatures preserved (called from
@@ -462,7 +470,7 @@ impl TimerCore {
         KSpinlock::from_bindings(unsafe { &raw mut (*timer).lock }).init(c"timer_lock".as_ptr());
 
         let mut timer_irq_desc = IrqDesc {
-            handler: Some(clockintr),
+            handler: Some(&CLOCK_IRQ_HANDLER),
             data: (&raw const TICKS) as *mut c_void,
             dev: ptr::null_mut(),
             irq: 0,

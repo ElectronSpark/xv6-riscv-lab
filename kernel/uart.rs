@@ -626,46 +626,46 @@ pub(crate) unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
 // Interrupt handler.
 // ===========================================================================
 
-/// Handle a uart interrupt, raised because input has arrived, or the
-/// uart is ready for more output, or both. Called from `do_irq()`.
-///
-/// # Safety
-/// Must be called from interrupt/IRQ-dispatch context with a valid
-/// `irq_handler_t` calling convention (matches C `void uartintr(int,
-/// void*, device_t*)`); `data`/`dev` are unused, forwarded only for
-/// ABI compatibility with the registered `irq_desc`.
-///
-/// FLOOR: address-taken IRQ handler slot (`Some(crate::uart::uartintr)`
-/// in `console.rs`'s `IrqDesc.handler`) -- kept a free fn per this
-/// crate's established floor convention (matches `virtio_disk.rs`'s
-/// `virtio_disk_intr`, `e1000.rs`'s `e1000_intr`), body updated to call
-/// the relocated `Uart` associated fns.
-pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
-    // SAFETY: `UART_RX_LOCK` is a valid, compile-time-initialised
-    // spinlock; the RX ring is out of this wave's scope and stays raw.
-    // (The TX ring moved into `UART_TX`; its acquire is below, outside
-    // this block.)
-    unsafe {
-        Uart::spin_lock(&raw mut UART_RX_LOCK);
-        Uart::uartrecv();
+/// [`IrqHandler`] implementor for the uart (fn-pointer-callback-slot ->
+/// trait-dispatch campaign; was the free fn `uartintr` +
+/// `Some(crate::uart::uartintr)` in `console.rs`'s `IrqDesc.handler`,
+/// now folded into this ZST + trait impl, matching the
+/// `CdevOps`/`PcacheOps`/`NetdevOps` implementor precedent). `irq`/
+/// `data`/`dev` are unused -- forwarded only for trait-signature
+/// uniformity with the registered `IrqDesc`.
+pub(crate) struct UartIrqHandler;
 
-        // Process all buffered input. Drop the RX lock around each
-        // `consoleintr` call, exactly as the C did, since the console
-        // line discipline may need other locks.
-        while UART_RX_R != UART_RX_W {
-            let c = UART_RX_BUF[(UART_RX_R % UART_RX_BUF_SIZE as u64) as usize] as c_int;
-            UART_RX_R += 1;
-            Uart::spin_unlock(&raw mut UART_RX_LOCK);
-            Console::consoleintr(c);
+impl crate::irq::irq_core::IrqHandler for UartIrqHandler {
+    unsafe fn handle(&self, _irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
+        // SAFETY: `UART_RX_LOCK` is a valid, compile-time-initialised
+        // spinlock; the RX ring is out of this wave's scope and stays raw.
+        // (The TX ring moved into `UART_TX`; its acquire is below, outside
+        // this block.)
+        unsafe {
             Uart::spin_lock(&raw mut UART_RX_LOCK);
-        }
-        Uart::spin_unlock(&raw mut UART_RX_LOCK);
-    }
+            Uart::uartrecv();
 
-    // Send buffered characters. N-R7 lock-owns-data: the TX ring is now
-    // `UART_TX` (`SpinLock<UartTx>`); acquire its guard and hand it to
-    // `uartstart`. Guard drops (unlocks) at scope end — byte-identical
-    // to the old `spin_lock(uart_tx_lock); uartstart(); spin_unlock`.
-    let mut tx = UART_TX.lock();
-    Uart::uartstart(&mut tx);
+            // Process all buffered input. Drop the RX lock around each
+            // `consoleintr` call, exactly as the C did, since the console
+            // line discipline may need other locks.
+            while UART_RX_R != UART_RX_W {
+                let c = UART_RX_BUF[(UART_RX_R % UART_RX_BUF_SIZE as u64) as usize] as c_int;
+                UART_RX_R += 1;
+                Uart::spin_unlock(&raw mut UART_RX_LOCK);
+                Console::consoleintr(c);
+                Uart::spin_lock(&raw mut UART_RX_LOCK);
+            }
+            Uart::spin_unlock(&raw mut UART_RX_LOCK);
+        }
+
+        // Send buffered characters. N-R7 lock-owns-data: the TX ring is now
+        // `UART_TX` (`SpinLock<UartTx>`); acquire its guard and hand it to
+        // `uartstart`. Guard drops (unlocks) at scope end — byte-identical
+        // to the old `spin_lock(uart_tx_lock); uartstart(); spin_unlock`.
+        let mut tx = UART_TX.lock();
+        Uart::uartstart(&mut tx);
+    }
 }
+
+/// The single shared instance `console.rs`'s `consoledevinit` registers.
+pub(crate) static UART_IRQ_HANDLER: UartIrqHandler = UartIrqHandler;

@@ -568,7 +568,7 @@ pub(crate) extern "C" fn init(xregs: *mut u32) {
     // duration of this call.
     let ret = unsafe {
         let mut e1000_irq =
-            IrqDesc { handler: Some(e1000_intr), data: ptr::null_mut(), dev: ptr::null_mut(), irq: 0, count: 0, rcu_head: core::mem::zeroed() };
+            IrqDesc { handler: Some(&E1000_IRQ_HANDLER), data: ptr::null_mut(), dev: ptr::null_mut(), irq: 0, count: 0, rcu_head: core::mem::zeroed() };
         IrqCore::register_irq_handler(IrqCore::plic_irq(__e1000_pci_irqno as c_int), &raw mut e1000_irq)
     };
     if ret != 0 {
@@ -792,13 +792,26 @@ unsafe fn recv() {
 /// crate's established floor convention (matches `virtio_disk.rs`'s
 /// `virtio_disk_intr`, `uart.rs`'s `uartintr`), body updated to call the
 /// relocated `E1000` associated fns.
-extern "C" fn e1000_intr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
-    // SAFETY: `REGS` set by `e1000_init`, which registers this handler
-    // (via `register_irq_handler`) only after setting `REGS`.
-    unsafe { E1000::reg_write(E1000_ICR, 0xffffffff) };
-    // SAFETY: same as above.
-    unsafe { E1000::recv() };
+/// [`IrqHandler`] implementor for the e1000 (fn-pointer-callback-slot ->
+/// trait-dispatch campaign; was the free fn `e1000_intr` +
+/// `Some(e1000_intr)` in [`E1000::init`]'s `IrqDesc.handler`, now
+/// folded into this ZST + trait impl, matching the `E1000NetdevOps`
+/// implementor precedent below). `irq`/`data`/`dev` are unused --
+/// forwarded only for trait-signature uniformity with the registered
+/// `IrqDesc`.
+struct E1000IrqHandler;
+
+impl crate::irq::irq_core::IrqHandler for E1000IrqHandler {
+    unsafe fn handle(&self, _irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
+        // SAFETY: `REGS` set by `e1000_init`, which registers this handler
+        // (via `register_irq_handler`) only after setting `REGS`.
+        unsafe { E1000::reg_write(E1000_ICR, 0xffffffff) };
+        // SAFETY: same as above.
+        unsafe { E1000::recv() };
+    }
 }
+
+static E1000_IRQ_HANDLER: E1000IrqHandler = E1000IrqHandler;
 
 // ===========================================================================
 // netdev glue.

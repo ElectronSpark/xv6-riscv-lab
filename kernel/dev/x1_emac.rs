@@ -544,44 +544,57 @@ static EMAC_INIT_DONE: [AtomicI32; MAX_EMAC_INSTANCES] = [const { AtomicI32::new
 /// telemetry, preserved as-is).
 static EMAC_COUNT: AtomicI32 = AtomicI32::new(0);
 
-extern "C" fn x1_emac_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
-    // SAFETY: `data` is the `X1EmacSoftc*` this instance's
-    // `x1_emac_init_one` registered via `register_irq_handler` below;
-    // live for the process lifetime (never freed).
-    let sc = data as *mut X1EmacSoftc;
+/// [`IrqHandler`] implementor for the X1 EMAC RX/TX DMA interrupt
+/// (fn-pointer-callback-slot -> trait-dispatch campaign; was the free
+/// fn `x1_emac_intr` + `Some(x1_emac_intr)` in this driver's
+/// `IrqDesc.handler`, now folded into this ZST + trait impl, matching
+/// the `X1EmacNetdevOps` implementor precedent below). One shared
+/// instance serves every EMAC instance -- `data` carries the
+/// per-registration `X1EmacSoftc*`, exactly as the old free fn did.
+struct X1EmacIrqHandler;
 
-    // Read and acknowledge DMA status.
-    // SAFETY: `sc` live per above.
-    let status = unsafe { X1EmacSoftc::rd(sc, DMA_STATUS_IRQ) };
-    // Acknowledge all bits by writing them back.
-    // SAFETY: see above.
-    unsafe { X1EmacSoftc::wr(sc, DMA_STATUS_IRQ, status) };
+impl crate::irq::irq_core::IrqHandler for X1EmacIrqHandler {
+    unsafe fn handle(&self, _irq: c_int, data: *mut c_void, _dev: *mut c_void) {
+        // SAFETY: `data` is the `X1EmacSoftc*` this instance's
+        // `x1_emac_init_one` registered via `register_irq_handler` below;
+        // live for the process lifetime (never freed).
+        let sc = data as *mut X1EmacSoftc;
 
-    if status & DMA_IRQ_RX_DONE != 0 {
-        // SAFETY: `sc` live.
-        unsafe { X1EmacSoftc::recv(sc) };
-    }
+        // Read and acknowledge DMA status.
+        // SAFETY: `sc` live per above.
+        let status = unsafe { X1EmacSoftc::rd(sc, DMA_STATUS_IRQ) };
+        // Acknowledge all bits by writing them back.
+        // SAFETY: see above.
+        unsafe { X1EmacSoftc::wr(sc, DMA_STATUS_IRQ, status) };
 
-    if status & DMA_IRQ_TX_DONE != 0 {
-        // SAFETY: `sc` live.
-        unsafe { X1EmacSoftc::tx_reclaim(sc) };
-    }
+        if status & DMA_IRQ_RX_DONE != 0 {
+            // SAFETY: `sc` live.
+            unsafe { X1EmacSoftc::recv(sc) };
+        }
 
-    if status & DMA_IRQ_RX_DESC_UNAVAIL != 0 {
-        // RX ring ran out of descriptors. Kick RX DMA to resume.
-        // SAFETY: `sc` live.
-        unsafe { X1EmacSoftc::wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF) };
-    }
+        if status & DMA_IRQ_TX_DONE != 0 {
+            // SAFETY: `sc` live.
+            unsafe { X1EmacSoftc::tx_reclaim(sc) };
+        }
 
-    if status & (DMA_IRQ_TX_STOPPED | DMA_IRQ_RX_STOPPED) != 0 {
-        // SAFETY: `sc` live; format string matches its two arguments.
-        crate::kprintln!(
-            "x1_emac{}: DMA stopped! status=0x{:x}",
-            unsafe { (*sc).index },
-            ((status as i32 as i64) as u64),
-        );
+        if status & DMA_IRQ_RX_DESC_UNAVAIL != 0 {
+            // RX ring ran out of descriptors. Kick RX DMA to resume.
+            // SAFETY: `sc` live.
+            unsafe { X1EmacSoftc::wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF) };
+        }
+
+        if status & (DMA_IRQ_TX_STOPPED | DMA_IRQ_RX_STOPPED) != 0 {
+            // SAFETY: `sc` live; format string matches its two arguments.
+            crate::kprintln!(
+                "x1_emac{}: DMA stopped! status=0x{:x}",
+                unsafe { (*sc).index },
+                ((status as i32 as i64) as u64),
+            );
+        }
     }
 }
+
+static X1_EMAC_IRQ_HANDLER: X1EmacIrqHandler = X1EmacIrqHandler;
 
 /// [`NetdevOps`] implementor for the X1 EMAC (fn-pointer-ops-table ->
 /// trait dispatch campaign; was the free fn `x1_emac_transmit_op` +
@@ -1359,7 +1372,7 @@ impl X1EmacSoftc {
         // `IrqDesc` for the duration of this call.
         let ret = unsafe {
             let mut emac_irq = IrqDesc {
-                handler: Some(x1_emac_intr),
+                handler: Some(&X1_EMAC_IRQ_HANDLER),
                 data: sc as *mut c_void,
                 dev: ptr::null_mut(),
                 irq: 0,

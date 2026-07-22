@@ -49,30 +49,73 @@ impl IrqCore {
     }
 }
 
-/// C `irq_handler_t` is `void (*)(int irq, void *data, device_t *dev)`; the
-/// third parameter is typed `*mut c_void` here rather than `*mut device_t`
-/// so this matches the one live Rust handler today,
-/// `uart::uartintr(c_int, *mut c_void, *mut c_void)` (Wave 4, out of this
-/// wave's touch scope), without forcing a signature change there. Pointer
-/// representation is identical regardless of pointee type, so this is
-/// ABI-neutral; `do_irq`/`do_plic_irq` cast `desc.dev` to `*mut c_void` at
-/// the two call sites below.
-pub type IrqHandlerFn = unsafe extern "C" fn(c_int, *mut c_void, *mut c_void);
+/// fn-pointer-callback-slot -> trait-dispatch campaign (precedents:
+/// `CdevOps`/`PcacheOps`/`NetdevOps`/`KobjectRelease`/`BioEndIo`).
+/// Replaces the old C-shaped `irq_handler_t` (`void (*)(int irq, void
+/// *data, device_t *dev)`) fn-pointer typedef. Parameters named after
+/// the two call sites below (`do_plic_irq`/`do_irq`): `irq` is the
+/// full software IRQ number (already PLIC-offset where applicable),
+/// `data` is the registrant-supplied opaque context copied out of
+/// `IrqDesc::data` (e.g. a disk index, an `X1EmacSoftc*`, an
+/// `&AtomicU64` for the timer tick counter), `dev` is `IrqDesc::dev`
+/// cast to `*mut c_void` (a `device_t*`, or null when the registrant
+/// didn't supply one).
+pub trait IrqHandler: Sync {
+    /// # Safety
+    /// Must only be invoked from interrupt-dispatch context
+    /// (`IrqCore::do_irq`/`do_plic_irq`) with the exact `data`/`dev`
+    /// pair this handler's `IrqDesc` was registered with.
+    unsafe fn handle(&self, irq: c_int, data: *mut c_void, dev: *mut c_void);
+}
 
 /// Mirrors C `struct irq_desc` field-for-field (see module doc for the
 /// bindgen-coverage rationale). `handler`/`data`/`dev` are caller-supplied;
 /// `irq`/`count` are "ignored when registering" (overwritten by
 /// `register_irq_handler`); `rcu_head` backs the deferred-free path in
 /// `unregister_irq_handler`.
+///
+/// `handler` was a `Option<IrqHandlerFn>` (an 8-byte `unsafe extern "C"
+/// fn` pointer) before the fn-pointer -> trait-dispatch conversion; it
+/// is now a 16-byte `Option<&'static dyn IrqHandler>` fat pointer
+/// (`None` is the null-data-pointer niche, same reasoning as
+/// `Cdev`'s/`Pcache`'s `Option<&'static dyn _Ops>`). This is a
+/// same-hart-visible, RCU-protected-by-the-*pointer* field (the whole
+/// `IrqDesc` is reached via a single `AtomicPtr<IrqDesc>` load in
+/// `IRQ_DESCS`); the extra 8 bytes only shift `data`/`dev`/`irq`/
+/// `count`/`rcu_head` within the block that
+/// `register_irq_handler`/`unregister_irq_handler` allocate and free
+/// as a whole via the slab cache — no reader ever takes a raw
+/// `&IrqDesc` across a wait loop, so this growth does not touch the
+/// freeze/noalias hazard class.
 #[repr(C)]
 pub struct IrqDesc {
-    pub handler: Option<IrqHandlerFn>,
+    pub handler: Option<&'static dyn IrqHandler>,
     pub data: *mut c_void,
     pub dev: *mut device_t,
     pub irq: c_int,
     pub count: u64,
     pub rcu_head: rcu_head,
 }
+
+// Layout assert (host-native rustc layout probe + const-eval
+// confirmation, precedent: `pcache.rs`/`kobject.rs`/`bio.rs`). `handler`
+// widened 8 -> 16 bytes (fn pointer -> fat pointer); every field after
+// it shifts +8; the struct itself has no tail padding to absorb the
+// growth (unlike `Pcache`'s `align(64)`), so `size_of::<IrqDesc>()`
+// grows 80 -> 88. `IRQ_DESCS` stores `AtomicPtr<IrqDesc>` (a plain
+// pointer, not an embedded struct), so its array sizing is unaffected.
+const _: () = {
+    assert!(core::mem::size_of::<Option<&'static dyn IrqHandler>>() == 16, "irq handler fat pointer size");
+    assert!(core::mem::align_of::<Option<&'static dyn IrqHandler>>() == 8, "irq handler fat pointer alignment");
+    assert!(core::mem::size_of::<IrqDesc>() == 88, "irq_desc size");
+    assert!(core::mem::align_of::<IrqDesc>() == 8, "irq_desc alignment");
+    assert!(core::mem::offset_of!(IrqDesc, handler) == 0, "irq_desc.handler offset");
+    assert!(core::mem::offset_of!(IrqDesc, data) == 16, "irq_desc.data offset");
+    assert!(core::mem::offset_of!(IrqDesc, dev) == 24, "irq_desc.dev offset");
+    assert!(core::mem::offset_of!(IrqDesc, irq) == 32, "irq_desc.irq offset");
+    assert!(core::mem::offset_of!(IrqDesc, count) == 40, "irq_desc.count offset");
+    assert!(core::mem::offset_of!(IrqDesc, rcu_head) == 48, "irq_desc.rcu_head offset");
+};
 
 // ===========================================================================
 // Externs.
@@ -365,7 +408,7 @@ impl IrqCore {
         // and is safe to call with that exact triple.
         unsafe {
             if let Some(h) = (*desc).handler {
-                h(irq_full, (*desc).data, (*desc).dev as *mut c_void);
+                h.handle(irq_full, (*desc).data, (*desc).dev as *mut c_void);
             }
         }
         Rcu::read_unlock();
@@ -410,7 +453,7 @@ impl IrqCore {
         // SAFETY: see `do_plic_irq`.
         unsafe {
             if let Some(h) = (*desc).handler {
-                h(irq_num, (*desc).data, (*desc).dev as *mut c_void);
+                h.handle(irq_num, (*desc).data, (*desc).dev as *mut c_void);
             }
         }
         Rcu::read_unlock();

@@ -580,77 +580,85 @@ impl Ipi {
 // Receive side: registered handler for IRQ_S_SOFT.
 // ===========================================================================
 
-/// `kernel/ipi/ipi.c`'s `static void __ipi_irq_handler(int irq, void
-/// *data, device_t *dev)`. Runs in hard interrupt context on the
-/// receiving hart -- see the module doc's interrupt-context audit table
-/// for the no-sleep/no-alloc justification of every case below.
-///
-/// # Safety
-/// Must only be invoked by `irq::irq_core::do_irq`'s dispatch (the
-/// `register_irq_handler` call in [`ipi_init`] is this function's only
-/// registration site), which guarantees interrupts are disabled and this
-/// runs on the hart the interrupt actually targeted.
-unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
-    // Acknowledge: clear SIP.SSIE.
-    Ipi::write_sip(Ipi::read_sip() & !SIE_SSIE);
+/// [`IrqHandler`] implementor for the IPI soft-interrupt line
+/// (fn-pointer-callback-slot -> trait-dispatch campaign; was the free
+/// fn `ipi_irq_handler` + `Some(ipi_irq_handler)` in [`Ipi::init`]'s
+/// `IrqDesc.handler`, now folded into this ZST + trait impl). Runs in
+/// hard interrupt context on the receiving hart -- see the module
+/// doc's interrupt-context audit table for the no-sleep/no-alloc
+/// justification of every case below.
+struct IpiIrqHandler;
 
-    let hartid = machine::Riscv::cpuid();
+impl crate::irq::irq_core::IrqHandler for IpiIrqHandler {
+    /// # Safety
+    /// Must only be invoked by `irq::irq_core::do_irq`'s dispatch (the
+    /// `register_irq_handler` call in [`Ipi::init`] is this handler's only
+    /// registration site), which guarantees interrupts are disabled and this
+    /// runs on the hart the interrupt actually targeted.
+    unsafe fn handle(&self, _irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
+        // Acknowledge: clear SIP.SSIE.
+        Ipi::write_sip(Ipi::read_sip() & !SIE_SSIE);
 
-    // ACQ_REL in the C; weakest-correct `Acquire` -- see module doc's
-    // ordering-map table (no reader ever observes the "now empty" store
-    // half, so the C's Release component is provably unneeded).
-    let mut pending = IPI_PENDING[hartid as usize].swap(0, Ordering::Acquire);
+        let hartid = machine::Riscv::cpuid();
 
-    while pending != 0 {
-        let reason = Ipi::ctz8(pending as u8);
-        if reason < 0 || reason >= NR_IPI_REASON {
-            break;
-        }
-        pending &= !(1u64 << reason);
+        // ACQ_REL in the C; weakest-correct `Acquire` -- see module doc's
+        // ordering-map table (no reader ever observes the "now empty" store
+        // half, so the C's Release component is provably unneeded).
+        let mut pending = IPI_PENDING[hartid as usize].swap(0, Ordering::Acquire);
 
-        match reason {
-            IPI_REASON_CRASH => {
-                machine::CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
-                Printf::panic_msg_lock();
-                crate::kprintln!("[Core: {}] Received IPI_REASON_CRASH, crashing...", hartid);
-                // SAFETY: same as the removed `printf` call above; the
-                // physical-memory bounds are written only during
-                // single-hart early boot (start_kernel/fdt), read-only by
-                // the time any IPI can run.
-                unsafe {
-                    Backtrace::print_backtrace(Ipi::read_fp(), __physical_memory_start, __physical_memory_end);
+        while pending != 0 {
+            let reason = Ipi::ctz8(pending as u8);
+            if reason < 0 || reason >= NR_IPI_REASON {
+                break;
+            }
+            pending &= !(1u64 << reason);
+
+            match reason {
+                IPI_REASON_CRASH => {
+                    machine::CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
+                    Printf::panic_msg_lock();
+                    crate::kprintln!("[Core: {}] Received IPI_REASON_CRASH, crashing...", hartid);
+                    // SAFETY: same as the removed `printf` call above; the
+                    // physical-memory bounds are written only during
+                    // single-hart early boot (start_kernel/fdt), read-only by
+                    // the time any IPI can run.
+                    unsafe {
+                        Backtrace::print_backtrace(Ipi::read_fp(), __physical_memory_start, __physical_memory_end);
+                    }
+                    Printf::panic_msg_unlock();
+                    Ipi::send_all_but_self(IPI_REASON_CRASH);
+                    loop {
+                        machine::Riscv::wfi();
+                    }
                 }
-                Printf::panic_msg_unlock();
-                Ipi::send_all_but_self(IPI_REASON_CRASH);
-                loop {
-                    machine::Riscv::wfi();
+                IPI_REASON_CALL_FUNC => {
+                    // Request to call a function -- not implemented yet
+                    // (matches the C original's empty case).
                 }
-            }
-            IPI_REASON_CALL_FUNC => {
-                // Request to call a function -- not implemented yet
-                // (matches the C original's empty case).
-            }
-            IPI_REASON_RESCHEDULE => {
-                // SAFETY: `rq_flush_wake_list` is documented IRQ-safe
-                // (see the `extern` block above and the module doc's
-                // interrupt-context audit).
-                unsafe { Rq::flush_wake_list(hartid) };
-                machine::CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
-            }
-            IPI_REASON_TLB_FLUSH => {
-                // xv6 uses separate kernel/user page tables, so the TLB
-                // is flushed on the next return to user mode instead
-                // (matches the C original's empty case + comment).
-            }
-            IPI_REASON_GENERIC => {
-                // Generic IPI -- no specific action (matches the C).
-            }
-            _ => {
-                // Unknown reason (matches the C's default case).
+                IPI_REASON_RESCHEDULE => {
+                    // SAFETY: `rq_flush_wake_list` is documented IRQ-safe
+                    // (see the `extern` block above and the module doc's
+                    // interrupt-context audit).
+                    unsafe { Rq::flush_wake_list(hartid) };
+                    machine::CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
+                }
+                IPI_REASON_TLB_FLUSH => {
+                    // xv6 uses separate kernel/user page tables, so the TLB
+                    // is flushed on the next return to user mode instead
+                    // (matches the C original's empty case + comment).
+                }
+                IPI_REASON_GENERIC => {
+                    // Generic IPI -- no specific action (matches the C).
+                }
+                _ => {
+                    // Unknown reason (matches the C's default case).
+                }
             }
         }
     }
 }
+
+static IPI_IRQ_HANDLER: IpiIrqHandler = IpiIrqHandler;
 
 impl Ipi {
     /// `kernel/ipi/ipi.c`'s `void ipi_init(void)`.
@@ -665,7 +673,7 @@ impl Ipi {
         }
 
         let mut ipi_desc = IrqDesc {
-            handler: Some(ipi_irq_handler),
+            handler: Some(&IPI_IRQ_HANDLER),
             data: core::ptr::null_mut(),
             dev: core::ptr::null_mut(),
             irq: 0,

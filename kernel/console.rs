@@ -939,7 +939,7 @@ impl Console {
             (*cdev).dev.ops = Some(&CONSOLE_DEV_OPS);
 
             let mut irq_desc = IrqDesc {
-                handler: Some(crate::uart::uartintr),
+                handler: Some(&crate::uart::UART_IRQ_HANDLER),
                 data: core::ptr::null_mut(),
                 dev: &raw mut (*cdev).dev,
                 irq: 0,
