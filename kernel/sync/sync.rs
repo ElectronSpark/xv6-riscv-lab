@@ -242,7 +242,7 @@ impl Drop for KSpinPairGuard {
 //     same three fields), so `SpinLock::new` needs no runtime `spin_init`
 //     call and is a `const fn`, usable directly in a `static`.
 //   * `lock()`/`try_lock()` call straight through to this crate's one
-//     canonical spinlock primitive (`crate::lock::spinlock::spin_lock` /
+//     canonical spinlock primitive (`crate::lock::spinlock::RawSpinlock::lock` /
 //     `spin_trylock` / `spin_unlock`, from `kernel/lock/spinlock.rs`,
 //     Wave P3-3A) -- the same `push_off`/`spin_acquire`/... machinery
 //     `KSpinlock` above delegates to (via `crate::mm::cffi::raw`), just
@@ -318,7 +318,7 @@ impl<T> SpinLock<T> {
         // storage embedded in `self`, never freed while `self` is
         // alive) -- the same contract every other `spin_lock` call site
         // in this crate relies on.
-        unsafe { crate::lock::spinlock::spin_lock(self.raw.get()) };
+        unsafe { crate::lock::spinlock::RawSpinlock::lock(self.raw.get()) };
         SpinLockGuard { lock: self, _not_send_sync: PhantomData }
     }
 
@@ -343,7 +343,7 @@ impl<T> SpinLock<T> {
         // stored by `new` so the diagnostic name is preserved.
         unsafe {
             let name = (*raw).name;
-            crate::lock::spinlock::spin_init(raw, name);
+            crate::lock::spinlock::RawSpinlock::init(raw, name);
         }
     }
 
@@ -354,7 +354,7 @@ impl<T> SpinLock<T> {
     #[inline]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // SAFETY: see `lock`.
-        let acquired = unsafe { crate::lock::spinlock::spin_trylock(self.raw.get()) } != 0;
+        let acquired = unsafe { crate::lock::spinlock::RawSpinlock::trylock(self.raw.get()) } != 0;
         if acquired {
             Some(SpinLockGuard { lock: self, _not_send_sync: PhantomData })
         } else {
@@ -435,7 +435,7 @@ impl<'a, T> Drop for SpinLockGuard<'a, T> {
         // this hart (established in `SpinLock::lock`/`try_lock`, never
         // forged elsewhere -- `lock`/`_not_send_sync` are private
         // fields).
-        unsafe { crate::lock::spinlock::spin_unlock(self.lock.raw.get()) };
+        unsafe { crate::lock::spinlock::RawSpinlock::unlock(self.lock.raw.get()) };
     }
 }
 

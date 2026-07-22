@@ -1548,7 +1548,7 @@ impl VfsSuperblock {
                 RWLOCK_PRIO_READ as u64,
                 c"vfs_superblock_lock".as_ptr(),
             );
-            crate::lock::spinlock::spin_init(
+            crate::lock::spinlock::RawSpinlock::init(
                 &raw mut (*sb).spinlock,
                 c"vfs_superblock_spinlock".as_ptr() as *mut c_char,
             );
@@ -1813,7 +1813,7 @@ impl VfsSuperblock {
     pub(crate) fn vfs_superblock_spin_lock(sb: *mut vfs_superblock) {
         unsafe {
             kassert!(!sb.is_null(), "Superblock cannot be NULL when acquiring spinlock");
-            crate::lock::spinlock::spin_lock(&raw mut (*sb).spinlock);
+            crate::lock::spinlock::RawSpinlock::lock(&raw mut (*sb).spinlock);
         }
     }
 
@@ -1821,7 +1821,7 @@ impl VfsSuperblock {
     pub(crate) fn vfs_superblock_spin_unlock(sb: *mut vfs_superblock) {
         unsafe {
             kassert!(!sb.is_null(), "Superblock cannot be NULL when releasing spinlock");
-            crate::lock::spinlock::spin_unlock(&raw mut (*sb).spinlock);
+            crate::lock::spinlock::RawSpinlock::unlock(&raw mut (*sb).spinlock);
         }
     }
 
@@ -3182,7 +3182,7 @@ impl FsStruct {
                 return ptr::null_mut();
             }
             ptr::write_bytes(fs, 0, 1);
-            crate::lock::spinlock::spin_init(&raw mut (*fs).lock, FS_STRUCT_LOCK_NAME.as_ptr() as *mut c_char);
+            crate::lock::spinlock::RawSpinlock::init(&raw mut (*fs).lock, FS_STRUCT_LOCK_NAME.as_ptr() as *mut c_char);
             FsStruct::fs_refcount_atomic(fs).store(1, Ordering::Release);
             fs
         }
@@ -3199,12 +3199,12 @@ impl FsStruct {
             let fs = FsStruct::struct_alloc_init();
             kassert!(!fs.is_null(), "idle_thread_init: failed to create fs_struct");
             // Preserved 1:1 from the C original: `__vfs_struct_alloc_init`
-            // already performs this exact `crate::lock::spinlock::spin_init`/refcount-store pair;
+            // already performs this exact `crate::lock::spinlock::RawSpinlock::init`/refcount-store pair;
             // `FsStruct::vfs_struct_init` redoes it (harmless -- both are idempotent
             // full re-initializations of freshly allocated, still-exclusive
             // memory).
             FsStruct::fs_refcount_atomic(fs).store(1, Ordering::Release);
-            crate::lock::spinlock::spin_init(&raw mut (*fs).lock, FS_STRUCT_LOCK_NAME.as_ptr() as *mut c_char);
+            crate::lock::spinlock::RawSpinlock::init(&raw mut (*fs).lock, FS_STRUCT_LOCK_NAME.as_ptr() as *mut c_char);
             (*fs).rooti.sb = ptr::null_mut();
             (*fs).rooti.inode = ptr::null_mut();
             (*fs).cwd.sb = ptr::null_mut();
@@ -3232,12 +3232,12 @@ impl FsStruct {
 
             // Get inode pointers under spinlock, but take references outside
             // (FsStruct::vfs_inode_get_ref may acquire the inode mutex).
-            crate::lock::spinlock::spin_lock(&raw mut (*old_fs).lock);
+            crate::lock::spinlock::RawSpinlock::lock(&raw mut (*old_fs).lock);
             let rooti = (*old_fs).rooti.inode;
             let cwdi = (*old_fs).cwd.inode;
             let rooti_ok = !rooti.is_null() && VfsInode::vfs_idup_not_zero(rooti);
             let cwdi_ok = !cwdi.is_null() && VfsInode::vfs_idup_not_zero(cwdi);
-            crate::lock::spinlock::spin_unlock(&raw mut (*old_fs).lock);
+            crate::lock::spinlock::RawSpinlock::unlock(&raw mut (*old_fs).lock);
 
             let mut ret;
             if rooti_ok {

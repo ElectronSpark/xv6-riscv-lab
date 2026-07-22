@@ -2807,17 +2807,17 @@ pub(crate) use crate::sbi::sbi_remote_hfence_vma;
     pub fn rb_delete_node_color(root: *mut crate::bindings::rb_root, node: *mut rb_node) -> *mut rb_node {
         unsafe { crate::rbtree::rb_delete_node_color(root, node) }
     }
-    /// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+    /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
     pub fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
-        unsafe { crate::lock::spinlock::spin_init(lk, name) };
+        unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name) };
     }
-    /// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+    /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::lock`]'s contract.
     pub fn spin_lock(lk: *mut spinlock_t) {
-        unsafe { crate::lock::spinlock::spin_lock(lk) };
+        unsafe { crate::lock::spinlock::RawSpinlock::lock(lk) };
     }
-    /// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+    /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::unlock`]'s contract.
     pub fn spin_unlock(lk: *mut spinlock_t) {
-        unsafe { crate::lock::spinlock::spin_unlock(lk) };
+        unsafe { crate::lock::spinlock::RawSpinlock::unlock(lk) };
     }
     /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
     pub fn page_alloc(order: u64, flags: u64) -> *mut c_void {

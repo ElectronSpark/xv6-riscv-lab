@@ -137,7 +137,7 @@ pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6
     /// contract the original C-ABI `spin_init` always had.
     pub(crate) fn spin_init(lock: *mut Spinlock, name: *const c_char) {
         unsafe {
-            crate::lock::spinlock::spin_init(
+            crate::lock::spinlock::RawSpinlock::init(
                 lock as *mut crate::bindings::spinlock_t,
                 name as *mut c_char,
             );
@@ -146,17 +146,17 @@ pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6
 
     /// SAFETY: see [`spin_init`].
     pub(crate) fn spin_lock(lock: *mut Spinlock) {
-        unsafe { crate::lock::spinlock::spin_lock(lock as *mut crate::bindings::spinlock_t) };
+        unsafe { crate::lock::spinlock::RawSpinlock::lock(lock as *mut crate::bindings::spinlock_t) };
     }
 
     /// SAFETY: see [`spin_init`].
     pub(crate) fn spin_unlock(lock: *mut Spinlock) {
-        unsafe { crate::lock::spinlock::spin_unlock(lock as *mut crate::bindings::spinlock_t) };
+        unsafe { crate::lock::spinlock::RawSpinlock::unlock(lock as *mut crate::bindings::spinlock_t) };
     }
 
     /// SAFETY: see [`spin_init`].
     pub(crate) fn spin_holding(lock: *mut Spinlock) -> c_int {
-        unsafe { crate::lock::spinlock::spin_holding(lock as *mut crate::bindings::spinlock_t) }
+        unsafe { crate::lock::spinlock::RawSpinlock::is_holding(lock as *mut crate::bindings::spinlock_t) }
     }
 }
 

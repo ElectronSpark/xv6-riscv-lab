@@ -603,13 +603,6 @@ unsafe extern "C" {
 
 }
 
-// P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
-// `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
-// this file's original extern declarations were plain (non-`safe`) `fn`s,
-// so every call site already sits in an `unsafe` context -- the plain
-// `use` keeps them unchanged.
-use crate::lock::spinlock::{spin_holding, spin_init, spin_lock, spin_unlock};
-
 // P3-D3b: lock/rcu.rs's `call_rcu` is a plain `pub(crate) unsafe fn` now
 // that its `#[no_mangle]` export is gone; reached by crate path (the call
 // site in `thread_destroy` already sits inside `thread_raw_layout!`'s

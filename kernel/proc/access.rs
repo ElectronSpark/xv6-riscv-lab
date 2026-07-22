@@ -297,13 +297,13 @@ impl<'a> SpinLockRef<'a> {
     }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut spinlock_t { self.raw.as_ptr() }
-    #[inline] pub fn lock(&self) { unsafe { crate::lock::spinlock::spin_lock(self.raw.as_ptr()); } }
-    #[inline] pub fn init(&self, name: *mut c_char) { unsafe { crate::lock::spinlock::spin_init(self.raw.as_ptr(), name); } }
-    #[inline] pub fn trylock(&self) -> c_int { unsafe { crate::lock::spinlock::spin_trylock(self.raw.as_ptr()) } }
-    #[inline] pub fn unlock(&self) { unsafe { crate::lock::spinlock::spin_unlock(self.raw.as_ptr()); } }
-    #[inline] pub fn holding(&self) -> bool { unsafe { crate::lock::spinlock::spin_holding(self.raw.as_ptr()) != 0 } }
-    #[inline] pub fn lock_irqsave(&self) -> c_int { unsafe { crate::lock::spinlock::spin_lock_irqsave(self.raw.as_ptr()) } }
-    #[inline] pub fn unlock_irqrestore(&self, intr: c_int) { unsafe { crate::lock::spinlock::spin_unlock_irqrestore(self.raw.as_ptr(), intr); } }
+    #[inline] pub fn lock(&self) { unsafe { crate::lock::spinlock::RawSpinlock::lock(self.raw.as_ptr()); } }
+    #[inline] pub fn init(&self, name: *mut c_char) { unsafe { crate::lock::spinlock::RawSpinlock::init(self.raw.as_ptr(), name); } }
+    #[inline] pub fn trylock(&self) -> c_int { unsafe { crate::lock::spinlock::RawSpinlock::trylock(self.raw.as_ptr()) } }
+    #[inline] pub fn unlock(&self) { unsafe { crate::lock::spinlock::RawSpinlock::unlock(self.raw.as_ptr()); } }
+    #[inline] pub fn holding(&self) -> bool { unsafe { crate::lock::spinlock::RawSpinlock::is_holding(self.raw.as_ptr()) != 0 } }
+    #[inline] pub fn lock_irqsave(&self) -> c_int { unsafe { crate::lock::spinlock::RawSpinlock::lock_irqsave(self.raw.as_ptr()) } }
+    #[inline] pub fn unlock_irqrestore(&self, intr: c_int) { unsafe { crate::lock::spinlock::RawSpinlock::unlock_irqrestore(self.raw.as_ptr(), intr); } }
     #[inline] pub fn scoped_lock(&self) -> SpinLockGuard<'a> { self.lock(); SpinLockGuard { lock: *self } }
 }
 
@@ -1102,7 +1102,7 @@ impl<'a> RqPercpuRef<'a> {
         unsafe { SpinLockRef::from_raw(self.lock_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn zero_storage(&self) { unsafe { core::ptr::write_bytes(self.raw.as_ptr(), 0, 1); } }
-    #[inline] pub fn init_lock(&self, name: *mut c_char) { unsafe { crate::lock::spinlock::spin_init(self.lock_ptr(), name); } }
+    #[inline] pub fn init_lock(&self, name: *mut c_char) { unsafe { crate::lock::spinlock::RawSpinlock::init(self.lock_ptr(), name); } }
     #[inline] pub fn ready_mask(&self) -> u64 { raw_get!(self, ready_mask) }
     #[inline] pub fn ready_mask_secondary(&self) -> u64 { raw_get!(self, ready_mask_secondary) }
     #[inline] pub fn set_ready_mask(&self, v: u64) { raw_set!(self, ready_mask, v) }

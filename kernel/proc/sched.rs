@@ -21,12 +21,7 @@ use crate::machine::{
 };
 use crate::lock::rcu::rcu_check_callbacks;
 use crate::proc::proc_shims::xv6_panic;
-use crate::lock::spinlock::spin_holding;
-use crate::lock::spinlock::spin_init;
-use crate::lock::spinlock::spin_lock;
-use crate::lock::spinlock::spin_lock_irqsave;
-use crate::lock::spinlock::spin_unlock;
-use crate::lock::spinlock::spin_unlock_irqrestore;
+use crate::lock::spinlock::RawSpinlock;
 use crate::proc::access::{
     is_err_or_null, smp_load_acquire_i32, smp_load_acquire_state, smp_rmb,
     smp_store_release_state, CpuLocalRef, RqRef, SchedEntityRef, SpinLockRef, ThreadAccess,
@@ -542,7 +537,7 @@ fn sched_assert_unholding() {
 impl Scheduler {
 fn scheduler_init_impl() {
     unsafe {
-        spin_init(Scheduler::sleep_lock_ptr(), c"xv6_schport_sleep_lock".as_ptr() as *mut c_char);
+        RawSpinlock::init(Scheduler::sleep_lock_ptr(), c"xv6_schport_sleep_lock".as_ptr() as *mut c_char);
         Scheduler::chan_queue_init();
         Rq::global_init();
     }
@@ -726,21 +721,21 @@ fn do_scheduler_wakeup_safe(p: *mut thread, from_stopped: bool) {
 unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
     unsafe {
         let se = (*p).sched_entity;
-        spin_lock(&raw mut (*se).pi_lock);
+        RawSpinlock::lock(&raw mut (*se).pi_lock);
 
         if p == Scheduler::current_thread() {
             smp_rmb();
             if from_stopped {
-                spin_unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 return;
             }
             let old_state = smp_load_acquire_state(&(*p).state as *const _);
             if !Scheduler::state_is_sleeping(old_state) {
-                spin_unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 return;
             }
             smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
-            spin_unlock(&raw mut (*se).pi_lock);
+            RawSpinlock::unlock(&raw mut (*se).pi_lock);
             return;
         }
 
@@ -748,11 +743,11 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
         let mut old_state = smp_load_acquire_state(&(*p).state as *const _);
         if from_stopped {
             if old_state != THREAD_STOPPED {
-                spin_unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 return;
             }
         } else if !Scheduler::state_is_sleeping(old_state) {
-            spin_unlock(&raw mut (*se).pi_lock);
+            RawSpinlock::unlock(&raw mut (*se).pi_lock);
             return;
         }
 
@@ -767,17 +762,17 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
 
             if Rq::trylock_two(origin_cpuid, target_cpu) == 0 {
                 pop_off();
-                spin_unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 for _ in 0..10 { cpu_relax(); }
-                spin_lock(&raw mut (*se).pi_lock);
+                RawSpinlock::lock(&raw mut (*se).pi_lock);
                 old_state = smp_load_acquire_state(&(*p).state as *const _);
                 if from_stopped {
                     if old_state != THREAD_STOPPED {
-                        spin_unlock(&raw mut (*se).pi_lock);
+                        RawSpinlock::unlock(&raw mut (*se).pi_lock);
                         return;
                     }
                 } else if !Scheduler::state_is_sleeping(old_state) {
-                    spin_unlock(&raw mut (*se).pi_lock);
+                    RawSpinlock::unlock(&raw mut (*se).pi_lock);
                     return;
                 }
                 continue;
@@ -787,16 +782,16 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
             let current_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
             if current_cpuid >= 0 && current_cpuid != origin_cpuid {
                 Rq::unlock_two(origin_cpuid, target_cpu);
-                spin_unlock(&raw mut (*se).pi_lock);
-                spin_lock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::lock(&raw mut (*se).pi_lock);
                 old_state = smp_load_acquire_state(&(*p).state as *const _);
                 if from_stopped {
                     if old_state != THREAD_STOPPED {
-                        spin_unlock(&raw mut (*se).pi_lock);
+                        RawSpinlock::unlock(&raw mut (*se).pi_lock);
                         return;
                     }
                 } else if !Scheduler::state_is_sleeping(old_state) {
-                    spin_unlock(&raw mut (*se).pi_lock);
+                    RawSpinlock::unlock(&raw mut (*se).pi_lock);
                     return;
                 }
                 continue;
@@ -806,21 +801,21 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
 
             if smp_load_acquire_i32(&(*se).on_rq as *const _) != 0 {
                 smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
-                spin_unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 Rq::unlock_two(origin_cpuid, target_cpu);
                 return;
             }
 
             if smp_load_acquire_i32(&(*se).on_cpu as *const _) != 0 {
                 Rq::add_wake_list(origin_cpuid, se);
-                spin_unlock(&raw mut (*se).pi_lock);
+                RawSpinlock::unlock(&raw mut (*se).pi_lock);
                 Rq::unlock_two(origin_cpuid, target_cpu);
                 ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
                 return;
             }
 
             RqRef::assume(rq).enqueue(se);
-            spin_unlock(&raw mut (*se).pi_lock);
+            RawSpinlock::unlock(&raw mut (*se).pi_lock);
             Rq::unlock_two(origin_cpuid, target_cpu);
             return;
         }

@@ -234,9 +234,9 @@ const _: () = {
 // this file's original extern declarations asserted `safe fn` (usual
 // FFI-facade convention). Thin wrappers preserve that safe facade for the
 // unchanged call sites.
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
 fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
-    unsafe { crate::lock::spinlock::spin_init(l, name) }
+    unsafe { crate::lock::spinlock::RawSpinlock::init(l, name) }
 }
 
 // P3-D3b: lock/rcu.rs's read-side entry points are plain safe Rust fns

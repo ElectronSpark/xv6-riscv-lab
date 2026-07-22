@@ -28,7 +28,7 @@ use crate::bindings::{
 // lock/spinlock.rs's `#[no_mangle]` exports -- now gone). Same genuinely
 // `unsafe fn` signatures at their crate path; every call site already
 // sits in an `unsafe` context.
-use crate::lock::spinlock::{spin_init, spin_lock, spin_unlock};
+use crate::lock::spinlock::RawSpinlock;
 
 // P3-D3a: `slab_alloc`/`slab_free`/`slab_cache_init` used to be imported
 // from `crate::bindings` (bindgen extern decls resolved at link time
@@ -57,7 +57,6 @@ unsafe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
 unsafe fn slab_free(obj: *mut c_void) {
     crate::mm::slab_free(obj)
 }
-use crate::lock::spinlock::spin_holding;
 
 // ===========================================================================
 // Native uabi signal trio — P3-4b nativization (user directive: remove
@@ -797,7 +796,7 @@ impl<'a> ThreadAccess<'a> {
         raw_sig_abi! {
             let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
             let sa = ta.sigacts_ptr();
-            if !sa.is_null() && spin_holding(&raw mut (*sa).lock) == 0 {
+            if !sa.is_null() && RawSpinlock::is_holding(&raw mut (*sa).lock) == 0 {
                 xv6_panic(c"dequeue_signal: sigacts not held".as_ptr());
             }
             if sigbad(signo) { return Err(Errno::Inval); }
@@ -979,7 +978,7 @@ impl<'a> ThreadAccess<'a> {
     raw_sig_abi! {
         let ta = ThreadAccess::assume(p);
         let sa = ta.sigacts_ptr();
-        if !sa.is_null() && spin_holding(&raw mut (*sa).lock) == 0 {
+        if !sa.is_null() && RawSpinlock::is_holding(&raw mut (*sa).lock) == 0 {
             xv6_panic(c"sigpending_empty: sigacts not held".as_ptr());
         }
 
@@ -1080,7 +1079,7 @@ impl SigActs {
             (*sa).sa_sigstop = 0;
             (*sa).sa_sigcont = 0;
             (*sa).sa_sigignore = 0;
-            spin_init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
+            RawSpinlock::init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
             (*sa).refcount = 1;
             for i in 1..=NSIG {
                 if SigactsAccess::assume(sa).setdefault(i) != 0 {
@@ -1103,7 +1102,7 @@ impl SigActs {
                 SigActs::sigacts_lock_impl(psa);
                 memmove(sa as *mut c_void, psa as *const c_void, core::mem::size_of::<sigacts_t>());
                 SigActs::sigacts_unlock_impl(psa);
-                spin_init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
+                RawSpinlock::init(&raw mut (*sa).lock, c"sigacts_lock".as_ptr() as *mut c_char);
                 (*sa).refcount = 1;
             }
             sa

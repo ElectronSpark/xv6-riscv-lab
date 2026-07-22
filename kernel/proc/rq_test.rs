@@ -16,9 +16,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::bindings::{
     cpumask_t, rq, sched_attr, sched_entity, spinlock_t, thread, tq_t,
 };
-use crate::lock::spinlock::spin_init;
-use crate::lock::spinlock::spin_lock;
-use crate::lock::spinlock::spin_unlock;
+use crate::lock::spinlock::RawSpinlock;
 use crate::machine::cpuid;
 use crate::proc::access::{is_err_or_null, zeroed_sched_attr, RqRef, SchedEntityRef, ThreadAccess};
 use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
@@ -305,12 +303,12 @@ const EXPECTED_ORDER: [c_int; PRIORITY_TEST_COUNT] = [4, 2, 1, 3, 0];
 
 unsafe extern "C" fn priority_test_proc_entry(my_index: u64, _unused: u64) -> c_int {
     rq_test_raw! {
-        spin_lock(lock_ptr());
+        RawSpinlock::lock(lock_ptr());
         let my_order = ACTIVATION_INDEX.fetch_add(1, Ordering::AcqRel);
         ACTIVATION_ORDER[my_index as usize].store(my_order, Ordering::Release);
         let done = PROCESSES_DONE.fetch_add(1, Ordering::AcqRel) + 1;
         let all_done = done == PRIORITY_TEST_COUNT as c_int;
-        spin_unlock(lock_ptr());
+        RawSpinlock::unlock(lock_ptr());
 
         if all_done {
             let _ = TqRef::from_ptr(tq_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wakeup_all(0, 0));
@@ -323,7 +321,7 @@ fn test_priority_ordered_activation() {
     rq_test_raw! {
         crate::kprintln!("TEST: Priority-Ordered Process Activation");
 
-        spin_init(lock_ptr(), c"prio_test".as_ptr() as *mut c_char);
+        RawSpinlock::init(lock_ptr(), c"prio_test".as_ptr() as *mut c_char);
         if let Some(r) = TqRef::from_ptr(tq_ptr()) { r.init(c"main_wait".as_ptr(), lock_ptr()); }
         ACTIVATION_INDEX.store(0, Ordering::Release);
         PROCESSES_DONE.store(0, Ordering::Release);
@@ -370,11 +368,11 @@ fn test_priority_ordered_activation() {
         Scheduler::yield_now();
 
         crate::kprintln!("  Phase 4: Waiting for all processes to complete");
-        spin_lock(lock_ptr());
+        RawSpinlock::lock(lock_ptr());
         while PROCESSES_DONE.load(Ordering::Acquire) < PRIORITY_TEST_COUNT as c_int {
             let _ = TqRef::from_ptr(tq_ptr()).map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(lock_ptr(), core::ptr::null_mut()));
         }
-        spin_unlock(lock_ptr());
+        RawSpinlock::unlock(lock_ptr());
 
         crate::kprintln!("  Phase 5: Verifying activation order");
         crate::kprint!("    Expected: ");

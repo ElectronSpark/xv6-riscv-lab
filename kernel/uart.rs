@@ -172,17 +172,17 @@ use crate::mm::cffi::{xv6_pop_off, xv6_push_off};
 // ABI-truth note: the old redeclaration typed `name` as `*const c_char`;
 // the real fn takes `*mut c_char` (the callee only reads it) -- the
 // wrapper carries the cast.
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
+    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) }
 }
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::lock`]'s contract.
 fn spin_lock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(lk) }
+    unsafe { crate::lock::spinlock::RawSpinlock::lock(lk) }
 }
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::unlock`]'s contract.
 fn spin_unlock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(lk) }
+    unsafe { crate::lock::spinlock::RawSpinlock::unlock(lk) }
 }
 
 // P3-1C mesh sweep: console.rs is in scope for this wave, so

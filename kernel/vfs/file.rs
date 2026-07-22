@@ -409,13 +409,13 @@ const _: () = {
 // already proved non-null. `printf` (C-variadic) is the one exception.
 // ===========================================================================
 
-// P3-D3c: `crate::lock::spinlock::spin_init` is genuinely `unsafe fn` now
+// P3-D3c: `crate::lock::spinlock::RawSpinlock::init` is genuinely `unsafe fn` now
 // that its `#[no_mangle]` export is gone; this file's original extern
 // declaration asserted `safe fn` (usual FFI-facade convention). The thin
 // wrapper preserves that safe facade for the unchanged call sites.
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
 fn spin_init(l: *mut spinlock_t, name: *mut c_char) {
-    unsafe { crate::lock::spinlock::spin_init(l, name) }
+    unsafe { crate::lock::spinlock::RawSpinlock::init(l, name) }
 }
 
 unsafe extern "C" {

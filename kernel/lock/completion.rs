@@ -60,9 +60,9 @@ fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int {
 fn sched_timer_done(tn: *mut timer_node) {
     unsafe { crate::timer::sched_timer::sched_timer_done(tn) }
 }
-pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
+use crate::lock::spinlock::RawSpinlock;
 
-/// `crate::lock::spinlock::spin_init` takes `name: *mut c_char`; this
+/// `crate::lock::spinlock::RawSpinlock::init` takes `name: *mut c_char`; this
 /// file's (and several sibling lock modules') original extern declaration
 /// typed it `*const c_char` (call sites only ever pass a `&'static
 /// [u8]`-derived string literal pointer, never written through). Thin
@@ -71,7 +71,7 @@ pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     // SAFETY: `name` is only read by the callee despite the `*mut`
     // parameter; every call site here passes a `'static` string literal.
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
+    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) };
 }
 
 // ---------------------------------------------------------------------------
@@ -221,9 +221,9 @@ extern "C" fn completion_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
         }
     }
 
-    let status = spin_holding(lock_ptr(comp));
+    let status = RawSpinlock::is_holding(lock_ptr(comp));
     if status != 0 {
-        spin_unlock(lock_ptr(comp));
+        RawSpinlock::unlock(lock_ptr(comp));
     }
     status
 }}
@@ -243,7 +243,7 @@ extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
     }
 
     if sleep_cb_status != 0 {
-        spin_lock(lock_ptr(comp));
+        RawSpinlock::lock(lock_ptr(comp));
     }
 }}
 

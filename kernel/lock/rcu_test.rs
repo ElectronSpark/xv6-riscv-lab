@@ -55,7 +55,7 @@ fn kmm_free(ptr: *mut c_void) {
     unsafe { crate::mm::kalloc::Kmem::kmm_free(ptr) };
 }
 
-/// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`
+/// See `completion.rs`'s identical note: `crate::lock::spinlock::RawSpinlock::init`
 /// takes `name: *mut c_char`; this file's original extern declaration
 /// typed it `*const c_char` (every call site passes a `'static`
 /// string-literal pointer, never written through).
@@ -63,7 +63,7 @@ fn kmm_free(ptr: *mut c_void) {
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     // SAFETY: `name` is only read by the callee despite the `*mut`
     // parameter; every call site here passes a `'static` string literal.
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
+    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) };
 }
 
 

@@ -51,9 +51,9 @@ fn sched_timer_done(tn: *mut timer_node) {
 }
 // `sleep_ms` stayed a safe fn -- plain crate-path import.
 use crate::timer::sched_timer::sleep_ms;
-pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
+use crate::lock::spinlock::RawSpinlock;
 
-/// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`
+/// See `completion.rs`'s identical note: `crate::lock::spinlock::RawSpinlock::init`
 /// takes `name: *mut c_char`; this file's original extern declaration
 /// typed it `*const c_char` (call site only ever passes a `'static`
 /// string-literal pointer, never written through).
@@ -61,7 +61,7 @@ pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     // SAFETY: `name` is only read by the callee despite the `*mut`
     // parameter; the sole call site passes a `'static` string literal.
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
+    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) };
 }
 
 // ---------------------------------------------------------------------------
@@ -214,9 +214,9 @@ extern "C" fn sem_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
             ctx.set_armed(true);
         }
     }
-    let status = spin_holding(lk_ptr(sem));
+    let status = RawSpinlock::is_holding(lk_ptr(sem));
     if status != 0 {
-        spin_unlock(lk_ptr(sem));
+        RawSpinlock::unlock(lk_ptr(sem));
     }
     status
 }}
@@ -234,7 +234,7 @@ extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! 
         ctx.set_armed(false);
     }
     if sleep_cb_status != 0 {
-        spin_lock(lk_ptr(sem));
+        RawSpinlock::lock(lk_ptr(sem));
     }
 }}
 

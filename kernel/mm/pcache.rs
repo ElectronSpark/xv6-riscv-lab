@@ -321,7 +321,7 @@ pub type Workqueue = workqueue;
 // `rwlock_rlock`, `rb_find_key`, `slab_alloc`, `page_lock_acquire`, …) used
 // to be re-declared here as thin `pub fn` safe facades, each one just
 // forwarding its args unchanged into the real `unsafe fn` in its owning
-// module (`crate::lock::spinlock::spin_lock`, `crate::mm::page::
+// module (`crate::lock::spinlock::RawSpinlock::lock`, `crate::mm::page::
 // page_lock_acquire`, …). Per the wrapper-removal directive every call site
 // (all of them inside `impl PcacheHandle`/`impl NodeHandle` methods, plus a
 // handful of `impl Pcache` assoc fns below) now calls straight through to
@@ -542,7 +542,7 @@ impl Pcache {
     /// One-shot global initialization invoked from `pcache_global_init`.
     fn globals_init() {
         list_init(Pcache::global_list_head());
-        unsafe { crate::lock::spinlock::spin_init(Pcache::global_spinlock(), SPINLOCK_NAME.as_ptr() as *const c_char as *mut c_char) };
+        unsafe { crate::lock::spinlock::RawSpinlock::init(Pcache::global_spinlock(), SPINLOCK_NAME.as_ptr() as *const c_char as *mut c_char) };
     }
 }
 
@@ -692,20 +692,20 @@ impl PcacheHandle {
     }
     #[inline]
     fn spin_init(self) {
-        unsafe { crate::lock::spinlock::spin_init(self.spinlock_ptr(), PCACHE_LOCK_NAME.as_ptr() as *const c_char as *mut c_char) };
+        unsafe { crate::lock::spinlock::RawSpinlock::init(self.spinlock_ptr(), PCACHE_LOCK_NAME.as_ptr() as *const c_char as *mut c_char) };
     }
     #[inline]
     fn spin_lock(self) {
-        unsafe { crate::lock::spinlock::spin_lock(self.spinlock_ptr()) };
+        unsafe { crate::lock::spinlock::RawSpinlock::lock(self.spinlock_ptr()) };
     }
     #[inline]
     fn spin_unlock(self) {
-        unsafe { crate::lock::spinlock::spin_unlock(self.spinlock_ptr()) };
+        unsafe { crate::lock::spinlock::RawSpinlock::unlock(self.spinlock_ptr()) };
     }
     #[inline]
     fn spin_assert_holding(self) {
         pcache_assert(
-            unsafe { crate::lock::spinlock::spin_holding(self.spinlock_ptr()) } != 0,
+            unsafe { crate::lock::spinlock::RawSpinlock::is_holding(self.spinlock_ptr()) } != 0,
             b"pcache_spin_assert_holding: pcache spinlock not held\0",
         );
     }
@@ -1244,7 +1244,7 @@ impl Pcache {
 
     fn global_spin_assert_holding() {
         pcache_assert(
-            unsafe { crate::lock::spinlock::spin_holding(Pcache::global_spinlock()) } != 0,
+            unsafe { crate::lock::spinlock::RawSpinlock::is_holding(Pcache::global_spinlock()) } != 0,
             b"pcache_global_spin_assert_holding: not held\0",
         );
     }
@@ -1906,7 +1906,7 @@ impl Pcache {
 #[must_use = "global pcache lock is released immediately if the guard is dropped"]
 struct PcGlobalGuard;
 impl Drop for PcGlobalGuard {
-    fn drop(&mut self) { unsafe { crate::lock::spinlock::spin_unlock(Pcache::global_spinlock()) }; }
+    fn drop(&mut self) { unsafe { crate::lock::spinlock::RawSpinlock::unlock(Pcache::global_spinlock()) }; }
 }
 impl PcGlobalGuard {
     /// Read `PCACHE_GLOBAL_COUNT` (registered-pcache count) under the held
@@ -1923,7 +1923,7 @@ impl PcGlobalGuard {
 }
 impl Pcache {
     fn lock_global() -> PcGlobalGuard {
-        unsafe { crate::lock::spinlock::spin_lock(Pcache::global_spinlock()) };
+        unsafe { crate::lock::spinlock::RawSpinlock::lock(Pcache::global_spinlock()) };
         PcGlobalGuard
     }
 }

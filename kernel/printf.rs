@@ -58,17 +58,17 @@ use crate::backtrace::print_backtrace;
 // FFI-facade convention). Thin wrappers preserve that safe facade for the
 // unchanged call sites. (`name` cast: old redeclaration said
 // `*const c_char`, real fn takes `*mut c_char`; the callee only reads it.)
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
+    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) }
 }
-/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::lock`]'s contract.
 fn spin_lock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_lock(lk) }
+    unsafe { crate::lock::spinlock::RawSpinlock::lock(lk) }
 }
-/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::unlock`]'s contract.
 fn spin_unlock(lk: *mut spinlock_t) {
-    unsafe { crate::lock::spinlock::spin_unlock(lk) }
+    unsafe { crate::lock::spinlock::RawSpinlock::unlock(lk) }
 }
 
 // P3-D3c: the FDT-configured kernel physical memory bounds

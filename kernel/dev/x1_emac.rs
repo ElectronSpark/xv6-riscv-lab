@@ -97,9 +97,9 @@ use crate::timer::sched_timer::sleep_ms;
 // unchanged call sites.
 // (`name` cast: old redeclaration said `*const c_char`, real fn takes
 // `*mut c_char`; the callee only reads it.)
-/// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+/// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
-    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) }
+    unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) }
 }
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
