@@ -469,12 +469,12 @@ fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
 /// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
 #[inline]
 fn kalloc() -> *mut c_void {
-    unsafe { crate::mm::kalloc() }
+    unsafe { crate::mm::kalloc::Kmem::kalloc() }
 }
 /// SAFETY: `pa` must originate from `kalloc` above.
 #[inline]
 fn kfree(pa: *mut c_void) {
-    unsafe { crate::mm::kfree(pa) };
+    unsafe { crate::mm::kalloc::Kmem::kfree(pa) };
 }
 // P3-1D mesh sweep: dev/cdev.rs, dev/blkdev.rs, dev/dev.rs, net.rs, and
 // sysnet.rs are all in scope for this wave; these become plain crate-path

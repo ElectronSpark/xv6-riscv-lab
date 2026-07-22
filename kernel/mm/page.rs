@@ -469,12 +469,15 @@ impl PcpuCache {
 // to translate between `&mut Page` and `&mut ListNode` linked-list links.
 const PAGE_BUDDY_LRU_OFFSET: usize = offset_of!(Page, union_bytes);
 
+impl Page {
 #[inline]
 #[allow(dead_code)]
 fn page_to_lru(p: &mut Page) -> *mut ListNode {
     (p as *mut Page as usize + PAGE_BUDDY_LRU_OFFSET) as *mut ListNode
 }
+}
 
+impl Page {
 #[inline]
 fn lru_node_to_page(n: *mut ListNode) -> Option<&'static mut Page> {
     if n.is_null() { return None; }
@@ -483,6 +486,7 @@ fn lru_node_to_page(n: *mut ListNode) -> Option<&'static mut Page> {
     // subtracting the offset yields a valid `&mut Page` borrowed from the
     // global `__pages` array (lifetime is fictitious `'static`).
     unsafe { Some(&mut *p) }
+}
 }
 
 // ===========================================================================
@@ -615,7 +619,7 @@ pub(crate) use crate::mm::slab::slab_free;
     #[inline] pub fn log_buddy_range(s: u64, e: u64) {
         crate::kprintln!("buddy init range: 0x{:x} - 0x{:x}", s, e);
     }
-    #[inline] pub fn print_stat(detailed: c_int) { super::print_buddy_system_stat(detailed) }
+    #[inline] pub fn print_stat(detailed: c_int) { super::BuddyPool::print_buddy_system_stat(detailed) }
 }
 
 // `printf` is shared by every diagnostic-printing helper in this module
@@ -653,6 +657,7 @@ static PCPU_CACHE_NAME: &[u8] = b"pcpu_cache\0";
 // references handed back by these helpers.
 // ===========================================================================
 
+impl Page {
 #[inline]
 fn pages_base() -> *mut Page {
     // SAFETY: addr-of read of a `static mut` (no `&`/`&mut` aliasing of the
@@ -660,10 +665,12 @@ fn pages_base() -> *mut Page {
     // immutable thereafter.
     unsafe { *(&raw const __pages) }
 }
+}
 
 /// Borrow the buddy pool for `order`. Returns `&mut` because each pool
 /// has its own spinlock; callers are responsible for locking before
 /// mutating list state.
+impl BuddyPool {
 #[inline]
 fn buddy_pool(order: u64) -> &'static mut BuddyPool {
     debug_assert!(order <= PAGE_BUDDY_MAX_ORDER);
@@ -673,7 +680,9 @@ fn buddy_pool(order: u64) -> &'static mut BuddyPool {
     // creating a `&mut` to the static itself.
     unsafe { &mut (*(&raw mut __buddy_pools))[order as usize] }
 }
+}
 
+impl PcpuCache {
 #[inline]
 fn pcpu_cache(cpu: usize, order: u64) -> &'static mut PcpuCache {
     debug_assert!(cpu < NCPU);
@@ -681,13 +690,16 @@ fn pcpu_cache(cpu: usize, order: u64) -> &'static mut PcpuCache {
     // SAFETY: see `buddy_pool`.
     unsafe { &mut (*(&raw mut __pcpu_caches))[cpu][order as usize] }
 }
+}
 
 /// Borrow the `Page` at index `i` from the global page array.
+impl Page {
 #[inline]
 fn page_at(i: isize) -> &'static mut Page {
     // SAFETY: `__pages` was sized to `__physical_total_pages` at init.
     // Callers (all internal) validate `i` against the valid range.
-    unsafe { &mut *pages_base().offset(i) }
+    unsafe { &mut *Page::pages_base().offset(i) }
+}
 }
 
 /// Borrow the page following `p` by `delta` slots in the global array.
@@ -695,13 +707,15 @@ fn page_at(i: isize) -> &'static mut Page {
 /// The pages live in a contiguous `[Page]`. Returning two `&mut Page`
 /// borrows that may overlap aliasing would be UB, so we only ever call
 /// this *after* releasing the first borrow.
+impl Page {
 #[inline]
 fn page_offset_from(p: &Page, delta: usize) -> &'static mut Page {
-    let base = pages_base();
+    let base = Page::pages_base();
     // Translate `&Page` -> index in the global array.
     let idx = ((p as *const Page as usize) - (base as usize))
               / core::mem::size_of::<Page>();
-    page_at((idx + delta) as isize)
+    Page::page_at((idx + delta) as isize)
+}
 }
 
 // ===========================================================================
@@ -803,6 +817,7 @@ impl Page {
 // ===========================================================================
 use crate::sync::KSpinlock;
 
+impl BuddyPool {
 fn buddy_pool_lock(order: u64) {
     if order > PAGE_BUDDY_MAX_ORDER {
         ffi::panic(b"__buddy_pool_lock: invalid order\0");
@@ -811,29 +826,36 @@ fn buddy_pool_lock(order: u64) {
     // `buddy_pool_unlock` will release. This is the documented bridge
     // between RAII and the legacy lock/unlock-on-separate-lines style
     // that some buddy-allocator loops require.
-    core::mem::forget(KSpinlock::from_ptr(buddy_pool(order).lock_ptr()).lock());
+    core::mem::forget(KSpinlock::from_ptr(BuddyPool::buddy_pool(order).lock_ptr()).lock());
 }
+}
+impl BuddyPool {
 fn buddy_pool_unlock(order: u64) {
     if order > PAGE_BUDDY_MAX_ORDER {
         ffi::panic(b"__buddy_pool_unlock: invalid order\0");
     }
-    ffi::spin_unlock(buddy_pool(order).lock_ptr());
+    ffi::spin_unlock(BuddyPool::buddy_pool(order).lock_ptr());
 }
+}
+impl BuddyPool {
 fn buddy_pool_lock_range(s: u64, e: u64) {
     if s > e || e > PAGE_BUDDY_MAX_ORDER {
         ffi::panic(b"__buddy_pool_lock_range: invalid order range\0");
     }
     for i in s..=e {
-        core::mem::forget(KSpinlock::from_ptr(buddy_pool(i).lock_ptr()).lock());
+        core::mem::forget(KSpinlock::from_ptr(BuddyPool::buddy_pool(i).lock_ptr()).lock());
     }
 }
+}
+impl BuddyPool {
 fn buddy_pool_unlock_range(s: u64, e: u64) {
     if s > e || e > PAGE_BUDDY_MAX_ORDER {
         ffi::panic(b"__buddy_pool_unlock_range: invalid order range\0");
     }
     for i in (s..=e).rev() {
-        ffi::spin_unlock(buddy_pool(i).lock_ptr());
+        ffi::spin_unlock(BuddyPool::buddy_pool(i).lock_ptr());
     }
+}
 }
 
 /// Lock two pages in pointer-address order (or just one if equal). The
@@ -847,11 +869,14 @@ fn buddy_pool_unlock_range(s: u64, e: u64) {
 /// function); the C original has the same lifecycle. RAII single-
 /// scope use of `KSpinlock::lock_two` is available directly when the
 /// caller's structure allows it.
+impl Page {
 fn lock_pair(p1: &mut Page, p2: &mut Page) {
     let h1 = KSpinlock::from_ptr(p1.lock_ptr());
     let h2 = KSpinlock::from_ptr(p2.lock_ptr());
     core::mem::forget(KSpinlock::lock_two(h1, h2));
 }
+}
+impl Page {
 fn unlock_pair(p1: &mut Page, p2: &mut Page) {
     let a = p1 as *mut Page;
     let b = p2 as *mut Page;
@@ -864,6 +889,7 @@ fn unlock_pair(p1: &mut Page, p2: &mut Page) {
     } else {
         ffi::spin_unlock(p1.lock_ptr());
     }
+}
 }
 
 // ===========================================================================
@@ -903,7 +929,7 @@ impl Page {
 
     /// Mark `self` as a buddy group header, then walk every tail page and
     /// flag it as `PAGE_TYPE_TAIL`. Tail pages are reached via separate
-    /// `page_at()` borrows because we cannot hold overlapping `&mut Page`s.
+    /// `Page::page_at()` borrows because we cannot hold overlapping `&mut Page`s.
     pub fn as_buddy_group(&mut self, order: u64, state: u32) {
         let head_ptr = self as *mut Page;
         self.flags = PAGE_TYPE_BUDDY;
@@ -913,7 +939,7 @@ impl Page {
         ffi::list_init(self.buddy_lru());
         let count = 1u64 << order;
         for i in 1..count {
-            let tail = page_offset_from(self, i as usize);
+            let tail = Page::page_offset_from(self, i as usize);
             tail.as_buddy_tail(head_ptr);
         }
     }
@@ -936,7 +962,7 @@ impl Page {
         let head_ptr = self as *mut Page;
         let count = 1u64 << order;
         for i in 1..count {
-            let tp = page_offset_from(self, i as usize);
+            let tp = Page::page_offset_from(self, i as usize);
             KSpinlock::from_ptr(tp.lock_ptr())
                 .init(PAGE_LOCK_NAME.as_ptr() as *const c_char);
             tp.physical_address = base_pa + (i << PAGE_SHIFT);
@@ -945,9 +971,10 @@ impl Page {
     }
 }
 
+impl BuddyPool {
 fn buddy_pool_init() {
     for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
-        let pool = buddy_pool(i as u64);
+        let pool = BuddyPool::buddy_pool(i as u64);
         pool.count = 0;
         ffi::list_init(&mut pool.lru_head);
         KSpinlock::from_ptr(pool.lock_ptr())
@@ -955,7 +982,7 @@ fn buddy_pool_init() {
     }
     for cpu in 0..NCPU {
         for order in 0..=(PCPU_CACHE_MAX_ORDER as usize) {
-            let cache = pcpu_cache(cpu, order as u64);
+            let cache = PcpuCache::pcpu_cache(cpu, order as u64);
             ffi::list_init(&mut cache.lru_head);
             cache.count.store(0, Ordering::Release);
             KSpinlock::from_ptr(cache.lock_ptr())
@@ -963,7 +990,9 @@ fn buddy_pool_init() {
         }
     }
 }
+}
 
+impl Page {
 fn init_range_flags(pa_start: u64, pa_end: u64, flags: u64) -> i32 {
     if pa_start >= pa_end {
         ffi::log_init_invalid_range(pa_start, pa_end);
@@ -979,7 +1008,7 @@ fn init_range_flags(pa_start: u64, pa_end: u64, flags: u64) -> i32 {
     }
     ffi::log_init_range(pa_start, pa_end, flags);
     for base in (pa_start..pa_end).step_by(PAGE_SIZE as usize) {
-        match pa_to_page(base) {
+        match Page::pa_to_page(base) {
             Some(p) => p.init(base, 0, flags),
             None => {
                 ffi::log_init_get_page(base);
@@ -988,6 +1017,7 @@ fn init_range_flags(pa_start: u64, pa_end: u64, flags: u64) -> i32 {
         }
     }
     0
+}
 }
 
 // ===========================================================================
@@ -1023,7 +1053,7 @@ impl BuddyPool {
         // update to unlocked peekers before the popped page is handed
         // back to the caller for reuse.
         fence(Ordering::SeqCst);
-        lru_node_to_page(node)
+        Page::lru_node_to_page(node)
     }
 
     pub fn detach_page(&mut self, page: &mut Page) {
@@ -1052,16 +1082,16 @@ impl Page {
         let order = self.buddy_order();
         if (order as u64) >= PAGE_BUDDY_MAX_ORDER { return None; }
         let buddy_base = get_buddy_addr(self.physical_address, order);
-        let buddy_head = pa_to_page(buddy_base)?;
+        let buddy_head = Page::pa_to_page(buddy_base)?;
 
-        lock_pair(self, buddy_head);
+        Page::lock_pair(self, buddy_head);
         let still_valid =
             buddy_head.is_buddy_group_head() &&
             buddy_head.buddy_order() == order &&
             !ffi::list_is_detached(buddy_head.buddy_lru_ptr()) &&
             buddy_head.buddy_state() == BUDDY_STATE_FREE;
         if !still_valid {
-            unlock_pair(self, buddy_head);
+            Page::unlock_pair(self, buddy_head);
             return None;
         }
         buddy_head.set_buddy_state(BUDDY_STATE_INTERMEDIATE);
@@ -1082,7 +1112,7 @@ impl Page {
         ffi::list_init(self.buddy_lru());
         let count = 1u64 << order;
         for i in 1..count {
-            let tail = page_offset_from(self, i as usize);
+            let tail = Page::page_offset_from(self, i as usize);
             tail.as_buddy_tail(header_ptr);
         }
     }
@@ -1091,7 +1121,7 @@ impl Page {
         let merged_ptr = self as *mut Page;
         let half_count = 1u64 << (merged_order as u64 - 1);
         for i in 0..half_count {
-            let tail = page_offset_from(self, (half_count + i) as usize);
+            let tail = Page::page_offset_from(self, (half_count + i) as usize);
             tail.as_buddy_tail(merged_ptr);
         }
     }
@@ -1109,7 +1139,7 @@ impl Page {
         let order_after = order - 1;
         let half = 1usize << order_after as usize;
         self.set_buddy_order(order_after);
-        let buddy = page_offset_from(self, half);
+        let buddy = Page::page_offset_from(self, half);
         buddy.as_buddy_header(order_after as u64, BUDDY_STATE_INTERMEDIATE);
         // SeqCst: publishes the new buddy header's state/order fields
         // before the caller (typically `buddy_get`, still holding the
@@ -1132,16 +1162,17 @@ impl Page {
 // ===========================================================================
 // Per-CPU page cache
 // ===========================================================================
+impl PcpuCache {
 fn pcpu_cache_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     if order > PCPU_CACHE_MAX_ORDER { return None; }
     let cpu = ffi::cpuid() as usize;
-    let cache = pcpu_cache(cpu, order);
+    let cache = PcpuCache::pcpu_cache(cpu, order);
     let popped: Option<&mut Page>;
 
     let pop = |cache: &mut PcpuCache| -> Option<&'static mut Page> {
         if ffi::list_is_empty(&cache.lru_head) { return None; }
         let node = ffi::list_pop_front(&mut cache.lru_head);
-        let p = lru_node_to_page(node)?;
+        let p = Page::lru_node_to_page(node)?;
         p.set_buddy_state(BUDDY_STATE_INTERMEDIATE);
         let old = cache.count.fetch_sub(1, Ordering::Release);
         if old == 0 { ffi::panic(b"PCPU cache counter underflow\0"); }
@@ -1164,15 +1195,15 @@ fn pcpu_cache_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     } else {
         let count = 1u64 << order;
         page.reinit(pa, 1, flags);
-        // SAFETY: page_at() returns a fresh borrow disjoint from `page`.
+        // SAFETY: Page::page_at() returns a fresh borrow disjoint from `page`.
         // We release `page` (only used for the head reinit above) before
         // touching tails.
         let _ = page_ptr; // silence dead-code in non-debug builds
         for i in 1..count {
-            let base = pages_base();
+            let base = Page::pages_base();
             let head_idx = ((page_ptr as usize) - (base as usize))
                           / core::mem::size_of::<Page>();
-            let tp = page_at((head_idx + i as usize) as isize);
+            let tp = Page::page_at((head_idx + i as usize) as isize);
             let tp_pa = tp.physical_address;
             tp.reinit(tp_pa, 1, flags);
         }
@@ -1180,6 +1211,7 @@ fn pcpu_cache_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     // SAFETY: re-borrow the head we just reinitialized; the previous
     // borrow ended at the loop above.
     Some(unsafe { &mut *page_ptr })
+}
 }
 
 impl Page {
@@ -1189,7 +1221,7 @@ impl Page {
     fn pcpu_cache_put(&mut self, order: u64) -> i32 {
         if order > PCPU_CACHE_MAX_ORDER { return -1; }
         let cpu = ffi::cpuid() as usize;
-        let cache = pcpu_cache(cpu, order);
+        let cache = PcpuCache::pcpu_cache(cpu, order);
         let cache_limit = if order == 0 { PCPU_HOT_PAGE_CACHE_SIZE } else { PCPU_CACHE_SIZE };
         let preserve = self.has_valid_tail_structure(order);
         let mut ret: i32 = -1;
@@ -1232,12 +1264,13 @@ impl Page {
 // ===========================================================================
 // Buddy allocation core
 // ===========================================================================
+impl BuddyPool {
 fn buddy_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     if !page_flags_validity(flags) { return None; }
     if order > PAGE_BUDDY_MAX_ORDER { return None; }
 
     if order <= PCPU_CACHE_MAX_ORDER {
-        if let Some(p) = pcpu_cache_get(order, flags) {
+        if let Some(p) = PcpuCache::pcpu_cache_get(order, flags) {
             return Some(p);
         }
     }
@@ -1245,15 +1278,15 @@ fn buddy_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     // Walk the free lists from `order` upward looking for any non-empty pool.
     let mut found: Option<(&mut Page, u64)> = None;
     for tmp in order..=PAGE_BUDDY_MAX_ORDER {
-        buddy_pool_lock(tmp);
-        let popped = buddy_pool(tmp).pop_page();
+        BuddyPool::buddy_pool_lock(tmp);
+        let popped = BuddyPool::buddy_pool(tmp).pop_page();
         if let Some(p) = popped {
             p.set_buddy_state(BUDDY_STATE_INTERMEDIATE);
-            buddy_pool_unlock(tmp);
+            BuddyPool::buddy_pool_unlock(tmp);
             found = Some((p, tmp));
             break;
         }
-        buddy_pool_unlock(tmp);
+        BuddyPool::buddy_pool_unlock(tmp);
     }
     let (page, found_order) = found?;
 
@@ -1264,10 +1297,10 @@ fn buddy_get(order: u64, flags: u64) -> Option<&'static mut Page> {
         let upper = page.buddy_split().unwrap_or_else(
             || ffi::panic(b"__buddy_get(): failed splitting buddy pages\0"));
         tmp_order -= 1;
-        buddy_pool_lock(tmp_order);
+        BuddyPool::buddy_pool_lock(tmp_order);
         upper.split_commit_later_half(tmp_order);
-        buddy_pool(tmp_order).push_page(upper);
-        buddy_pool_unlock(tmp_order);
+        BuddyPool::buddy_pool(tmp_order).push_page(upper);
+        BuddyPool::buddy_pool_unlock(tmp_order);
     }
 
     let page_ptr = page as *mut Page;
@@ -1278,10 +1311,10 @@ fn buddy_get(order: u64, flags: u64) -> Option<&'static mut Page> {
         let count = 1u64 << order;
         page.reinit(pa, 1, flags);
         for i in 1..count {
-            let base = pages_base();
+            let base = Page::pages_base();
             let idx = ((page_ptr as usize) - (base as usize))
                       / core::mem::size_of::<Page>();
-            let tp = page_at((idx + i as usize) as isize);
+            let tp = Page::page_at((idx + i as usize) as isize);
             let tp_pa = tp.physical_address;
             tp.reinit(tp_pa, 1, flags);
         }
@@ -1289,29 +1322,31 @@ fn buddy_get(order: u64, flags: u64) -> Option<&'static mut Page> {
     // SAFETY: re-borrow the head after the tail loop ended the prior borrow.
     Some(unsafe { &mut *page_ptr })
 }
+}
 
 // ===========================================================================
 // Buddy deallocation
 // ===========================================================================
+impl Page {
 fn buddy_merge_and_insert(start_page: &mut Page, start_order: u64) {
     let mut page: &mut Page = start_page;
     let mut tmp_order = start_order;
     while tmp_order <= PAGE_BUDDY_MAX_ORDER {
-        buddy_pool_lock(tmp_order);
+        BuddyPool::buddy_pool_lock(tmp_order);
         match page.lock_get_buddy() {
             Some(buddy) => {
-                buddy_pool(tmp_order).detach_page(buddy);
-                buddy_pool_unlock(tmp_order);
+                BuddyPool::buddy_pool(tmp_order).detach_page(buddy);
+                BuddyPool::buddy_pool_unlock(tmp_order);
                 let merged_order = page.buddy_order() + 1;
                 let merged = Page::merge_with(page, buddy).unwrap_or_else(
                     || ffi::panic(b"__buddy_merge_and_insert(): failed to merge buddies\0"));
                 let merged_ptr = merged as *mut Page;
                 merged.merge_commit_later_half(merged_order);
                 // Re-fetch both pages to unlock them.
-                let base = pages_base();
+                let base = Page::pages_base();
                 let merged_idx = ((merged_ptr as usize) - (base as usize))
                                 / core::mem::size_of::<Page>();
-                let merged_again = page_at(merged_idx as isize);
+                let merged_again = Page::page_at(merged_idx as isize);
                 // Other half is `merged_idx ^ half_count`; cheaper to use
                 // physical_address xor: buddy's address.
                 // The two pages we want to unlock are exactly the originals.
@@ -1322,25 +1357,26 @@ fn buddy_merge_and_insert(start_page: &mut Page, start_order: u64) {
                 // two &mut. We can synthesize them from raw via page_at:
                 let merged_pa = merged_again.physical_address;
                 let other_pa = merged_pa ^ page_buddy_bytes(merged_order as u64 - 1);
-                let other = pa_to_page(other_pa)
+                let other = Page::pa_to_page(other_pa)
                     .expect("buddy_merge_and_insert: other half missing");
                 // `merged_again` and `other` are distinct pages -> two
                 // disjoint borrows from the global array; safe.
-                unlock_pair(merged_again, other);
-                page = page_at(merged_idx as isize);
+                Page::unlock_pair(merged_again, other);
+                page = Page::page_at(merged_idx as isize);
             }
             None => {
                 {
                     let _g = KSpinlock::from_ptr(page.lock_ptr()).lock();
                     page.order_change_commit();
-                    buddy_pool(tmp_order).push_page(page);
+                    BuddyPool::buddy_pool(tmp_order).push_page(page);
                 }
-                buddy_pool_unlock(tmp_order);
+                BuddyPool::buddy_pool_unlock(tmp_order);
                 return;
             }
         }
         tmp_order += 1;
     }
+}
 }
 
 impl Page {
@@ -1354,7 +1390,7 @@ impl Page {
             let _g = KSpinlock::from_ptr(self.lock_ptr()).lock();
             self.as_buddy_header(0, BUDDY_STATE_INTERMEDIATE);
         }
-        buddy_merge_and_insert(self, 0);
+        Page::buddy_merge_and_insert(self, 0);
         0
     }
 }
@@ -1362,6 +1398,7 @@ impl Page {
 // ===========================================================================
 // Buddy init helpers
 // ===========================================================================
+impl BuddyPool {
 fn page_buddy_reserve_range(pa_start: u64, pa_end: u64,
                             region_start: u64, region_end: u64) {
     let r_start = core::cmp::max(pgrounddown(region_start), pa_start);
@@ -1372,57 +1409,67 @@ fn page_buddy_reserve_range(pa_start: u64, pa_end: u64,
     }
     ffi::log_reserving(r_start, r_end);
     for base in (r_start..r_end).step_by(PAGE_SIZE as usize) {
-        let p = pa_to_page(base)
+        let p = Page::pa_to_page(base)
             .unwrap_or_else(|| ffi::panic(b"__page_buddy_reserve_range(): get NULL page\0"));
         p.flags |= PAGE_FLAG_LOCKED;
     }
 }
+}
 
+impl BuddyPool {
 fn mark_reserved_page(pa_start: u64, pa_end: u64) {
     if ffi::has_ramdisk() && ffi::ramdisk_base() != 0 {
         let s = ffi::ramdisk_base();
         let e = s + ffi::ramdisk_size();
-        page_buddy_reserve_range(pa_start, pa_end, s, e);
+        BuddyPool::page_buddy_reserve_range(pa_start, pa_end, s, e);
     }
     for i in 0..ffi::reserved_count() {
         let s = ffi::reserved_base(i);
         let e = s + ffi::reserved_size(i);
-        page_buddy_reserve_range(pa_start, pa_end, s, e);
+        BuddyPool::page_buddy_reserve_range(pa_start, pa_end, s, e);
     }
 }
+}
 
+impl BuddyPool {
 fn find_next_avail(start_pa: u64, end_pa: u64) -> u64 {
     // First page in the range that is NOT locked, else `end_pa` (matching the
     // original `while`-then-`break`-then-return-`pa` walk).
     (start_pa..end_pa)
         .step_by(PAGE_SIZE as usize)
         .find(|&pa| {
-            let p = pa_to_page(pa)
+            let p = Page::pa_to_page(pa)
                 .unwrap_or_else(|| ffi::panic(b"find_next_avail: NULL page\0"));
             (p.flags & PAGE_FLAG_LOCKED) == 0
         })
         .unwrap_or(end_pa)
 }
+}
 
+impl BuddyPool {
 fn find_current_end(start_pa: u64, end_pa: u64) -> u64 {
     // First locked page in the range, else `end_pa`.
     (start_pa..end_pa)
         .step_by(PAGE_SIZE as usize)
         .find(|&pa| {
-            let p = pa_to_page(pa)
+            let p = Page::pa_to_page(pa)
                 .unwrap_or_else(|| ffi::panic(b"find_current_end: NULL page\0"));
             (p.flags & PAGE_FLAG_LOCKED) != 0
         })
         .unwrap_or(end_pa)
 }
-
-fn page_buddy_init_as_order(pa_start: u64, order: u64) {
-    let head = pa_to_page(pa_start)
-        .unwrap_or_else(|| ffi::panic(b"page_buddy_init_as_order: NULL page\0"));
-    head.as_buddy_group_init(order, BUDDY_STATE_FREE);
-    buddy_pool(order).push_page(head);
 }
 
+impl BuddyPool {
+fn page_buddy_init_as_order(pa_start: u64, order: u64) {
+    let head = Page::pa_to_page(pa_start)
+        .unwrap_or_else(|| ffi::panic(b"page_buddy_init_as_order: NULL page\0"));
+    head.as_buddy_group_init(order, BUDDY_STATE_FREE);
+    BuddyPool::buddy_pool(order).push_page(head);
+}
+}
+
+impl BuddyPool {
 fn page_buddy_init_range(pa_start: u64, pa_end: u64) {
     if pa_start >= pa_end { return; }
     let mut remain = pa_end - pa_start;
@@ -1433,7 +1480,7 @@ fn page_buddy_init_range(pa_start: u64, pa_end: u64) {
     // Align the start up to higher orders by carving small blocks first.
     while remain >= block && order < PAGE_BUDDY_MAX_ORDER as i64 {
         if (pa & block) != 0 {
-            page_buddy_init_as_order(pa, order as u64);
+            BuddyPool::page_buddy_init_as_order(pa, order as u64);
             remain -= block;
             pa += block;
         }
@@ -1442,14 +1489,14 @@ fn page_buddy_init_range(pa_start: u64, pa_end: u64) {
     }
     // Bulk middle: carve top-order blocks.
     while remain >= block {
-        page_buddy_init_as_order(pa, order as u64);
+        BuddyPool::page_buddy_init_as_order(pa, order as u64);
         remain -= block;
         pa += block;
     }
     // Trail: shrink the order down until the remainder is consumed.
     while remain > 0 && order >= 0 {
         if remain >= block {
-            page_buddy_init_as_order(pa, order as u64);
+            BuddyPool::page_buddy_init_as_order(pa, order as u64);
             remain -= block;
             pa += block;
         }
@@ -1457,6 +1504,7 @@ fn page_buddy_init_range(pa_start: u64, pa_end: u64) {
         if order < 0 { break; }
         block = PAGE_SIZE << order;
     }
+}
 }
 
 // ===========================================================================
@@ -1487,10 +1535,12 @@ impl Page {
 // ===========================================================================
 // Address translation (internal helper used by init and FFI)
 // ===========================================================================
+impl Page {
 fn pa_to_page(physical: u64) -> Option<&'static mut Page> {
     if !page_base_validity(physical) { return None; }
     let idx = ((physical - ffi::kernbase()) >> PAGE_SHIFT) as isize;
-    Some(page_at(idx))
+    Some(Page::page_at(idx))
+}
 }
 
 // ===========================================================================
@@ -1503,12 +1553,14 @@ fn pa_to_page(physical: u64) -> Option<&'static mut Page> {
 // `&mut` is a caller obligation documented on each public FFI entry
 // point that calls this helper (the C side must not hold or create a
 // second reference into the same `Page` for the call's duration).
+impl Page {
 #[inline]
 fn page_ref(p: *mut Page) -> Option<&'static mut Page> {
     // SAFETY: `p`, if non-null, is trusted (by every caller's own
     // `# Safety` contract) to be a live pointer into the global `Page`
     // array with no other outstanding reference to the same page.
     NonNull::new(p).map(|mut nn| unsafe { nn.as_mut() })
+}
 }
 
 // ===========================================================================
@@ -1529,6 +1581,7 @@ fn page_ref(p: *mut Page) -> Option<&'static mut Page> {
 ///   code that touches page-allocator state concurrently) — the
 ///   internal writes to the allocator's global statics are not
 ///   synchronized.
+impl Page {
 pub(crate) unsafe fn page_buddy_init() -> c_int {
     let total_pages = ffi::totalpages();
     let page_arr_size = core::mem::size_of::<Page>() * total_pages as usize;
@@ -1557,31 +1610,32 @@ pub(crate) unsafe fn page_buddy_init() -> c_int {
     if mstart >= mend {
         ffi::panic(b"page_buddy_init(): managed_start not less than managed_end\0");
     }
-    if init_range_flags(kernbase, mstart, PAGE_FLAG_LOCKED) != 0 {
+    if Page::init_range_flags(kernbase, mstart, PAGE_FLAG_LOCKED) != 0 {
         ffi::panic(b"page_buddy_init(): lower locked range failed\0");
     }
     if mend < ffi::phystop()
-        && init_range_flags(mend, ffi::phystop(), PAGE_FLAG_LOCKED) != 0 {
+        && Page::init_range_flags(mend, ffi::phystop(), PAGE_FLAG_LOCKED) != 0 {
         ffi::panic(b"page_buddy_init(): higher locked range failed\0");
     }
-    if init_range_flags(mstart, mend, 0) != 0 {
+    if Page::init_range_flags(mstart, mend, 0) != 0 {
         ffi::panic(b"page_buddy_init(): free range failed\0");
     }
 
-    buddy_pool_init();
-    mark_reserved_page(mstart, mend);
+    BuddyPool::buddy_pool_init();
+    BuddyPool::mark_reserved_page(mstart, mend);
 
-    let mut base = find_next_avail(mstart, mend);
-    let mut curr_end = find_current_end(base, mend);
+    let mut base = BuddyPool::find_next_avail(mstart, mend);
+    let mut curr_end = BuddyPool::find_current_end(base, mend);
     while base < mend {
-        page_buddy_init_range(base, curr_end);
+        BuddyPool::page_buddy_init_range(base, curr_end);
         ffi::log_buddy_range(base, curr_end);
-        base = find_next_avail(curr_end, mend);
-        curr_end = find_current_end(base, mend);
+        base = BuddyPool::find_next_avail(curr_end, mend);
+        curr_end = BuddyPool::find_current_end(base, mend);
     }
 
     ffi::print_stat(1);
     0
+}
 }
 
 /// Allocates a `2^order`-page block from the buddy allocator. Returns
@@ -1590,12 +1644,14 @@ pub(crate) unsafe fn page_buddy_init() -> c_int {
 /// # Safety
 ///
 /// - `page_buddy_init` must have completed before this is called.
+impl Page {
 pub(crate) unsafe fn __page_alloc(order: u64, flags: u64) -> *mut Page {
     if order > PAGE_BUDDY_MAX_ORDER { return ptr::null_mut(); }
-    match buddy_get(order, flags) {
+    match BuddyPool::buddy_get(order, flags) {
         Some(p) => p as *mut Page,
         None => ptr::null_mut(),
     }
+}
 }
 
 /// Frees a `2^order`-page block previously returned by
@@ -1610,8 +1666,9 @@ pub(crate) unsafe fn __page_alloc(order: u64, flags: u64) -> *mut Page {
 ///   caller must hold no other reference into the `count`-page group
 ///   starting at `page` for the duration of this call.
 /// - `page_buddy_init` must have completed before this is called.
+impl Page {
 pub(crate) unsafe fn __page_free(page: *mut Page, order: u64) {
-    let Some(p) = page_ref(page) else { return };
+    let Some(p) = Page::page_ref(page) else { return };
     if order > PAGE_BUDDY_MAX_ORDER {
         ffi::panic(b"__page_free(): order too large\0");
     }
@@ -1630,7 +1687,7 @@ pub(crate) unsafe fn __page_free(page: *mut Page, order: u64) {
     // Validate every page in the group is freeable. Borrow each tail
     // separately to avoid overlapping `&mut`s.
     for i in 0..count {
-        let tail = if i == 0 { &*p } else { &*page_offset_from(p, i as usize) };
+        let tail = if i == 0 { &*p } else { &*Page::page_offset_from(p, i as usize) };
         if !tail.is_freeable() {
             ffi::panic(b"__page_free(): trying to free non-freeable page\0");
         }
@@ -1650,7 +1707,8 @@ pub(crate) unsafe fn __page_free(page: *mut Page, order: u64) {
         }
     }
 
-    buddy_merge_and_insert(p, order);
+    Page::buddy_merge_and_insert(p, order);
+}
 }
 
 /// Allocates a `2^order`-page block and returns its physical address
@@ -1662,13 +1720,15 @@ pub(crate) unsafe fn __page_free(page: *mut Page, order: u64) {
 ///
 /// - Same preconditions as [`__page_alloc`]: `page_buddy_init` must
 ///   have completed before this is called.
+impl Page {
 pub(crate) unsafe fn page_alloc(order: u64, flags: u64) -> *mut c_void {
-    let page = __page_alloc(order, flags);
+    let page = Page::__page_alloc(order, flags);
     if page.is_null() { return ptr::null_mut(); }
-    let pa = __page_to_pa(page) as *mut c_void;
+    let pa = Page::__page_to_pa(page) as *mut c_void;
     if pa.is_null() { ffi::panic(b"page_alloc\0"); }
     ffi::memset(pa, 5, (PAGE_SIZE << order) as usize);
     pa
+}
 }
 
 /// Frees the `2^order`-page block whose physical base address is
@@ -1681,9 +1741,11 @@ pub(crate) unsafe fn page_alloc(order: u64, flags: u64) -> *mut c_void {
 ///   as [`__page_free`]: a live, previously-allocated block at this
 ///   `order`, not already freed, with no other outstanding reference
 ///   into the group.
+impl Page {
 pub(crate) unsafe fn page_free(ptr: *mut c_void, order: u64) {
-    let page = __pa_to_page(ptr as u64);
-    __page_free(page, order);
+    let page = Page::__pa_to_page(ptr as u64);
+    Page::__page_free(page, order);
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,15 +1761,17 @@ pub(crate) unsafe fn page_free(ptr: *mut c_void, order: u64) {
 ///   [`page_lock_release`]; caller must not deadlock by re-acquiring
 ///   without an intervening release, and must call `page_lock_release`
 ///   exactly once for each successful acquire.
+impl Page {
 pub(crate) unsafe fn page_lock_acquire(page: *mut Page) {
     // Split-statement lock/unlock pair across C ABI boundary: matching
     // `page_lock_release` provides the release. The `KSpinlock` handle
     // is constructed, used for `lock()`, and its guard `mem::forget`'d
     // because the release happens in a separate ABI call. Going through
     // `KSpinlock::lock` keeps the call site uniform with the rest of mm.
-    if let Some(p) = page_ref(page) {
+    if let Some(p) = Page::page_ref(page) {
         core::mem::forget(KSpinlock::from_ptr(p.lock_ptr()).lock());
     }
+}
 }
 
 /// Releases `page`'s embedded spinlock previously acquired via
@@ -1717,8 +1781,10 @@ pub(crate) unsafe fn page_lock_acquire(page: *mut Page) {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is currently held by the calling hart.
+impl Page {
 pub(crate) unsafe fn page_lock_release(page: *mut Page) {
-    if let Some(p) = page_ref(page) { ffi::spin_unlock(p.lock_ptr()); }
+    if let Some(p) = Page::page_ref(page) { ffi::spin_unlock(p.lock_ptr()); }
+}
 }
 
 /// Panics if `page`'s embedded spinlock is not held by the calling
@@ -1728,12 +1794,14 @@ pub(crate) unsafe fn page_lock_release(page: *mut Page) {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array.
+impl Page {
 pub(crate) unsafe fn page_lock_assert_holding(page: *mut Page) {
-    if let Some(p) = page_ref(page) {
+    if let Some(p) = Page::page_ref(page) {
         if !ffi::spin_holding_b(p.lock_ptr()) {
             ffi::panic(b"page_lock_assert_holding failed\0");
         }
     }
+}
 }
 
 /// Panics if `page`'s embedded spinlock *is* held by the calling
@@ -1743,12 +1811,14 @@ pub(crate) unsafe fn page_lock_assert_holding(page: *mut Page) {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array.
+impl Page {
 pub(crate) unsafe fn page_lock_assert_unholding(page: *mut Page) {
-    if let Some(p) = page_ref(page) {
+    if let Some(p) = Page::page_ref(page) {
         if ffi::spin_holding_b(p.lock_ptr()) {
             ffi::panic(b"page_lock_assert_unholding failed\0");
         }
     }
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -1763,10 +1833,12 @@ pub(crate) unsafe fn page_lock_assert_unholding(page: *mut Page) {
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is *not* already held by the calling
 ///   hart (self-deadlock otherwise).
+impl Page {
 pub(crate) unsafe fn __page_ref_inc(page: *mut Page) -> c_int {
-    let Some(p) = page_ref(page) else { return -1 };
+    let Some(p) = Page::page_ref(page) else { return -1 };
     let _g = KSpinlock::from_ptr(p.lock_ptr()).lock();
     p.ref_inc_unlocked_impl()
+}
 }
 
 /// Increments `page`'s reference count. Caller must already hold
@@ -1777,11 +1849,13 @@ pub(crate) unsafe fn __page_ref_inc(page: *mut Page) -> c_int {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is held by the calling hart.
+impl Page {
 pub(crate) unsafe fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
-    match page_ref(page) {
+    match Page::page_ref(page) {
         Some(p) => p.ref_inc_unlocked_impl(),
         None => -1,
     }
+}
 }
 
 /// Lockless (atomic) decrement of `page`'s reference count on the
@@ -1798,8 +1872,9 @@ pub(crate) unsafe fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
 ///   `page`'s spinlock and touch `ref_count` directly must ensure
 ///   they are not doing so concurrently with a lockless decrement on
 ///   another hart.
+impl Page {
 pub(crate) unsafe fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
-    let Some(p) = page_ref(page) else { return -1 };
+    let Some(p) = Page::page_ref(page) else { return -1 };
     // Lockless decrement: treat ref_count as atomic on the fast path.
     // SAFETY: `&mut Page` proves the storage is valid and exclusively
     // accessed for the duration of this borrow; we re-interpret the
@@ -1815,6 +1890,7 @@ pub(crate) unsafe fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
     }
     old - 1
 }
+}
 
 /// Locks `page`, decrements its reference count, and frees the page
 /// (returning its slab/pcache node and the block itself to the buddy
@@ -1826,8 +1902,9 @@ pub(crate) unsafe fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is *not* already held by the calling
 ///   hart.
+impl Page {
 pub(crate) unsafe fn __page_ref_dec(page: *mut Page) -> c_int {
-    let Some(p) = page_ref(page) else { return -1 };
+    let Some(p) = Page::page_ref(page) else { return -1 };
     let ret = {
         let _g = KSpinlock::from_ptr(p.lock_ptr()).lock();
         let original = p.ref_count;
@@ -1854,6 +1931,7 @@ pub(crate) unsafe fn __page_ref_dec(page: *mut Page) -> c_int {
     }
     ret
 }
+}
 
 /// Returns the reference count of the page containing physical
 /// address `physical`, or -1 if it does not translate to a managed
@@ -1864,9 +1942,11 @@ pub(crate) unsafe fn __page_ref_dec(page: *mut Page) -> c_int {
 /// - `page_buddy_init` must have completed before this is called.
 ///   `physical` itself is validated internally (`pa_to_page` range
 ///   checks), so no additional pointer-validity precondition applies.
+impl Page {
 pub(crate) unsafe fn page_refcnt(physical: *mut c_void) -> c_int {
-    let page = __pa_to_page(physical as u64);
-    page_ref_count(page)
+    let page = Page::__pa_to_page(physical as u64);
+    Page::page_ref_count(page)
+}
 }
 
 /// Locks and increments the reference count of the page containing
@@ -1878,9 +1958,11 @@ pub(crate) unsafe fn page_refcnt(physical: *mut c_void) -> c_int {
 /// - `page_buddy_init` must have completed before this is called.
 /// - If `ptr` translates to a managed page, that page's lock must not
 ///   already be held by the calling hart.
+impl Page {
 pub(crate) unsafe fn page_ref_inc(ptr: *mut c_void) -> c_int {
-    let page = __pa_to_page(ptr as u64);
-    __page_ref_inc(page)
+    let page = Page::__pa_to_page(ptr as u64);
+    Page::__page_ref_inc(page)
+}
 }
 
 /// Locks and decrements the reference count of the page containing
@@ -1892,9 +1974,11 @@ pub(crate) unsafe fn page_ref_inc(ptr: *mut c_void) -> c_int {
 /// - `page_buddy_init` must have completed before this is called.
 /// - If `ptr` translates to a managed page, that page's lock must not
 ///   already be held by the calling hart.
+impl Page {
 pub(crate) unsafe fn page_ref_dec(ptr: *mut c_void) -> c_int {
-    let page = __pa_to_page(ptr as u64);
-    __page_ref_dec(page)
+    let page = Page::__pa_to_page(ptr as u64);
+    Page::__page_ref_dec(page)
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -1907,11 +1991,13 @@ pub(crate) unsafe fn page_ref_dec(ptr: *mut c_void) -> c_int {
 ///
 /// - `page_buddy_init` must have completed before this is called
 ///   (`__pages`/`__managed_start`/`__managed_end` must be set).
+impl Page {
 pub(crate) unsafe fn __pa_to_page(physical: u64) -> *mut Page {
-    match pa_to_page(physical) {
+    match Page::pa_to_page(physical) {
         Some(p) => p as *mut Page,
         None => ptr::null_mut(),
     }
+}
 }
 
 /// Returns `page`'s physical address, or 0 if `page` is null.
@@ -1920,11 +2006,13 @@ pub(crate) unsafe fn __pa_to_page(physical: u64) -> *mut Page {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array.
+impl Page {
 pub(crate) unsafe fn __page_to_pa(page: *mut Page) -> u64 {
-    match page_ref(page) {
+    match Page::page_ref(page) {
         Some(p) => p.physical_address,
         None => 0,
     }
+}
 }
 
 /// Returns `page`'s current reference count, or -1 if `page` is null.
@@ -1935,11 +2023,13 @@ pub(crate) unsafe fn __page_to_pa(page: *mut Page) -> u64 {
 ///   `Page` array. The read is not synchronized with concurrent
 ///   lockless decrements ([`page_ref_dec_unlocked`]); callers wanting
 ///   a linearizable snapshot must hold `page`'s lock.
+impl Page {
 pub(crate) unsafe fn page_ref_count(page: *mut Page) -> c_int {
-    match page_ref(page) {
+    match Page::page_ref(page) {
         Some(p) => p.ref_count,
         None => -1,
     }
+}
 }
 
 /// Returns the physical base address of the managed page range.
@@ -1948,8 +2038,10 @@ pub(crate) unsafe fn page_ref_count(page: *mut Page) -> c_int {
 ///
 /// - `page_buddy_init` must have completed before this is called (the
 ///   static is otherwise a leftover zero/uninitialized value).
+impl Page {
 pub(crate) unsafe fn managed_page_base() -> u64 {
     __managed_start
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -1966,11 +2058,12 @@ pub(crate) unsafe fn managed_page_base() -> u64 {
 /// - `empty_arr`, if non-null, must be valid for `size` writes of
 ///   `u8`.
 /// - `page_buddy_init` must have completed before this is called.
+impl BuddyPool {
 pub(crate) unsafe fn page_buddy_stat(ret_arr: *mut u64,
                                          empty_arr: *mut u8,
                                          size: usize) {
     if ret_arr.is_null() || size < (PAGE_BUDDY_MAX_ORDER + 1) as usize { return; }
-    buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    BuddyPool::buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
     let n = core::cmp::min(size, (PAGE_BUDDY_MAX_ORDER + 1) as usize);
     let ret = core::slice::from_raw_parts_mut(ret_arr, n);
     let mut empty: Option<&mut [u8]> = if empty_arr.is_null() {
@@ -1979,13 +2072,14 @@ pub(crate) unsafe fn page_buddy_stat(ret_arr: *mut u64,
         Some(core::slice::from_raw_parts_mut(empty_arr, n))
     };
     for i in 0..n {
-        let pool = buddy_pool(i as u64);
+        let pool = BuddyPool::buddy_pool(i as u64);
         ret[i] = pool.count;
         if let Some(em) = empty.as_deref_mut() {
             em[i] = if ffi::list_is_empty(&pool.lru_head) { 1 } else { 0 };
         }
     }
-    buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+    BuddyPool::buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+}
 }
 
 /// Panics if `ptr` is null or does not fall strictly inside the
@@ -1994,20 +2088,22 @@ pub(crate) unsafe fn page_buddy_stat(ret_arr: *mut u64,
 /// # Safety
 ///
 /// - `page_buddy_init` must have completed before this is called
-///   (`pages_base()`/`totalpages()` must be valid).
+///   (`Page::pages_base()`/`totalpages()` must be valid).
 /// - `ptr` need not itself be dereferenced by this function — only
 ///   its numeric value is compared — so no pointer-validity
 ///   precondition applies to `ptr` beyond being non-null.
+impl Page {
 pub(crate) unsafe fn __check_page_pointer_in_range(ptr: *mut c_void) {
     if ptr.is_null() {
         ffi::panic(b"__check_page_pointer_in_range: NULL pointer\0");
     }
-    let p_start = pages_base() as usize;
+    let p_start = Page::pages_base() as usize;
     let p_end = p_start + (ffi::totalpages() as usize) * core::mem::size_of::<Page>();
     let p = ptr as usize;
     if !(p > p_start && p < p_end) {
         ffi::panic(b"__check_page_pointer_in_range: page pointer out of range\0");
     }
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -2023,9 +2119,11 @@ pub(crate) unsafe fn __check_page_pointer_in_range(ptr: *mut c_void) {
 /// - The read is unsynchronized (no pool lock taken); caller must
 ///   tolerate a torn/stale value or hold the range lock itself (see
 ///   [`xv6_buddy_pool_lock_range_all`]).
+impl BuddyPool {
 pub(crate) unsafe fn xv6_buddy_pool_count(order: u64) -> u64 {
     if order > PAGE_BUDDY_MAX_ORDER { return 0; }
-    buddy_pool(order).count
+    BuddyPool::buddy_pool(order).count
+}
 }
 
 /// Returns the free-block count of `cpu`'s per-CPU cache at `order`,
@@ -2037,9 +2135,11 @@ pub(crate) unsafe fn xv6_buddy_pool_count(order: u64) -> u64 {
 /// - `cpu` must be a valid hart index; the per-CPU cache array must
 ///   have at least `NCPU` entries (invariant of the allocator's
 ///   static layout, not caller-controlled).
+impl PcpuCache {
 pub(crate) unsafe fn xv6_pcpu_cache_count(cpu: u32, order: u64) -> u32 {
     if (cpu as usize) >= NCPU || order > PCPU_CACHE_MAX_ORDER { return 0; }
-    pcpu_cache(cpu as usize, order).count.load(Ordering::Acquire)
+    PcpuCache::pcpu_cache(cpu as usize, order).count.load(Ordering::Acquire)
+}
 }
 
 /// Locks every buddy pool's spinlock, orders 0..=`PAGE_BUDDY_MAX_ORDER`.
@@ -2051,8 +2151,10 @@ pub(crate) unsafe fn xv6_pcpu_cache_count(cpu: u32, order: u64) -> u32 {
 ///   [`xv6_buddy_pool_unlock_range_all`] on the same hart before any
 ///   other buddy-pool-locking call is made (the locks are held across
 ///   the ABI boundary, mirroring [`page_lock_acquire`]).
+impl BuddyPool {
 pub(crate) unsafe fn xv6_buddy_pool_lock_range_all() {
-    buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    BuddyPool::buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+}
 }
 
 /// Releases the locks taken by [`xv6_buddy_pool_lock_range_all`].
@@ -2062,8 +2164,10 @@ pub(crate) unsafe fn xv6_buddy_pool_lock_range_all() {
 /// - Caller must currently hold every buddy pool lock, orders
 ///   0..=`PAGE_BUDDY_MAX_ORDER`, acquired via a prior matching call to
 ///   [`xv6_buddy_pool_lock_range_all`].
+impl BuddyPool {
 pub(crate) unsafe fn xv6_buddy_pool_unlock_range_all() {
-    buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+    BuddyPool::buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+}
 }
 
 /// Returns the total number of managed pages
@@ -2072,10 +2176,12 @@ pub(crate) unsafe fn xv6_buddy_pool_unlock_range_all() {
 /// # Safety
 ///
 /// - `page_buddy_init` must have completed before this is called.
+impl BuddyPool {
 pub(crate) unsafe fn xv6_total_managed_pages() -> u64 {
     let s = __managed_start;
     let e = __managed_end;
     (e - s) >> PAGE_SHIFT
+}
 }
 
 // ===========================================================================
@@ -2106,6 +2212,7 @@ fn print_size(bytes: u64) {
 /// Sum free + per-cpu-cached pages across every order. `empty_arr` mirrors
 /// `page_buddy_stat`'s raw `u8` output convention (0/1, not `bool`) so the
 /// call below needs no type-punning.
+impl BuddyPool {
 fn buddy_stat_totals(
     total_free_pages: &mut u64,
     total_cached_pages: &mut u64,
@@ -2118,7 +2225,7 @@ fn buddy_stat_totals(
     // SAFETY: `ret_arr`/`empty_arr` are stack arrays of exactly `ORDER_COUNT`
     // elements, matching the `size` argument.
     unsafe {
-        page_buddy_stat(ret_arr.as_mut_ptr(), empty_arr.as_mut_ptr(), ORDER_COUNT);
+        BuddyPool::page_buddy_stat(ret_arr.as_mut_ptr(), empty_arr.as_mut_ptr(), ORDER_COUNT);
     }
 
     for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
@@ -2131,7 +2238,7 @@ fn buddy_stat_totals(
                 // SAFETY: `cpu`/`i` are within `xv6_pcpu_cache_count`'s
                 // documented bounds (checked internally; out-of-range
                 // returns 0).
-                cache_total += unsafe { xv6_pcpu_cache_count(cpu as u32, i as u64) } as u64;
+                cache_total += unsafe { PcpuCache::xv6_pcpu_cache_count(cpu as u32, i as u64) } as u64;
             }
             if cache_total > 0 {
                 *total_cached_pages += (1u64 << i) * cache_total;
@@ -2139,14 +2246,16 @@ fn buddy_stat_totals(
         }
     }
 }
+}
 
+impl BuddyPool {
 pub(crate) fn print_buddy_system_stat(detailed: c_int) {
     let mut total_free_pages: u64 = 0;
     let mut total_cached_pages: u64 = 0;
     let mut ret_arr: [u64; ORDER_COUNT] = [0; ORDER_COUNT];
     let mut empty_arr: [u8; ORDER_COUNT] = [0; ORDER_COUNT];
 
-    buddy_stat_totals(
+    BuddyPool::buddy_stat_totals(
         &mut total_free_pages,
         &mut total_cached_pages,
         &mut ret_arr,
@@ -2182,7 +2291,7 @@ pub(crate) fn print_buddy_system_stat(detailed: c_int) {
                 // SAFETY: `cpu`/`i` are within `xv6_pcpu_cache_count`'s
                 // documented bounds (checked internally; out-of-range
                 // returns 0).
-                cache_total += unsafe { xv6_pcpu_cache_count(cpu as u32, i as u64) } as u64;
+                cache_total += unsafe { PcpuCache::xv6_pcpu_cache_count(cpu as u32, i as u64) } as u64;
             }
             if cache_total > 0 {
                 let cached_pages = (1u64 << i) * cache_total;
@@ -2205,6 +2314,7 @@ pub(crate) fn print_buddy_system_stat(detailed: c_int) {
     print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
     crate::kprintln!(")");
 }
+}
 
 // ===========================================================================
 // check_buddy_system_integrity — walk every buddy pool and verify counts +
@@ -2219,12 +2329,13 @@ pub(crate) fn print_buddy_system_stat(detailed: c_int) {
 // already encodes the head-offset via `offset_of!`, so the walk below
 // reuses both directly.
 // ===========================================================================
+impl BuddyPool {
 #[allow(dead_code)]
 pub fn check_buddy_system_integrity() {
     let mut total_free_pages: u64 = 0;
-    buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    BuddyPool::buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
     for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
-        let pool = buddy_pool(i as u64);
+        let pool = BuddyPool::buddy_pool(i as u64);
         let count_field = pool.count as i64;
         let head: *mut ListNode = &mut pool.lru_head;
         // SAFETY: `head` is the address of a live, initialized `ListNode`
@@ -2249,8 +2360,8 @@ pub fn check_buddy_system_integrity() {
             // the pointers passed are the raw list-node pointers just read
             // above.
             unsafe {
-                __check_page_pointer_in_range(head_prev as *mut c_void);
-                __check_page_pointer_in_range(head_next as *mut c_void);
+                Page::__check_page_pointer_in_range(head_prev as *mut c_void);
+                Page::__check_page_pointer_in_range(head_next as *mut c_void);
             }
             crate::kprintln!(
                 "prev page: {}, next page: {}",
@@ -2265,7 +2376,7 @@ pub fn check_buddy_system_integrity() {
         while !pos.is_null() && pos != head {
             // SAFETY: `pos` is a live list node inside the pool's LRU list.
             let next = unsafe { (*pos).next };
-            let Some(page) = lru_node_to_page(pos) else {
+            let Some(page) = Page::lru_node_to_page(pos) else {
                 ffi::panic(b"buddy pool LRU node has no owning page\0");
             };
             if !page.is_type(PAGE_TYPE_BUDDY) {
@@ -2276,8 +2387,8 @@ pub fn check_buddy_system_integrity() {
             }
             // SAFETY: `page` is a valid `&mut Page` from `lru_node_to_page`.
             unsafe {
-                __check_page_pointer_in_range(page as *mut Page as *mut c_void);
-                if __page_to_pa(page as *mut Page) != page.physical_address {
+                Page::__check_page_pointer_in_range(page as *mut Page as *mut c_void);
+                if Page::__page_to_pa(page as *mut Page) != page.physical_address {
                     ffi::panic(b"buddy page physical address mismatch\0");
                 }
             }
@@ -2295,8 +2406,9 @@ pub fn check_buddy_system_integrity() {
             ffi::panic(b"buddy pool count mismatch\0");
         }
     }
-    buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+    BuddyPool::buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
     let _ = total_free_pages;
+}
 }
 
 // ===========================================================================
@@ -2322,20 +2434,20 @@ pub(crate) extern "C" fn sys_memstat() -> u64 {
 
     if (flags & MEMSTAT_INCLUDE_BUDDY) != 0 {
         if (flags & MEMSTAT_DETAILED) != 0 {
-            print_buddy_system_stat(1);
+            BuddyPool::print_buddy_system_stat(1);
         } else if (flags & MEMSTAT_VERBOSE) != 0 {
-            print_buddy_system_stat(0);
+            BuddyPool::print_buddy_system_stat(0);
         }
     }
     if (flags & MEMSTAT_INCLUDE_SLAB) != 0 {
         if (flags & MEMSTAT_DETAILED) != 0 {
-            crate::mm::slab::slab_dump_all(2);
+            crate::mm::slab::SlabCache::slab_dump_all(2);
         } else if (flags & MEMSTAT_VERBOSE) != 0 {
-            crate::mm::slab::slab_dump_all(1);
+            crate::mm::slab::SlabCache::slab_dump_all(1);
         }
     }
 
-    buddy_stat_totals(
+    BuddyPool::buddy_stat_totals(
         &mut total_free_pages,
         &mut total_cached_pages,
         &mut ret_arr,
@@ -2343,7 +2455,7 @@ pub(crate) extern "C" fn sys_memstat() -> u64 {
     );
     let free_bytes = (total_free_pages + total_cached_pages) * PAGE_SIZE;
     // SAFETY: plain unsafe extern "C" fn call, defined earlier in this file.
-    let managed_bytes = unsafe { xv6_total_managed_pages() } * PAGE_SIZE;
+    let managed_bytes = unsafe { BuddyPool::xv6_total_managed_pages() } * PAGE_SIZE;
     let used_bytes = if managed_bytes > free_bytes {
         managed_bytes - free_bytes
     } else {

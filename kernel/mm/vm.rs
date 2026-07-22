@@ -393,7 +393,7 @@ impl Vma {
                             *src_pte &= !(PTE_W as u64);
                             *new_pte = *src_pte;
                             let pa = pte_to_pa(*src_pte);
-                            let refc = page_ref_inc(pa as *mut c_void);
+                            let refc = crate::mm::page::Page::page_ref_inc(pa as *mut c_void);
                             if refc <= 0 {
                                 xv6_vm_panic(
                                     b"__vma_copy: page refcnt should be greater than 0\0".as_ptr()
@@ -2340,7 +2340,7 @@ impl Vm {
                             break 'done;
                         }
                         *new_pte = ((pa >> 12) << 10) | pte_flags | PTE_V as u64;
-                        page_ref_inc(pa as *mut c_void);
+                        crate::mm::page::Page::page_ref_inc(pa as *mut c_void);
                         *old_pte = 0;
                     }
                 }
@@ -2821,11 +2821,11 @@ pub(crate) use crate::sbi::sbi_remote_hfence_vma;
     }
     /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
     pub fn page_alloc(order: u64, flags: u64) -> *mut c_void {
-        unsafe { crate::mm::page::page_alloc(order, flags) }
+        unsafe { crate::mm::page::Page::page_alloc(order, flags) }
     }
     /// SAFETY: `ptr` must originate from `page_alloc` above.
     pub fn page_free(ptr: *mut c_void, order: u64) {
-        unsafe { crate::mm::page::page_free(ptr, order) };
+        unsafe { crate::mm::page::Page::page_free(ptr, order) };
     }
     /// SAFETY: see [`crate::string::memset`]'s contract.
     pub fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void {
@@ -3192,7 +3192,6 @@ unsafe extern "C" {
 // these become plain crate-path re-exports instead of `extern "C"`
 // redeclarations.
 use crate::vfs::file::{vfs_fdup, vfs_fput, FileOps};
-pub(crate) use crate::mm::page::page_ref_inc;
 pub(crate) use crate::mm::slab::slab_free;
 pub(crate) use crate::mm::vm_pgtab::xv6_vm_panic;
 
@@ -3202,7 +3201,7 @@ pub(crate) use crate::mm::vm_pgtab::xv6_vm_panic;
 /// plain non-`safe` `fn` — its call sites already wrap `unsafe {}`).
 fn page_ref_dec(ptr: *mut c_void) -> c_int {
     // SAFETY: see `crate::mm::page::page_ref_dec`'s contract.
-    unsafe { crate::mm::page::page_ref_dec(ptr) }
+    unsafe { crate::mm::page::Page::page_ref_dec(ptr) }
 }
 
 /// `slab_alloc`/`slab_cache_init`/`slab_free`: this file's original extern

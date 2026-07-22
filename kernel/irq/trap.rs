@@ -390,7 +390,7 @@ use crate::proc::Proc;
 // block above (signatures identical). `page_alloc` stays a genuinely
 // `unsafe fn` (`crate::mm::page`); its one call site below already sits
 // in an `unsafe` block, so the plain `use` keeps it unchanged too.
-use crate::mm::{page_alloc, Vm, Vma};
+use crate::mm::{Vm, Vma};
 
 /// `trampoline_userret = TRAMPOLINE + (userret - trampoline)`, computed
 /// once by [`trapinit`]. `None` until then; every real call site runs
@@ -651,7 +651,7 @@ pub(crate) extern "C" fn trapinit() {
         // Allocate and map interrupt stacks for each CPU hart.
         let kpgtbl = (&raw const _data_ktlb) as *const u8 as *mut u64;
         for i in 0..(NCPU as u64) {
-            let stack_mem = page_alloc(INTR_STACK_ORDER, 0);
+            let stack_mem = crate::mm::page::Page::page_alloc(INTR_STACK_ORDER, 0);
             kassert!(
                 !stack_mem.is_null(),
                 c"trapinit",

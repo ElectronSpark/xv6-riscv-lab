@@ -1558,32 +1558,32 @@ impl Pcache {
 // ---------------------------------------------------------------------------
 impl Pcache {
     fn page_lock_release(p: *mut Page) {
-        unsafe { crate::mm::page::page_lock_release(p as *mut crate::mm::page::Page) };
+        unsafe { crate::mm::page::Page::page_lock_release(p as *mut crate::mm::page::Page) };
     }
 
 
     fn page_lock_assert_holding(p: *mut Page) {
-        unsafe { crate::mm::page::page_lock_assert_holding(p as *mut crate::mm::page::Page) };
+        unsafe { crate::mm::page::Page::page_lock_assert_holding(p as *mut crate::mm::page::Page) };
     }
 
 
     fn page_ref_inc_unlocked(p: *mut Page) -> c_int {
-        unsafe { crate::mm::page::page_ref_inc_unlocked(p as *mut crate::mm::page::Page) }
+        unsafe { crate::mm::page::Page::page_ref_inc_unlocked(p as *mut crate::mm::page::Page) }
     }
 
 
     fn page_ref_dec_unlocked(p: *mut Page) -> c_int {
-        unsafe { crate::mm::page::page_ref_dec_unlocked(p as *mut crate::mm::page::Page) }
+        unsafe { crate::mm::page::Page::page_ref_dec_unlocked(p as *mut crate::mm::page::Page) }
     }
 
 
     fn page_ref_count(p: *mut Page) -> c_int {
-        unsafe { crate::mm::page::page_ref_count(p as *mut crate::mm::page::Page) }
+        unsafe { crate::mm::page::Page::page_ref_count(p as *mut crate::mm::page::Page) }
     }
 
 
     fn page_ref_dec(p: *mut Page) -> c_int {
-        unsafe { crate::mm::page::__page_ref_dec(p as *mut crate::mm::page::Page) }
+        unsafe { crate::mm::page::Page::__page_ref_dec(p as *mut crate::mm::page::Page) }
     }
 }
 
@@ -2028,7 +2028,7 @@ impl PcPageGuard {
 }
 impl Pcache {
     fn lock_page(page: *mut Page) -> PcPageGuard {
-        unsafe { crate::mm::page::page_lock_acquire(page as *mut crate::mm::page::Page) };
+        unsafe { crate::mm::page::Page::page_lock_acquire(page as *mut crate::mm::page::Page) };
         PcPageGuard(page)
     }
 
@@ -2446,7 +2446,7 @@ impl Pcache {
             None => return ptr::null_mut(),
         };
         let pcnode = node_box.as_ptr() as *mut PcacheNode;
-        let page = ((unsafe { crate::mm::page::__page_alloc(0, PAGE_TYPE_PCACHE as u64) } as *mut page_t));
+        let page = ((unsafe { crate::mm::page::Page::__page_alloc(0, PAGE_TYPE_PCACHE as u64) } as *mut page_t));
         if page.is_null() {
             // `node_box` drops here -> unsafe { crate::mm::slab::slab_free(pcnode) }; replaces the old
             // manual `PcacheNode::free(pcnode)` call.
@@ -2456,7 +2456,7 @@ impl Pcache {
         PcacheNode::set_page(pcnode, page);
         PcacheNode::set_page_count(pcnode, 1);
         PcacheNode::set_size(pcnode, Pcache::pgsize());
-        unsafe { NodeHandle::new(pcnode) }.set_data((unsafe { crate::mm::page::__page_to_pa(page as *mut crate::mm::page::Page) } as *mut c_void));
+        unsafe { NodeHandle::new(pcnode) }.set_data((unsafe { crate::mm::page::Page::__page_to_pa(page as *mut crate::mm::page::Page) } as *mut c_void));
         Pcache::page_set_node(page, pcnode);
         Pcache::page_set_pcache(page, ptr::null_mut());
         // `pcnode` is now reachable and owned via `page->pcache.pcache_node`

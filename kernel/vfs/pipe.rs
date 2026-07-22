@@ -225,12 +225,12 @@ use crate::mm::Vm;
 /// SAFETY: see [`crate::mm::kalloc::kalloc`]'s contract.
 #[inline]
 fn kalloc() -> *mut c_void {
-    unsafe { crate::mm::kalloc() }
+    unsafe { crate::mm::kalloc::Kmem::kalloc() }
 }
 /// SAFETY: `pa` must originate from `kalloc` above.
 #[inline]
 fn kfree(pa: *mut c_void) {
-    unsafe { crate::mm::kfree(pa) };
+    unsafe { crate::mm::kalloc::Kmem::kfree(pa) };
 }
 /// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract.
 #[inline]

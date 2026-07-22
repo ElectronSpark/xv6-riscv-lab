@@ -77,29 +77,29 @@ mod ffi {
 
     /// SAFETY: see [`crate::mm::page::page_buddy_init`]'s contract.
     pub fn page_buddy_init() -> c_int {
-        unsafe { crate::mm::page::page_buddy_init() }
+        unsafe { crate::mm::page::Page::page_buddy_init() }
     }
     /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
     pub fn __page_alloc(order: u64, flags: u64) -> *mut c_void {
-        unsafe { crate::mm::page::__page_alloc(order, flags) as *mut c_void }
+        unsafe { crate::mm::page::Page::__page_alloc(order, flags) as *mut c_void }
     }
     /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
     pub fn __pa_to_page(physical: u64) -> *mut c_void {
-        unsafe { crate::mm::page::__pa_to_page(physical) as *mut c_void }
+        unsafe { crate::mm::page::Page::__pa_to_page(physical) as *mut c_void }
     }
     /// SAFETY: `page` must originate from `__page_alloc`/`__pa_to_page`
     /// above (`crate::mm::page::__page_to_pa`'s contract).
     pub fn __page_to_pa(page: *mut c_void) -> u64 {
-        unsafe { crate::mm::page::__page_to_pa(page as *mut crate::mm::page::Page) }
+        unsafe { crate::mm::page::Page::__page_to_pa(page as *mut crate::mm::page::Page) }
     }
     /// SAFETY: see `__page_to_pa` above.
     pub fn __page_ref_dec(page: *mut c_void) -> c_int {
-        unsafe { crate::mm::page::__page_ref_dec(page as *mut crate::mm::page::Page) }
+        unsafe { crate::mm::page::Page::__page_ref_dec(page as *mut crate::mm::page::Page) }
     }
     /// SAFETY: see [`crate::mm::page::page_buddy_stat`]'s contract;
     /// `bool` and `u8` share layout/values (0/1) here.
     pub fn page_buddy_stat(ret_arr: *mut u64, empty_arr: *mut bool, size: usize) {
-        unsafe { crate::mm::page::page_buddy_stat(ret_arr, empty_arr as *mut u8, size) };
+        unsafe { crate::mm::page::BuddyPool::page_buddy_stat(ret_arr, empty_arr as *mut u8, size) };
     }
 
     /// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract; `name`
@@ -187,6 +187,16 @@ impl SlabCachePtr {
 }
 
 // ---------------------------------------------------------------------------
+// `Kmem` — zero-sized namespace type for this file's allocator API.
+// No natural C struct backs this file (state lives in the module-level
+// statics below); `Kmem` exists purely so every top-level fn can become
+// an associated fn (`Kmem::kalloc()`, `Kmem::kmm_alloc(size)`, ...)
+// instead of a free fn, per the KERNEL-OO wave's namespacing rule
+// (8283168 precedent: byte-identical bodies, raw params kept).
+// ---------------------------------------------------------------------------
+pub(crate) struct Kmem;
+
+// ---------------------------------------------------------------------------
 // Backing storage — formerly C arrays in `kalloc_shims.c`.
 // ---------------------------------------------------------------------------
 static KMM_SLAB_CACHE: [Storage<SlabCache>; SLAB_CACHE_NUMS] =
@@ -197,30 +207,41 @@ static KMM_SLAB_NAMES: [Storage<[u8; 32]>; SLAB_CACHE_NUMS] =
     [const { Storage::zeroed() }; SLAB_CACHE_NUMS];
 
 // Typed accessors.
+impl Kmem {
 fn kmm_cache(i: usize) -> SlabCachePtr {
     unsafe { SlabCachePtr::from_storage(KMM_SLAB_CACHE[i].as_ptr()) }
 }
+}
+impl Kmem {
 fn slab_t_pool() -> SlabCachePtr {
     unsafe { SlabCachePtr::from_storage(SLAB_T_POOL.as_ptr()) }
 }
+}
+impl Kmem {
 fn slab_cache_t_pool() -> SlabCachePtr {
     unsafe { SlabCachePtr::from_storage(SLAB_CACHE_T_POOL.as_ptr()) }
 }
+}
 
 /// Borrow the name slot for slab `i` mutably during init (single-threaded).
+impl Kmem {
 fn kmm_name_slot(i: usize) -> &'static mut [u8; 32] {
     // SAFETY: called only from `kinit`, which runs once at boot on a single
     // hart before any reads. The storage outlives `'static`.
     unsafe { &mut *KMM_SLAB_NAMES[i].as_ptr() }
 }
+}
+impl Kmem {
 fn kmm_name_ptr(i: usize) -> *const c_char {
     KMM_SLAB_NAMES[i].as_ptr() as *const c_char
+}
 }
 
 // ---------------------------------------------------------------------------
 // Panic / diagnostic helpers — small safe wrappers around the variadic
 // C `printf`/panic primitives.
 // ---------------------------------------------------------------------------
+impl Kmem {
 #[inline(never)]
 fn panic_kalloc(msg: &[u8]) -> ! {
     debug_assert!(msg.last() == Some(&0), "panic msg must be NUL-terminated");
@@ -228,9 +249,12 @@ fn panic_kalloc(msg: &[u8]) -> ! {
     crate::kprintln!("PANIC kalloc: {}", crate::printf::Cs(msg.as_ptr() as *const c_char));
     ffi::__panic_end()
 }
+}
 
+impl Kmem {
 fn log_slab_init_failed(name: *const c_char) {
     crate::kprintln!("failed to initialize kmm slab: {}", crate::printf::Cs(name));
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +263,9 @@ fn log_slab_init_failed(name: *const c_char) {
 
 /// Render `bytes` as decimal ASCII into the 32-byte name slot for slab `idx`.
 /// Mirrors `__init_kmm_slab_name()` from the C original.
+impl Kmem {
 fn init_kmm_slab_name(idx: usize, mut bytes: usize) {
-    let dst = kmm_name_slot(idx);
+    let dst = Kmem::kmm_name_slot(idx);
     dst.fill(0);
     let mut tmp = [0u8; 32];
     let mut i: usize = 29;
@@ -253,9 +278,11 @@ fn init_kmm_slab_name(idx: usize, mut bytes: usize) {
     let len = 30 - start;
     dst[..len].copy_from_slice(&tmp[start..start + len]);
 }
+}
 
 /// Map a requested allocation size to a slab-cache index, or `None` if it
 /// exceeds `SLAB_OBJ_MAX_SIZE`.
+impl Kmem {
 fn slab_index_for(mut size: usize) -> Option<usize> {
     if size > SLAB_OBJ_MAX_SIZE {
         return None;
@@ -276,8 +303,10 @@ fn slab_index_for(mut size: usize) -> Option<usize> {
     }
     (idx < SLAB_CACHE_NUMS).then_some(idx)
 }
+}
 
 /// Sum `(1<<order) * free_pages[order]` across the buddy allocator.
+impl Kmem {
 fn total_free_pages() -> u64 {
     const N: usize = (PAGE_BUDDY_MAX_ORDER as usize) + 1;
     let mut ret_arr: [u64; N] = [0; N];
@@ -289,8 +318,10 @@ fn total_free_pages() -> u64 {
     }
     total
 }
+}
 
 /// Initialise the slab caches.  Panics if any cache fails to init.
+impl Kmem {
 fn init_kmm() {
     ffi::page_buddy_init();
 
@@ -298,36 +329,40 @@ fn init_kmm() {
     let slab_t_size = size_of::<Slab>();
     let slab_cache_t_size = size_of::<SlabCache>();
 
-    if slab_t_pool().init(b"slab_t_pool\0".as_ptr() as *const c_char,
+    if Kmem::slab_t_pool().init(b"slab_t_pool\0".as_ptr() as *const c_char,
                           slab_t_size, flags) != 0 {
-        panic_kalloc(b"kinit: failed to initialize slab_t pool\0");
+        Kmem::panic_kalloc(b"kinit: failed to initialize slab_t pool\0");
     }
-    if slab_cache_t_pool().init(b"slab_cache_t_pool\0".as_ptr() as *const c_char,
+    if Kmem::slab_cache_t_pool().init(b"slab_cache_t_pool\0".as_ptr() as *const c_char,
                                 slab_cache_t_size, flags) != 0 {
-        panic_kalloc(b"kinit: failed to initialize slab_cache_t pool\0");
+        Kmem::panic_kalloc(b"kinit: failed to initialize slab_cache_t pool\0");
     }
 
     let mut obj_size = SLAB_OBJ_MIN_SIZE;
     for i in 0..SLAB_CACHE_NUMS {
-        init_kmm_slab_name(i, obj_size);
-        let name = kmm_name_ptr(i);
-        if kmm_cache(i).init(name, obj_size, flags) != 0 {
-            log_slab_init_failed(name);
-            panic_kalloc(b"kinit\0");
+        Kmem::init_kmm_slab_name(i, obj_size);
+        let name = Kmem::kmm_name_ptr(i);
+        if Kmem::kmm_cache(i).init(name, obj_size, flags) != 0 {
+            Kmem::log_slab_init_failed(name);
+            Kmem::panic_kalloc(b"kinit\0");
         }
         obj_size <<= 1;
     }
 }
+}
 
 /// Free a single page-sized allocation (legacy `kalloc`/`kfree` path).
+impl Kmem {
 fn page_free(pa: *mut c_void) {
     let page = ffi::__pa_to_page(pa as u64);
     if ffi::__page_ref_dec(page) == -1 {
-        panic_kalloc(b"kfree\0");
+        Kmem::panic_kalloc(b"kfree\0");
     }
+}
 }
 
 /// Allocate a single page; fill with junk byte `5` to catch use-of-uninit.
+impl Kmem {
 fn page_alloc_legacy() -> *mut c_void {
     let page = ffi::__page_alloc(0, PAGE_TYPE_ANON);
     if page.is_null() {
@@ -335,65 +370,88 @@ fn page_alloc_legacy() -> *mut c_void {
     }
     let pa = ffi::__page_to_pa(page);
     if pa == 0 {
-        panic_kalloc(b"kalloc\0");
+        Kmem::panic_kalloc(b"kalloc\0");
     }
     ffi::memset(pa as *mut c_void, 5, PGSIZE);
     pa as *mut c_void
+}
 }
 
 // ---------------------------------------------------------------------------
 // Public C ABI — thin wrappers.
 // ---------------------------------------------------------------------------
 
+impl Kmem {
 pub(crate) unsafe fn kinit() {
-    init_kmm()
+    Kmem::init_kmm()
+}
 }
 
+impl Kmem {
 pub(crate) unsafe fn slab_t_desc_alloc() -> *mut c_void {
-    slab_t_pool().alloc()
+    Kmem::slab_t_pool().alloc()
+}
 }
 
+impl Kmem {
 pub(crate) unsafe fn slab_t_desc_free(slab_desc: *mut c_void) {
     if !slab_desc.is_null() {
         ffi::slab_free(slab_desc);
     }
 }
-
-pub(crate) unsafe fn slab_cache_t_alloc() -> *mut c_void {
-    slab_cache_t_pool().alloc()
 }
 
+impl Kmem {
+pub(crate) unsafe fn slab_cache_t_alloc() -> *mut c_void {
+    Kmem::slab_cache_t_pool().alloc()
+}
+}
+
+impl Kmem {
 pub(crate) unsafe fn slab_cache_t_free(cache_desc: *mut c_void) {
     if !cache_desc.is_null() {
         ffi::slab_free(cache_desc);
     }
 }
+}
 
+impl Kmem {
 pub(crate) unsafe fn kmm_alloc(size: usize) -> *mut c_void {
-    match slab_index_for(size) {
-        Some(idx) => kmm_cache(idx).alloc(),
+    match Kmem::slab_index_for(size) {
+        Some(idx) => Kmem::kmm_cache(idx).alloc(),
         None      => core::ptr::null_mut(),
     }
 }
+}
 
+impl Kmem {
 pub(crate) unsafe fn kmm_free(ptr: *mut c_void) {
     ffi::slab_free(ptr)
 }
+}
 
+impl Kmem {
 pub(crate) unsafe fn kmm_shrink_all() {
     for i in 0..SLAB_CACHE_NUMS {
-        kmm_cache(i).shrink(c_int::MAX);
+        Kmem::kmm_cache(i).shrink(c_int::MAX);
     }
 }
+}
 
+impl Kmem {
 pub(crate) unsafe fn get_total_free_pages() -> u64 {
-    total_free_pages()
+    Kmem::total_free_pages()
+}
 }
 
+impl Kmem {
 pub(crate) unsafe fn kfree(pa: *mut c_void) {
-    page_free(pa)
+    Kmem::page_free(pa)
+}
 }
 
+impl Kmem {
 pub(crate) unsafe fn kalloc() -> *mut c_void {
-    page_alloc_legacy()
+    Kmem::page_alloc_legacy()
+}
 }

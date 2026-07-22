@@ -109,11 +109,11 @@ pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6
 
     /// SAFETY: see [`crate::mm::kalloc::kmm_alloc`]'s contract.
     pub fn kmm_alloc(size: usize) -> *mut c_void {
-        unsafe { crate::mm::kalloc::kmm_alloc(size) }
+        unsafe { crate::mm::kalloc::Kmem::kmm_alloc(size) }
     }
     /// SAFETY: see [`crate::mm::kalloc::kmm_free`]'s contract.
     pub fn kmm_free(ptr: *mut c_void) {
-        unsafe { crate::mm::kalloc::kmm_free(ptr) };
+        unsafe { crate::mm::kalloc::Kmem::kmm_free(ptr) };
     }
     /// SAFETY: see [`crate::string::memset`]'s contract.
     pub fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void {

@@ -179,13 +179,14 @@ use crate::dev::fdt::platform;
 // (`crate::mm::page`), declared `safe` here (usual FFI facade) with the
 // bindgen `page_t` view rather than page.rs's own `Page` struct (same
 // layout, different Rust name); the thin wrapper preserves both.
-use crate::mm::kalloc;
+// `kalloc` is now `impl Kmem` (kalloc.rs KERNEL-OO wave); called
+// fully-qualified at its call sites below instead of `use`-imported.
 
 /// SAFETY: `page` must be a live `Page`
 /// (see [`crate::mm::page::__page_to_pa`]'s contract).
 #[inline]
 fn __page_to_pa(page: *mut page_t) -> u64 {
-    unsafe { crate::mm::__page_to_pa(page as *mut crate::mm::page::Page) }
+    unsafe { crate::mm::page::Page::__page_to_pa(page as *mut crate::mm::page::Page) }
 }
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
@@ -1326,9 +1327,9 @@ fn virtio_disk_init_one(diskno: usize) {
         }
 
         // allocate and zero queue memory.
-        (*disk).desc = kalloc() as *mut virtq_desc;
-        (*disk).avail = kalloc() as *mut virtq_avail;
-        (*disk).used = kalloc() as *mut virtq_used;
+        (*disk).desc = crate::mm::kalloc::Kmem::kalloc() as *mut virtq_desc;
+        (*disk).avail = crate::mm::kalloc::Kmem::kalloc() as *mut virtq_avail;
+        (*disk).used = crate::mm::kalloc::Kmem::kalloc() as *mut virtq_used;
         if (*disk).desc.is_null() || (*disk).avail.is_null() || (*disk).used.is_null() {
             panic_fmt_i32!("virtio disk {} kalloc", diskno as c_int);
         }

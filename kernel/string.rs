@@ -79,7 +79,8 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-pub(crate) use crate::kmm_alloc;
+// `kmm_alloc` is now `impl Kmem` (kalloc.rs KERNEL-OO wave); called
+// fully-qualified at its call sites below instead of `use`-imported.
 
 // ---------------------------------------------------------------------------
 // memset / memcmp / memmove / memcpy — see module doc for the no-recursion
@@ -433,7 +434,7 @@ pub(crate) unsafe fn strstr(
 pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
     unsafe {
         let len = strnlen(s, n);
-        let new_str = kmm_alloc(len + 1) as *mut c_char;
+        let new_str = crate::mm::kalloc::Kmem::kmm_alloc(len + 1) as *mut c_char;
         if new_str.is_null() {
             return ptr::null_mut();
         }
@@ -463,7 +464,7 @@ pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
 pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
     unsafe {
         let len = strlen(s);
-        let new_str = kmm_alloc(len + 1) as *mut c_char;
+        let new_str = crate::mm::kalloc::Kmem::kmm_alloc(len + 1) as *mut c_char;
         if new_str.is_null() {
             return ptr::null_mut();
         }

@@ -303,12 +303,12 @@ fn slab_free(obj: *mut c_void) {
 /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
 #[inline]
 fn page_alloc(order: u64, flags: u64) -> *mut c_void {
-    unsafe { crate::mm::page_alloc(order, flags) }
+    unsafe { crate::mm::page::Page::page_alloc(order, flags) }
 }
 /// SAFETY: `ptr` must originate from `page_alloc` above.
 #[inline]
 fn page_free(ptr: *mut c_void, order: u64) {
-    unsafe { crate::mm::page_free(ptr, order) };
+    unsafe { crate::mm::page::Page::page_free(ptr, order) };
 }
 // P3-1C mesh sweep: vfs/devtmpfs/superblock.rs is in scope for this wave;
 // signatures are identical (same `mode_t`/`dev_t` types), so these become

@@ -181,23 +181,23 @@ pub(crate) use crate::mm::vm::{Vm, Vma};
     }
     /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
     pub fn page_alloc(order: c_int, ptype: c_int) -> *mut c_void {
-        unsafe { crate::mm::page::page_alloc(order as u64, ptype as u64) }
+        unsafe { crate::mm::page::Page::page_alloc(order as u64, ptype as u64) }
     }
     /// SAFETY: `pa` must originate from `page_alloc` above.
     pub fn page_free(pa: *mut c_void, order: c_int) {
-        unsafe { crate::mm::page::page_free(pa, order as u64) };
+        unsafe { crate::mm::page::Page::page_free(pa, order as u64) };
     }
     /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
     pub fn __pa_to_page(pa: u64) -> *mut c_void {
-        unsafe { crate::mm::page::__pa_to_page(pa) as *mut c_void }
+        unsafe { crate::mm::page::Page::__pa_to_page(pa) as *mut c_void }
     }
     /// SAFETY: `p` must be a live `Page` (`crate::mm::page::page_lock_acquire`'s contract).
     pub fn page_lock_acquire(p: *mut Page) {
-        unsafe { crate::mm::page::page_lock_acquire(p) };
+        unsafe { crate::mm::page::Page::page_lock_acquire(p) };
     }
     /// SAFETY: see `page_lock_acquire` above.
     pub fn page_lock_release(p: *mut Page) {
-        unsafe { crate::mm::page::page_lock_release(p) };
+        unsafe { crate::mm::page::Page::page_lock_release(p) };
     }
 }
 

@@ -622,7 +622,7 @@ use crate::lock::rcu::call_rcu;
 // an `unsafe` context) are reached as crate-path items instead of the
 // `extern "C"` redeclarations that used to sit in the block above
 // (the old decls' `vm_t` was this file's alias for `crate::bindings::vm`).
-use crate::mm::{page_alloc, Vm};
+use crate::mm::Vm;
 
 // NO-STANDALONE-FN: the former `page_free` FFI facade (a thin forward to
 // `crate::mm::page_free`) had a single call site (`thread_destroy_rcu_callback`)
@@ -945,7 +945,7 @@ impl Thread {
         }
         let kstack_size = 1u64 << (PAGE_SHIFT + kstack_order as u32);
         thread_raw_layout! {
-            let kstack = page_alloc(kstack_order as u64, PAGE_TYPE_ANON);
+            let kstack = crate::mm::page::Page::page_alloc(kstack_order as u64, PAGE_TYPE_ANON);
             if kstack.is_null() {
                 return Err(Errno::NoMem);
             }
@@ -1120,7 +1120,7 @@ extern "C" fn thread_destroy_rcu_callback(data: *mut c_void) {
     // Inlined former `page_free` FFI facade (the sole call site).
     // SAFETY: `t.kstack_addr()` originates from `page_alloc` in `kstack_arrange`
     // (see `crate::mm::page::page_free`'s contract).
-    unsafe { crate::mm::page_free(t.kstack_addr() as *mut c_void, t.kstack_order() as u64) };
+    unsafe { crate::mm::page::Page::page_free(t.kstack_addr() as *mut c_void, t.kstack_order() as u64) };
 }
 
 // NO-STANDALONE-FN: the thread destructor that used to be the free fn

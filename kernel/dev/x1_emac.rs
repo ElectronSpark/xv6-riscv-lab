@@ -118,7 +118,8 @@ use crate::dev::fdt::platform;
 // that its `#[no_mangle]` export is gone; this file's original extern
 // declaration was a plain (non-`safe`) `fn`, so every call site already
 // sits in an `unsafe` context — the plain `use` keeps them unchanged.
-use crate::mm::kalloc;
+// `kalloc` is now `impl Kmem` (kalloc.rs KERNEL-OO wave); called
+// fully-qualified at its call sites below instead of `use`-imported.
 // P3-1D mesh sweep: net.rs/dev/netdev.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
@@ -835,7 +836,7 @@ unsafe fn x1_emac_tx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
 
     // Use kalloc pages -- identity mapped, so VA == PA.
     // SAFETY: `kalloc` returns a fresh page or null.
-    let ring = unsafe { kalloc() } as *mut x1_tx_desc;
+    let ring = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut x1_tx_desc;
     if ring.is_null() {
         return -1;
     }
@@ -879,7 +880,7 @@ unsafe fn x1_emac_rx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
     let ring_size = X1_EMAC_RX_RING_SIZE * core::mem::size_of::<x1_rx_desc>();
 
     // SAFETY: `kalloc` returns a fresh page or null.
-    let ring = unsafe { kalloc() } as *mut x1_rx_desc;
+    let ring = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut x1_rx_desc;
     if ring.is_null() {
         return -1;
     }

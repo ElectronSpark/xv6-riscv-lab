@@ -47,12 +47,12 @@ use crate::timer::timer_core::get_jiffs;
 /// original extern declaration asserted `pub safe fn` (usual FFI facade).
 #[inline]
 fn kmm_alloc(size: usize) -> *mut c_void {
-    unsafe { crate::kmm_alloc(size) }
+    unsafe { crate::mm::kalloc::Kmem::kmm_alloc(size) }
 }
 /// SAFETY: see [`kmm_alloc`] above.
 #[inline]
 fn kmm_free(ptr: *mut c_void) {
-    unsafe { crate::kmm_free(ptr) };
+    unsafe { crate::mm::kalloc::Kmem::kmm_free(ptr) };
 }
 
 /// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`

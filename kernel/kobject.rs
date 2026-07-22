@@ -86,7 +86,8 @@ const _: () = {
 };
 
 use crate::proc::proc_shims::xv6_panic;
-pub(crate) use crate::kmm_free;
+// `kmm_free` is now `impl Kmem` (kalloc.rs KERNEL-OO wave); called
+// fully-qualified at its call site below instead of `use`-imported.
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
 /// panic the kernel if `$cond` is false. Simplified to a fixed message
@@ -354,7 +355,7 @@ pub(crate) unsafe fn kobject_put(obj: *mut Kobject) {
             core::sync::atomic::fence(Ordering::Acquire);
             detach(obj);
             match (*obj).ops.release {
-                None => kmm_free(obj as *mut c_void),
+                None => crate::mm::kalloc::Kmem::kmm_free(obj as *mut c_void),
                 Some(release) => release(obj),
             }
         }

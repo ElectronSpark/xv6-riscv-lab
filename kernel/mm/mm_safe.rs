@@ -100,19 +100,19 @@ mod ffi {
     // preserving here, no pointer-type cast.
     /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
     pub fn __page_alloc(order: u64, flags: u64) -> *mut Page {
-        unsafe { crate::mm::page::__page_alloc(order, flags) }
+        unsafe { crate::mm::page::Page::__page_alloc(order, flags) }
     }
     /// SAFETY: `page` must originate from `__page_alloc` above.
     pub fn __page_free(page: *mut Page, order: u64) {
-        unsafe { crate::mm::page::__page_free(page, order) };
+        unsafe { crate::mm::page::Page::__page_free(page, order) };
     }
     /// SAFETY: `page` must be a live `Page`.
     pub fn __page_to_pa(page: *mut Page) -> u64 {
-        unsafe { crate::mm::page::__page_to_pa(page) }
+        unsafe { crate::mm::page::Page::__page_to_pa(page) }
     }
     /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
     pub fn __pa_to_page(physical: u64) -> *mut Page {
-        unsafe { crate::mm::page::__pa_to_page(physical) }
+        unsafe { crate::mm::page::Page::__pa_to_page(physical) }
     }
     /// SAFETY: `cache` must be a live `SlabCache`.
     pub fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {

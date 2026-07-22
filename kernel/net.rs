@@ -68,7 +68,8 @@ unsafe extern "C" {
 // this file's original extern declarations were plain (non-`safe`) `fn`,
 // so every call site already sits in an `unsafe` context — the plain
 // `use` keeps them unchanged.
-use crate::mm::{kalloc, kfree};
+// `kalloc`/`kfree` are now `impl Kmem` (kalloc.rs KERNEL-OO wave); called
+// fully-qualified at their call sites below instead of `use`-imported.
 // P3-1D mesh sweep: dev/netdev.rs/sysnet.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
@@ -318,7 +319,7 @@ pub(crate) extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
     // SAFETY: `kalloc()` returns a fresh, exclusively-owned page (or
     // null, checked below); `size_of::<mbuf>()` (`2048 + 16`-ish bytes)
     // fits in one page, matching the C original's assumption.
-    let m = unsafe { kalloc() } as *mut mbuf;
+    let m = unsafe { crate::mm::kalloc::Kmem::kalloc() } as *mut mbuf;
     if m.is_null() {
         return ptr::null_mut();
     }
@@ -342,7 +343,7 @@ pub(crate) extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
 // redeclaration -- demoted.
 pub(crate) unsafe extern "C" fn mbuffree(m: *mut mbuf) {
     // SAFETY: caller contract.
-    unsafe { kfree(m as *mut c_void) };
+    unsafe { crate::mm::kalloc::Kmem::kfree(m as *mut c_void) };
 }
 
 /// Mirrors `struct mbufq` (`kernel/inc/dev/net.h`) -- real definition,

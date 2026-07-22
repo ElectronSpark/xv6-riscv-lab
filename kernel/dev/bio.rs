@@ -85,7 +85,8 @@ use crate::lock::completion::completion_init;
 // this file's original extern declarations were plain (non-`safe`) `fn`,
 // so every call site already sits in an `unsafe` context — the plain
 // `use` keeps them unchanged.
-use crate::mm::{kmm_alloc, kmm_free};
+// `kmm_alloc`/`kmm_free` are now `impl Kmem` (kalloc.rs KERNEL-OO wave);
+// called fully-qualified at their call sites below instead of `use`-imported.
 
 // ---------------------------------------------------------------------------
 // Local constants -- mirrors `dev/bio.h`'s `#define`s. `BIO_MAX_VECS`/
@@ -294,7 +295,7 @@ extern "C" fn bio_release_kobj_cb(obj: *mut kobject) {
     // is a valid, uniquely-owned `struct bio` allocation from
     // `kmm_alloc` in `bio_alloc` below -- freeing it here is exactly
     // the deallocation `bio_alloc` paired it with.
-    unsafe { kmm_free(bio_ptr as *mut c_void) };
+    unsafe { crate::mm::kalloc::Kmem::kmm_free(bio_ptr as *mut c_void) };
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +328,7 @@ fn bio_alloc_inner(
         return Err(Errno::Inval);
     }
     let bio_size = core::mem::size_of::<bio>() + (vec_length as usize) * core::mem::size_of::<bio_vec>();
-    let bio_ptr = unsafe { kmm_alloc(bio_size) } as *mut bio;
+    let bio_ptr = unsafe { crate::mm::kalloc::Kmem::kmm_alloc(bio_size) } as *mut bio;
     if bio_ptr.is_null() {
         return Err(Errno::NoMem);
     }

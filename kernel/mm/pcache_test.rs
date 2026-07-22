@@ -116,10 +116,10 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // checks, so the cast is layout-safe.
 use crate::bindings::page_t as Page;
 use crate::bindings::{pcache_ops, EAGAIN, EBUSY, EINVAL, EIO};
-pub(crate) use crate::mm::{
-    __page_alloc, __page_free, page_lock_acquire, page_lock_release, Pcache,
-    PcacheNode,
-};
+// `__page_alloc`/`__page_free`/`page_lock_acquire`/`page_lock_release` are
+// now `impl Page` associated fns (page.rs KERNEL-OO wave); called
+// fully-qualified at their call sites below instead of `use`-imported.
+pub(crate) use crate::mm::{Pcache, PcacheNode};
 
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
@@ -160,11 +160,11 @@ unsafe fn pg_lock(p: *mut Page) {
     // the same live global-array page as page.rs's native `Page` layout,
     // proven bit-identical by `mm/page.rs`'s own `size_of`/`align_of`
     // compile-time assertions.
-    unsafe { page_lock_acquire(p.cast()) };
+    unsafe { crate::mm::page::Page::page_lock_acquire(p.cast()) };
 }
 unsafe fn pg_unlock(p: *mut Page) {
     // SAFETY: see `pg_lock`.
-    unsafe { page_lock_release(p.cast()) };
+    unsafe { crate::mm::page::Page::page_lock_release(p.cast()) };
 }
 
 // `is_err_or_null`'s canonical home is `crate::kstd` (P3-CS2
@@ -418,7 +418,7 @@ fn alloc_foreign_page() -> *mut Page {
     // valid. `.cast()` reinterprets page.rs's native `Page` return as the
     // bindgen `page_t` this file standardizes on — see the top-of-file
     // import comment; the two are layout-identical by construction.
-    unsafe { __page_alloc(0, 0).cast::<Page>() }
+    unsafe { crate::mm::page::Page::__page_alloc(0, 0).cast::<Page>() }
 }
 fn free_foreign_page(page: *mut Page) {
     if page.is_null() {
@@ -427,7 +427,7 @@ fn free_foreign_page(page: *mut Page) {
     // SAFETY: `page` came from `alloc_foreign_page` (order 0) and was
     // never handed to the pcache, so it is safe to free at the same order;
     // `.cast()` reverses the reinterpretation above.
-    unsafe { __page_free(page.cast(), 0) };
+    unsafe { crate::mm::page::Page::__page_free(page.cast(), 0) };
 }
 
 /// Populates `cache` with `n` additional clean, unreferenced (LRU) pages at

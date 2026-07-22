@@ -249,11 +249,11 @@ pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex
 // layout, different Rust name). Thin wrappers preserve both.
 /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
 fn page_alloc(order: u64, flags: u64) -> *mut c_void {
-    unsafe { crate::mm::page::page_alloc(order, flags) }
+    unsafe { crate::mm::page::Page::page_alloc(order, flags) }
 }
 /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
 fn __pa_to_page(physical: u64) -> *mut page_t {
-    unsafe { crate::mm::page::__pa_to_page(physical) as *mut page_t }
+    unsafe { crate::mm::page::Page::__pa_to_page(physical) as *mut page_t }
 }
 
 // ---------------------------------------------------------------------------

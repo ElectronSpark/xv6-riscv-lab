@@ -134,7 +134,7 @@ use crate::dev::fdt::platform;
 /// (see [`crate::mm::page::__page_to_pa`]'s contract).
 #[inline]
 fn __page_to_pa(page: *mut page_t) -> u64 {
-    unsafe { crate::mm::__page_to_pa(page as *mut crate::mm::page::Page) }
+    unsafe { crate::mm::page::Page::__page_to_pa(page as *mut crate::mm::page::Page) }
 }
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an

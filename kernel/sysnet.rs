@@ -79,7 +79,9 @@ use crate::sync::SpinLock;
 // genuinely `unsafe fn` (`crate::mm::kalloc`); its one call site below
 // already sits in an `unsafe` block, so the plain `use` keeps it
 // unchanged too.
-use crate::mm::{kfree, Vm};
+// `kfree` is now `impl Kmem` (kalloc.rs KERNEL-OO wave); called
+// fully-qualified at its one call site below instead of `use`-imported.
+use crate::mm::Vm;
 // P3-1D mesh sweep: net.rs is in scope for this wave; signatures are
 // identical, so these become plain crate-path imports instead of `extern
 // "C"` redeclarations.
@@ -211,7 +213,7 @@ pub(crate) unsafe extern "C" fn sockclose(si: *mut sock) {
             let m = mbufq_pophead(rxq);
             mbuffree(m);
         }
-        kfree(si as *mut c_void);
+        crate::mm::kalloc::Kmem::kfree(si as *mut c_void);
     }
 }
 

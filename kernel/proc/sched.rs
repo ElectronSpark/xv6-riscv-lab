@@ -398,7 +398,7 @@ macro_rules! kassert { ($c:expr, $m:expr) => {{ if !($c) { kpanic!($m); } }}; }
 impl Scheduler {
 #[inline]
 fn page_free(ptr: *mut c_void, order: c_int) {
-    unsafe { crate::mm::page_free(ptr, order as u64) };
+    unsafe { crate::mm::page::Page::page_free(ptr, order as u64) };
 }
 
 #[inline] fn cpu_access<'a>() -> CpuLocalRef<'a> {

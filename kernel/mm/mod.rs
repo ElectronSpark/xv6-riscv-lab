@@ -12,7 +12,11 @@ pub(crate) mod cffi;
 pub(crate) mod page;
 pub(crate) mod slab;
 mod sysmm;
-mod kalloc;
+// pub(crate) so cross-file callers can name `crate::mm::kalloc::Kmem`
+// directly (KERNEL-OO wave: kalloc.rs's top-level fns became `impl Kmem`
+// associated fns, no longer glob-reexportable as bare free fns at every
+// call site that needs the fully-qualified path).
+pub(crate) mod kalloc;
 // P3-D3c: `pub(crate)` so `dev/fdt.rs`/`start_kernel.rs` can import
 // `early_alloc*` by crate path (their `extern "C"` redeclarations are gone).
 pub(crate) mod early_allocator;

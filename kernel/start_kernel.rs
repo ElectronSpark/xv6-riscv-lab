@@ -205,7 +205,7 @@ use crate::timer::sched_timer::sleep_ms;
 // `unsafe fn` in `crate::mm::kalloc`; its call site already sits in an
 // `unsafe` context) are reached as crate-path items instead of the
 // `extern "C"` redeclarations that used to sit in the block above.
-use crate::mm::{kinit, Pcache};
+use crate::mm::Pcache;
 // P3-D3b: lock/rcu.rs's boot entry points are plain `pub(crate) unsafe
 // fn`s now that their `#[no_mangle]` exports are gone; reached by crate
 // path (call sites below already sit in `unsafe` blocks).
@@ -274,7 +274,7 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
 
         sbi_probe_extensions();
         ksymbols_init(); // Initialize kernel symbols
-        kinit(); // physical page allocator
+        crate::mm::kalloc::Kmem::kinit(); // physical page allocator
         PageTable::kvminit(); // create kernel page table
         crate::kprintln!("page table initialized");
         PageTable::kvminithart(); // turn on paging
