@@ -774,7 +774,10 @@ use crate::vfs::fdtable::VfsFdtable;
 use crate::vfs::file::VfsFile;
 use crate::vfs::inode::{inode_ops, VfsInode};
 use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
-use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
+// Wave A: `xv6fs_init`/`xv6fs_mount_root` are now `Xv6fs::init`/
+// `Xv6fs::mount_root` associated fns (`xv6fs/superblock.rs`'s own
+// free-fn -> associated-fn sweep); called via the fully qualified path
+// below instead of a `use` import.
 
 // P3-9c: `KArc<vfs_fs_type>` -- see `kernel/kobject.rs`'s `HasKobject`/
 // `KArc` doc and the `dev/dev.rs` (`device_t`) / `dev/bio.rs` (`bio`)
@@ -3044,12 +3047,12 @@ impl Vfs {
 
             // Initialize filesystem types (registers them with VFS).
             tmpfs_init();
-            xv6fs_init();
+            crate::vfs::xv6fs::superblock::Xv6fs::init();
             devtmpfs_init();
 
             // Mount filesystems.
             tmpfs_mount_root();
-            xv6fs_mount_root();
+            crate::vfs::xv6fs::superblock::Xv6fs::mount_root();
 
             // Mount tmpfs at /tmp (after chroot to xv6fs).
             ret = Vfs::vfs_mount_path(c"tmpfs".as_ptr(), c"/tmp".as_ptr(), 4, ptr::null(), 0);

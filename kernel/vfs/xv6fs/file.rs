@@ -52,8 +52,8 @@ use crate::vfs::file::FileOps;
 
 use crate::proc::proc_shims::xv6_current_thread;
 
+use super::inode::Xv6fsInode;
 use super::log::{xv6fs_begin_op, xv6fs_end_op};
-use super::truncate::xv6fs_bmap;
 
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention (this
@@ -309,7 +309,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
             }
 
             // Ensure the block is allocated (may log indirect-block changes).
-            let addr = xv6fs_bmap(ip, bn);
+            let addr = Xv6fsInode::bmap(ip, bn);
             if addr == 0 {
                 VfsInode::vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
@@ -383,7 +383,7 @@ fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count: usize, use
                 (*inode).size = pos;
             }
         }
-        super::inode::xv6fs_iupdate(ip);
+        Xv6fsInode::iupdate(ip);
 
         // Release inode lock before ending transaction.
         VfsInode::vfs_iunlock(inode);
