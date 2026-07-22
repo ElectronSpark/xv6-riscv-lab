@@ -47,8 +47,8 @@
 //! ever affected. The fix normalizes `cmd` to its zero-extended 32-bit
 //! form immediately after the raw fetch (`(cmd as u32) as u64`) and
 //! uses that single canonical value for both the `switch` *and* every
-//! downstream call (`vfs_ioctl`, and transitively `tty::tty_ioctl`/
-//! `tty::ptmx_fops_ioctl`'s own `cmd == TIOCGPTN` comparisons) — so the
+//! downstream call (`vfs_ioctl`, and transitively `Tty::ioctl`/
+//! `PtyPair::ptmx_ioctl`'s own `cmd == TIOCGPTN` comparisons) — so the
 //! fix is centralized at the one point raw user input enters the
 //! kernel, rather than needing matching truncation at every driver
 //! that compares `cmd` against a UAPI constant.

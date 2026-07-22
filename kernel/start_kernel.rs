@@ -109,7 +109,8 @@ use crate::timer::sched_timer::sched_timer_init;
 // redeclarations (all no-arg/no-return, identical signatures).
 use crate::console::{consoledevinit, consoleinit};
 use crate::printf::printfinit;
-use crate::tty::ptmx::ptmxinit;
+// NO-STANDALONE-FN: `ptmxinit` relocated to `PtyPair::init` (kernel/tty/ptmx.rs).
+use crate::tty::ptmx::PtyPair;
 use crate::tty::tty::Tty;
 use crate::tty::tty_dev::TtyDev;
 use crate::vfs::fs::Vfs;
@@ -415,7 +416,7 @@ pub(crate) fn start_kernel_post_init() {
         consoledevinit(); // Initialize and register the console character device
         nullranddevinit(); // Register /dev/null, /dev/random, /dev/zero
         TtyDev::init(); // Register /dev/tty (controlling terminal device)
-        ptmxinit(); // Register /dev/ptmx (PTY multiplexer)
+        PtyPair::init(); // Register /dev/ptmx (PTY multiplexer)
         virtio_disk_init(); // emulated hard disk (QEMU)
         ramdisk_init(); // ramdisk from FDT initrd (real hardware)
         sockinit();

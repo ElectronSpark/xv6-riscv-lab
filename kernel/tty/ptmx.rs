@@ -6,7 +6,7 @@
 //! closed the tty and pair are freed.
 //!
 //! - `/dev/ptmx` (major 5, minor 2): opening allocates a new PTY pair
-//!   (via `kernel/tty/pty.rs`'s `pty_alloc`). The returned fd is the
+//!   (via `kernel/tty/pty.rs`'s `Pty::alloc`). The returned fd is the
 //!   master side. The slave index is obtained via the `TIOCGPTN`
 //!   ioctl; the slave device appears at `/dev/pts/<index>`.
 //! - `/dev/pts/N` (major 136, minor N+1): a character device whose
@@ -14,9 +14,9 @@
 //!   PTY slave tty. Each open fd holds a pair ref.
 //!
 //! Lifecycle:
-//! - ptmx open -> `pty_alloc()`, `pair.refcount = 1`
+//! - ptmx open -> `Pty::alloc()`, `pair.refcount = 1`
 //! - pts open -> `pair.refcount += 1`
-//! - any close -> `pair.refcount -= 1`; if 0 -> [`pty_pair_destroy`]
+//! - any close -> `pair.refcount -= 1`; if 0 -> [`PtyPair::destroy`]
 //! - master close -> also: `tty_hangup`, `cdev_unregister` (which
 //!   removes the devtmpfs node via `dev->devname`)
 //!
@@ -91,7 +91,10 @@ fn slab_free(obj: *mut c_void) {
 // (`kernel/tty/pty.rs`, Phase 2 Wave 10) APIs called from here are
 // ordinary same-crate Rust items -- called directly through their
 // module paths below rather than re-declared as `extern "C"`.
-use super::pty::{pty_alloc, pty_master_read, pty_master_write};
+// NO-STANDALONE-FN: `pty_alloc`/`pty_master_read`/`pty_master_write`
+// relocated to `Pty::alloc`/`Pty::master_read`/`Pty::master_write`
+// (kernel/tty/pty.rs).
+use super::pty::Pty;
 use super::tty::Tty;
 
 // ===========================================================================
@@ -138,7 +141,7 @@ macro_rules! ptmx_assert_errno {
                 "ASSERTION_FAILURE {}:{}: In function '{}':",
                 "kernel/tty/ptmx.rs",
                 line!(),
-                "ptmxinit",
+                "PtyPair::init",
             );
             crate::kprintln!($msg, $errno);
             __panic_end();
@@ -165,11 +168,11 @@ macro_rules! ptmx_assert_errno {
 /// original read them outside the lock: `slave`/`slave_cdev` are device
 /// registration state, `index` is immutable after setup.
 #[repr(C)]
-struct PtyPair {
+pub(crate) struct PtyPair {
     /// Lock-owned mutable state (`refcount`/`master_open`/`cdev_live`).
     /// Embedded at offset 0 -> its `spinlock_t` is the pair's first byte.
     inner: SpinLock<PtyInner>,
-    /// The slave tty (allocated by `pty_alloc`). Non-guarded: set once.
+    /// The slave tty (allocated by `Pty::alloc`). Non-guarded: set once.
     slave: *mut tty,
     /// Registered cdev for `/dev/pts/N`. Non-guarded: reached by
     /// `container_of` via `offset_of!(PtyPair, slave_cdev)` (layout-
@@ -223,7 +226,7 @@ const _: () = {
 /// redeclare this tiny wrapper per file -- see e.g. `irq_core.rs`'s
 /// `CacheCell`, `kernel/tty/tty.rs`'s own copy).
 struct SyncCell<T>(UnsafeCell<MaybeUninit<T>>);
-// SAFETY: `PTY_PAIR_CACHE`'s storage is written once by `ptmxinit()`
+// SAFETY: `PTY_PAIR_CACHE`'s storage is written once by `PtyPair::init()`
 // before any other entry point runs, then only ever touched through the
 // C kernel's own synchronised primitives (`slab_alloc`'s internal
 // locking). `PTY_TABLE` (the other former user of this pattern) is now a
@@ -240,9 +243,12 @@ impl<T> SyncCell<T> {
 }
 
 static PTY_PAIR_CACHE: SyncCell<slab_cache_t> = SyncCell::uninit();
-#[inline(always)]
-fn pty_pair_cache_ptr() -> *mut slab_cache_t {
-    PTY_PAIR_CACHE.get()
+
+impl PtyPair {
+    #[inline(always)]
+    fn cache_ptr() -> *mut slab_cache_t {
+        PTY_PAIR_CACHE.get()
+    }
 }
 
 /// `static spinlock_t ptmx_lock;` + `static struct pty_pair
@@ -264,78 +270,80 @@ static mut PTMX_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 // Refcount helpers.
 // ===========================================================================
 
-/// Drop one reference. Returns `true` if this was the LAST reference
-/// and the caller must call [`pty_pair_destroy`].
-///
-/// # Safety
-/// `pair` must be a live `*mut PtyPair`.
-unsafe fn pty_pair_put(pair: *mut PtyPair) -> bool {
-    // SAFETY: caller guarantees `pair` is live (fn doc).
-    let mut p = unsafe { (*pair).inner.lock() };
-    p.refcount -= 1;
-    p.refcount <= 0
-}
+impl PtyPair {
+    /// Drop one reference. Returns `true` if this was the LAST reference
+    /// and the caller must call [`PtyPair::destroy`].
+    ///
+    /// # Safety
+    /// `pair` must be a live `*mut PtyPair`.
+    unsafe fn put(pair: *mut PtyPair) -> bool {
+        // SAFETY: caller guarantees `pair` is live (fn doc).
+        let mut p = unsafe { (*pair).inner.lock() };
+        p.refcount -= 1;
+        p.refcount <= 0
+    }
 
-/// # Safety
-/// `pair` must be a live, exclusively-teardownable `*mut PtyPair` (no
-/// other reference outstanding -- the caller must have observed
-/// [`pty_pair_put`] return `true`).
-unsafe fn pty_pair_destroy(pair: *mut PtyPair) {
-    // Clear the table slot so the index can be reused.
-    {
-        let mut table = PTY_TABLE.lock();
-        // SAFETY: `index` is always in `[0, MAX_PTYS)` (only ever set
-        // from the scan loop in `ptmx_open_file`).
-        let idx = unsafe { (*pair).index as usize };
-        if table[idx] == pair {
-            table[idx] = core::ptr::null_mut();
+    /// # Safety
+    /// `pair` must be a live, exclusively-teardownable `*mut PtyPair` (no
+    /// other reference outstanding -- the caller must have observed
+    /// [`PtyPair::put`] return `true`).
+    unsafe fn destroy(pair: *mut PtyPair) {
+        // Clear the table slot so the index can be reused.
+        {
+            let mut table = PTY_TABLE.lock();
+            // SAFETY: `index` is always in `[0, MAX_PTYS)` (only ever set
+            // from the scan loop in `PtyPair::ptmx_open_file`).
+            let idx = unsafe { (*pair).index as usize };
+            if table[idx] == pair {
+                table[idx] = core::ptr::null_mut();
+            }
         }
-    }
 
-    // Free the tty (closes pipe ends, releases slab).
-    // SAFETY: `pair` is caller-guaranteed live and exclusively owned
-    // (fn doc).
-    let slave = unsafe { (*pair).slave };
-    if !slave.is_null() {
-        unsafe {
-            Tty::unref(slave);
-            (*pair).slave = core::ptr::null_mut();
+        // Free the tty (closes pipe ends, releases slab).
+        // SAFETY: `pair` is caller-guaranteed live and exclusively owned
+        // (fn doc).
+        let slave = unsafe { (*pair).slave };
+        if !slave.is_null() {
+            unsafe {
+                Tty::unref(slave);
+                (*pair).slave = core::ptr::null_mut();
+            }
         }
+
+        unsafe { slab_free(pair as *mut c_void) };
     }
 
-    unsafe { slab_free(pair as *mut c_void) };
-}
+    /// Build the devtmpfs name `"pts/<idx>"` into `out` (NUL-terminated).
+    /// `out` must be at least 16 bytes (mirrors the C original's
+    /// contract). Returns the string length excluding the NUL.
+    fn pts_name(out: &mut [u8], idx: i32) -> usize {
+        let prefix = b"pts/";
+        let mut n = 0usize;
+        for &b in prefix {
+            out[n] = b;
+            n += 1;
+        }
 
-/// Build the devtmpfs name `"pts/<idx>"` into `out` (NUL-terminated).
-/// `out` must be at least 16 bytes (mirrors the C original's
-/// contract). Returns the string length excluding the NUL.
-fn pts_name(out: &mut [u8], idx: i32) -> usize {
-    let prefix = b"pts/";
-    let mut n = 0usize;
-    for &b in prefix {
-        out[n] = b;
-        n += 1;
-    }
-
-    let mut digits = [0u8; 8];
-    let mut di = 0usize;
-    if idx == 0 {
-        digits[di] = b'0';
-        di += 1;
-    } else {
-        let mut v = idx;
-        while v > 0 {
-            digits[di] = b'0' + (v % 10) as u8;
+        let mut digits = [0u8; 8];
+        let mut di = 0usize;
+        if idx == 0 {
+            digits[di] = b'0';
             di += 1;
-            v /= 10;
+        } else {
+            let mut v = idx;
+            while v > 0 {
+                digits[di] = b'0' + (v % 10) as u8;
+                di += 1;
+                v /= 10;
+            }
         }
+        for i in (0..di).rev() {
+            out[n] = digits[i];
+            n += 1;
+        }
+        out[n] = 0;
+        n
     }
-    for i in (0..di).rev() {
-        out[n] = digits[i];
-        n += 1;
-    }
-    out[n] = 0;
-    n
 }
 
 // ===========================================================================
@@ -344,9 +352,13 @@ fn pts_name(out: &mut [u8], idx: i32) -> usize {
 // ===========================================================================
 
 /// `tty_read`/`tty_write`'s raw `i64` ("bytes moved, or negative
-/// errno") — and `pty_master_read`/`_write`'s equivalent `isize` — to
+/// errno") — and `Pty::master_read`/`_write`'s equivalent `isize` — to
 /// [`KResult<isize>`], preserving the exact errno via [`Errno::Raw`]
 /// passthrough (results this adapter layer doesn't own).
+///
+/// FLOOR: small generic result adaptor, not PtyPair-specific state or
+/// behavior -- left as a free fn (matches `pty.rs`'s
+/// `pipe_ret_to_result` floor).
 #[inline]
 fn count_result(ret: isize) -> KResult<isize> {
     if ret < 0 {
@@ -363,14 +375,14 @@ fn count_result(ret: isize) -> KResult<isize> {
 /// their null-slot dispatch outcomes exactly).
 struct PtsSlaveFileOps;
 
-/// The single shared instance `pts_open_file` installs.
+/// The single shared instance `PtyPair::pts_open_file` installs.
 static PTS_SLAVE_FILE_OPS: PtsSlaveFileOps = PtsSlaveFileOps;
 
 impl FileOps for PtsSlaveFileOps {
     unsafe fn read(&self, file: *mut vfs_file, buf: *mut c_char, count: usize, user: bool)
         -> KResult<isize> {
         // SAFETY: `file` is a live, open `vfs_file` (VFS contract); its
-        // `private_data` was set by `pts_open_file` below.
+        // `private_data` was set by `PtyPair::pts_open_file` below.
         let pair = unsafe { (*file).private_data } as *mut PtyPair;
         if pair.is_null() || unsafe { (*pair).slave.is_null() } {
             return Err(Errno::Io);
@@ -411,12 +423,12 @@ impl FileOps for PtsSlaveFileOps {
         unsafe {
             (*file).private_data = core::ptr::null_mut();
 
-            // Drop the tty-level "open" ref taken in `pts_open_file`.
+            // Drop the tty-level "open" ref taken in `PtyPair::pts_open_file`.
             Tty::close((*pair).slave);
 
             // Drop the pair ref -- may destroy.
-            if pty_pair_put(pair) {
-                pty_pair_destroy(pair);
+            if PtyPair::put(pair) {
+                PtyPair::destroy(pair);
             }
         }
         Ok(())
@@ -435,7 +447,7 @@ impl FileOps for PtsSlaveFileOps {
 /// outcomes exactly -- slave I/O goes through `FileOps` instead).
 struct PtsCdevOps;
 
-/// The single shared instance `ptmx_open_file` installs on every
+/// The single shared instance `PtyPair::ptmx_open_file` installs on every
 /// freshly-allocated pair's `slave_cdev`.
 static PTS_CDEV_OPS: PtsCdevOps = PtsCdevOps;
 
@@ -451,48 +463,50 @@ impl CdevOps for PtsCdevOps {
         // SAFETY: dispatch contract (`open_cdev`) -- `cdev`/`file` are
         // both live; `cdev` is a `pair.slave_cdev` (the only cdev this
         // implementor is ever installed on).
-        Some(unsafe { pts_open_file(cdev, file) })
+        Some(unsafe { PtyPair::pts_open_file(cdev, file) })
     }
 }
 
-/// Called by `__vfs_open_cdev` (via [`PtsCdevOps::open_file`]).
-/// Installs the slave file ops on the `vfs_file` so that the VFS
-/// manages the fd lifecycle. The cdev kobject ref is released by
-/// `__vfs_open_cdev` immediately after this returns (because we set
-/// `file->ops`).
-unsafe fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
-    // SAFETY: `cdev` is caller-guaranteed to be `&pair.slave_cdev` for
-    // some live `PtyPair` (the only cdev this callback is ever
-    // installed on, in `ptmx_open_file` below).
-    let pair = unsafe {
-        crate::mm::cffi::container_of::<PtyPair, cdev_t>(cdev, core::mem::offset_of!(PtyPair, slave_cdev))
-    };
+impl PtyPair {
+    /// Called by `__vfs_open_cdev` (via [`PtsCdevOps::open_file`]).
+    /// Installs the slave file ops on the `vfs_file` so that the VFS
+    /// manages the fd lifecycle. The cdev kobject ref is released by
+    /// `__vfs_open_cdev` immediately after this returns (because we set
+    /// `file->ops`).
+    unsafe fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
+        // SAFETY: `cdev` is caller-guaranteed to be `&pair.slave_cdev` for
+        // some live `PtyPair` (the only cdev this callback is ever
+        // installed on, in `PtyPair::ptmx_open_file` below).
+        let pair = unsafe {
+            crate::mm::cffi::container_of::<PtyPair, cdev_t>(cdev, core::mem::offset_of!(PtyPair, slave_cdev))
+        };
 
-    // Reject open after master closed (device is being torn down).
-    {
-        // SAFETY: `pair` is live (`container_of` of a registered slave
-        // cdev; only installed on live pairs — see fn doc).
-        let mut p = unsafe { (*pair).inner.lock() };
-        if p.master_open == 0 {
-            return -ENXIO;
+        // Reject open after master closed (device is being torn down).
+        {
+            // SAFETY: `pair` is live (`container_of` of a registered slave
+            // cdev; only installed on live pairs — see fn doc).
+            let mut p = unsafe { (*pair).inner.lock() };
+            if p.master_open == 0 {
+                return -ENXIO;
+            }
+            p.refcount += 1;
         }
-        p.refcount += 1;
-    }
 
-    // tty-level open (bumps tty refcount).
-    let ret = unsafe { Tty::open((*pair).slave) };
-    if ret != 0 {
-        if unsafe { pty_pair_put(pair) } {
-            unsafe { pty_pair_destroy(pair) };
+        // tty-level open (bumps tty refcount).
+        let ret = unsafe { Tty::open((*pair).slave) };
+        if ret != 0 {
+            if unsafe { PtyPair::put(pair) } {
+                unsafe { PtyPair::destroy(pair) };
+            }
+            return ret;
         }
-        return ret;
-    }
 
-    unsafe {
-        (*file).ops = Some(&PTS_SLAVE_FILE_OPS);
-        (*file).private_data = pair as *mut c_void;
+        unsafe {
+            (*file).ops = Some(&PTS_SLAVE_FILE_OPS);
+            (*file).private_data = pair as *mut c_void;
+        }
+        0
     }
-    0
 }
 
 
@@ -507,7 +521,7 @@ unsafe fn pts_open_file(cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
 /// their null-slot dispatch outcomes exactly).
 struct PtmxMasterFileOps;
 
-/// The single shared instance `ptmx_open_file` installs.
+/// The single shared instance `PtyPair::ptmx_open_file` installs.
 static PTMX_MASTER_FILE_OPS: PtmxMasterFileOps = PtmxMasterFileOps;
 
 impl FileOps for PtmxMasterFileOps {
@@ -518,7 +532,7 @@ impl FileOps for PtmxMasterFileOps {
             return Err(Errno::NxIo);
         }
         count_result(unsafe {
-            pty_master_read((*pair).slave, buf, count, user as crate::bindings::bool_)
+            Pty::master_read((*pair).slave, buf, count, user as crate::bindings::bool_)
         })
     }
 
@@ -529,113 +543,115 @@ impl FileOps for PtmxMasterFileOps {
             return Err(Errno::NxIo);
         }
         count_result(unsafe {
-            pty_master_write((*pair).slave, buf, count, user as crate::bindings::bool_)
+            Pty::master_write((*pair).slave, buf, count, user as crate::bindings::bool_)
         })
     }
 
     unsafe fn ioctl(&self, file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> Option<c_int> {
-        Some(ptmx_fops_ioctl(file, cmd, arg))
+        Some(PtyPair::ptmx_ioctl(file, cmd, arg))
     }
 
     unsafe fn poll(&self, file: *mut vfs_file, events: c_short) -> Option<c_int> {
-        Some(ptmx_fops_poll(file, events))
+        Some(PtyPair::ptmx_poll(file, events))
     }
 
     unsafe fn release(&self, inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
-        ptmx_fops_release(inode, file);
+        PtyPair::ptmx_release(inode, file);
         Ok(())
     }
 }
 
-fn ptmx_fops_release(_inode: *mut vfs_inode, file: *mut vfs_file) {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() {
-        return;
-    }
-    unsafe { (*file).private_data = core::ptr::null_mut() };
+impl PtyPair {
+    fn ptmx_release(_inode: *mut vfs_inode, file: *mut vfs_file) {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() {
+            return;
+        }
+        unsafe { (*file).private_data = core::ptr::null_mut() };
 
-    // ---- master-specific teardown ----
-    let do_unregister;
-    {
-        // SAFETY: `pair` is live (checked non-null above; taken from a
-        // still-open master `vfs_file`'s `private_data`).
-        let mut p = unsafe { (*pair).inner.lock() };
-        p.master_open = 0;
-        do_unregister = p.cdev_live != 0;
-        p.cdev_live = 0;
-    }
+        // ---- master-specific teardown ----
+        let do_unregister;
+        {
+            // SAFETY: `pair` is live (checked non-null above; taken from a
+            // still-open master `vfs_file`'s `private_data`).
+            let mut p = unsafe { (*pair).inner.lock() };
+            p.master_open = 0;
+            do_unregister = p.cdev_live != 0;
+            p.cdev_live = 0;
+        }
 
-    // Hang up the slave tty so any blocked readers/writers unblock.
-    let slave = unsafe { (*pair).slave };
-    if !slave.is_null() {
-        unsafe { Tty::hangup(slave) };
-    }
+        // Hang up the slave tty so any blocked readers/writers unblock.
+        let slave = unsafe { (*pair).slave };
+        if !slave.is_null() {
+            unsafe { Tty::hangup(slave) };
+        }
 
-    // Unregister the slave cdev. `device_unregister()` also removes
-    // `/dev/pts/N` from devtmpfs via `dev->devname`. Since all slave
-    // fds use `open_file` (no file holds a kobject ref), the kobject
-    // drops to 0 immediately and `pts_cdev_release` fires (a no-op).
-    // Existing slave fds continue to work because they use
-    // `FileOps` directly.
-    if do_unregister {
-        unsafe { cdev_unregister(&raw mut (*pair).slave_cdev) };
-    }
+        // Unregister the slave cdev. `device_unregister()` also removes
+        // `/dev/pts/N` from devtmpfs via `dev->devname`. Since all slave
+        // fds use `open_file` (no file holds a kobject ref), the kobject
+        // drops to 0 immediately and `pts_cdev_release` fires (a no-op).
+        // Existing slave fds continue to work because they use
+        // `FileOps` directly.
+        if do_unregister {
+            unsafe { cdev_unregister(&raw mut (*pair).slave_cdev) };
+        }
 
-    // Drop the pair ref -- may destroy.
-    if unsafe { pty_pair_put(pair) } {
-        unsafe { pty_pair_destroy(pair) };
-    }
-}
-
-fn ptmx_fops_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() {
-        return -ENXIO;
-    }
-
-    if cmd == TIOCGPTN {
-        // Return the slave PTY index (what N in /dev/pts/N).
-        let idxp = arg as *mut c_int;
-        unsafe { *idxp = (*pair).index };
-        return 0;
-    }
-
-    // Forward termios / winsize ioctls to the slave tty.
-    let slave = unsafe { (*pair).slave };
-    if !slave.is_null() {
-        return unsafe { Tty::ioctl(slave, cmd, arg) };
-    }
-    -ENOTTY
-}
-
-fn ptmx_fops_poll(file: *mut vfs_file, events: c_short) -> c_int {
-    let pair = unsafe { (*file).private_data } as *mut PtyPair;
-    if pair.is_null() || unsafe { (*pair).slave.is_null() } {
-        return 0;
-    }
-
-    let mut revents: c_short = 0;
-
-    // Master is readable when the slave's output pipe has data.
-    if events & POLLIN != 0 {
-        // SAFETY: `pair.slave` is a live tty for `pair`'s lifetime.
-        let outp = unsafe { (*(*pair).slave).output_pipe };
-        if !outp.is_null() {
-            // SAFETY: `outp` is a live pipe.
-            let nw = unsafe { load_acquire_u32(&raw const (*outp).nwrite) };
-            let nr = unsafe { load_acquire_u32(&raw const (*outp).nread) };
-            if nw.wrapping_sub(nr) > 0 {
-                revents |= POLLIN;
-            }
+        // Drop the pair ref -- may destroy.
+        if unsafe { PtyPair::put(pair) } {
+            unsafe { PtyPair::destroy(pair) };
         }
     }
 
-    // Master is always writable (slave input pipe has space).
-    if events & POLLOUT != 0 {
-        revents |= POLLOUT;
+    fn ptmx_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() {
+            return -ENXIO;
+        }
+
+        if cmd == TIOCGPTN {
+            // Return the slave PTY index (what N in /dev/pts/N).
+            let idxp = arg as *mut c_int;
+            unsafe { *idxp = (*pair).index };
+            return 0;
+        }
+
+        // Forward termios / winsize ioctls to the slave tty.
+        let slave = unsafe { (*pair).slave };
+        if !slave.is_null() {
+            return unsafe { Tty::ioctl(slave, cmd, arg) };
+        }
+        -ENOTTY
     }
 
-    revents as c_int
+    fn ptmx_poll(file: *mut vfs_file, events: c_short) -> c_int {
+        let pair = unsafe { (*file).private_data } as *mut PtyPair;
+        if pair.is_null() || unsafe { (*pair).slave.is_null() } {
+            return 0;
+        }
+
+        let mut revents: c_short = 0;
+
+        // Master is readable when the slave's output pipe has data.
+        if events & POLLIN != 0 {
+            // SAFETY: `pair.slave` is a live tty for `pair`'s lifetime.
+            let outp = unsafe { (*(*pair).slave).output_pipe };
+            if !outp.is_null() {
+                // SAFETY: `outp` is a live pipe.
+                let nw = unsafe { load_acquire_u32(&raw const (*outp).nwrite) };
+                let nr = unsafe { load_acquire_u32(&raw const (*outp).nread) };
+                if nw.wrapping_sub(nr) > 0 {
+                    revents |= POLLIN;
+                }
+            }
+        }
+
+        // Master is always writable (slave input pipe has space).
+        if events & POLLOUT != 0 {
+            revents |= POLLOUT;
+        }
+
+        revents as c_int
+    }
 }
 
 // ===========================================================================
@@ -647,7 +663,7 @@ fn ptmx_fops_poll(file: *mut vfs_file, events: c_short) -> c_int {
 /// work, cdev open/release are no-ops).
 struct PtmxCdevOps;
 
-/// The single shared instance `ptmxinit` installs.
+/// The single shared instance `PtyPair::init` installs.
 static PTMX_CDEV_OPS: PtmxCdevOps = PtmxCdevOps;
 
 impl CdevOps for PtmxCdevOps {
@@ -660,115 +676,117 @@ impl CdevOps for PtmxCdevOps {
     unsafe fn open_file(&self, cdev: *mut cdev_t, file: *mut vfs_file) -> Option<c_int> {
         // SAFETY: dispatch contract (`open_cdev`) -- `cdev`/`file` are
         // both live.
-        Some(unsafe { ptmx_open_file(cdev, file) })
+        Some(unsafe { PtyPair::ptmx_open_file(cdev, file) })
     }
 }
 
-unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
-    // Allocate a PTY index -- reuse freed slots.
-    let idx: i32;
-    {
-        let mut table = PTY_TABLE.lock();
-        let mut found: i32 = -1;
-        for (i, slot) in table.iter().enumerate() {
-            if slot.is_null() {
-                found = i as i32;
-                break;
+impl PtyPair {
+    unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
+        // Allocate a PTY index -- reuse freed slots.
+        let idx: i32;
+        {
+            let mut table = PTY_TABLE.lock();
+            let mut found: i32 = -1;
+            for (i, slot) in table.iter().enumerate() {
+                if slot.is_null() {
+                    found = i as i32;
+                    break;
+                }
             }
+            if found < 0 {
+                return -ENOSPC;
+            }
+            // Reserve the slot temporarily (non-null sentinel) so
+            // concurrent opens skip it while we finish setting it up.
+            table[found as usize] = core::ptr::without_provenance_mut(1);
+            idx = found;
         }
-        if found < 0 {
-            return -ENOSPC;
+
+        // Allocate the pair structure.
+        let pair = unsafe { slab_alloc(PtyPair::cache_ptr()) } as *mut PtyPair;
+        if pair.is_null() {
+            PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
+            return -ENOMEM;
         }
-        // Reserve the slot temporarily (non-null sentinel) so
-        // concurrent opens skip it while we finish setting it up.
-        table[found as usize] = core::ptr::without_provenance_mut(1);
-        idx = found;
+
+        // SAFETY: `pair` is freshly allocated, exclusively-owned slab
+        // memory; every field is written before any other code can observe
+        // `pair` (matches the C original's `memset(pair, 0, ...)` followed
+        // by explicit field assignment -- plain assignment through a raw
+        // pointer is a pure store, never a read of the old value, so no
+        // pre-zeroing is required for the scalar/pointer fields; the
+        // embedded `cdev_t` is written as an explicit zeroed value below
+        // before any bitfield accessor -- which does read-modify-write --
+        // touches it).
+        unsafe {
+            // N-R7i: build the lock-guarded interior, then move a fully
+            // initialised `SpinLock<PtyInner>` into the (uninitialised) slab
+            // slot via `ptr::write` (no drop of the old garbage). Done before
+            // `pair` is published to `PTY_TABLE`/`file->private_data`, so no
+            // other hart can race the acquire.
+            core::ptr::write(
+                &raw mut (*pair).inner,
+                SpinLock::new(c"pty_pair", PtyInner { refcount: 1, master_open: 1, cdev_live: 0 }),
+            );
+            // Non-guarded plain fields: set once here, read lock-free after.
+            (*pair).slave = core::ptr::null_mut();
+            (*pair).slave_cdev = MaybeUninit::zeroed().assume_init();
+            (*pair).index = idx;
+        }
+
+        // Build slave name "pts/N".
+        let mut name = [0u8; 32];
+        PtyPair::pts_name(&mut name, idx);
+
+        // Allocate the slave tty.
+        let mut slave: *mut tty = core::ptr::null_mut();
+        let dev_minor = idx + 1; // device framework rejects minor 0
+        let ret = unsafe { Pty::alloc(&mut slave, name.as_ptr() as *const c_char, dev_minor) };
+        if ret != 0 {
+            PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
+            unsafe { slab_free(pair as *mut c_void) };
+            return ret;
+        }
+        unsafe { (*pair).slave = slave };
+
+        // Set up the slave cdev with `open_file` so slave fds get file ops.
+        unsafe {
+            (*pair).slave_cdev.dev.major = PTS_MAJOR;
+            (*pair).slave_cdev.dev.minor = dev_minor;
+            (*pair).slave_cdev.flags.set_readable(1);
+            (*pair).slave_cdev.flags.set_writable(1);
+            (*pair).slave_cdev.ops = Some(&PTS_CDEV_OPS);
+            // devname/devmode so `device_register()` auto-creates the
+            // devtmpfs node.
+            (*pair).slave_cdev.dev.devname = (*slave).name.as_ptr(); // e.g. "pts/0"
+            (*pair).slave_cdev.dev.devmode = (S_IFCHR | 0o620) as mode_t;
+        }
+
+        let ret = unsafe { cdev_register(&raw mut (*pair).slave_cdev) };
+        if ret != 0 {
+            crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
+            unsafe { Tty::unref(slave) };
+            PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
+            unsafe { slab_free(pair as *mut c_void) };
+            return ret;
+        }
+        // Guarded field: `pair` is still private (not yet in `PTY_TABLE` /
+        // `file->private_data`), but access goes through the lock to honour
+        // the lock-owns-data invariant.
+        // SAFETY: `pair` is live, freshly allocated above.
+        unsafe { (*pair).inner.lock().cdev_live = 1 };
+
+        // Record in global table.
+        PTY_TABLE.lock()[idx as usize] = pair;
+
+        // Install master file ops on the opened file.
+        unsafe {
+            (*file).ops = Some(&PTMX_MASTER_FILE_OPS);
+            (*file).private_data = pair as *mut c_void;
+        }
+
+        0
     }
-
-    // Allocate the pair structure.
-    let pair = unsafe { slab_alloc(pty_pair_cache_ptr()) } as *mut PtyPair;
-    if pair.is_null() {
-        PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
-        return -ENOMEM;
-    }
-
-    // SAFETY: `pair` is freshly allocated, exclusively-owned slab
-    // memory; every field is written before any other code can observe
-    // `pair` (matches the C original's `memset(pair, 0, ...)` followed
-    // by explicit field assignment -- plain assignment through a raw
-    // pointer is a pure store, never a read of the old value, so no
-    // pre-zeroing is required for the scalar/pointer fields; the
-    // embedded `cdev_t` is written as an explicit zeroed value below
-    // before any bitfield accessor -- which does read-modify-write --
-    // touches it).
-    unsafe {
-        // N-R7i: build the lock-guarded interior, then move a fully
-        // initialised `SpinLock<PtyInner>` into the (uninitialised) slab
-        // slot via `ptr::write` (no drop of the old garbage). Done before
-        // `pair` is published to `PTY_TABLE`/`file->private_data`, so no
-        // other hart can race the acquire.
-        core::ptr::write(
-            &raw mut (*pair).inner,
-            SpinLock::new(c"pty_pair", PtyInner { refcount: 1, master_open: 1, cdev_live: 0 }),
-        );
-        // Non-guarded plain fields: set once here, read lock-free after.
-        (*pair).slave = core::ptr::null_mut();
-        (*pair).slave_cdev = MaybeUninit::zeroed().assume_init();
-        (*pair).index = idx;
-    }
-
-    // Build slave name "pts/N".
-    let mut name = [0u8; 32];
-    pts_name(&mut name, idx);
-
-    // Allocate the slave tty.
-    let mut slave: *mut tty = core::ptr::null_mut();
-    let dev_minor = idx + 1; // device framework rejects minor 0
-    let ret = unsafe { pty_alloc(&mut slave, name.as_ptr() as *const c_char, dev_minor) };
-    if ret != 0 {
-        PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
-        unsafe { slab_free(pair as *mut c_void) };
-        return ret;
-    }
-    unsafe { (*pair).slave = slave };
-
-    // Set up the slave cdev with `open_file` so slave fds get file ops.
-    unsafe {
-        (*pair).slave_cdev.dev.major = PTS_MAJOR;
-        (*pair).slave_cdev.dev.minor = dev_minor;
-        (*pair).slave_cdev.flags.set_readable(1);
-        (*pair).slave_cdev.flags.set_writable(1);
-        (*pair).slave_cdev.ops = Some(&PTS_CDEV_OPS);
-        // devname/devmode so `device_register()` auto-creates the
-        // devtmpfs node.
-        (*pair).slave_cdev.dev.devname = (*slave).name.as_ptr(); // e.g. "pts/0"
-        (*pair).slave_cdev.dev.devmode = (S_IFCHR | 0o620) as mode_t;
-    }
-
-    let ret = unsafe { cdev_register(&raw mut (*pair).slave_cdev) };
-    if ret != 0 {
-        crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
-        unsafe { Tty::unref(slave) };
-        PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
-        unsafe { slab_free(pair as *mut c_void) };
-        return ret;
-    }
-    // Guarded field: `pair` is still private (not yet in `PTY_TABLE` /
-    // `file->private_data`), but access goes through the lock to honour
-    // the lock-owns-data invariant.
-    // SAFETY: `pair` is live, freshly allocated above.
-    unsafe { (*pair).inner.lock().cdev_live = 1 };
-
-    // Record in global table.
-    PTY_TABLE.lock()[idx as usize] = pair;
-
-    // Install master file ops on the opened file.
-    unsafe {
-        (*file).ops = Some(&PTMX_MASTER_FILE_OPS);
-        (*file).private_data = pair as *mut c_void;
-    }
-
-    0
 }
 
 
@@ -776,39 +794,41 @@ unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
 // Initialization.
 // ===========================================================================
 
-pub(crate) extern "C" fn ptmxinit() {
-    // SAFETY: `PTY_PAIR_CACHE`/`PTMX_CDEV` are written here (their first
-    // use) before any other `ptmx_*`/`pts_*` entry point can run
-    // (mirrors the C original's `start_kernel.c`-ordered single call).
-    // `PTY_TABLE` needs no such runtime init -- its `SpinLock::new` is a
-    // `const fn`, already in the initialised state.
-    let ret = unsafe {
-        slab_cache_init(
-            pty_pair_cache_ptr(),
-            c"pty_pair".as_ptr() as *mut c_char,
-            core::mem::size_of::<PtyPair>(),
-            crate::bindings::SLAB_FLAG_STATIC as u64,
-        )
-    };
-    ptmx_assert_errno!(ret == 0, "ptmxinit: slab_cache_init failed: {}", ret);
+impl PtyPair {
+    pub(crate) extern "C" fn init() {
+        // SAFETY: `PTY_PAIR_CACHE`/`PTMX_CDEV` are written here (their first
+        // use) before any other `ptmx_*`/`pts_*` entry point can run
+        // (mirrors the C original's `start_kernel.c`-ordered single call).
+        // `PTY_TABLE` needs no such runtime init -- its `SpinLock::new` is a
+        // `const fn`, already in the initialised state.
+        let ret = unsafe {
+            slab_cache_init(
+                PtyPair::cache_ptr(),
+                c"pty_pair".as_ptr() as *mut c_char,
+                core::mem::size_of::<PtyPair>(),
+                crate::bindings::SLAB_FLAG_STATIC as u64,
+            )
+        };
+        ptmx_assert_errno!(ret == 0, "PtyPair::init: slab_cache_init failed: {}", ret);
 
-    unsafe {
-        let cdev = PTMX_CDEV.as_mut_ptr();
-        (*cdev).dev.major = PTMX_MAJOR;
-        (*cdev).dev.minor = PTMX_MINOR;
-        (*cdev).dev.devname = c"ptmx".as_ptr();
-        (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
-        (*cdev).flags.set_readable(1);
-        (*cdev).flags.set_writable(1);
-        (*cdev).ops = Some(&PTMX_CDEV_OPS);
+        unsafe {
+            let cdev = PTMX_CDEV.as_mut_ptr();
+            (*cdev).dev.major = PTMX_MAJOR;
+            (*cdev).dev.minor = PTMX_MINOR;
+            (*cdev).dev.devname = c"ptmx".as_ptr();
+            (*cdev).dev.devmode = (S_IFCHR | 0o666) as mode_t;
+            (*cdev).flags.set_readable(1);
+            (*cdev).flags.set_writable(1);
+            (*cdev).ops = Some(&PTMX_CDEV_OPS);
 
-        let ret = cdev_register(cdev);
-        ptmx_assert_errno!(ret == 0, "ptmxinit: cdev_register failed: {}", ret);
+            let ret = cdev_register(cdev);
+            ptmx_assert_errno!(ret == 0, "PtyPair::init: cdev_register failed: {}", ret);
+        }
+
+        crate::kprintln!(
+            "ptmx: /dev/ptmx registered (major {}, minor {})",
+            PTMX_MAJOR,
+            PTMX_MINOR,
+        );
     }
-
-    crate::kprintln!(
-        "ptmx: /dev/ptmx registered (major {}, minor {})",
-        PTMX_MAJOR,
-        PTMX_MINOR,
-    );
 }

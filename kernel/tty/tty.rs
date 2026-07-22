@@ -40,7 +40,7 @@
 //! interrupt handler directly): `console.rs`'s `consoleintr()` (real
 //! interrupt context) only stages bytes into a lock-free ring buffer;
 //! a dedicated kernel thread (`console_tty_input_thread`) drains that
-//! ring and calls `tty_input()`. `pty.rs`'s `pty_master_write()` (the
+//! ring and calls `tty_input()`. `pty.rs`'s `Pty::master_write()` (the
 //! other caller) also always runs in the writing thread's context. So
 //! `tty_input()` sleeping under the covers (via `pipe_write`) is sound
 //! — there is no interrupt-context caller to violate a no-sleep rule.

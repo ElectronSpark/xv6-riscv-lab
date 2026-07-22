@@ -7,11 +7,11 @@
 //! the slave appears as output readable from the master.
 //!
 //! The master is just two pipes; the slave is a full `struct tty` that
-//! uses those pipes. `pty_alloc()` creates the pair. The master side
-//! is driven by `kernel/tty/ptmx.c` (still C, Wave 11), which holds
-//! the slave `tty` pointer and calls [`pty_master_read`] /
-//! [`pty_master_write`] directly — this file exports the same C ABI
-//! `ptmx.c` already links against.
+//! uses those pipes. [`Pty::alloc`] creates the pair. The master side
+//! is driven by `kernel/tty/ptmx.rs`, which holds the slave `tty`
+//! pointer and calls [`Pty::master_read`] / [`Pty::master_write`]
+//! directly — this file exports the same C ABI `ptmx.c` already links
+//! against.
 //!
 //! ```text
 //! master-write  ──►  slave tty_input()  (line discipline)
@@ -47,7 +47,7 @@ use crate::mm::either_copyin;
 // items (identical signatures). ABI-truth note: `tty_alloc`/`tty_input`
 // are real `unsafe extern "C" fn`s -- this file's former mirror declared
 // them `safe`, but both call sites already sit inside an `unsafe fn`
-// body (`pty_alloc`) or an explicit `unsafe { }` block, so no behavior
+// body (`Pty::alloc`) or an explicit `unsafe { }` block, so no behavior
 // changes.
 use crate::tty::tty::Tty;
 use crate::vfs::pipe::Pipe;
@@ -77,6 +77,10 @@ struct PtySlaveOps;
 /// into the [`TtyOps`] `KResult<usize>` convention, losslessly
 /// (`Errno::Raw` carries the exact negative value back across the
 /// dispatch boundary).
+///
+/// FLOOR: small generic result adaptor, not tied to any one type in
+/// this file -- left as a free fn (matches `ptmx.rs`'s `count_result`
+/// floor).
 #[inline]
 fn pipe_ret_to_result(r: i64) -> KResult<usize> {
     if r < 0 {
@@ -90,7 +94,7 @@ impl TtyOps for PtySlaveOps {
     /// Slave read <- pull from the input pipe (fed by master write).
     ///
     /// # Safety
-    /// `tty` must be a live slave `tty` allocated by [`pty_alloc`],
+    /// `tty` must be a live slave `tty` allocated by [`Pty::alloc`],
     /// whose `input_pipe` is non-null for the pty's lifetime; `buf`
     /// must point to at least `nr` writable bytes (the
     /// [`TtyOps::read`] contract).
@@ -102,7 +106,7 @@ impl TtyOps for PtySlaveOps {
     /// Slave write -> push into the output pipe (master can read it).
     ///
     /// # Safety
-    /// `tty` must be a live slave `tty` allocated by [`pty_alloc`],
+    /// `tty` must be a live slave `tty` allocated by [`Pty::alloc`],
     /// whose `output_pipe` is non-null for the pty's lifetime; `buf`
     /// must point to at least `nr` readable bytes (the
     /// [`TtyOps::write`] contract).
@@ -118,136 +122,147 @@ static PTY_SLAVE_OPS: PtySlaveOps = PtySlaveOps;
 // PTY master.
 // ===========================================================================
 
-/// Data from the master goes through the slave's line discipline via
-/// `tty_input()`.
-///
-/// # Safety
-/// `slave` must be a live `tty` (as allocated by [`pty_alloc`]). `buf`
-/// must point to at least `count` readable bytes if `user` is false,
-/// or be a valid userspace address range otherwise (checked internally
-/// by `either_copyin`).
-pub(crate) unsafe extern "C" fn pty_master_write(
-    slave: *mut tty,
-    buf: *const c_char,
-    count: usize,
-    user: bool_,
-) -> isize {
-    let mut kbuf = [0u8; 64];
-    let mut written: usize = 0;
+/// Zero-sized namespace for the PTY master-side entry points (P3-10d
+/// wave, NO-STANDALONE-FN pass): these operate on a slave `*mut tty`
+/// directly (there is no `PtyPair` in scope here -- `ptmx.rs` owns that
+/// type and passes `pair.slave` in), so `Pty` plays the same
+/// subject-less-ZST role `TtyDev` plays in `kernel/tty/tty_dev.rs`.
+pub(crate) struct Pty;
 
-    while written < count {
-        let batch = core::cmp::min(count - written, kbuf.len());
+impl Pty {
+    /// Data from the master goes through the slave's line discipline via
+    /// `tty_input()`.
+    ///
+    /// # Safety
+    /// `slave` must be a live `tty` (as allocated by [`Pty::alloc`]). `buf`
+    /// must point to at least `count` readable bytes if `user` is false,
+    /// or be a valid userspace address range otherwise (checked internally
+    /// by `either_copyin`).
+    pub(crate) unsafe extern "C" fn master_write(
+        slave: *mut tty,
+        buf: *const c_char,
+        count: usize,
+        user: bool_,
+    ) -> isize {
+        let mut kbuf = [0u8; 64];
+        let mut written: usize = 0;
 
-        if user != 0 {
-            // SAFETY: `either_copyin` validates the userspace range
-            // itself; `kbuf` is a valid `batch`-byte write target.
-            let r = unsafe {
-                either_copyin(
-                    kbuf.as_mut_ptr() as *mut c_void,
-                    1,
-                    (buf as u64).wrapping_add(written as u64),
-                    batch as u64,
-                )
-            };
-            if r < 0 {
-                return if written > 0 { written as isize } else { -EFAULT as isize };
+        while written < count {
+            let batch = core::cmp::min(count - written, kbuf.len());
+
+            if user != 0 {
+                // SAFETY: `either_copyin` validates the userspace range
+                // itself; `kbuf` is a valid `batch`-byte write target.
+                let r = unsafe {
+                    either_copyin(
+                        kbuf.as_mut_ptr() as *mut c_void,
+                        1,
+                        (buf as u64).wrapping_add(written as u64),
+                        batch as u64,
+                    )
+                };
+                if r < 0 {
+                    return if written > 0 { written as isize } else { -EFAULT as isize };
+                }
+            } else {
+                // SAFETY: caller guarantees `buf[..count]` is readable
+                // kernel memory when `user` is false (fn doc); `written +
+                // batch <= count` by construction of `batch` above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (buf as *const u8).add(written),
+                        kbuf.as_mut_ptr(),
+                        batch,
+                    );
+                }
             }
-        } else {
-            // SAFETY: caller guarantees `buf[..count]` is readable
-            // kernel memory when `user` is false (fn doc); `written +
-            // batch <= count` by construction of `batch` above.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (buf as *const u8).add(written),
-                    kbuf.as_mut_ptr(),
-                    batch,
-                );
+
+            // Feed through the slave's line discipline.
+            // SAFETY: `slave` is caller-guaranteed live (fn doc); `kbuf[..batch]`
+            // was just filled above by either path.
+            let ret = unsafe { Tty::input(slave, kbuf.as_ptr() as *const c_char, batch as u64) };
+            if ret < 0 {
+                return if written > 0 { written as isize } else { ret as isize };
             }
+            written += ret as usize;
         }
 
-        // Feed through the slave's line discipline.
-        // SAFETY: `slave` is caller-guaranteed live (fn doc); `kbuf[..batch]`
-        // was just filled above by either path.
-        let ret = unsafe { Tty::input(slave, kbuf.as_ptr() as *const c_char, batch as u64) };
-        if ret < 0 {
-            return if written > 0 { written as isize } else { ret as isize };
-        }
-        written += ret as usize;
+        written as isize
     }
 
-    written as isize
-}
-
-/// Read data that the slave has written (i.e. the slave's output pipe).
-///
-/// # Safety
-/// `slave` must be a live `tty` (as allocated by [`pty_alloc`]). `buf`
-/// must point to at least `count` writable bytes if `user` is false,
-/// or be a valid userspace address range otherwise (checked internally
-/// by `pipe_read`).
-pub(crate) unsafe extern "C" fn pty_master_read(
-    slave: *mut tty,
-    buf: *mut c_char,
-    count: usize,
-    user: bool_,
-) -> isize {
-    // SAFETY: forwarded straight to `pipe_read`, which validates `buf`
-    // itself per the userspace/kernel split encoded by `user`; `slave`
-    // is caller-guaranteed live (fn doc), so `(*slave).output_pipe` is
-    // a valid read.
-    unsafe { Pipe::pipe_read((*slave).output_pipe, buf, count as u64, user as c_int) as isize }
+    /// Read data that the slave has written (i.e. the slave's output pipe).
+    ///
+    /// # Safety
+    /// `slave` must be a live `tty` (as allocated by [`Pty::alloc`]). `buf`
+    /// must point to at least `count` writable bytes if `user` is false,
+    /// or be a valid userspace address range otherwise (checked internally
+    /// by `pipe_read`).
+    pub(crate) unsafe extern "C" fn master_read(
+        slave: *mut tty,
+        buf: *mut c_char,
+        count: usize,
+        user: bool_,
+    ) -> isize {
+        // SAFETY: forwarded straight to `pipe_read`, which validates `buf`
+        // itself per the userspace/kernel split encoded by `user`; `slave`
+        // is caller-guaranteed live (fn doc), so `(*slave).output_pipe` is
+        // a valid read.
+        unsafe { Pipe::pipe_read((*slave).output_pipe, buf, count as u64, user as c_int) as isize }
+    }
 }
 
 // ===========================================================================
 // Allocation.
 // ===========================================================================
 
-/// Create a PTY master/slave pair.
-///
-/// On success, `*slave_out` receives a pointer to the slave `tty`.
-/// `minor` (minor device number for `/dev/pts/N`) is unused: the
-/// devtmpfs node is created automatically by `device_register()` when
-/// the slave cdev is registered in `ptmx_open_file()`.
-///
-/// Returns 0 on success, negative errno on failure.
-///
-/// The caller interacts with the master side through
-/// [`pty_master_read`] / [`pty_master_write`], passing the slave `tty`
-/// pointer.
-///
-/// # Safety
-/// `slave_out` must be a valid, writable `*mut *mut tty`. `name` must
-/// be a valid, NUL-terminated C string for the duration of this call
-/// (the `Tty::alloc` contract).
-pub(crate) unsafe extern "C" fn pty_alloc(
-    slave_out: *mut *mut tty,
-    name: *const c_char,
-    _minor: c_int,
-) -> c_int {
-    // P3-10d: the ops table is a `&'static dyn TtyOps` trait object
-    // now (the old `static mut` existed only because `tty_alloc`'s C
-    // signature took `*mut tty_ops`).
-    let slave = Tty::alloc(name, Some(&PTY_SLAVE_OPS));
-    if is_err(slave) {
-        return ptr_err(slave);
+impl Pty {
+    /// Create a PTY master/slave pair.
+    ///
+    /// On success, `*slave_out` receives a pointer to the slave `tty`.
+    /// `minor` (minor device number for `/dev/pts/N`) is unused: the
+    /// devtmpfs node is created automatically by `device_register()` when
+    /// the slave cdev is registered in `PtyPair::ptmx_open_file()`.
+    ///
+    /// Returns 0 on success, negative errno on failure.
+    ///
+    /// The caller interacts with the master side through
+    /// [`Pty::master_read`] / [`Pty::master_write`], passing the slave `tty`
+    /// pointer.
+    ///
+    /// # Safety
+    /// `slave_out` must be a valid, writable `*mut *mut tty`. `name` must
+    /// be a valid, NUL-terminated C string for the duration of this call
+    /// (the `Tty::alloc` contract).
+    pub(crate) unsafe extern "C" fn alloc(
+        slave_out: *mut *mut tty,
+        name: *const c_char,
+        _minor: c_int,
+    ) -> c_int {
+        // P3-10d: the ops table is a `&'static dyn TtyOps` trait object
+        // now (the old `static mut` existed only because `tty_alloc`'s C
+        // signature took `*mut tty_ops`).
+        let slave = Tty::alloc(name, Some(&PTY_SLAVE_OPS));
+        if is_err(slave) {
+            return ptr_err(slave);
+        }
+
+        // devtmpfs node is now created automatically by device_register()
+        // when the slave cdev is registered in PtyPair::ptmx_open_file().
+
+        // SAFETY: caller guarantees `slave_out` is valid and writable (fn doc).
+        unsafe {
+            *slave_out = slave;
+        }
+        0
     }
 
-    // devtmpfs node is now created automatically by device_register()
-    // when the slave cdev is registered in ptmx_open_file().
-
-    // SAFETY: caller guarantees `slave_out` is valid and writable (fn doc).
-    unsafe {
-        *slave_out = slave;
+    /// Clean up for a PTY pair.
+    ///
+    /// The devtmpfs node is now removed automatically by
+    /// `device_unregister()` when the slave cdev is unregistered (via
+    /// `dev->devname`). This function is retained for any future
+    /// non-devtmpfs cleanup.
+    pub(crate) extern "C" fn dealloc(_slave: *mut tty) {
+        // devtmpfs removal is handled by cdev_unregister -> device_unregister.
     }
-    0
-}
-
-/// Clean up for a PTY pair.
-///
-/// The devtmpfs node is now removed automatically by
-/// `device_unregister()` when the slave cdev is unregistered (via
-/// `dev->devname`). This function is retained for any future
-/// non-devtmpfs cleanup.
-pub(crate) extern "C" fn pty_dealloc(_slave: *mut tty) {
-    // devtmpfs removal is handled by cdev_unregister -> device_unregister.
 }
