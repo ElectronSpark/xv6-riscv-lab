@@ -225,10 +225,10 @@ use crate::dev::nullrand::NullRandDev;
 use crate::dev::x1_emac::X1EmacSoftc;
 use crate::dev::x1_sdhci::SdhciSoftc;
 use crate::pci::pci_init;
-use crate::ramdisk::ramdisk_init;
+use crate::ramdisk::Ramdisk;
 use crate::sbi::Sbi;
-use crate::sysnet::sockinit;
-use crate::virtio_disk::virtio_disk_init;
+use crate::sysnet::SysNet;
+use crate::virtio_disk::Disk;
 
 // ===========================================================================
 // Boot-hart subsystem bring-up.
@@ -417,9 +417,9 @@ pub(crate) fn start_kernel_post_init() {
         NullRandDev::init(); // Register /dev/null, /dev/random, /dev/zero
         TtyDev::init(); // Register /dev/tty (controlling terminal device)
         PtyPair::init(); // Register /dev/ptmx (PTY multiplexer)
-        virtio_disk_init(); // emulated hard disk (QEMU)
-        ramdisk_init(); // ramdisk from FDT initrd (real hardware)
-        sockinit();
+        Disk::init(); // emulated hard disk (QEMU)
+        Ramdisk::init(); // ramdisk from FDT initrd (real hardware)
+        SysNet::sockinit();
         Pcache::global_init(); // page cache subsystem initialization
 
         // File system initialization must be run in the context of a

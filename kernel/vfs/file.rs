@@ -486,7 +486,9 @@ fn kfree(pa: *mut c_void) {
 use crate::dev::cdev::Cdev;
 use crate::dev::blkdev::Blkdev;
 use crate::dev::dev::DeviceInstance;
-use crate::net::mbufq_init;
+// N.B. not `use crate::net::mbufq` -- this file has its own local
+// `struct mbufq` mirror (see below) with the same name; the real type's
+// `init` fn is reached fully-qualified at the one call site instead.
 // Wave P3-8d: `sysnet.rs`'s `sock_lock`/`sockets` (two independently-
 // paired globals) were migrated to a single `SpinLock<*mut sock>` --
 // `SOCKETS` is locked directly below instead of a raw `spinlock_t`
@@ -1719,7 +1721,7 @@ fn vfs_sockalloc_inner(
         // file's `mbufq` is a byte-layout-identical local mirror (see this
         // struct's own doc comment) -- pointer cast, same precedent as the
         // `sock`/`crate::bindings::sock` handoff a few lines below.
-        mbufq_init(ptr::addr_of_mut!((*si).rxq) as *mut crate::net::mbufq);
+        crate::net::mbufq::init(ptr::addr_of_mut!((*si).rxq) as *mut crate::net::mbufq);
     }
 
     // SAFETY: non-null `f`.

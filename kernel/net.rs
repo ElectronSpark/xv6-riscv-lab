@@ -74,7 +74,7 @@ unsafe extern "C" {
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
 use crate::dev::netdev::Netdev;
-use crate::sysnet::sockrecvudp;
+use crate::sysnet::SysNet;
 
 // ===========================================================================
 // Constants -- redeclared locally from `kernel/inc/dev/net.h`.
@@ -150,6 +150,13 @@ const fn make_ip_addr(a: u32, b: u32, c: u32, d: u32) -> u32 {
     (a << 24) | (b << 16) | (c << 8) | d
 }
 
+/// Zero-sized driver-state type for the networking protocol support in
+/// this file (P3-10c precedent's ZST shape) -- KERNEL-OO home for the
+/// free fns not naturally owned by [`Mbuf`]/[`mbufq`]. Raw params kept,
+/// NO `&self` receiver (uniform with this file's sibling drivers).
+pub(crate) struct Net;
+
+impl Net {
 #[inline(always)]
 fn htons(x: u16) -> u16 {
     x.swap_bytes()
@@ -166,6 +173,7 @@ fn htonl(x: u32) -> u32 {
 fn ntohl(x: u32) -> u32 {
     x.swap_bytes()
 }
+} // impl Net (htons/ntohs/htonl/ntohl)
 
 // ===========================================================================
 // Packet headers -- see module doc for why every one is `packed`.
@@ -225,6 +233,7 @@ static LOCAL_IP: u32 = make_ip_addr(10, 0, 2, 15); // qemu's idea of the guest I
 static LOCAL_MAC: [u8; ETHADDR_LEN] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 static BROADCAST_MAC: [u8; ETHADDR_LEN] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
+impl Net {
 #[cold]
 #[inline(never)]
 fn panic_fixed(msg: &core::ffi::CStr) -> ! {
@@ -232,18 +241,20 @@ fn panic_fixed(msg: &core::ffi::CStr) -> ! {
     crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
     __panic_end()
 }
+} // impl Net (panic_fixed)
 
 // ===========================================================================
 // mbuf management -- exported (`kernel/inc/dev/net.h`).
 // ===========================================================================
 
+impl Mbuf {
 /// Strips data from the start of the buffer and returns a pointer to it.
 /// Returns null if less than the full requested length is available.
 ///
 /// # Safety
 /// `m` must be live.
 // P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
-pub(crate) unsafe extern "C" fn mbufpull(m: *mut mbuf, len: c_uint) -> *mut c_char {
+pub(crate) unsafe extern "C" fn pull(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         let tmp = (*m).head;
@@ -261,12 +272,12 @@ pub(crate) unsafe extern "C" fn mbufpull(m: *mut mbuf, len: c_uint) -> *mut c_ch
 /// # Safety
 /// `m` must be live.
 // P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
-pub(crate) unsafe extern "C" fn mbufpush(m: *mut mbuf, len: c_uint) -> *mut c_char {
+pub(crate) unsafe extern "C" fn push(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         (*m).head = (*m).head.sub(len as usize);
         if (*m).head < (*m).buf.as_mut_ptr() {
-            panic_fixed(c"mbufpush");
+            Net::panic_fixed(c"mbufpush");
         }
         (*m).len += len;
         (*m).head
@@ -278,13 +289,13 @@ pub(crate) unsafe extern "C" fn mbufpush(m: *mut mbuf, len: c_uint) -> *mut c_ch
 /// # Safety
 /// `m` must be live.
 // P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
-pub(crate) unsafe extern "C" fn mbufput(m: *mut mbuf, len: c_uint) -> *mut c_char {
+pub(crate) unsafe extern "C" fn put(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         let tmp = (*m).head.add((*m).len as usize);
         (*m).len += len;
         if (*m).len > MBUF_SIZE {
-            panic_fixed(c"mbufput");
+            Net::panic_fixed(c"mbufput");
         }
         tmp
     }
@@ -296,7 +307,7 @@ pub(crate) unsafe extern "C" fn mbufput(m: *mut mbuf, len: c_uint) -> *mut c_cha
 /// # Safety
 /// `m` must be live.
 // P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
-pub(crate) unsafe extern "C" fn mbuftrim(m: *mut mbuf, len: c_uint) -> *mut c_char {
+pub(crate) unsafe extern "C" fn trim(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         if len > (*m).len {
@@ -312,7 +323,7 @@ pub(crate) unsafe extern "C" fn mbuftrim(m: *mut mbuf, len: c_uint) -> *mut c_ch
 // P3-1D mesh sweep: callers (`e1000.rs`, `sysnet.rs`, `dev/x1_emac.rs`)
 // now import this via crate-path `use` instead of an `extern`
 // redeclaration -- demoted.
-pub(crate) extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
+pub(crate) extern "C" fn alloc(headroom: c_uint) -> *mut mbuf {
     if headroom > MBUF_SIZE {
         return ptr::null_mut();
     }
@@ -336,15 +347,16 @@ pub(crate) extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
 /// Frees a packet buffer.
 ///
 /// # Safety
-/// `m` must be a live `mbuf` previously returned by [`mbufalloc`], not
+/// `m` must be a live `mbuf` previously returned by [`Mbuf::alloc`], not
 /// freed since.
 // P3-1D mesh sweep: callers (`e1000.rs`, `sysnet.rs`, `dev/x1_emac.rs`)
 // now import this via crate-path `use` instead of an `extern`
 // redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn mbuffree(m: *mut mbuf) {
+pub(crate) unsafe extern "C" fn free(m: *mut mbuf) {
     // SAFETY: caller contract.
     unsafe { crate::mm::kalloc::Kmem::kfree(m as *mut c_void) };
 }
+} // impl Mbuf (pull/push/put/trim/alloc/free)
 
 /// Mirrors `struct mbufq` (`kernel/inc/dev/net.h`) -- real definition,
 /// this file being `mbufq_*`'s owning translation unit (unlike
@@ -356,13 +368,14 @@ pub struct mbufq {
     pub tail: *mut mbuf,
 }
 
+impl mbufq {
 /// Pushes an mbuf to the end of the queue.
 ///
 /// # Safety
 /// `q` must be live; `m` must be a live, exclusively-owned `mbuf`.
 // P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
 // `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn mbufq_pushtail(q: *mut mbufq, m: *mut mbuf) {
+pub(crate) unsafe extern "C" fn pushtail(q: *mut mbufq, m: *mut mbuf) {
     // SAFETY: caller contract.
     unsafe {
         (*m).next = ptr::null_mut();
@@ -382,7 +395,7 @@ pub(crate) unsafe extern "C" fn mbufq_pushtail(q: *mut mbufq, m: *mut mbuf) {
 /// `q` must be live.
 // P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
 // `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn mbufq_pophead(q: *mut mbufq) -> *mut mbuf {
+pub(crate) unsafe extern "C" fn pophead(q: *mut mbufq) -> *mut mbuf {
     // SAFETY: caller contract.
     unsafe {
         let head = (*q).head;
@@ -400,7 +413,7 @@ pub(crate) unsafe extern "C" fn mbufq_pophead(q: *mut mbufq) -> *mut mbuf {
 /// `q` must be live.
 // P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
 // `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn mbufq_empty(q: *mut mbufq) -> c_int {
+pub(crate) unsafe extern "C" fn empty(q: *mut mbufq) -> c_int {
     // SAFETY: caller contract.
     (unsafe { (*q).head }.is_null()) as c_int
 }
@@ -411,10 +424,11 @@ pub(crate) unsafe extern "C" fn mbufq_empty(q: *mut mbufq) -> c_int {
 /// `q` must be live.
 // P3-1D mesh sweep: callers (`vfs/file.rs`, `sysnet.rs`) now import this
 // via crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) unsafe extern "C" fn mbufq_init(q: *mut mbufq) {
+pub(crate) unsafe extern "C" fn init(q: *mut mbufq) {
     // SAFETY: caller contract.
     unsafe { (*q).head = ptr::null_mut() };
 }
+} // impl mbufq (pushtail/pophead/empty/init)
 
 // ===========================================================================
 // Checksum.
@@ -425,6 +439,7 @@ pub(crate) unsafe extern "C" fn mbufq_init(q: *mut mbufq) {
 ///
 /// # Safety
 /// `addr` must be valid for `len` bytes.
+impl Net {
 unsafe fn in_cksum(addr: *const u8, len: i32) -> u16 {
     let mut nleft = len;
     let mut w = addr as *const u16;
@@ -469,7 +484,7 @@ fn net_tx_eth(m: *mut mbuf, ethtype: u16) {
     // SAFETY: `m` caller-owned/live; `mbufpush` only returns null via
     // its own panic path (never actually returns for this file's fixed,
     // in-bounds header sizes), so `ethhdr` is always valid here.
-    let ethhdr = unsafe { mbufpush(m, core::mem::size_of::<Eth>() as c_uint) as *mut Eth };
+    let ethhdr = unsafe { Mbuf::push(m, core::mem::size_of::<Eth>() as c_uint) as *mut Eth };
     let ndev = Netdev::get_default();
 
     // SAFETY: `ethhdr` live (see above); `ndev` checked for null.
@@ -483,7 +498,7 @@ fn net_tx_eth(m: *mut mbuf, ethtype: u16) {
         // discovered through ARP. Because we don't support enough of
         // the ARP protocol, set it to broadcast instead.
         memmove((&raw mut (*ethhdr).dhost) as *mut c_void, BROADCAST_MAC.as_ptr() as *const c_void, ETHADDR_LEN);
-        (*ethhdr).type_ = htons(ethtype);
+        (*ethhdr).type_ = Self::htons(ethtype);
     }
 
     let should_free = if ndev.is_null() {
@@ -496,8 +511,8 @@ fn net_tx_eth(m: *mut mbuf, ethtype: u16) {
     };
     if should_free {
         // SAFETY: `m` still caller-owned here (no netdev, or transmit
-        // failed) -- matches the C's `mbuffree(m)`.
-        unsafe { mbuffree(m) };
+        // failed) -- matches the C's `Mbuf::free(m)`.
+        unsafe { Mbuf::free(m) };
     }
 }
 
@@ -505,22 +520,22 @@ fn net_tx_eth(m: *mut mbuf, ethtype: u16) {
 fn net_tx_ip(m: *mut mbuf, proto: u8, dip: u32) {
     // SAFETY: `m` live; `mbufpush` always succeeds for this fixed,
     // in-bounds header size (see `net_tx_eth`'s identical note).
-    let iphdr = unsafe { mbufpush(m, core::mem::size_of::<Ip>() as c_uint) as *mut Ip };
+    let iphdr = unsafe { Mbuf::push(m, core::mem::size_of::<Ip>() as c_uint) as *mut Ip };
 
     // SAFETY: `iphdr` live.
     unsafe {
         memset(iphdr as *mut c_void, 0, core::mem::size_of::<Ip>());
         (*iphdr).ip_vhl = (4 << 4) | (20 >> 2);
         (*iphdr).ip_p = proto;
-        (*iphdr).ip_src = htonl(LOCAL_IP);
-        (*iphdr).ip_dst = htonl(dip);
-        (*iphdr).ip_len = htons((*m).len as u16);
+        (*iphdr).ip_src = Self::htonl(LOCAL_IP);
+        (*iphdr).ip_dst = Self::htonl(dip);
+        (*iphdr).ip_len = Self::htons((*m).len as u16);
         (*iphdr).ip_ttl = 100;
-        (*iphdr).ip_sum = in_cksum(iphdr as *const u8, core::mem::size_of::<Ip>() as i32);
+        (*iphdr).ip_sum = Self::in_cksum(iphdr as *const u8, core::mem::size_of::<Ip>() as i32);
     }
 
     // Now on to the ethernet layer.
-    net_tx_eth(m, ETHTYPE_IP);
+    Self::net_tx_eth(m, ETHTYPE_IP);
 }
 
 /// Sends a UDP packet.
@@ -529,23 +544,23 @@ fn net_tx_ip(m: *mut mbuf, proto: u8, dip: u32) {
 pub(crate) extern "C" fn net_tx_udp(m: *mut mbuf, dip: u32, sport: u16, dport: u16) {
     // SAFETY: `m` live; `mbufpush` always succeeds for this fixed,
     // in-bounds header size.
-    let udphdr = unsafe { mbufpush(m, core::mem::size_of::<Udp>() as c_uint) as *mut Udp };
+    let udphdr = unsafe { Mbuf::push(m, core::mem::size_of::<Udp>() as c_uint) as *mut Udp };
 
     // SAFETY: `udphdr` live.
     unsafe {
-        (*udphdr).sport = htons(sport);
-        (*udphdr).dport = htons(dport);
-        (*udphdr).ulen = htons((*m).len as u16);
+        (*udphdr).sport = Self::htons(sport);
+        (*udphdr).dport = Self::htons(dport);
+        (*udphdr).ulen = Self::htons((*m).len as u16);
         (*udphdr).sum = 0; // zero means no checksum is provided
     }
 
     // Now on to the IP layer.
-    net_tx_ip(m, IPPROTO_UDP, dip);
+    Self::net_tx_ip(m, IPPROTO_UDP, dip);
 }
 
 /// Sends an ARP packet.
 fn net_tx_arp(op: u16, dmac: *const u8, dip: u32) -> c_int {
-    let m = mbufalloc(MBUF_DEFAULT_HEADROOM);
+    let m = Mbuf::alloc(MBUF_DEFAULT_HEADROOM);
     if m.is_null() {
         return -1;
     }
@@ -553,14 +568,14 @@ fn net_tx_arp(op: u16, dmac: *const u8, dip: u32) -> c_int {
     // Generic part of the ARP header.
     // SAFETY: `m` live; `mbufput` always succeeds for this fixed,
     // in-bounds header size.
-    let arphdr = unsafe { mbufput(m, core::mem::size_of::<Arp>() as c_uint) as *mut Arp };
+    let arphdr = unsafe { Mbuf::put(m, core::mem::size_of::<Arp>() as c_uint) as *mut Arp };
     // SAFETY: `arphdr` live.
     unsafe {
-        (*arphdr).hrd = htons(ARP_HRD_ETHER);
-        (*arphdr).pro = htons(ETHTYPE_IP);
+        (*arphdr).hrd = Self::htons(ARP_HRD_ETHER);
+        (*arphdr).pro = Self::htons(ETHTYPE_IP);
         (*arphdr).hln = ETHADDR_LEN as u8;
         (*arphdr).pln = core::mem::size_of::<u32>() as u8;
-        (*arphdr).op = htons(op);
+        (*arphdr).op = Self::htons(op);
     }
 
     // Ethernet + IP part of the ARP header.
@@ -572,13 +587,13 @@ fn net_tx_arp(op: u16, dmac: *const u8, dip: u32) -> c_int {
         } else {
             memmove((&raw mut (*arphdr).sha) as *mut c_void, LOCAL_MAC.as_ptr() as *const c_void, ETHADDR_LEN);
         }
-        (*arphdr).sip = htonl(LOCAL_IP);
+        (*arphdr).sip = Self::htonl(LOCAL_IP);
         memmove((&raw mut (*arphdr).tha) as *mut c_void, dmac as *const c_void, ETHADDR_LEN);
-        (*arphdr).tip = htonl(dip);
+        (*arphdr).tip = Self::htonl(dip);
     }
 
     // Header is ready, send the packet.
-    net_tx_eth(m, ETHTYPE_ARP);
+    Self::net_tx_eth(m, ETHTYPE_ARP);
     0
 }
 
@@ -589,26 +604,26 @@ fn net_tx_arp(op: u16, dmac: *const u8, dip: u32) -> c_int {
 /// Receives an ARP packet.
 fn net_rx_arp(m: *mut mbuf) {
     // SAFETY: `m` live.
-    let arphdr = unsafe { mbufpull(m, core::mem::size_of::<Arp>() as c_uint) as *mut Arp };
+    let arphdr = unsafe { Mbuf::pull(m, core::mem::size_of::<Arp>() as c_uint) as *mut Arp };
     if arphdr.is_null() {
         // SAFETY: `m` still caller-owned.
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
 
     // SAFETY: `arphdr` live.
-    let (hrd, pro, hln, pln) = unsafe { (ntohs((*arphdr).hrd), ntohs((*arphdr).pro), (*arphdr).hln, (*arphdr).pln) };
+    let (hrd, pro, hln, pln) = unsafe { (Self::ntohs((*arphdr).hrd), Self::ntohs((*arphdr).pro), (*arphdr).hln, (*arphdr).pln) };
     // Validate the ARP header.
     if hrd != ARP_HRD_ETHER || pro != ETHTYPE_IP || hln != ETHADDR_LEN as u8 || pln != core::mem::size_of::<u32>() as u8 {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
 
     // Only requests are supported so far; check if our IP was solicited.
     // SAFETY: `arphdr` live.
-    let (op, tip) = unsafe { (ntohs((*arphdr).op), ntohl((*arphdr).tip)) };
+    let (op, tip) = unsafe { (Self::ntohs((*arphdr).op), Self::ntohl((*arphdr).tip)) };
     if op != ARP_OP_REQUEST || tip != LOCAL_IP {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
 
@@ -617,20 +632,20 @@ fn net_rx_arp(m: *mut mbuf) {
     // SAFETY: `arphdr` live; `smac` local and live.
     let sip = unsafe {
         memmove(smac.as_mut_ptr() as *mut c_void, (&raw const (*arphdr).sha) as *const c_void, ETHADDR_LEN);
-        ntohl((*arphdr).sip)
+        Self::ntohl((*arphdr).sip)
     };
-    net_tx_arp(ARP_OP_REPLY, smac.as_ptr(), sip);
+    Self::net_tx_arp(ARP_OP_REPLY, smac.as_ptr(), sip);
 
     // SAFETY: `m` still caller-owned.
-    unsafe { mbuffree(m) };
+    unsafe { Mbuf::free(m) };
 }
 
 /// Receives a UDP packet.
 fn net_rx_udp(m: *mut mbuf, mut len: u16, iphdr: *mut Ip) {
     // SAFETY: `m` live.
-    let udphdr = unsafe { mbufpull(m, core::mem::size_of::<Udp>() as c_uint) as *mut Udp };
+    let udphdr = unsafe { Mbuf::pull(m, core::mem::size_of::<Udp>() as c_uint) as *mut Udp };
     if udphdr.is_null() {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
 
@@ -638,35 +653,35 @@ fn net_rx_udp(m: *mut mbuf, mut len: u16, iphdr: *mut Ip) {
 
     // Validate lengths reported in headers.
     // SAFETY: `udphdr` live.
-    if ntohs(unsafe { (*udphdr).ulen }) != len {
-        unsafe { mbuffree(m) };
+    if Self::ntohs(unsafe { (*udphdr).ulen }) != len {
+        unsafe { Mbuf::free(m) };
         return;
     }
     len -= core::mem::size_of::<Udp>() as u16;
     // SAFETY: `m` live.
     if len > unsafe { (*m).len as u16 } {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
     // Minimum packet size could be larger than the payload.
     // SAFETY: `m` live.
-    unsafe { mbuftrim(m, (*m).len - len as c_uint) };
+    unsafe { Mbuf::trim(m, (*m).len - len as c_uint) };
 
     // Parse the necessary fields.
     // SAFETY: `iphdr`/`udphdr` live.
-    let (sip, sport, dport) = unsafe { (ntohl((*iphdr).ip_src), ntohs((*udphdr).sport), ntohs((*udphdr).dport)) };
+    let (sip, sport, dport) = unsafe { (Self::ntohl((*iphdr).ip_src), Self::ntohs((*udphdr).sport), Self::ntohs((*udphdr).dport)) };
     // SAFETY: `m` handed off to `sockrecvudp` (`sysnet.rs`, this wave),
     // which takes ownership (delivers it to a socket's rxq, or frees it
     // if no socket matches -- matches the C `sockrecvudp` contract).
-    unsafe { sockrecvudp(m, sip, dport, sport) };
+    unsafe { SysNet::sockrecvudp(m, sip, dport, sport) };
 }
 
 /// Receives an IP packet.
 fn net_rx_ip(m: *mut mbuf) {
     // SAFETY: `m` live.
-    let iphdr = unsafe { mbufpull(m, core::mem::size_of::<Ip>() as c_uint) as *mut Ip };
+    let iphdr = unsafe { Mbuf::pull(m, core::mem::size_of::<Ip>() as c_uint) as *mut Ip };
     if iphdr.is_null() {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
 
@@ -674,32 +689,32 @@ fn net_rx_ip(m: *mut mbuf) {
     unsafe {
         // Check IP version and header length.
         if (*iphdr).ip_vhl != ((4 << 4) | (20 >> 2)) {
-            mbuffree(m);
+            Mbuf::free(m);
             return;
         }
         // Validate IP checksum.
-        if in_cksum(iphdr as *const u8, core::mem::size_of::<Ip>() as i32) != 0 {
-            mbuffree(m);
+        if Self::in_cksum(iphdr as *const u8, core::mem::size_of::<Ip>() as i32) != 0 {
+            Mbuf::free(m);
             return;
         }
         // Can't support fragmented IP packets.
-        if htons((*iphdr).ip_off) != 0 {
-            mbuffree(m);
+        if Self::htons((*iphdr).ip_off) != 0 {
+            Mbuf::free(m);
             return;
         }
         // Is the packet addressed to us?
-        if htonl((*iphdr).ip_dst) != LOCAL_IP {
-            mbuffree(m);
+        if Self::htonl((*iphdr).ip_dst) != LOCAL_IP {
+            Mbuf::free(m);
             return;
         }
         // Can only support UDP.
         if (*iphdr).ip_p != IPPROTO_UDP {
-            mbuffree(m);
+            Mbuf::free(m);
             return;
         }
 
-        let len = ntohs((*iphdr).ip_len).wrapping_sub(core::mem::size_of::<Ip>() as u16);
-        net_rx_udp(m, len, iphdr);
+        let len = Self::ntohs((*iphdr).ip_len).wrapping_sub(core::mem::size_of::<Ip>() as u16);
+        Self::net_rx_udp(m, len, iphdr);
     }
 }
 
@@ -710,19 +725,20 @@ fn net_rx_ip(m: *mut mbuf) {
 // demoted.
 pub(crate) extern "C" fn net_rx(m: *mut mbuf) {
     // SAFETY: `m` live (caller contract).
-    let ethhdr = unsafe { mbufpull(m, core::mem::size_of::<Eth>() as c_uint) as *mut Eth };
+    let ethhdr = unsafe { Mbuf::pull(m, core::mem::size_of::<Eth>() as c_uint) as *mut Eth };
     if ethhdr.is_null() {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
         return;
     }
 
     // SAFETY: `ethhdr` live.
-    let type_ = ntohs(unsafe { (*ethhdr).type_ });
+    let type_ = Self::ntohs(unsafe { (*ethhdr).type_ });
     if type_ == ETHTYPE_IP {
-        net_rx_ip(m);
+        Self::net_rx_ip(m);
     } else if type_ == ETHTYPE_ARP {
-        net_rx_arp(m);
+        Self::net_rx_arp(m);
     } else {
-        unsafe { mbuffree(m) };
+        unsafe { Mbuf::free(m) };
     }
 }
+} // impl Net (in_cksum/net_tx_*/net_rx_*)

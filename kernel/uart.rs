@@ -104,6 +104,16 @@ const LSR_RX_READY: u32 = 1 << 0;
 const LSR_TX_IDLE: u32 = 1 << 5;
 const MSR: u32 = 6;
 
+/// Zero-sized driver-state type for the UART (P3-10c precedent's ZST
+/// shape) -- KERNEL-OO home for this file's free fns. Raw params kept,
+/// NO `&self` receiver: `Uart`'s state (`UART_TX`/`UART_RX_LOCK`/the
+/// MMIO base globals) is `Freeze` and IRQ-shared cross-hart (see module
+/// doc's "Locking / sleep semantics") -- a `&self` would let LLVM hoist
+/// a read out of a wait/poll loop (e.g. `uartputc_sync`'s `LSR.TX_IDLE`
+/// spin, `uartputc`'s buffer-full sleep retest).
+pub(crate) struct Uart;
+
+impl Uart {
 /// Mirrors the C `UART_FIFO_SIZE` macro.
 #[inline(always)]
 fn uart_fifo_size() -> u32 {
@@ -155,6 +165,7 @@ fn write_reg(reg: u32, v: u32) {
         }
     }
 }
+} // impl Uart (uart_fifo_size/read_reg/write_reg)
 
 // ===========================================================================
 // Externs.
@@ -172,6 +183,7 @@ use crate::mm::cffi::{xv6_pop_off, xv6_push_off};
 // ABI-truth note: the old redeclaration typed `name` as `*const c_char`;
 // the real fn takes `*mut c_char` (the callee only reads it) -- the
 // wrapper carries the cast.
+impl Uart {
 /// SAFETY: see [`crate::lock::spinlock::RawSpinlock::init`]'s contract.
 fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     unsafe { crate::lock::spinlock::RawSpinlock::init(lk, name as *mut c_char) }
@@ -184,6 +196,7 @@ fn spin_lock(lk: *mut spinlock_t) {
 fn spin_unlock(lk: *mut spinlock_t) {
     unsafe { crate::lock::spinlock::RawSpinlock::unlock(lk) }
 }
+} // impl Uart (spin_init/spin_lock/spin_unlock)
 
 // P3-1C mesh sweep: console.rs is in scope for this wave, so
 // `consoleintr` becomes a plain crate-path import instead of an
@@ -246,10 +259,12 @@ static mut UART_IER: u32 = 0;
 /// `sleep_on_interruptible`) and [`uartstart`]'s `wakeup_on_chan`,
 /// and is never dereferenced, so any consistent unique address is a
 /// faithful replacement.
+impl Uart {
 #[inline(always)]
 fn tx_chan() -> *mut c_void {
     core::ptr::addr_of!(UART_TX) as *mut c_void
 }
+} // impl Uart (tx_chan)
 
 // ===========================================================================
 // RX ring buffer + lock.
@@ -298,39 +313,40 @@ static mut UART_RX_R: u64 = 0;
 /// Bring up the UART hardware. Returns 1 on success (matches the C
 /// `int uartinit(void)` — always succeeds today, the return value
 /// exists for the real-hardware/SBI-fallback path in `console.rs`).
+impl Uart {
 pub(crate) extern "C" fn uartinit() -> c_int {
     // Disable interrupts to avoid spurious IRQs while reprogramming.
-    write_reg(IER, 0x00);
+    Self::write_reg(IER, 0x00);
 
     // Reset FIFOs: enable, flush both, then disable (Linux PXA sequence).
-    write_reg(FCR, FCR_FIFO_ENABLE);
-    write_reg(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR);
-    write_reg(FCR, 0);
+    Self::write_reg(FCR, FCR_FIFO_ENABLE);
+    Self::write_reg(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR);
+    Self::write_reg(FCR, 0);
 
     // Drain latched status so new config starts clean.
-    let _ = read_reg(LSR);
-    let _ = read_reg(RHR);
-    let _ = read_reg(IIR);
-    let _ = read_reg(MSR);
+    let _ = Self::read_reg(LSR);
+    let _ = Self::read_reg(RHR);
+    let _ = Self::read_reg(IIR);
+    let _ = Self::read_reg(MSR);
 
     // 8N1 framing; OUT2 required on PXA for IRQ line to reach PLIC.
-    write_reg(LCR, LCR_EIGHT_BITS);
-    write_reg(MCR, MCR_DTR | MCR_RTS | MCR_OUT2);
+    Self::write_reg(LCR, LCR_EIGHT_BITS);
+    Self::write_reg(MCR, MCR_DTR | MCR_RTS | MCR_OUT2);
 
     // RX trigger: 8-byte on PXA (64-byte FIFO to cut IRQ rate), 1-byte
     // on 16550 for responsiveness.
     // SAFETY: single boot-time-writer global, see module doc.
     if unsafe { __uart0_reg_io_width } == 4 {
-        write_reg(FCR, FCR_FIFO_ENABLE | FCR_TRIGGER_8);
+        Self::write_reg(FCR, FCR_FIFO_ENABLE | FCR_TRIGGER_8);
     } else {
-        write_reg(FCR, FCR_FIFO_ENABLE | FCR_TRIGGER_1);
+        Self::write_reg(FCR, FCR_FIFO_ENABLE | FCR_TRIGGER_1);
     }
 
     // Clear status again after re-enabling FIFO.
-    let _ = read_reg(LSR);
-    let _ = read_reg(RHR);
-    let _ = read_reg(IIR);
-    let _ = read_reg(MSR);
+    let _ = Self::read_reg(LSR);
+    let _ = Self::read_reg(RHR);
+    let _ = Self::read_reg(IIR);
+    let _ = Self::read_reg(MSR);
 
     // Enable RX interrupts; PXA also needs RTOIE for RX timeout and
     // UUE to power the block.
@@ -342,7 +358,7 @@ pub(crate) extern "C" fn uartinit() -> c_int {
         } else {
             IER_RX_ENABLE
         };
-        write_reg(IER, UART_IER);
+        Self::write_reg(IER, UART_IER);
     }
 
     1 // Success - UART is now initialized
@@ -372,12 +388,12 @@ pub(crate) extern "C" fn uartputc(c: c_int) {
         // takes `&mut self`, ending any `Deref` borrow before the sleep
         // and barring the compiler from hoisting the `tx.w`/`tx.r` retest
         // out of the wait loop (freeze-noalias defense).
-        tx.sleep_on(tx_chan());
+        tx.sleep_on(Self::tx_chan());
     }
     let idx = (tx.w % UART_TX_BUF_SIZE as u64) as usize;
     tx.buf[idx] = c as u8;
     tx.w += 1;
-    uartstart(&mut tx);
+    Self::uartstart(&mut tx);
 }
 
 /// Batch version of [`uartputc`] — write multiple characters at once.
@@ -394,7 +410,7 @@ pub(crate) unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
 
     for i in 0..n as isize {
         while tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
-            tx.sleep_on(tx_chan());
+            tx.sleep_on(Self::tx_chan());
         }
         let idx = (tx.w % UART_TX_BUF_SIZE as u64) as usize;
         // SAFETY: `s`/`n` validity is this function's documented precondition.
@@ -402,7 +418,7 @@ pub(crate) unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
         tx.w += 1;
     }
 
-    uartstart(&mut tx);
+    Self::uartstart(&mut tx);
 }
 
 /// Non-blocking batch enqueue: copy up to `n` bytes from `s` into the
@@ -427,7 +443,7 @@ pub(crate) unsafe extern "C" fn uartputs_nb(s: *const c_char, n: c_int) -> c_int
         enqueued += 1;
     }
     if enqueued > 0 {
-        uartstart(&mut tx);
+        Self::uartstart(&mut tx);
     }
     enqueued
 }
@@ -444,7 +460,7 @@ pub(crate) extern "C" fn uart_tx_wait() -> c_int {
     // mutates via `uartstart` under the same lock).
     let mut tx = UART_TX.lock();
     while tx.w == tx.r + UART_TX_BUF_SIZE as u64 {
-        if tx.sleep_on_interruptible(tx_chan()) != 0 {
+        if tx.sleep_on_interruptible(Self::tx_chan()) != 0 {
             // Interrupted by signal; lock is re-held, drop it and bail.
             drop(tx);
             return -EINTR;
@@ -460,8 +476,8 @@ pub(crate) extern "C" fn uart_tx_wait() -> c_int {
 pub(crate) extern "C" fn uartputc_sync(c: c_int) {
     xv6_push_off();
     // Wait for Transmit Holding Empty to be set in LSR.
-    while (read_reg(LSR) & LSR_TX_IDLE) == 0 {}
-    write_reg(THR, c as u32);
+    while (Self::read_reg(LSR) & LSR_TX_IDLE) == 0 {}
+    Self::write_reg(THR, c as u32);
     xv6_pop_off();
 }
 
@@ -476,7 +492,7 @@ pub(crate) extern "C" fn uartputc_sync(c: c_int) {
 /// itself sound because every caller holds the TX guard.
 fn uartstart(tx: &mut UartTx) {
     // Check if UART TX FIFO is ready (THR empty).
-    if (read_reg(LSR) & LSR_TX_IDLE) == 0 {
+    if (Self::read_reg(LSR) & LSR_TX_IDLE) == 0 {
         // The UART transmit holding register is full; enable TX
         // interrupt so we get notified when ready.
         // SAFETY: `UART_IER` is guarded by the TX lock, which the caller
@@ -484,14 +500,14 @@ fn uartstart(tx: &mut UartTx) {
         unsafe {
             if tx.w != tx.r && (UART_IER & IER_TX_ENABLE) == 0 {
                 UART_IER |= IER_TX_ENABLE;
-                write_reg(IER, UART_IER);
+                Self::write_reg(IER, UART_IER);
             }
         }
         return;
     }
 
     // Fill TX FIFO with up to half the FIFO size.
-    let max_batch = uart_fifo_size() / 2;
+    let max_batch = Self::uart_fifo_size() / 2;
     let mut sent: u32 = 0;
 
     while sent < max_batch {
@@ -502,7 +518,7 @@ fn uartstart(tx: &mut UartTx) {
         let c = tx.buf[(tx.r % UART_TX_BUF_SIZE as u64) as usize];
         tx.r += 1;
         sent += 1;
-        write_reg(THR, c as u32);
+        Self::write_reg(THR, c as u32);
     }
 
     // Enable or disable TX interrupt based on whether more data is
@@ -513,21 +529,21 @@ fn uartstart(tx: &mut UartTx) {
             // More data to send - enable TX interrupt.
             if (UART_IER & IER_TX_ENABLE) == 0 {
                 UART_IER |= IER_TX_ENABLE;
-                write_reg(IER, UART_IER);
+                Self::write_reg(IER, UART_IER);
             }
         } else {
             // Buffer empty - disable TX interrupt to avoid spurious
             // interrupts.
             if (UART_IER & IER_TX_ENABLE) != 0 {
                 UART_IER &= !IER_TX_ENABLE;
-                write_reg(IER, UART_IER);
+                Self::write_reg(IER, UART_IER);
             }
         }
     }
 
     // Maybe uartputc() is waiting for space in the buffer.
     if sent > 0 {
-        Scheduler::wakeup_on_chan(tx_chan());
+        Scheduler::wakeup_on_chan(Self::tx_chan());
     }
 }
 
@@ -542,16 +558,16 @@ fn uartstart(tx: &mut UartTx) {
 /// Caller must hold `UART_RX_LOCK`.
 unsafe fn uartrecv() {
     // Read all available bytes from the hardware RX FIFO.
-    while (read_reg(LSR) & LSR_RX_READY) != 0 {
+    while (Self::read_reg(LSR) & LSR_RX_READY) != 0 {
         // SAFETY: caller holds `UART_RX_LOCK`.
         unsafe {
             if UART_RX_W == UART_RX_R + UART_RX_BUF_SIZE as u64 {
                 // SW buffer full: drop byte (console path is
                 // best-effort).
-                let _ = read_reg(RHR); // discard to advance HW FIFO
+                let _ = Self::read_reg(RHR); // discard to advance HW FIFO
                 continue;
             }
-            UART_RX_BUF[(UART_RX_W % UART_RX_BUF_SIZE as u64) as usize] = read_reg(RHR) as u8;
+            UART_RX_BUF[(UART_RX_W % UART_RX_BUF_SIZE as u64) as usize] = Self::read_reg(RHR) as u8;
             UART_RX_W += 1;
         }
     }
@@ -564,16 +580,16 @@ pub(crate) extern "C" fn uartgetc() -> c_int {
     // SAFETY: `UART_RX_LOCK` is a valid, compile-time-initialised
     // spinlock; `uartrecv` is called with it held, as required.
     unsafe {
-        spin_lock(&raw mut UART_RX_LOCK);
+        Self::spin_lock(&raw mut UART_RX_LOCK);
 
-        uartrecv();
+        Self::uartrecv();
 
         if UART_RX_R != UART_RX_W {
             c = UART_RX_BUF[(UART_RX_R % UART_RX_BUF_SIZE as u64) as usize] as c_int;
             UART_RX_R += 1;
         }
 
-        spin_unlock(&raw mut UART_RX_LOCK);
+        Self::spin_unlock(&raw mut UART_RX_LOCK);
     }
     c
 }
@@ -588,9 +604,9 @@ pub(crate) unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
     // SAFETY: `UART_RX_LOCK` valid as above; `buf`/`n` validity is
     // this function's documented precondition.
     unsafe {
-        spin_lock(&raw mut UART_RX_LOCK);
+        Self::spin_lock(&raw mut UART_RX_LOCK);
 
-        uartrecv();
+        Self::uartrecv();
 
         while (i as c_int) < n && UART_RX_R != UART_RX_W {
             *buf.offset(i) = UART_RX_BUF[(UART_RX_R % UART_RX_BUF_SIZE as u64) as usize] as c_char;
@@ -598,10 +614,12 @@ pub(crate) unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
             UART_RX_R += 1;
         }
 
-        spin_unlock(&raw mut UART_RX_LOCK);
+        Self::spin_unlock(&raw mut UART_RX_LOCK);
     }
     i as c_int
 }
+
+} // impl Uart (uartinit..uartgets)
 
 // ===========================================================================
 // Interrupt handler.
@@ -615,14 +633,20 @@ pub(crate) unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
 /// `irq_handler_t` calling convention (matches C `void uartintr(int,
 /// void*, device_t*)`); `data`/`dev` are unused, forwarded only for
 /// ABI compatibility with the registered `irq_desc`.
+///
+/// FLOOR: address-taken IRQ handler slot (`Some(crate::uart::uartintr)`
+/// in `console.rs`'s `IrqDesc.handler`) -- kept a free fn per this
+/// crate's established floor convention (matches `virtio_disk.rs`'s
+/// `virtio_disk_intr`, `e1000.rs`'s `e1000_intr`), body updated to call
+/// the relocated `Uart` associated fns.
 pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
     // SAFETY: `UART_RX_LOCK` is a valid, compile-time-initialised
     // spinlock; the RX ring is out of this wave's scope and stays raw.
     // (The TX ring moved into `UART_TX`; its acquire is below, outside
     // this block.)
     unsafe {
-        spin_lock(&raw mut UART_RX_LOCK);
-        uartrecv();
+        Uart::spin_lock(&raw mut UART_RX_LOCK);
+        Uart::uartrecv();
 
         // Process all buffered input. Drop the RX lock around each
         // `consoleintr` call, exactly as the C did, since the console
@@ -630,11 +654,11 @@ pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_
         while UART_RX_R != UART_RX_W {
             let c = UART_RX_BUF[(UART_RX_R % UART_RX_BUF_SIZE as u64) as usize] as c_int;
             UART_RX_R += 1;
-            spin_unlock(&raw mut UART_RX_LOCK);
+            Uart::spin_unlock(&raw mut UART_RX_LOCK);
             consoleintr(c);
-            spin_lock(&raw mut UART_RX_LOCK);
+            Uart::spin_lock(&raw mut UART_RX_LOCK);
         }
-        spin_unlock(&raw mut UART_RX_LOCK);
+        Uart::spin_unlock(&raw mut UART_RX_LOCK);
     }
 
     // Send buffered characters. N-R7 lock-owns-data: the TX ring is now
@@ -642,5 +666,5 @@ pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_
     // `uartstart`. Guard drops (unlocks) at scope end — byte-identical
     // to the old `spin_lock(uart_tx_lock); uartstart(); spin_unlock`.
     let mut tx = UART_TX.lock();
-    uartstart(&mut tx);
+    Uart::uartstart(&mut tx);
 }

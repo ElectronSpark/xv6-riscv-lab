@@ -215,14 +215,14 @@ pub(crate) extern "C" fn consputc(c: c_int) {
     // Use synchronous UART output (safe for interrupt context).
     if c == BACKSPACE {
         // If the user typed backspace, overwrite with a space.
-        crate::uart::uartputc_sync('\u{8}' as c_int);
-        crate::uart::uartputc_sync(' ' as c_int);
-        crate::uart::uartputc_sync('\u{8}' as c_int);
+        crate::uart::Uart::uartputc_sync('\u{8}' as c_int);
+        crate::uart::Uart::uartputc_sync(' ' as c_int);
+        crate::uart::Uart::uartputc_sync('\u{8}' as c_int);
     } else {
         if c == '\n' as c_int {
-            crate::uart::uartputc_sync('\r' as c_int);
+            crate::uart::Uart::uartputc_sync('\r' as c_int);
         }
-        crate::uart::uartputc_sync(c);
+        crate::uart::Uart::uartputc_sync(c);
     }
 }
 
@@ -377,14 +377,14 @@ unsafe fn consolewrite(
         while sent < olen {
             // SAFETY: `outbuf[sent..olen]` is a valid readable slice.
             let accepted = unsafe {
-                crate::uart::uartputs_nb(
+                crate::uart::Uart::uartputs_nb(
                     outbuf[sent..olen].as_ptr() as *const c_char,
                     (olen - sent) as c_int,
                 )
             };
             sent += accepted.max(0) as usize;
             if sent < olen {
-                let ret = crate::uart::uart_tx_wait();
+                let ret = crate::uart::Uart::uart_tx_wait();
                 if ret != 0 {
                     // Interrupted by signal -- return partial write
                     // count. We consumed this batch from userspace, so
@@ -781,7 +781,7 @@ pub(crate) extern "C" fn consoleinit() {
 
     // Try to initialize UART hardware. Returns 1 if successful (QEMU),
     // 0 if deferred (real hardware uses SBI).
-    if crate::uart::uartinit() != 0 {
+    if crate::uart::Uart::uartinit() != 0 {
         // Mark UART as initialized - switch from SBI to UART output.
         UART_INITIALIZED.store(true, Ordering::Relaxed);
     }
@@ -884,7 +884,7 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
             if !UART_INITIALIZED.load(Ordering::Relaxed) {
                 crate::sbi::Sbi::console_putchar(byte as c_int);
             } else {
-                crate::uart::uartputc_sync(byte as c_int);
+                crate::uart::Uart::uartputc_sync(byte as c_int);
             }
         }
     }

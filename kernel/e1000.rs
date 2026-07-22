@@ -65,7 +65,7 @@
 //!   `TX_RING_SIZE` -- the C's own `>` bound is unreachable dead code,
 //!   not a live bug, but ported verbatim (not silently upgraded to `>=`)
 //!   per this wave's line-fidelity charter.
-//! - [`e1000_recv`]'s `newbuf = mbufalloc(0)` return is never null-
+//! - [`e1000_recv`]'s `newbuf = Mbuf::alloc(0)` return is never null-
 //!   checked before `newbuf->head` is dereferenced two lines later (an
 //!   OOM would null-deref) -- same shape as the C original, which has
 //!   the identical unchecked dereference. Preserved rather than
@@ -101,7 +101,7 @@ unsafe extern "C" {
 // P3-1D mesh sweep: net.rs/dev/netdev.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
-use crate::net::{mbufalloc, mbuffree, net_rx};
+use crate::net::{Mbuf, Net};
 use crate::dev::netdev::Netdev;
 
 // ===========================================================================
@@ -359,11 +359,20 @@ static mut E1000_NDEV: netdev = netdev {
     link_cb: None,
 };
 
+/// Zero-sized driver-state type for the e1000 (P3-10c precedent's ZST
+/// shape) -- KERNEL-OO home for this file's free fns. Raw params kept,
+/// NO `&self` receiver: `E1000`'s state (`REGS`/`TX`/the RX ring
+/// globals) is `Freeze` and IRQ-shared cross-hart (see module doc's
+/// "Barrier accounting") -- a `&self` would let LLVM hoist a read out
+/// of a poll loop.
+pub(crate) struct E1000;
+
+impl E1000 {
 /// `#define R(n, r)`-equivalent word-indexed MMIO access -- see module
 /// doc's "MMIO -- volatile accounting".
 ///
 /// # Safety
-/// `REGS` must have been set by [`e1000_init`]; `offset` must be a
+/// `REGS` must have been set by [`E1000::init`]; `offset` must be a
 /// valid e1000 register word-index.
 #[inline(always)]
 unsafe fn reg_read(offset: usize) -> u32 {
@@ -371,7 +380,7 @@ unsafe fn reg_read(offset: usize) -> u32 {
     unsafe { core::ptr::read_volatile(REGS.add(offset)) }
 }
 /// # Safety
-/// Same as [`reg_read`].
+/// Same as [`Self::reg_read`].
 #[inline(always)]
 unsafe fn reg_write(offset: usize, val: u32) {
     // SAFETY: caller contract.
@@ -395,13 +404,13 @@ fn panic_fixed(msg: &core::ffi::CStr) -> ! {
 ///
 /// # Safety
 /// `REGS` must be set (see [`reg_read`]/[`reg_write`]).
-unsafe fn e1000_dev_reset() {
+unsafe fn dev_reset() {
     // SAFETY: caller contract.
     unsafe {
-        reg_write(E1000_IMS, 0); // disable interrupts
-        let ctl = reg_read(E1000_CTL);
-        reg_write(E1000_CTL, ctl | E1000_CTL_RST);
-        reg_write(E1000_IMS, 0); // redisable interrupts
+        Self::reg_write(E1000_IMS, 0); // disable interrupts
+        let ctl = Self::reg_read(E1000_CTL);
+        Self::reg_write(E1000_CTL, ctl | E1000_CTL_RST);
+        Self::reg_write(E1000_IMS, 0); // redisable interrupts
     }
     fence(Ordering::SeqCst);
 }
@@ -413,7 +422,7 @@ unsafe fn e1000_dev_reset() {
 ///
 /// # Safety
 /// `mac` must be valid for 6 bytes; `REGS` must be set.
-unsafe fn e1000_set_rcvaddr(mac: *const u8, as_type: u8, valid: bool, index: i32) -> i32 {
+unsafe fn set_rcvaddr(mac: *const u8, as_type: u8, valid: bool, index: i32) -> i32 {
     if index >= 16 || index < 0 {
         return -1; // the receive address array of e1000 has < 16 entries
     }
@@ -429,10 +438,10 @@ unsafe fn e1000_set_rcvaddr(mac: *const u8, as_type: u8, valid: bool, index: i32
     }
     fence(Ordering::SeqCst);
     // SAFETY: caller contract; `index` bounds-checked above.
-    unsafe { reg_write(E1000_RA + 2 * index as usize, l) };
+    unsafe { Self::reg_write(E1000_RA + 2 * index as usize, l) };
     fence(Ordering::SeqCst);
     // SAFETY: same as above.
-    unsafe { reg_write(E1000_RA + 2 * index as usize + 1, h) };
+    unsafe { Self::reg_write(E1000_RA + 2 * index as usize + 1, h) };
     fence(Ordering::SeqCst);
     0
 }
@@ -445,7 +454,7 @@ unsafe fn e1000_set_rcvaddr(mac: *const u8, as_type: u8, valid: bool, index: i32
 /// # Safety
 /// `virtual_base`/`mbufs_ptr_arr_base` must be valid for `size /
 /// size_of::<tx_desc>()` entries; `REGS` must be set.
-unsafe fn e1000_set_transmission_descriptor_base(
+unsafe fn set_transmission_descriptor_base(
     virtual_base: *mut tx_desc,
     physical_base: u64,
     mbufs_ptr_arr_base: *mut *mut mbuf,
@@ -478,11 +487,11 @@ unsafe fn e1000_set_transmission_descriptor_base(
     fence(Ordering::SeqCst);
     // SAFETY: caller contract.
     unsafe {
-        reg_write(E1000_TDBAL, l as u32);
-        reg_write(E1000_TDBAH, h as u32);
-        reg_write(E1000_TDLEN, size);
-        reg_write(E1000_TDH, 0);
-        reg_write(E1000_TDT, 0);
+        Self::reg_write(E1000_TDBAL, l as u32);
+        Self::reg_write(E1000_TDBAH, h as u32);
+        Self::reg_write(E1000_TDLEN, size);
+        Self::reg_write(E1000_TDH, 0);
+        Self::reg_write(E1000_TDT, 0);
     }
     fence(Ordering::SeqCst);
     0
@@ -490,11 +499,11 @@ unsafe fn e1000_set_transmission_descriptor_base(
 
 /// Initialise the receive descriptor circular buffer. Same contract as
 /// [`e1000_set_transmission_descriptor_base`], and additionally
-/// allocates an `mbuf` per entry via `mbufalloc(0)`.
+/// allocates an `mbuf` per entry via `Mbuf::alloc(0)`.
 ///
 /// # Safety
 /// Same as [`e1000_set_transmission_descriptor_base`].
-unsafe fn e1000_set_receive_descriptor_base(
+unsafe fn set_receive_descriptor_base(
     virtual_base: *mut rx_desc,
     physical_base: u64,
     mbufs_ptr_arr_base: *mut *mut mbuf,
@@ -520,7 +529,7 @@ unsafe fn e1000_set_receive_descriptor_base(
     unsafe {
         for i in 0..rd_arr_size {
             *virtual_base.add(i) = ZERO_RX_DESC;
-            let mb = mbufalloc(0);
+            let mb = Mbuf::alloc(0);
             *mbufs_ptr_arr_base.add(i) = mb;
             if mb.is_null() {
                 return -1;
@@ -531,11 +540,11 @@ unsafe fn e1000_set_receive_descriptor_base(
     fence(Ordering::SeqCst);
     // SAFETY: caller contract.
     unsafe {
-        reg_write(E1000_RDBAL, l as u32);
-        reg_write(E1000_RDBAH, h as u32);
-        reg_write(E1000_RDLEN, size);
-        reg_write(E1000_RDH, 0);
-        reg_write(E1000_RDT, (rd_arr_size - 1) as u32);
+        Self::reg_write(E1000_RDBAL, l as u32);
+        Self::reg_write(E1000_RDBAH, h as u32);
+        Self::reg_write(E1000_RDLEN, size);
+        Self::reg_write(E1000_RDH, 0);
+        Self::reg_write(E1000_RDT, (rd_arr_size - 1) as u32);
     }
     fence(Ordering::SeqCst);
     0
@@ -543,9 +552,9 @@ unsafe fn e1000_set_receive_descriptor_base(
 
 /// Called by [`crate::pci::pci_init`]. `xregs` is the memory address at
 /// which the e1000's registers are mapped.
-// P3-1D mesh sweep: caller (`pci.rs`) now imports this via crate-path
-// `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
+// P3-1D mesh sweep: caller (`pci.rs`) reaches this via a crate-path
+// `use` of `E1000::init` (not an `extern` redeclaration).
+pub(crate) extern "C" fn init(xregs: *mut u32) {
     let default_mac_address: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
     // SAFETY: single-threaded boot-time init: `pci_init` (this driver's
@@ -562,12 +571,12 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
         IrqCore::register_irq_handler(IrqCore::plic_irq(__e1000_pci_irqno as c_int), &raw mut e1000_irq)
     };
     if ret != 0 {
-        panic_fixed(c"e1000_init: failed to register irq handler");
+        Self::panic_fixed(c"e1000_init: failed to register irq handler");
     }
 
     // Reset the device.
     // SAFETY: `REGS` just set above.
-    unsafe { e1000_dev_reset() };
+    unsafe { Self::dev_reset() };
 
     // [E1000 14.5] Transmit initialization.
     // Single-threaded boot-time init (same as `REGS` above) -- taking
@@ -584,7 +593,7 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
     // above having since dropped); still single-threaded init, so no
     // concurrent access is possible here.
     if unsafe {
-        e1000_set_transmission_descriptor_base(
+        Self::set_transmission_descriptor_base(
             tx_ring_ptr,
             tx_ring_ptr as u64,
             tx_mbufs_ptr,
@@ -592,7 +601,7 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
         )
     } != 0
     {
-        panic_fixed(c"e1000");
+        Self::panic_fixed(c"e1000");
     }
 
     // [E1000 14.4] Receive initialization.
@@ -600,7 +609,7 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
     let (rx_ring_ptr, rx_mbufs_ptr) = unsafe { (&raw mut RX_RING.0 as *mut rx_desc, &raw mut RX_MBUFS as *mut *mut mbuf) };
     // SAFETY: same as the TX ring above.
     if unsafe {
-        e1000_set_receive_descriptor_base(
+        Self::set_receive_descriptor_base(
             rx_ring_ptr,
             rx_ring_ptr as u64,
             rx_mbufs_ptr,
@@ -608,34 +617,34 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
         )
     } != 0
     {
-        panic_fixed(c"e1000");
+        Self::panic_fixed(c"e1000");
     }
 
     // Filter by qemu's MAC address, 52:54:00:12:34:56.
     // SAFETY: `default_mac_address` valid for 6 bytes; `REGS` set.
-    if unsafe { e1000_set_rcvaddr(default_mac_address.as_ptr(), 0, true, 0) } != 0 {
-        panic_fixed(c"e1000_init: MAC address");
+    if unsafe { Self::set_rcvaddr(default_mac_address.as_ptr(), 0, true, 0) } != 0 {
+        Self::panic_fixed(c"e1000_init: MAC address");
     }
 
     // SAFETY: `REGS` set; every write below is a plain MMIO register write.
     unsafe {
         // Multicast table.
         for i in 0..(4096 / 32) {
-            reg_write(E1000_MTA + i, 0);
+            Self::reg_write(E1000_MTA + i, 0);
         }
 
         // Transmitter control bits.
-        reg_write(
+        Self::reg_write(
             E1000_TCTL,
             E1000_TCTL_EN // enable
                 | E1000_TCTL_PSP // pad short packets
                 | (0x0F << E1000_TCTL_CT_SHIFT) // max retransmissions on collision
                 | (0x40 << E1000_TCTL_COLD_SHIFT), // collision distance
         );
-        reg_write(E1000_TIPG, 10 | (8 << 10) | (6 << 20)); // inter-pkt gap
+        Self::reg_write(E1000_TIPG, 10 | (8 << 10) | (6 << 20)); // inter-pkt gap
 
         // Receiver control bits.
-        reg_write(
+        Self::reg_write(
             E1000_RCTL,
             E1000_RCTL_EN // enable receiver
                 | E1000_RCTL_BAM // enable broadcast
@@ -645,9 +654,9 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
 
         // Ask e1000 for receive interrupts. Instead of RDTR/RADV, use
         // the Interrupt Throttling Register (ITR) if a delay is needed.
-        reg_write(E1000_RDTR, 0); // interrupt after every received packet (no timer)
-        reg_write(E1000_RADV, 0); // interrupt after every packet (no timer)
-        reg_write(E1000_IMS, 1 << 7); // RXDW -- Receiver Descriptor Write Back
+        Self::reg_write(E1000_RDTR, 0); // interrupt after every received packet (no timer)
+        Self::reg_write(E1000_RADV, 0); // interrupt after every packet (no timer)
+        Self::reg_write(E1000_IMS, 1 << 7); // RXDW -- Receiver Descriptor Write Back
 
         // Register with the netdev abstraction layer.
         strncpy(E1000_NDEV.name.as_mut_ptr(), c"e1000".as_ptr(), NETDEV_NAME_MAX);
@@ -666,12 +675,13 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
 /// descriptor ring so the e1000 sends it. Stashes a pointer so it can
 /// be freed after sending. Returns `0` on success, `-1` if the ring is
 /// full (the next descriptor hasn't finished transmitting yet).
-// P3-1D mesh sweep: only referenced by address (as the `netdev_ops.
-// transmit` function-pointer value below), never called by name via an
-// `extern` redeclaration -- demoted. `extern "C"` (the calling-convention
-// marker) is kept: the fn-pointer-typed field it's stored into requires
-// it, per this wave's fn-pointer-value hazard class.
-pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
+// P3-1D mesh sweep: called by name from `e1000_netdev_transmit` below
+// (the actual address-taken `netdev_ops.transmit` entry -- see that
+// fn's own FLOOR note), so this one is a plain crate-path item, not
+// itself address-taken -- convertible to an `E1000` associated fn.
+// `extern "C"` (the calling-convention marker) is kept for ABI parity
+// even though nothing takes this particular fn's address directly.
+pub(crate) extern "C" fn transmit(m: *mut mbuf) -> c_int {
     // `TX.lock()` (RAII): the sole early-return-while-holding exit path
     // below now releases for free when `tx` drops, instead of a
     // hand-paired `spin_unlock` before the `return` (Wave P3-8d; matches
@@ -682,9 +692,9 @@ pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
     // SAFETY: `REGS` set by `e1000_init`, which always runs before any
     // netdev consumer can reach this function (publication order via
     // `netdev_register`).
-    let index = unsafe { reg_read(E1000_TDT) };
+    let index = unsafe { Self::reg_read(E1000_TDT) };
     if index > TX_RING_SIZE as u32 {
-        panic_fixed(c"e1000 transmit: ring overflow");
+        Self::panic_fixed(c"e1000 transmit: ring overflow");
     }
     // SAFETY: `index <= TX_RING_SIZE` (see module doc's "Preserved-as-
     // is" note for the C's own off-by-one-tolerant bound, kept verbatim).
@@ -702,7 +712,7 @@ pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
         // SAFETY: `*slot` non-null, previously stashed by an earlier
         // `e1000_transmit` call whose descriptor has now completed
         // (checked above).
-        unsafe { mbuffree(*slot) };
+        unsafe { Mbuf::free(*slot) };
     }
     // Pass packet information into the transmit descriptor.
     // SAFETY: `m` is caller-owned and live (the `netdev_ops.transmit`
@@ -717,21 +727,21 @@ pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
         (*desc).cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
         *slot = m;
         // Move the tail pointer of the transmission ring buffer forward.
-        reg_write(E1000_TDT, (reg_read(E1000_TDT) + 1) % TX_RING_SIZE as u32);
+        Self::reg_write(E1000_TDT, (Self::reg_read(E1000_TDT) + 1) % TX_RING_SIZE as u32);
     }
     // `tx` drops here (RAII) -- no manual `spin_unlock` needed.
     0
 }
 
 /// Check for packets that have arrived from the e1000; deliver each to
-/// the network stack via `net_rx()`.
+/// the network stack via `Net::net_rx()`.
 ///
 /// # Safety
 /// `REGS` must be set.
-unsafe fn e1000_recv() {
+unsafe fn recv() {
     loop {
         // SAFETY: caller contract.
-        let index = (unsafe { reg_read(E1000_RDT) } + 1) % RX_RING_SIZE as u32;
+        let index = (unsafe { Self::reg_read(E1000_RDT) } + 1) % RX_RING_SIZE as u32;
         // SAFETY: `index < RX_RING_SIZE` (mod above).
         let desc = unsafe { (&raw mut RX_RING.0 as *mut rx_desc).add(index as usize) };
         // Keep processing RX descriptors until an unfinished one is hit.
@@ -752,9 +762,9 @@ unsafe fn e1000_recv() {
         unsafe { (*buf).len = (*desc).length as c_uint };
         // `buf` live; `net_rx` takes ownership (frees or forwards it,
         // matching every other netdev driver's contract).
-        net_rx(buf);
+        Net::net_rx(buf);
         // Allocate a new buffer for this slot. No preconditions.
-        let newbuf = mbufalloc(0);
+        let newbuf = Mbuf::alloc(0);
         // Let the descriptor point to the newly allocated buffer and
         // tell the controller we've finished processing this packet.
         // SAFETY: `slot`/`desc` live; `newbuf` may be null on OOM (see
@@ -765,27 +775,40 @@ unsafe fn e1000_recv() {
             *slot = newbuf;
             (*desc).addr = (*newbuf).head as u64;
             (*desc).status = 0;
-            reg_write(E1000_RDT, index);
+            Self::reg_write(E1000_RDT, index);
         }
     }
 }
+} // impl E1000 (reg_read/reg_write/panic_fixed/dev_reset/set_rcvaddr/
+  // set_transmission_descriptor_base/set_receive_descriptor_base/init/
+  // transmit/recv)
 
 /// Tell the e1000 we've seen this interrupt (without this it won't
 /// raise any further interrupts), then drain received packets.
+///
+/// FLOOR: address-taken IRQ handler slot (`Some(e1000_intr)` in
+/// [`E1000::init`]'s `IrqDesc.handler` below) -- kept a free fn per this
+/// crate's established floor convention (matches `virtio_disk.rs`'s
+/// `virtio_disk_intr`, `uart.rs`'s `uartintr`), body updated to call the
+/// relocated `E1000` associated fns.
 extern "C" fn e1000_intr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
     // SAFETY: `REGS` set by `e1000_init`, which registers this handler
     // (via `register_irq_handler`) only after setting `REGS`.
-    unsafe { reg_write(E1000_ICR, 0xffffffff) };
+    unsafe { E1000::reg_write(E1000_ICR, 0xffffffff) };
     // SAFETY: same as above.
-    unsafe { e1000_recv() };
+    unsafe { E1000::recv() };
 }
 
 // ===========================================================================
 // netdev glue.
 // ===========================================================================
 
+/// FLOOR: address-taken `netdev_ops.transmit` table entry
+/// (`Some(e1000_netdev_transmit)` in [`E1000_NETDEV_OPS`] below) -- kept
+/// a free fn per this crate's established floor convention (matches
+/// `dev/netdev.rs`'s ops-table entries).
 extern "C" fn e1000_netdev_transmit(_ndev: *mut netdev, m: *mut mbuf) -> c_int {
-    e1000_transmit(m)
+    E1000::transmit(m)
 }
 
 static E1000_NETDEV_OPS: netdev_ops = netdev_ops { transmit: Some(e1000_netdev_transmit) };

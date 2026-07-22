@@ -73,7 +73,7 @@ unsafe extern "C" {
 // P3-1D mesh sweep: e1000.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
-use crate::e1000::e1000_init;
+use crate::e1000::E1000;
 
 // ===========================================================================
 // PCI-E Configuration Space Command/Status/Header-Type bits --
@@ -442,7 +442,7 @@ pub(crate) extern "C" fn pci_init() {
             // `e1000_regs` is the physical address just programmed into
             // BAR0 above, mapped by `vm_pgtab.rs`'s `kvmmake` (see the
             // module doc's "We'll place..." comment).
-            e1000_init(e1000_regs as *mut u32);
+            E1000::init(e1000_regs as *mut u32);
         }
     }
 }

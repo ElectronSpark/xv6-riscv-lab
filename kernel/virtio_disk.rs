@@ -434,16 +434,27 @@ pub(crate) static mut __virtio_mmio_base: [u64; 3] = [0x10001000, 0x10002000, 0x
 // crate-path `use`) -- demoted.
 pub(crate) static mut __virtio_irqno: [u64; 3] = [1, 2, 3];
 
-/// `#define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))`.
-///
-/// # Safety
-/// `diskno` must be `< __virtio_mmio_base.len()`.
-#[inline(always)]
-unsafe fn reg(diskno: usize, offset: usize) -> *mut u32 {
-    // SAFETY: caller contract; `__virtio_mmio_base` is populated by
-    // `fdt_apply_platform_config` before `virtio_disk_init` ever runs
-    // (boot-order invariant, `start_kernel.rs`).
-    unsafe { (__virtio_mmio_base[diskno] + offset as u64) as *mut u32 }
+// KERNEL-OO: the remaining free fns below (MMIO register access, the
+// per-disk/per-blkdev global-storage accessors, the file-local panic
+// helpers, the file-local `bio` reimplementation, and I/O submission/
+// init) become associated functions on [`Disk`] -- this file's driver
+// state type. Raw params kept throughout, NO `&self` receiver (`Disk`
+// is `Freeze` and IRQ-shared cross-hart -- see module doc's "Sleeping-
+// completion protocol" -- a `&self` would let LLVM hoist a read out of
+// a wait/poll loop). Bodies byte-identical; only the free-fn name
+// becomes `Disk::name` at every call site in this file.
+impl Disk {
+    /// `#define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))`.
+    ///
+    /// # Safety
+    /// `diskno` must be `< __virtio_mmio_base.len()`.
+    #[inline(always)]
+    unsafe fn reg(diskno: usize, offset: usize) -> *mut u32 {
+        // SAFETY: caller contract; `__virtio_mmio_base` is populated by
+        // `fdt_apply_platform_config` before `virtio_disk_init` ever runs
+        // (boot-order invariant, `start_kernel.rs`).
+        unsafe { (__virtio_mmio_base[diskno] + offset as u64) as *mut u32 }
+    }
 }
 
 // ===========================================================================
@@ -556,7 +567,7 @@ struct DiskInner {
 }
 
 #[repr(C)]
-struct Disk {
+pub(crate) struct Disk {
     desc: *mut virtq_desc,
     avail: *mut virtq_avail,
     used: *mut virtq_used,
@@ -593,19 +604,21 @@ static VIRTIO_DISK_DEVS: SyncCell<[MaybeUninit<blkdev_t>; N_VIRTIO_DISK]> =
 
 const DISK_NAMES: [&core::ffi::CStr; N_VIRTIO_DISK] = [c"disk0", c"disk1"];
 
-/// # Safety
-/// `diskno` must be `< N_VIRTIO_DISK`.
-#[inline(always)]
-unsafe fn disk_ptr(diskno: usize) -> *mut Disk {
-    // SAFETY: caller contract; `DISKS` storage is 'static.
-    unsafe { (*DISKS.get())[diskno].as_mut_ptr() }
-}
-/// # Safety
-/// `diskno` must be `< N_VIRTIO_DISK`.
-#[inline(always)]
-unsafe fn blkdev_ptr(diskno: usize) -> *mut blkdev_t {
-    // SAFETY: caller contract; `VIRTIO_DISK_DEVS` storage is 'static.
-    unsafe { (*VIRTIO_DISK_DEVS.get())[diskno].as_mut_ptr() }
+impl Disk {
+    /// # Safety
+    /// `diskno` must be `< N_VIRTIO_DISK`.
+    #[inline(always)]
+    unsafe fn at(diskno: usize) -> *mut Disk {
+        // SAFETY: caller contract; `DISKS` storage is 'static.
+        unsafe { (*DISKS.get())[diskno].as_mut_ptr() }
+    }
+    /// # Safety
+    /// `diskno` must be `< N_VIRTIO_DISK`.
+    #[inline(always)]
+    unsafe fn blkdev_at(diskno: usize) -> *mut blkdev_t {
+        // SAFETY: caller contract; `VIRTIO_DISK_DEVS` storage is 'static.
+        unsafe { (*VIRTIO_DISK_DEVS.get())[diskno].as_mut_ptr() }
+    }
 }
 
 // ===========================================================================
@@ -622,102 +635,111 @@ struct BioIter {
 
 const BLK_SIZE_SHIFT: u32 = 9;
 
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_iter_start(bio_ptr: *mut bio, it: &mut BioIter) {
-    // SAFETY: caller contract.
-    unsafe {
-        it.blkno = (*bio_ptr).blkno;
-        it.bvec_idx = 0;
-        if (*bio_ptr).vec_length > 0 {
-            it.size = (*(*bio_ptr).bvecs.as_ptr()).len;
-            it.size_done = 0;
-        } else {
-            it.size = 0;
-            it.size_done = 0;
+// KERNEL-OO (N-METH): `bio_iter_*(bio_ptr, it: &mut BioIter, ...)` become
+// `impl BioIter` methods taking `&mut self`/`&self` in place of `it` --
+// `BioIter` is a plain per-call stack local (never shared cross-hart,
+// unlike `Disk`), so this is the same safe transformation already
+// applied to `DiskInner` above (N-METH), not a `Disk`-style hazard.
+impl BioIter {
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn start(&mut self, bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe {
+            self.blkno = (*bio_ptr).blkno;
+            self.bvec_idx = 0;
+            if (*bio_ptr).vec_length > 0 {
+                self.size = (*(*bio_ptr).bvecs.as_ptr()).len;
+                self.size_done = 0;
+            } else {
+                self.size = 0;
+                self.size_done = 0;
+            }
         }
     }
-}
 
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_iter_next_seg(bio_ptr: *mut bio, it: &mut BioIter) {
-    let bvec_idx = it.bvec_idx + 1;
-    // SAFETY: caller contract.
-    if bvec_idx > unsafe { (*bio_ptr).vec_length } || bvec_idx < 0 {
-        return;
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn next_seg(&mut self, bio_ptr: *mut bio) {
+        let bvec_idx = self.bvec_idx + 1;
+        // SAFETY: caller contract.
+        if bvec_idx > unsafe { (*bio_ptr).vec_length } || bvec_idx < 0 {
+            return;
+        }
+        // SAFETY: caller contract; `bvec_idx` bounds-checked above.
+        unsafe {
+            let len = (*(*bio_ptr).bvecs.as_ptr().add(bvec_idx as usize)).len;
+            self.size -= len;
+            self.size_done += len;
+            (*bio_ptr).done_size += len;
+            self.blkno = (*bio_ptr).blkno
+                + (((*bio_ptr).done_size as u64) >> (BLK_SIZE_SHIFT + (*bio_ptr).block_shift as u32));
+            self.bvec_idx = bvec_idx;
+        }
     }
-    // SAFETY: caller contract; `bvec_idx` bounds-checked above.
-    unsafe {
-        let len = (*(*bio_ptr).bvecs.as_ptr().add(bvec_idx as usize)).len;
-        it.size -= len;
-        it.size_done += len;
-        (*bio_ptr).done_size += len;
-        it.blkno = (*bio_ptr).blkno
-            + (((*bio_ptr).done_size as u64) >> (BLK_SIZE_SHIFT + (*bio_ptr).block_shift as u32));
-        it.bvec_idx = bvec_idx;
-    }
-}
 
-/// # Safety
-/// `bio_ptr` must be live; `bvec` must be a live, writable `bio_vec`.
-unsafe fn bio_iter_copy_bvec(bio_ptr: *mut bio, it: &BioIter, bvec: *mut bio_vec) -> bool {
-    // SAFETY: caller contract.
-    if it.bvec_idx >= unsafe { (*bio_ptr).vec_length } {
-        return false;
-    }
-    // SAFETY: caller contract; `it.bvec_idx` bounds-checked above.
-    unsafe { *bvec = *(*bio_ptr).bvecs.as_ptr().add(it.bvec_idx as usize) };
-    true
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-#[inline(always)]
-unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
-    // SAFETY: caller contract.
-    unsafe { (*bio_ptr).flags.rw() != 0 }
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe {
-        (*bio_ptr).flags.set_done(0);
-        (*bio_ptr).done_size = 0;
-        (*bio_ptr).error = 0;
-        RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
-    }
-    fence(Ordering::SeqCst);
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe { (*bio_ptr).flags.set_done(1) };
-    fence(Ordering::SeqCst);
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_endio(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    if let Some(cb) = unsafe { (*bio_ptr).end_io } {
-        // SAFETY: `cb` is the bio owner's completion callback.
-        unsafe { cb(bio_ptr) };
+    /// # Safety
+    /// `bio_ptr` must be live; `bvec` must be a live, writable `bio_vec`.
+    unsafe fn copy_bvec(&self, bio_ptr: *mut bio, bvec: *mut bio_vec) -> bool {
+        // SAFETY: caller contract.
+        if self.bvec_idx >= unsafe { (*bio_ptr).vec_length } {
+            return false;
+        }
+        // SAFETY: caller contract; `self.bvec_idx` bounds-checked above.
+        unsafe { *bvec = *(*bio_ptr).bvecs.as_ptr().add(self.bvec_idx as usize) };
+        true
     }
 }
 
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_complete(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe {
-        bio_end_io_acct(bio_ptr);
-        bio_endio(bio_ptr);
-        RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
+impl Disk {
+    /// # Safety
+    /// `bio_ptr` must be live.
+    #[inline(always)]
+    unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
+        // SAFETY: caller contract.
+        unsafe { (*bio_ptr).flags.rw() != 0 }
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe {
+            (*bio_ptr).flags.set_done(0);
+            (*bio_ptr).done_size = 0;
+            (*bio_ptr).error = 0;
+            RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
+        }
+        fence(Ordering::SeqCst);
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe { (*bio_ptr).flags.set_done(1) };
+        fence(Ordering::SeqCst);
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_endio(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        if let Some(cb) = unsafe { (*bio_ptr).end_io } {
+            // SAFETY: `cb` is the bio owner's completion callback.
+            unsafe { cb(bio_ptr) };
+        }
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_complete(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe {
+            Self::bio_end_io_acct(bio_ptr);
+            Self::bio_endio(bio_ptr);
+            RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
+        }
     }
 }
 
@@ -740,44 +762,46 @@ macro_rules! panic_fmt_i32 {
     }};
 }
 
-#[cold]
-#[inline(never)]
-fn panic_fixed(msg: &str) -> ! {
-    __panic_start();
-    crate::kprintln!("{}", msg);
-    __panic_end()
-}
-
-#[cold]
-#[inline(never)]
-fn panic_intr_status(id: c_int, status: c_int, bio_ptr: *mut c_void, blockno: u64) -> ! {
-    // Matches the C original's
-    // `printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", ...)`
-    // immediately preceding its `panic("virtio_disk_intr status: %d", status)`.
-    crate::kprintln!(
-        "ERROR: id={} status={} buf={} blockno=0x{:x}",
-        id, status, crate::printf::Ptr(bio_ptr as u64), blockno,
-    );
-    __panic_start();
-    crate::kprintln!("virtio_disk_intr status: {}", status);
-    __panic_end()
-}
-
-/// Mirrors `__thread_state_set(p, THREAD_UNINTERRUPTIBLE)`
-/// (`kernel/inc/proc/thread.h`, `static inline` -- no external linkage).
-/// See module doc's "Deliberate simplifications".
-///
-/// # Safety
-/// `p` must be null or a live `*mut thread`.
-#[inline(always)]
-unsafe fn thread_state_set_uninterruptible(p: *mut thread) {
-    if p.is_null() {
-        return;
+impl Disk {
+    #[cold]
+    #[inline(never)]
+    fn panic_fixed(msg: &str) -> ! {
+        __panic_start();
+        crate::kprintln!("{}", msg);
+        __panic_end()
     }
-    // SAFETY: caller contract; `state` is a plain 4-byte field of `p`.
-    unsafe {
-        let state_ptr = core::ptr::addr_of_mut!((*p).state) as *mut u32;
-        AtomicU32::from_ptr(state_ptr).store(THREAD_UNINTERRUPTIBLE, Ordering::SeqCst);
+
+    #[cold]
+    #[inline(never)]
+    fn panic_intr_status(id: c_int, status: c_int, bio_ptr: *mut c_void, blockno: u64) -> ! {
+        // Matches the C original's
+        // `printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", ...)`
+        // immediately preceding its `panic("virtio_disk_intr status: %d", status)`.
+        crate::kprintln!(
+            "ERROR: id={} status={} buf={} blockno=0x{:x}",
+            id, status, crate::printf::Ptr(bio_ptr as u64), blockno,
+        );
+        __panic_start();
+        crate::kprintln!("virtio_disk_intr status: {}", status);
+        __panic_end()
+    }
+
+    /// Mirrors `__thread_state_set(p, THREAD_UNINTERRUPTIBLE)`
+    /// (`kernel/inc/proc/thread.h`, `static inline` -- no external linkage).
+    /// See module doc's "Deliberate simplifications".
+    ///
+    /// # Safety
+    /// `p` must be null or a live `*mut thread`.
+    #[inline(always)]
+    unsafe fn thread_state_set_uninterruptible(p: *mut thread) {
+        if p.is_null() {
+            return;
+        }
+        // SAFETY: caller contract; `state` is a plain 4-byte field of `p`.
+        unsafe {
+            let state_ptr = core::ptr::addr_of_mut!((*p).state) as *mut u32;
+            AtomicU32::from_ptr(state_ptr).store(THREAD_UNINTERRUPTIBLE, Ordering::SeqCst);
+        }
     }
 }
 
@@ -812,7 +836,7 @@ impl DiskInner {
     /// the disk's `inner` lock (evidenced by the `&mut self`).
     unsafe fn free_desc(&mut self, desc: *mut virtq_desc, i: i32) {
         if self.desc_freelist.free_item(i) != 0 {
-            panic_fixed("free_desc: invalid free");
+            Disk::panic_fixed("free_desc: invalid free");
         }
 
         // SAFETY: caller contract; `i` just validated as a real descriptor
@@ -890,6 +914,7 @@ impl DiskInner {
 // I/O submission + completion.
 // ===========================================================================
 
+impl Disk {
 /// Mirrors `virtio_disk_rw`.
 ///
 /// # Safety
@@ -897,15 +922,15 @@ impl DiskInner {
 /// be a valid physical-address pointer for `size` bytes, page-backed for
 /// the duration of the I/O (caller -- `virtio_disk_submit_bio` --
 /// guarantees this via the `bio`'s pinned pages).
-unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mut c_void, size: usize, write: bool) {
+unsafe fn rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mut c_void, size: usize, write: bool) {
     // SAFETY: caller contract.
-    let disk = unsafe { disk_ptr(diskno) };
+    let disk = unsafe { Self::at(diskno) };
 
     if size != BSIZE {
-        panic_fixed("virtio_disk_rw: size must be BSIZE");
+        Self::panic_fixed("virtio_disk_rw: size must be BSIZE");
     }
     if buf.is_null() {
-        panic_fixed("virtio_disk_rw: buf is NULL");
+        Self::panic_fixed("virtio_disk_rw: buf is NULL");
     }
 
     // The raw DMA descriptor ring pointer, copied out before the lock:
@@ -935,7 +960,7 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
         // No free descriptors; wait on the per-disk queue.
         // SAFETY: `xv6_current_thread()` returns the live current thread
         // (or null, handled internally).
-        unsafe { thread_state_set_uninterruptible(xv6_current_thread()) };
+        unsafe { Self::thread_state_set_uninterruptible(xv6_current_thread()) };
         // Wait on the descriptor-starvation queue: `wait_on` atomically
         // releases THIS guard's lock, blocks on the queue, and reacquires
         // the same lock before returning (the `tq_wait(q, &lk)` protocol,
@@ -992,7 +1017,7 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
 
     debug_assert!(!machine::Riscv::intr_get(), "virtio_disk_rw: interrupts enabled");
     // SAFETY: `diskno` valid; value is the queue number (0).
-    unsafe { core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_NOTIFY), 0) };
+    unsafe { core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_NOTIFY), 0) };
 
     // Submit only -- completion is handled by `virtio_disk_intr()`,
     // which frees the descriptor chain and signals the bio via
@@ -1003,13 +1028,20 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
     // `d` drops here -> releases the lock (was the explicit `spin_unlock`).
     drop(d);
 }
+} // impl Disk (rw)
 
 /// Mirrors `virtio_disk_intr`.
+///
+/// FLOOR: address-taken IRQ handler slot (`Some(virtio_disk_intr)` in
+/// [`Disk::blkdev_init`]'s `IrqDesc.handler` below) -- kept a free fn
+/// per this crate's established floor convention (matches `uart.rs`'s
+/// `uartintr`, `e1000.rs`'s `e1000_intr`), body updated to call the
+/// relocated `Disk`/`BioIter` associated fns.
 extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
     let diskno = data as usize;
     // SAFETY: `diskno` was registered with a valid disk index in
     // `virtio_blkdev_init` below.
-    let disk = unsafe { disk_ptr(diskno) };
+    let disk = unsafe { Disk::at(diskno) };
 
     // Raw DMA ring pointers, copied out before the lock (device-shared
     // pages, stay raw). `used_idx` -- the driver's *own* consume cursor --
@@ -1030,8 +1062,8 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
     // have nothing to do in the next interrupt, which is harmless.
     // SAFETY: `diskno` valid.
     unsafe {
-        let status = core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_INTERRUPT_STATUS)) & 0x3;
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_INTERRUPT_ACK), status);
+        let status = core::ptr::read_volatile(Disk::reg(diskno, VIRTIO_MMIO_INTERRUPT_STATUS)) & 0x3;
+        core::ptr::write_volatile(Disk::reg(diskno, VIRTIO_MMIO_INTERRUPT_ACK), status);
     }
 
     fence(Ordering::SeqCst);
@@ -1057,7 +1089,7 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
         let (status, bio_ptr) = unsafe { ((*disk).info[id].status, (*disk).info[id].bio) };
 
         if status != 0 {
-            panic_intr_status(id as c_int, status as c_int, bio_ptr as *mut c_void, if bio_ptr.is_null() {
+            Disk::panic_intr_status(id as c_int, status as c_int, bio_ptr as *mut c_void, if bio_ptr.is_null() {
                 0
             } else {
                 // SAFETY: `bio_ptr` non-null here.
@@ -1067,7 +1099,7 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
 
         // SAFETY: `disk` live; `info[]` raw field, serialised by `d`.
         if unsafe { (*disk).info[id].done } {
-            panic_fixed("virtio_disk_intr: already done");
+            Disk::panic_fixed("virtio_disk_intr: already done");
         }
         // SAFETY: `disk` live.
         unsafe { (*disk).info[id].done = true };
@@ -1084,7 +1116,7 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
             // that submitted it, still waiting in `bio_await`).
             unsafe {
                 (*bio_ptr).error = if status != 0 { -(EIO as c_int) } else { 0 };
-                bio_complete(bio_ptr);
+                Disk::bio_complete(bio_ptr);
             }
         }
 
@@ -1116,7 +1148,7 @@ impl BlkdevOps for VirtioDiskOps {
         Ok(())
     }
     unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
-        virtio_disk_submit_bio(blkdev, bio_ptr);
+        Disk::submit_bio(blkdev, bio_ptr);
         // The old callback unconditionally returned 0 -- I/O completion
         // (including per-bio errors) is signalled asynchronously via
         // `bio_complete` from `virtio_disk_intr`.
@@ -1124,39 +1156,40 @@ impl BlkdevOps for VirtioDiskOps {
     }
 }
 
+impl Disk {
 /// `submit_bio` -- process a block I/O request. Iterates over bio
-/// segments and hands each one to [`virtio_disk_rw`]; completion is
+/// segments and hands each one to [`Disk::rw`]; completion is
 /// asynchronous (see module doc).
-fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) {
+fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) {
     // SAFETY: `blkdev` is one of `VIRTIO_DISK_DEVS`'s entries, registered
     // in `virtio_blkdev_init` below with `minor` = diskno + 1.
     let diskno = (unsafe { (*blkdev).dev.minor } - 1) as usize; // minor 1 -> disk 0, minor 2 -> disk 1
 
     // SAFETY: `bio_ptr` live (blkdev_submit_bio's contract).
-    unsafe { bio_start_io_acct(bio_ptr) };
+    unsafe { Self::bio_start_io_acct(bio_ptr) };
 
     let mut iter = BioIter { blkno: 0, size: 0, size_done: 0, bvec_idx: 0 };
     // SAFETY: `bio_ptr` live.
-    unsafe { bio_iter_start(bio_ptr, &mut iter) };
+    unsafe { iter.start(bio_ptr) };
     let mut bvec: bio_vec = bio_vec { bv_page: ptr::null_mut(), len: 0, offset: 0 };
     // SAFETY: `bio_ptr` live; `bvec` local and live.
-    while unsafe { bio_iter_copy_bvec(bio_ptr, &iter, &raw mut bvec) } {
+    while unsafe { iter.copy_bvec(bio_ptr, &raw mut bvec) } {
         let sector = iter.blkno;
         let page: *mut page_t = bvec.bv_page;
         if page.is_null() {
-            panic_fixed("virtio_disk_submit_bio: page is NULL");
+            Self::panic_fixed("virtio_disk_submit_bio: page is NULL");
         }
         let pa = __page_to_pa(page) as *mut c_void;
         if pa.is_null() {
-            panic_fixed("virtio_disk_submit_bio: page has no physical address");
+            Self::panic_fixed("virtio_disk_submit_bio: page has no physical address");
         }
         // SAFETY: `bio_ptr` live.
-        let write = unsafe { bio_dir_write(bio_ptr) };
+        let write = unsafe { Self::bio_dir_write(bio_ptr) };
         // SAFETY: `diskno` valid (checked above); `bio_ptr` live; `pa +
         // bvec.offset` is a valid physical-memory pointer for
         // `bvec.len` bytes (the page this segment was built against).
         unsafe {
-            virtio_disk_rw(
+            Self::rw(
                 diskno,
                 bio_ptr,
                 sector,
@@ -1172,7 +1205,7 @@ fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) {
         // internal (differently-staggered) `size_done` update.
         iter.size_done += bvec.len;
         // SAFETY: `bio_ptr` live.
-        unsafe { bio_iter_next_seg(bio_ptr, &mut iter) };
+        unsafe { iter.next_seg(bio_ptr) };
     }
 
     // I/O has been submitted to the device. Completion (`bio_complete`)
@@ -1180,9 +1213,9 @@ fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) {
     // Callers wait via `bio_await()`.
 }
 
-fn virtio_blkdev_init(diskno: usize) {
+fn blkdev_init(diskno: usize) {
     // SAFETY: `diskno < N_VIRTIO_DISK`, storage 'static.
-    let dev = unsafe { blkdev_ptr(diskno) };
+    let dev = unsafe { Self::blkdev_at(diskno) };
     // SAFETY: `dev` is exclusively owned at this point (not yet
     // registered/published); zero it first (matches the C static
     // initializer's implicit zero-fill for every field the designated
@@ -1228,9 +1261,9 @@ fn virtio_blkdev_init(diskno: usize) {
     }
 }
 
-fn virtio_disk_init_one(diskno: usize) {
+fn init_one(diskno: usize) {
     // SAFETY: `diskno < N_VIRTIO_DISK`, storage 'static.
-    let disk = unsafe { disk_ptr(diskno) };
+    let disk = unsafe { Self::at(diskno) };
     let mut status: u32 = 0;
 
     // SAFETY: `disk` exclusively owned at this point; zero the whole
@@ -1265,10 +1298,10 @@ fn virtio_disk_init_one(diskno: usize) {
 
     // SAFETY: `diskno` valid.
     let magic_ok = unsafe {
-        core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_MAGIC_VALUE)) == 0x74726976
-            && core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_VERSION)) == 2
-            && core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_DEVICE_ID)) == 2
-            && core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_VENDOR_ID)) == 0x554d4551
+        core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_MAGIC_VALUE)) == 0x74726976
+            && core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_VERSION)) == 2
+            && core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_DEVICE_ID)) == 2
+            && core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_VENDOR_ID)) == 0x554d4551
     };
     if !magic_ok {
         panic_fmt_i32!("could not find virtio disk {}", diskno as c_int);
@@ -1277,19 +1310,19 @@ fn virtio_disk_init_one(diskno: usize) {
     // SAFETY: `diskno` valid throughout this function.
     unsafe {
         // reset device
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_STATUS), status);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_STATUS), status);
 
         // set ACKNOWLEDGE status bit
         status |= VIRTIO_CONFIG_S_ACKNOWLEDGE;
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_STATUS), status);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_STATUS), status);
 
         // set DRIVER status bit
         status |= VIRTIO_CONFIG_S_DRIVER;
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_STATUS), status);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_STATUS), status);
 
         // negotiate features (32-bit -- see module doc's "Deliberate
         // simplifications" for why this narrows the C's `uint64`).
-        let mut features = core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_DEVICE_FEATURES));
+        let mut features = core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_DEVICE_FEATURES));
         features &= !(1u32 << VIRTIO_BLK_F_RO);
         features &= !(1u32 << VIRTIO_BLK_F_SCSI);
         features &= !(1u32 << VIRTIO_BLK_F_CONFIG_WCE);
@@ -1297,28 +1330,28 @@ fn virtio_disk_init_one(diskno: usize) {
         features &= !(1u32 << VIRTIO_F_ANY_LAYOUT);
         features &= !(1u32 << VIRTIO_RING_F_EVENT_IDX);
         features &= !(1u32 << VIRTIO_RING_F_INDIRECT_DESC);
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_DRIVER_FEATURES), features);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_DRIVER_FEATURES), features);
 
         // tell device that feature negotiation is complete.
         status |= VIRTIO_CONFIG_S_FEATURES_OK;
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_STATUS), status);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_STATUS), status);
 
         // re-read status to ensure FEATURES_OK is set.
-        status = core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_STATUS));
+        status = core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_STATUS));
         if status & VIRTIO_CONFIG_S_FEATURES_OK == 0 {
             panic_fmt_i32!("virtio disk {} FEATURES_OK unset", diskno as c_int);
         }
 
         // initialize queue 0.
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_SEL), 0);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_SEL), 0);
 
         // ensure queue 0 is not in use.
-        if core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_READY)) != 0 {
+        if core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_READY)) != 0 {
             panic_fmt_i32!("virtio disk {} should not be ready", diskno as c_int);
         }
 
         // check maximum queue size.
-        let max = core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_NUM_MAX));
+        let max = core::ptr::read_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_NUM_MAX));
         if max == 0 {
             panic_fmt_i32!("virtio disk {} has no queue 0", diskno as c_int);
         }
@@ -1338,22 +1371,22 @@ fn virtio_disk_init_one(diskno: usize) {
         memset((*disk).used as *mut c_void, 0, PGSIZE as usize);
 
         // set queue size.
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_NUM), NUM as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_NUM), NUM as u32);
 
         // write physical addresses.
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW), (*disk).desc as u64 as u32);
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH), ((*disk).desc as u64 >> 32) as u32);
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW), (*disk).avail as u64 as u32);
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH), ((*disk).avail as u64 >> 32) as u32);
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW), (*disk).used as u64 as u32);
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH), ((*disk).used as u64 >> 32) as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW), (*disk).desc as u64 as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH), ((*disk).desc as u64 >> 32) as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW), (*disk).avail as u64 as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH), ((*disk).avail as u64 >> 32) as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW), (*disk).used as u64 as u32);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH), ((*disk).used as u64 >> 32) as u32);
 
         // queue is ready.
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_READY), 1);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_QUEUE_READY), 1);
 
         // tell device we're completely ready.
         status |= VIRTIO_CONFIG_S_DRIVER_OK;
-        core::ptr::write_volatile(reg(diskno, VIRTIO_MMIO_STATUS), status);
+        core::ptr::write_volatile(Self::reg(diskno, VIRTIO_MMIO_STATUS), status);
     }
 
     // all NUM descriptors start out unused; wire the descriptor-starvation
@@ -1372,14 +1405,14 @@ fn virtio_disk_init_one(diskno: usize) {
         if let Some(r) = TqRef::from_ptr(wq) { r.init(c"virtio_desc_wait".as_ptr(), lk); }
     }
 
-    virtio_blkdev_init(diskno);
+    Self::blkdev_init(diskno);
     // plic.rs and trap.rs arrange for interrupts from VIRTIO IRQs.
 }
 
 /// `void virtio_disk_init(void)`.
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn virtio_disk_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) reaches this via a
+// crate-path `use` of `Disk::init` (not an `extern` redeclaration).
+pub(crate) extern "C" fn init() {
     // SAFETY: `platform` is populated by `fdt_apply_platform_config`
     // before this runs (boot-hart-main-init, strictly before
     // `start_kernel_post_init`, which is where this driver's init runs).
@@ -1394,6 +1427,7 @@ pub(crate) extern "C" fn virtio_disk_init() {
     }
 
     for i in 0..num_disks {
-        virtio_disk_init_one(i);
+        Self::init_one(i);
     }
 }
+} // impl Disk (submit_bio/blkdev_init/init_one/init)

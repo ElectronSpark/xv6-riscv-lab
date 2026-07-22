@@ -94,102 +94,120 @@ struct BioIter {
 
 const BLK_SIZE_SHIFT: u32 = 9;
 
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_iter_start(bio_ptr: *mut bio, it: &mut BioIter) {
-    // SAFETY: caller contract.
-    unsafe {
-        it.blkno = (*bio_ptr).blkno;
-        it.bvec_idx = 0;
-        if (*bio_ptr).vec_length > 0 {
-            it.size = (*(*bio_ptr).bvecs.as_ptr()).len;
-            it.size_done = 0;
-        } else {
-            it.size = 0;
-            it.size_done = 0;
+/// KERNEL-OO (N-METH): `bio_iter_*(bio_ptr, it: &mut BioIter, ...)` become
+/// `impl BioIter` methods taking `&mut self`/`&self` in place of `it` --
+/// `BioIter` is a plain per-call stack local (never shared cross-hart),
+/// so `&mut self`/`&self` introduces no freeze-noalias hazard (unlike
+/// [`Ramdisk`], this file's driver state type, whose methods below keep
+/// raw params/no receiver).
+impl BioIter {
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn start(&mut self, bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe {
+            self.blkno = (*bio_ptr).blkno;
+            self.bvec_idx = 0;
+            if (*bio_ptr).vec_length > 0 {
+                self.size = (*(*bio_ptr).bvecs.as_ptr()).len;
+                self.size_done = 0;
+            } else {
+                self.size = 0;
+                self.size_done = 0;
+            }
         }
     }
-}
 
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_iter_next_seg(bio_ptr: *mut bio, it: &mut BioIter) {
-    let bvec_idx = it.bvec_idx + 1;
-    // SAFETY: caller contract.
-    if bvec_idx > unsafe { (*bio_ptr).vec_length } || bvec_idx < 0 {
-        return;
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn next_seg(&mut self, bio_ptr: *mut bio) {
+        let bvec_idx = self.bvec_idx + 1;
+        // SAFETY: caller contract.
+        if bvec_idx > unsafe { (*bio_ptr).vec_length } || bvec_idx < 0 {
+            return;
+        }
+        // SAFETY: caller contract; `bvec_idx` bounds-checked above.
+        unsafe {
+            let len = (*(*bio_ptr).bvecs.as_ptr().add(bvec_idx as usize)).len;
+            self.size -= len;
+            self.size_done += len;
+            (*bio_ptr).done_size += len;
+            self.blkno = (*bio_ptr).blkno
+                + (((*bio_ptr).done_size as u64) >> (BLK_SIZE_SHIFT + (*bio_ptr).block_shift as u32));
+            self.bvec_idx = bvec_idx;
+        }
     }
-    // SAFETY: caller contract; `bvec_idx` bounds-checked above.
-    unsafe {
-        let len = (*(*bio_ptr).bvecs.as_ptr().add(bvec_idx as usize)).len;
-        it.size -= len;
-        it.size_done += len;
-        (*bio_ptr).done_size += len;
-        it.blkno = (*bio_ptr).blkno
-            + (((*bio_ptr).done_size as u64) >> (BLK_SIZE_SHIFT + (*bio_ptr).block_shift as u32));
-        it.bvec_idx = bvec_idx;
-    }
-}
 
-/// # Safety
-/// `bio_ptr` must be live; `bvec` must be a live, writable `bio_vec`.
-unsafe fn bio_iter_copy_bvec(bio_ptr: *mut bio, it: &BioIter, bvec: *mut bio_vec) -> bool {
-    // SAFETY: caller contract.
-    if it.bvec_idx >= unsafe { (*bio_ptr).vec_length } {
-        return false;
-    }
-    // SAFETY: caller contract; `it.bvec_idx` bounds-checked above.
-    unsafe { *bvec = *(*bio_ptr).bvecs.as_ptr().add(it.bvec_idx as usize) };
-    true
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-#[inline(always)]
-unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
-    // SAFETY: caller contract.
-    unsafe { (*bio_ptr).flags.rw() != 0 }
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe {
-        (*bio_ptr).flags.set_done(0);
-        (*bio_ptr).done_size = 0;
-        (*bio_ptr).error = 0;
-        RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
-    }
-    fence(Ordering::SeqCst);
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe { (*bio_ptr).flags.set_done(1) };
-    fence(Ordering::SeqCst);
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_endio(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    if let Some(cb) = unsafe { (*bio_ptr).end_io } {
-        // SAFETY: `cb` is the bio owner's completion callback.
-        unsafe { cb(bio_ptr) };
+    /// # Safety
+    /// `bio_ptr` must be live; `bvec` must be a live, writable `bio_vec`.
+    unsafe fn copy_bvec(&self, bio_ptr: *mut bio, bvec: *mut bio_vec) -> bool {
+        // SAFETY: caller contract.
+        if self.bvec_idx >= unsafe { (*bio_ptr).vec_length } {
+            return false;
+        }
+        // SAFETY: caller contract; `self.bvec_idx` bounds-checked above.
+        unsafe { *bvec = *(*bio_ptr).bvecs.as_ptr().add(self.bvec_idx as usize) };
+        true
     }
 }
 
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_complete(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe {
-        bio_end_io_acct(bio_ptr);
-        bio_endio(bio_ptr);
-        RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
+/// Zero-sized driver-state type for the ramdisk (P3-10c precedent's ZST
+/// shape, e.g. `VirtioDiskOps`/`RamdiskOps` below) -- KERNEL-OO home for
+/// this file's free fns that aren't naturally owned by [`BioIter`]. Raw
+/// params kept, NO `&self` receiver (see module doc: this file has no
+/// interrupts/MMIO, but keeps the same driver-state discipline as its
+/// sibling `virtio_disk.rs`/`e1000.rs`/`uart.rs` for uniformity).
+pub(crate) struct Ramdisk;
+
+impl Ramdisk {
+    /// # Safety
+    /// `bio_ptr` must be live.
+    #[inline(always)]
+    unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
+        // SAFETY: caller contract.
+        unsafe { (*bio_ptr).flags.rw() != 0 }
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe {
+            (*bio_ptr).flags.set_done(0);
+            (*bio_ptr).done_size = 0;
+            (*bio_ptr).error = 0;
+            RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
+        }
+        fence(Ordering::SeqCst);
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe { (*bio_ptr).flags.set_done(1) };
+        fence(Ordering::SeqCst);
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_endio(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        if let Some(cb) = unsafe { (*bio_ptr).end_io } {
+            // SAFETY: `cb` is the bio owner's completion callback.
+            unsafe { cb(bio_ptr) };
+        }
+    }
+
+    /// # Safety
+    /// `bio_ptr` must be live.
+    unsafe fn bio_complete(bio_ptr: *mut bio) {
+        // SAFETY: caller contract.
+        unsafe {
+            Self::bio_end_io_acct(bio_ptr);
+            Self::bio_endio(bio_ptr);
+            RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
+        }
     }
 }
 
@@ -230,9 +248,11 @@ impl<T> SyncCell<T> {
 
 static RAMDISK_DEV: SyncCell<MaybeUninit<blkdev_t>> = SyncCell(UnsafeCell::new(MaybeUninit::uninit()));
 
-#[inline(always)]
-fn ramdisk_dev_ptr() -> *mut blkdev_t {
-    RAMDISK_DEV.get() as *mut blkdev_t
+impl Ramdisk {
+    #[inline(always)]
+    fn dev_ptr() -> *mut blkdev_t {
+        RAMDISK_DEV.get() as *mut blkdev_t
+    }
 }
 
 // ===========================================================================
@@ -255,22 +275,23 @@ impl BlkdevOps for RamdiskOps {
         Ok(())
     }
     unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
-        ramdisk_submit_bio(blkdev, bio_ptr)
+        Ramdisk::submit_bio(blkdev, bio_ptr)
     }
 }
 
-fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
+impl Ramdisk {
+fn submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
     let rd = RAMDISK.lock();
 
     // SAFETY: `bio_ptr` live (blkdev_submit_bio's contract).
-    unsafe { bio_start_io_acct(bio_ptr) };
+    unsafe { Self::bio_start_io_acct(bio_ptr) };
 
     let mut iter = BioIter { blkno: 0, size: 0, size_done: 0, bvec_idx: 0 };
     // SAFETY: `bio_ptr` live.
-    unsafe { bio_iter_start(bio_ptr, &mut iter) };
+    unsafe { iter.start(bio_ptr) };
     let mut bvec: bio_vec = bio_vec { bv_page: ptr::null_mut(), len: 0, offset: 0 };
     // SAFETY: `bio_ptr` live; `bvec` local and live.
-    while unsafe { bio_iter_copy_bvec(bio_ptr, &iter, &raw mut bvec) } {
+    while unsafe { iter.copy_bvec(bio_ptr, &raw mut bvec) } {
         let sector = iter.blkno;
         let page: *mut page_t = bvec.bv_page;
 
@@ -282,7 +303,7 @@ fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> 
             // SAFETY: `bio_ptr` live.
             unsafe {
                 (*bio_ptr).error = -(EINVAL as c_int);
-                bio_complete(bio_ptr);
+                Self::bio_complete(bio_ptr);
             }
             return Err(Errno::Inval);
         }
@@ -304,7 +325,7 @@ fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> 
             // SAFETY: `bio_ptr` live.
             unsafe {
                 (*bio_ptr).error = -(EINVAL as c_int);
-                bio_complete(bio_ptr);
+                Self::bio_complete(bio_ptr);
             }
             return Err(Errno::Inval);
         }
@@ -315,7 +336,7 @@ fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> 
             // SAFETY: `bio_ptr` live.
             unsafe {
                 (*bio_ptr).error = -(EINVAL as c_int);
-                bio_complete(bio_ptr);
+                Self::bio_complete(bio_ptr);
             }
             return Err(Errno::Inval);
         }
@@ -324,7 +345,7 @@ fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> 
         let ramdisk_addr = (rd.base + offset) as *mut c_void;
 
         // SAFETY: `bio_ptr` live.
-        if unsafe { bio_dir_write(bio_ptr) } {
+        if unsafe { Self::bio_dir_write(bio_ptr) } {
             // Write to ramdisk.
             // SAFETY: `pa + bvec.offset` valid for `bvec.len` bytes (the
             // page this segment was built against); `ramdisk_addr`
@@ -338,7 +359,7 @@ fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> 
 
         iter.size_done += bvec.len;
         // SAFETY: `bio_ptr` live.
-        unsafe { bio_iter_next_seg(bio_ptr, &mut iter) };
+        unsafe { iter.next_seg(bio_ptr) };
     }
 
     drop(rd);
@@ -346,15 +367,15 @@ fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> 
     // SAFETY: `bio_ptr` live.
     unsafe {
         (*bio_ptr).error = 0;
-        bio_complete(bio_ptr);
+        Self::bio_complete(bio_ptr);
     }
     Ok(())
 }
 
 /// `void ramdisk_init(void)`.
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
-pub(crate) extern "C" fn ramdisk_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) reaches this via a
+// crate-path `use` of `Ramdisk::init` (not an `extern` redeclaration).
+pub(crate) extern "C" fn init() {
     // `RAMDISK` starts life already in the `{ base: 0, size_bytes: 0,
     // size_blocks: 0 }` state (its `SpinLock::new` is a `const fn`), so
     // there is no separate "zero it, then `spin_init` the lock" step
@@ -384,7 +405,7 @@ pub(crate) extern "C" fn ramdisk_init() {
     }
 
     // Register the ramdisk as a block device.
-    let dev = ramdisk_dev_ptr();
+    let dev = Self::dev_ptr();
     // SAFETY: `dev` exclusively owned at this point (not yet registered/
     // published); zero it first (matches the C static initializer's
     // implicit zero-fill for every field the designated initializer
@@ -410,3 +431,4 @@ pub(crate) extern "C" fn ramdisk_init() {
         __panic_end();
     }
 }
+} // impl Ramdisk (submit_bio/init)

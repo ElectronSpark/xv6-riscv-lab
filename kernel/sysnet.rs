@@ -85,12 +85,24 @@ use crate::mm::Vm;
 // P3-1D mesh sweep: net.rs is in scope for this wave; signatures are
 // identical, so these become plain crate-path imports instead of `extern
 // "C"` redeclarations.
-use crate::net::{mbufalloc, mbuffree, mbufput, mbufq_empty, mbufq_pophead, mbufq_pushtail, net_tx_udp};
+use crate::net::{Mbuf, Net};
 
+/// Zero-sized syscall-support-state type for this file's socket helpers
+/// (P3-10c precedent's ZST shape) -- KERNEL-OO home for the free fns
+/// below. None of these are `SYSCALLS` dispatch-table entries (per the
+/// module doc, `sys_connect` dispatches to `vfs_syscall.rs`'s
+/// `sys_vfs_connect`, not anything in this file) and none is
+/// address-taken elsewhere -- grep-verified -- so none is FLOOR. Raw
+/// params kept, NO `&self` receiver (uniform with this file's sibling
+/// drivers).
+pub(crate) struct SysNet;
+
+impl SysNet {
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
+} // impl SysNet (neg)
 
 /// `kernel/inc/dev/net.h`: `#define MBUF_DEFAULT_HEADROOM 128` -- same
 /// local copy as `kernel/net.rs`'s own (private) constant, per this
@@ -156,10 +168,11 @@ pub struct SockInner {
 /// comment used to document is no longer needed.
 pub(crate) static SOCKETS: SpinLock<*mut sock> = SpinLock::new(c"socktbl", ptr::null_mut());
 
+impl SysNet {
 /// `void sockinit(void) {}` -- empty stub, ported as such (matches the
 /// plan's explicit instruction for this file).
-// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
-// crate-path `use` instead of an `extern` redeclaration -- demoted.
+// P3-1D mesh sweep: caller (`start_kernel.rs`) reaches this via a
+// crate-path `use` of `SysNet::sockinit` (not an `extern` redeclaration).
 pub(crate) extern "C" fn sockinit() {}
 
 // Legacy `sockalloc` removed -- VFS uses `vfs_sockalloc` in
@@ -209,9 +222,9 @@ pub(crate) unsafe extern "C" fn sockclose(si: *mut sock) {
     // drain is race-free.
     unsafe {
         let rxq = &raw mut (*(*si).inner.data_ptr()).rxq;
-        while mbufq_empty(rxq) == 0 {
-            let m = mbufq_pophead(rxq);
-            mbuffree(m);
+        while mbufq::empty(rxq) == 0 {
+            let m = mbufq::pophead(rxq);
+            Mbuf::free(m);
         }
         crate::mm::kalloc::Kmem::kfree(si as *mut c_void);
     }
@@ -248,16 +261,16 @@ pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> 
         let chan = &raw mut s.rxq as *mut c_void;
         // SAFETY: `s.rxq` is the guarded rxq; the raw mbufq list op stays
         // raw (intrusive-list class, out of scope). Lock held via `s`.
-        while unsafe { mbufq_empty(&raw mut s.rxq) } != 0 && crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) == 0 {
+        while unsafe { mbufq::empty(&raw mut s.rxq) } != 0 && crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) == 0 {
             if s.sleep_on_interruptible(chan) != 0 {
-                return neg(EINTR); // `s` drops here -> unlock
+                return Self::neg(EINTR); // `s` drops here -> unlock
             }
         }
         if crate::proc::access::ThreadAccess::from_ptr(pr).map_or(0, |ta| ta.killed()) != 0 {
-            return neg(EINTR); // `s` drops here -> unlock
+            return Self::neg(EINTR); // `s` drops here -> unlock
         }
         // SAFETY: lock held via `s`, rxq non-empty (loop invariant above).
-        unsafe { mbufq_pophead(&raw mut s.rxq) }
+        unsafe { mbufq::pophead(&raw mut s.rxq) }
     }; // `s` drops here -> unlock
 
     // SAFETY: `m` live (popped above, exclusively owned by this call
@@ -269,10 +282,10 @@ pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> 
     // SAFETY: `pr` live; `m` live; `(*pr).vm` is the current thread's
     // live address space.
     if unsafe { Vm::vm_copyout((*pr).vm, addr, (*m).head as *const c_void, len as u64) } < 0 {
-        unsafe { mbuffree(m) };
-        return neg(EFAULT);
+        unsafe { Mbuf::free(m) };
+        return Self::neg(EFAULT);
     }
-    unsafe { mbuffree(m) };
+    unsafe { Mbuf::free(m) };
     len
 }
 
@@ -289,19 +302,19 @@ pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> 
 pub(crate) unsafe extern "C" fn sockwrite(si: *mut sock, addr: u64, n: c_int) -> c_int {
     let pr = xv6_current_thread();
 
-    let m = mbufalloc(MBUF_DEFAULT_HEADROOM);
+    let m = Mbuf::alloc(MBUF_DEFAULT_HEADROOM);
     if m.is_null() {
-        return neg(ENOMEM);
+        return Self::neg(ENOMEM);
     }
 
     // SAFETY: `m` live; `pr` is the live current thread.
-    let dst = unsafe { mbufput(m, n as core::ffi::c_uint) };
+    let dst = unsafe { Mbuf::put(m, n as core::ffi::c_uint) };
     if unsafe { Vm::vm_copyin((*pr).vm, dst as *mut c_void, addr, n as u64) } < 0 {
-        unsafe { mbuffree(m) };
-        return neg(EFAULT);
+        unsafe { Mbuf::free(m) };
+        return Self::neg(EFAULT);
     }
     // SAFETY: `si` live; `m` live, ownership transferred to `net_tx_udp`.
-    unsafe { net_tx_udp(m, (*si).raddr, (*si).lport, (*si).rport) };
+    unsafe { Net::net_tx_udp(m, (*si).raddr, (*si).lport, (*si).rport) };
     n
 }
 
@@ -336,7 +349,7 @@ pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16
             // SAFETY: `m` is caller-owned, ownership transferred into the
             // rxq; the raw mbufq list op stays raw (out of scope). Lock
             // held via `s`.
-            unsafe { mbufq_pushtail(&raw mut s.rxq, m) };
+            unsafe { mbufq::pushtail(&raw mut s.rxq, m) };
             Scheduler::wakeup_on_chan(chan);
             return; // `s` then `guard` drop here (RAII).
         }
@@ -347,5 +360,6 @@ pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16
     // across a call into another function).
     drop(guard);
     // SAFETY: `m` still caller-owned (no socket matched).
-    unsafe { mbuffree(m) };
+    unsafe { Mbuf::free(m) };
 }
+} // impl SysNet (sockinit/sockclose/sockread/sockwrite/sockrecvudp)

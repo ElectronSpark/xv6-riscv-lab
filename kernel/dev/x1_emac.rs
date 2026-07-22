@@ -11,7 +11,7 @@
 //!
 //! Key data flow: TX: `net.c` -> `netdev_ops.transmit` ->
 //! [`x1_emac_transmit`] -> DMA. RX: IRQ -> [`x1_emac_intr`] ->
-//! [`x1_emac_recv`] -> `net_rx()`.
+//! [`x1_emac_recv`] -> `Net::net_rx()`.
 //!
 //! # QEMU verifiability (Wave 25 charter)
 //!
@@ -123,7 +123,7 @@ use crate::dev::fdt::platform;
 // P3-1D mesh sweep: net.rs/dev/netdev.rs are in scope for this wave;
 // signatures are identical, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
-use crate::net::{mbufalloc, mbuffree, net_rx};
+use crate::net::{Mbuf, Net};
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
 // instead of `extern "C"` redeclarations.
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
@@ -904,7 +904,7 @@ impl X1EmacSoftc {
         // Allocate mbufs and set up each descriptor in chained mode.
         for i in 0..X1_EMAC_RX_RING_SIZE {
             // `mbufalloc` returns a fresh mbuf or null.
-            let m = mbufalloc(0);
+            let m = Mbuf::alloc(0);
             if m.is_null() {
                 // SAFETY: caller contract; format string matches its two arguments.
                 crate::kprintln!("x1_emac{}: failed to alloc rx mbuf {}", unsafe { (*sc).index }, i as c_int);
@@ -968,7 +968,7 @@ impl X1EmacSoftc {
         // SAFETY: caller contract.
         unsafe {
             if !(*sc).tx_mbufs[idx].is_null() {
-                mbuffree((*sc).tx_mbufs[idx]);
+                Mbuf::free((*sc).tx_mbufs[idx]);
                 (*sc).tx_mbufs[idx] = ptr::null_mut();
             }
         }
@@ -1101,18 +1101,18 @@ impl X1EmacSoftc {
             // Deliver to network stack. `m` live, ownership transferred to
             // `net_rx` (matches the C original's contract -- `net_rx` is
             // responsible for `m`'s lifetime from here).
-            net_rx(m);
+            Net::net_rx(m);
 
             // Allocate a replacement mbuf. `mbufalloc` returns a fresh mbuf
             // or null.
-            let mut newm = mbufalloc(0);
+            let mut newm = Mbuf::alloc(0);
             if newm.is_null() {
                 // SAFETY: caller contract; format string matches its one argument.
                 crate::kprintln!("x1_emac{}: rx mbuf alloc failed", unsafe { (*sc).index });
                 // Reuse the old mbuf (we already gave it to net_rx, so
                 // allocate or we'll have a dangling pointer). In practice
                 // this shouldn't happen on xv6.
-                newm = mbufalloc(0);
+                newm = Mbuf::alloc(0);
                 if newm.is_null() {
                     panic!("x1_emac: out of mbufs");
                 }
@@ -1166,7 +1166,7 @@ impl X1EmacSoftc {
             // SAFETY: caller contract.
             unsafe {
                 if !(*sc).tx_mbufs[idx].is_null() {
-                    mbuffree((*sc).tx_mbufs[idx]);
+                    Mbuf::free((*sc).tx_mbufs[idx]);
                     (*sc).tx_mbufs[idx] = ptr::null_mut();
                 }
                 (*sc).tx_tail = (idx as u32 + 1) % X1_EMAC_TX_RING_SIZE as u32;
