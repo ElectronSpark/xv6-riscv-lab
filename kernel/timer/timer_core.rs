@@ -119,6 +119,24 @@ pub struct TimerRoot {
     pub lock: spinlock_t,
 }
 
+/// Timer-wheel expiry callback (fn-pointer-callback-slot ->
+/// trait-dispatch campaign). `TimerNode::callback` used to be a bare
+/// `unsafe extern "C" fn(*mut TimerNode)`; every registrant is now a
+/// `'static` ZST implementing this trait, installed as
+/// `Some(&'static SOME_HANDLER)`.
+pub(crate) trait TimerCallback: Sync {
+    /// Invoked by [`TimerCore::timer_tick`] when `node` has expired (its
+    /// `expires` tick has been reached), while `node.timer`'s spinlock is
+    /// held. Was the old `callback` fn-pointer's call.
+    ///
+    /// # Safety
+    /// Must only be invoked from `timer_tick`'s expiry loop with a live
+    /// `node` this callback was installed on (via
+    /// [`TimerCore::timer_node_init`]), whose owning `timer_root`'s lock is
+    /// held by the caller for the duration of the call.
+    unsafe fn expire(&self, node: *mut TimerNode);
+}
+
 /// Native `struct timer_node` (`kernel/inc/timer/timer_types.h`).
 #[repr(C)]
 pub struct TimerNode {
@@ -128,7 +146,11 @@ pub struct TimerNode {
     pub retry: c_int,
     pub retry_limit: c_int,
     pub timer: *mut TimerRoot,
-    pub callback: Option<unsafe extern "C" fn(*mut TimerNode)>,
+    /// `Option<&'static dyn TimerCallback>` fat pointer (was an 8-byte
+    /// `unsafe extern "C" fn` pointer) -- fn-pointer-callback-slot ->
+    /// trait-dispatch campaign. Grew 8 -> 16 bytes; `data` shifts +8
+    /// (64/80 -> see the layout asserts below).
+    pub callback: Option<&'static dyn TimerCallback>,
     pub data: *mut c_void,
 }
 
@@ -152,7 +174,12 @@ const _: () = {
     assert!(core::mem::size_of::<TimerRootFlagBits>() == 8, "timer_root flags-shell size");
     assert!(core::mem::align_of::<TimerRootFlagBits>() == 8, "timer_root flags-shell alignment");
 
-    assert!(core::mem::size_of::<TimerNode>() == 80, "timer_node size");
+    // TRAIT-OPS: `callback` (bare fn pointer -> `Option<&'static dyn
+    // TimerCallback>` fat pointer) grew 8 -> 16 bytes, so `data` shifts
+    // +8 and the total size grows 80 -> 88 (no align(64)/tail to absorb
+    // it here, unlike `TimerRoot::root` above -- this is an honest
+    // growth, not net-neutral).
+    assert!(core::mem::size_of::<TimerNode>() == 88, "timer_node size");
     assert!(core::mem::align_of::<TimerNode>() == 8, "timer_node alignment");
     assert!(core::mem::offset_of!(TimerNode, rb) == 0, "timer_node.rb offset");
     assert!(core::mem::offset_of!(TimerNode, list_entry) == 24, "timer_node.list_entry offset");
@@ -161,7 +188,13 @@ const _: () = {
     assert!(core::mem::offset_of!(TimerNode, retry_limit) == 52, "timer_node.retry_limit offset");
     assert!(core::mem::offset_of!(TimerNode, timer) == 56, "timer_node.timer offset");
     assert!(core::mem::offset_of!(TimerNode, callback) == 64, "timer_node.callback offset");
-    assert!(core::mem::offset_of!(TimerNode, data) == 72, "timer_node.data offset");
+    assert!(core::mem::offset_of!(TimerNode, data) == 80, "timer_node.data offset");
+    // Honest fat-pointer proof (IrqHandler/WorkHandler precedent): a
+    // `Option<&'static dyn TimerCallback>` is a 2-word (data ptr, vtable
+    // ptr) fat pointer with a null-data-pointer `None` niche -- no extra
+    // discriminant byte.
+    assert!(core::mem::size_of::<Option<&'static dyn TimerCallback>>() == 16, "timer callback fat-ptr size");
+    assert!(core::mem::align_of::<Option<&'static dyn TimerCallback>>() == 8, "timer callback fat-ptr align");
 };
 
 // ===========================================================================
@@ -517,7 +550,7 @@ impl TimerCore {
 pub(crate) unsafe fn timer_node_init(
     node: *mut timer_node,
     expires: u64,
-    callback: Option<unsafe extern "C" fn(*mut timer_node)>,
+    callback: Option<&'static dyn TimerCallback>,
     data: *mut c_void,
     _retry_limit: c_int,
 ) {
@@ -714,8 +747,10 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
                 // safe to call with `node`; `node` itself remains valid
                 // memory even if just removed from the tree/list above
                 // (removal does not free it -- ownership stays with the
-                // caller of `timer_add`).
-                unsafe { cb(node) };
+                // caller of `timer_add`); `timer`'s lock (`_g`) is held
+                // for the duration of this call, per `TimerCallback::expire`'s
+                // contract.
+                unsafe { cb.expire(node) };
             }
         }
         pos = next;

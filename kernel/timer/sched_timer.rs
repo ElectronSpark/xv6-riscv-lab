@@ -23,9 +23,9 @@
 //! C `__atomic_clear`/`__atomic_test_and_set`) coalesces any number of timer
 //! interrupts that fire between two `Scheduler::yield_now()` calls into a single
 //! `timer_tick()` pass — so the workqueue submission in
-//! [`timer_callback`]/`SchedTimerWorkHandler::run` (which *does* allocate, via
-//! `slab_alloc`) only ever runs from thread context, never from the raw
-//! ISR.
+//! `SchedTimerAddCallback::expire`/`SchedTimerWorkHandler::run` (which *does*
+//! allocate, via `slab_alloc`) only ever runs from thread context, never
+//! from the raw ISR.
 //!
 //! # Timer node lifetime
 //!
@@ -51,7 +51,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::bindings::{slab_cache_t, thread, thread_state, timer_node, timer_root, work_struct, workqueue};
 use crate::machine;
-use crate::timer::timer_core::TimerCore;
+use crate::timer::timer_core::{TimerCallback, TimerCore};
 
 // ===========================================================================
 // Constants mirrored from C headers.
@@ -105,11 +105,15 @@ unsafe extern "C" {
 /// Scheduler-tick consumer -- ZST housing every free fn this file used to
 /// export at crate scope (P3-OO mesh sweep, see `git show 91ef670` for the
 /// established convention). No receiver: every fn below keeps its exact
-/// C-derived parameter list. `timer_callback`/`sched_timer_callback` (each
-/// address-taken as a fn-pointer value passed to `TimerCore::timer_node_init`)
-/// stay free functions below this impl block; the former `work_callback`
-/// free fn is now `SchedTimerWorkHandler::run` (TRAIT-OPS, see `WorkHandler`
-/// in `proc/workqueue.rs`), installed via `Some(&SCHED_TIMER_WORK_HANDLER)`.
+/// C-derived parameter list. The former `timer_callback`/
+/// `sched_timer_callback` free fns (each address-taken as a fn-pointer
+/// value passed to `TimerCore::timer_node_init`) are now
+/// [`SchedTimerAddCallback`]/[`SchedTimerWakeCallback`] `TimerCallback`
+/// ZST impls (TRAIT-OPS, timer-callback-slot wave), installed via
+/// `Some(&SCHED_TIMER_ADD_CALLBACK)`/`Some(&SCHED_TIMER_WAKE_CALLBACK)`; the
+/// former `work_callback` free fn is now `SchedTimerWorkHandler::run`
+/// (TRAIT-OPS, see `WorkHandler` in `proc/workqueue.rs`), installed via
+/// `Some(&SCHED_TIMER_WORK_HANDLER)`.
 pub(crate) struct SchedTimer;
 
 impl SchedTimer {
@@ -197,11 +201,35 @@ impl SchedTimer {
 // sched_timer_work — slab-allocated envelope pairing a `timer_node` with a
 // `work_struct`, used by `sched_timer_add`/`sched_timer_add_deadline`.
 // ===========================================================================
+
+/// The `sched_timer_add`/`sched_timer_add_deadline` caller-supplied
+/// callback slot (a second, independent fn-pointer-callback layer from
+/// `TimerNode::callback` -- this one is invoked from workqueue-worker
+/// thread context by [`SchedTimerWorkHandler::run`], with the *caller's*
+/// opaque `data` pointer, not the `TimerNode`). Was
+/// `Option<unsafe extern "C" fn(*mut c_void)>`; every implementor gets
+/// `&self` (its own `'static` vtable) *and* the per-instance `data`
+/// pointer, per the timer-callback-slot wave's guidance for this exact
+/// callback+opaque-ctx shape (the ctx is per-`SchedTimerWork`-instance,
+/// not `'static`, so it cannot be folded into the vtable itself).
+///
+/// Zero in-tree callers install this today (`sched_timer_add`/
+/// `sched_timer_add_deadline` are both dead code -- see their own doc
+/// comments); the trait exists so the slot itself is no longer a bare fn
+/// pointer, matching every other callback slot in the crate.
+pub(crate) trait SchedTimerCallback: Sync {
+    /// # Safety
+    /// Must only be invoked by [`SchedTimerWorkHandler::run`] from
+    /// workqueue-worker thread context, with the exact `data` pointer this
+    /// callback was installed with (via [`SchedTimer::alloc_sched_timer_work`]).
+    unsafe fn expire(&self, data: *mut c_void);
+}
+
 #[repr(C)]
 struct SchedTimerWork {
     tn: timer_node,
     work: work_struct,
-    callback: Option<unsafe extern "C" fn(*mut c_void)>,
+    callback: Option<&'static dyn SchedTimerCallback>,
     data: *mut c_void,
 }
 
@@ -266,7 +294,8 @@ struct SchedTimerWorkHandler;
 impl WorkHandler for SchedTimerWorkHandler {
     unsafe fn run(&self, work: *mut work_struct) {
         // SAFETY: `work` is always the embedded `work_struct` inside a live
-        // `SchedTimerWork` published to `queue_work` by `timer_callback` below.
+        // `SchedTimerWork` published to `queue_work` by
+        // `SchedTimerAddCallback::expire` below.
         let data = unsafe { (*work).data };
         let stw = data as *mut SchedTimerWork;
         // SAFETY: `stw` was just derived from a live work item's `data`;
@@ -277,13 +306,14 @@ impl WorkHandler for SchedTimerWorkHandler {
             return;
         }
         // SAFETY: `stw` is live and non-null (checked above); `tn` is the
-        // embedded timer node `timer_callback` added to `SCHED_TIMER` --
-        // removing it here is required before the caller's callback can be
-        // allowed to e.g. free `stw`'s storage via a nested `sched_timer_add`.
+        // embedded timer node `SchedTimerAddCallback::expire` added to
+        // `SCHED_TIMER` -- removing it here is required before the caller's
+        // callback can be allowed to e.g. free `stw`'s storage via a nested
+        // `sched_timer_add`.
         unsafe {
             TimerCore::timer_remove(&raw mut (*stw).tn);
             if let Some(cb) = (*stw).callback {
-                cb((*stw).data);
+                cb.expire((*stw).data);
             }
             SchedTimer::free_sched_timer_work(stw);
         }
@@ -291,31 +321,37 @@ impl WorkHandler for SchedTimerWorkHandler {
 }
 static SCHED_TIMER_WORK_HANDLER: SchedTimerWorkHandler = SchedTimerWorkHandler;
 
-/// Kept as a free fn: its address is taken (`Some(timer_callback)`) as a
-/// `TimerCore::timer_node_init` fn-pointer value in
-/// [`SchedTimer::alloc_sched_timer_work`].
-unsafe extern "C" fn timer_callback(tn: *mut timer_node) {
-    // SAFETY: `tn` is live (called back by `timer_tick` while `SCHED_TIMER`
-    // is locked); `data` was set to a `SchedTimerWork*` by
-    // `alloc_sched_timer_work`.
-    let data = unsafe { (*tn).data };
-    let stw = data as *mut SchedTimerWork;
-    if stw.is_null() {
-        crate::kprintln!("warning: __timer_callback: Invalid work");
-        return;
-    }
-    let wq = SCHED_TIMER_WQ.load(Ordering::Relaxed);
-    // SAFETY: `stw` is live and non-null; `&raw mut (*stw).work` is the
-    // embedded work item `alloc_sched_timer_work` initialized.
-    let ok = unsafe { Workqueue::queue(wq, &raw mut (*stw).work) };
-    if !ok {
-        crate::kprintln!("warning: __sched_timer_add_timer_callback: Failed to queue work");
-        // SAFETY: `stw` is live and non-null; queueing failed so it will
-        // never be freed by `SchedTimerWorkHandler::run` -- this is the only remaining
-        // owner.
-        unsafe { SchedTimer::free_sched_timer_work(stw) };
+/// [`TimerCallback`] implementor (TRAIT-OPS, timer-callback-slot wave):
+/// one `'static` instance's address is taken (`Some(&SCHED_TIMER_ADD_CALLBACK)`)
+/// as the `TimerNode::callback` value in
+/// [`SchedTimer::alloc_sched_timer_work`]. Body moved verbatim from the
+/// former `timer_callback` free fn (was the old bare-fn-pointer slot).
+struct SchedTimerAddCallback;
+impl TimerCallback for SchedTimerAddCallback {
+    unsafe fn expire(&self, tn: *mut timer_node) {
+        // SAFETY: `tn` is live (called back by `timer_tick` while
+        // `SCHED_TIMER` is locked); `data` was set to a `SchedTimerWork*`
+        // by `alloc_sched_timer_work`.
+        let data = unsafe { (*tn).data };
+        let stw = data as *mut SchedTimerWork;
+        if stw.is_null() {
+            crate::kprintln!("warning: __timer_callback: Invalid work");
+            return;
+        }
+        let wq = SCHED_TIMER_WQ.load(Ordering::Relaxed);
+        // SAFETY: `stw` is live and non-null; `&raw mut (*stw).work` is the
+        // embedded work item `alloc_sched_timer_work` initialized.
+        let ok = unsafe { Workqueue::queue(wq, &raw mut (*stw).work) };
+        if !ok {
+            crate::kprintln!("warning: __sched_timer_add_timer_callback: Failed to queue work");
+            // SAFETY: `stw` is live and non-null; queueing failed so it
+            // will never be freed by `SchedTimerWorkHandler::run` -- this
+            // is the only remaining owner.
+            unsafe { SchedTimer::free_sched_timer_work(stw) };
+        }
     }
 }
+static SCHED_TIMER_ADD_CALLBACK: SchedTimerAddCallback = SchedTimerAddCallback;
 
 impl SchedTimer {
     /// # Safety
@@ -323,7 +359,7 @@ impl SchedTimer {
     /// workqueue-worker thread context.
     unsafe fn alloc_sched_timer_work(
         deadline: u64,
-        callback: Option<unsafe extern "C" fn(*mut c_void)>,
+        callback: Option<&'static dyn SchedTimerCallback>,
         data: *mut c_void,
     ) -> *mut SchedTimerWork {
         let stw = Self::slab_alloc(Self::sched_timer_work_slab_ptr()) as *mut SchedTimerWork;
@@ -342,7 +378,7 @@ impl SchedTimer {
             // parameter is a pre-existing no-op in the C original, kept here
             // for 1:1 fidelity -- the node is actually removed after its first
             // firing regardless of the value passed).
-            TimerCore::timer_node_init(&raw mut (*stw).tn, deadline, Some(timer_callback), stw as *mut c_void, 1);
+            TimerCore::timer_node_init(&raw mut (*stw).tn, deadline, Some(&SCHED_TIMER_ADD_CALLBACK), stw as *mut c_void, 1);
             WorkStruct::init(&raw mut (*stw).work, Some(&SCHED_TIMER_WORK_HANDLER), stw as u64);
         }
         stw
@@ -395,17 +431,26 @@ impl SchedTimer {
 // timer node belongs to.
 // ===========================================================================
 
-/// Kept as a free fn: its address is taken (`Some(sched_timer_callback)`)
-/// as a `TimerCore::timer_node_init` fn-pointer value in
-/// [`SchedTimer::sched_timer_set`].
-unsafe extern "C" fn sched_timer_callback(tn: *mut timer_node) {
-    // SAFETY: `tn` is live (called back while `SCHED_TIMER` is locked);
-    // `data` was set to a `*mut thread` by `sched_timer_set`.
-    let p = unsafe { (*tn).data } as *mut thread;
-    if SchedTimer::thread_sleeping(p) {
-        Scheduler::wakeup(p);
+/// [`TimerCallback`] implementor (TRAIT-OPS, timer-callback-slot wave):
+/// one `'static` instance's address is taken
+/// (`Some(&SCHED_TIMER_WAKE_CALLBACK)`) as the `TimerNode::callback` value
+/// in [`SchedTimer::sched_timer_set`] -- the timeout path shared by every
+/// timed lock wait (`mutex_lock_timed`/`sem_timedwait`/
+/// `wait_for_completion_timed`/rwsem-timed) and `sleep_ms`/
+/// `sleep_ms_interruptible`. Body moved verbatim from the former
+/// `sched_timer_callback` free fn (was the old bare-fn-pointer slot).
+struct SchedTimerWakeCallback;
+impl TimerCallback for SchedTimerWakeCallback {
+    unsafe fn expire(&self, tn: *mut timer_node) {
+        // SAFETY: `tn` is live (called back while `SCHED_TIMER` is locked);
+        // `data` was set to a `*mut thread` by `sched_timer_set`.
+        let p = unsafe { (*tn).data } as *mut thread;
+        if SchedTimer::thread_sleeping(p) {
+            Scheduler::wakeup(p);
+        }
     }
 }
+static SCHED_TIMER_WAKE_CALLBACK: SchedTimerWakeCallback = SchedTimerWakeCallback;
 
 // ===========================================================================
 // Public API — exact C names/signatures preserved.
@@ -429,7 +474,7 @@ impl SchedTimer {
         // SAFETY: `tn` is non-null per the check above and caller-owned per
         // this function's `# Safety` contract.
         unsafe {
-            TimerCore::timer_node_init(tn, expires, Some(sched_timer_callback), current as *mut c_void, TIMER_DEFAULT_RETRY_LIMIT);
+            TimerCore::timer_node_init(tn, expires, Some(&SCHED_TIMER_WAKE_CALLBACK), current as *mut c_void, TIMER_DEFAULT_RETRY_LIMIT);
             TimerCore::timer_add(Self::sched_timer_ptr(), tn)
         }
     }
@@ -573,7 +618,7 @@ impl SchedTimer {
     // API (matches `goldfish_rtc_init`'s precedent in this same wave/module).
     #[allow(dead_code)]
     pub(crate) unsafe fn sched_timer_add_deadline(
-        callback: Option<unsafe extern "C" fn(*mut c_void)>,
+        callback: Option<&'static dyn SchedTimerCallback>,
         data: *mut c_void,
         deadline: u64,
     ) -> c_int {
@@ -604,7 +649,7 @@ impl SchedTimer {
     // `sched_timer_add_deadline`'s comment just above.
     #[allow(dead_code)]
     pub(crate) unsafe fn sched_timer_add(
-        callback: Option<unsafe extern "C" fn(*mut c_void)>,
+        callback: Option<&'static dyn SchedTimerCallback>,
         data: *mut c_void,
         ms: u64,
     ) -> c_int {
