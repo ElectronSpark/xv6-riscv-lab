@@ -774,7 +774,6 @@ use crate::vfs::fdtable::{__vfs_fdtable_global_init, vfs_fdtable_init};
 use crate::vfs::file::{__vfs_file_init, __vfs_file_shrink_cache};
 use crate::vfs::inode::{inode_ops, VfsInode};
 use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
-use crate::vfs::vfs_syscall::vfs_mount_path;
 use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
 
 // P3-9c: `KArc<vfs_fs_type>` -- see `kernel/kobject.rs`'s `HasKobject`/
@@ -3053,7 +3052,7 @@ impl Vfs {
             xv6fs_mount_root();
 
             // Mount tmpfs at /tmp (after chroot to xv6fs).
-            ret = vfs_mount_path(c"tmpfs".as_ptr(), c"/tmp".as_ptr(), 4, ptr::null(), 0);
+            ret = Vfs::vfs_mount_path(c"tmpfs".as_ptr(), c"/tmp".as_ptr(), 4, ptr::null(), 0);
             if ret == 0 {
                 crate::kprintln!("tmpfs: mounted at /tmp");
             } else if ret == neg(ENOENT) {
@@ -3078,7 +3077,7 @@ impl Vfs {
             } else {
                 VfsInode::vfs_iput(dev_dir);
             }
-            ret = vfs_mount_path(c"devtmpfs".as_ptr(), c"/dev".as_ptr(), 4, ptr::null(), 0);
+            ret = Vfs::vfs_mount_path(c"devtmpfs".as_ptr(), c"/dev".as_ptr(), 4, ptr::null(), 0);
             if ret == 0 {
                 crate::kprintln!("devtmpfs: mounted at /dev");
                 // Now that the superblock & root inode are fully VFS-initialised,
