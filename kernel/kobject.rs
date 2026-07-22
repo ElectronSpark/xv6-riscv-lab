@@ -39,21 +39,28 @@ use crate::list::ListNode;
 use crate::sync::KSpinlock;
 
 // ---------------------------------------------------------------------------
-// Native layout — Wave P3-N3.
+// Native layout — Wave P3-N3 (nativization), updated by the TRAIT-OPS
+// `release` conversion (fn-pointer -> `Option<&'static dyn KobjectRelease>`,
+// see the trait definition below).
 //
 // `Kobject`/`KobjectOps` ARE the kernel-wide Rust definitions of
 // `kernel/inc/kobject.h`'s `struct kobject`/`struct kobject_ops` now
 // (blocklist+redirect technique per P3-N1/P3-N2, see `build.rs`).
 // `list_entry` is the crate's canonical native `crate::list::ListNode`
-// (== `list_node_t` via the P3-N1 redirect); `release` reproduces
+// (== `list_node_t` via the P3-N1 redirect); `release` used to reproduce
 // bindgen's `Option<unsafe extern "C" fn(*mut kobject)>` lowering of the
-// C function pointer exactly (`*mut Kobject` == `*mut kobject` via this
-// wave's redirect).
+// C function pointer exactly, but no C consumer of this struct remains
+// anywhere in the tree (the whole kernel outside `printf_shim.c` is
+// Rust), so this wave replaces it with a real Rust trait object --
+// `Option<&'static dyn KobjectRelease>`, a 16-byte fat pointer, `None`
+// via the null-data-pointer niche (same reasoning as every other
+// TRAIT-OPS conversion in this campaign: `PcacheOps`, `NetdevOps`,
+// `DeviceOps`, `FsTypeOps`).
 // ---------------------------------------------------------------------------
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct KobjectOps {
-    pub release: Option<unsafe extern "C" fn(obj: *mut Kobject)>,
+    pub release: Option<&'static dyn KobjectRelease>,
 }
 
 #[repr(C)]
@@ -65,24 +72,31 @@ pub struct Kobject {
     pub ops: KobjectOps,
 }
 
-// P3-N3 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
-// kobject { list_entry: list_node_t, refcount: c_int, name: *const
-// c_char, ops: kobject_ops }` / `pub struct kobject_ops { release:
-// Option<unsafe extern "C" fn(*mut kobject)> }`) and independently
-// confirmed by a riscv64-unknown-elf-gcc `_Static_assert` probe
-// (rv64gc/lp64d) against `kernel/inc/kobject.h`: kobject 40/8,
-// offsets 0/16/24/32; kobject_ops 8/8, release at 0.
+// Layout proof, updated for the `release` fn-pointer -> trait-object
+// conversion. `KobjectOps` grows 8 -> 16 (a `dyn` fat pointer instead of
+// a thin fn pointer), so `Kobject` grows 40 -> 48; `ops` stays the last
+// field so its own offset (32) is unaffected, and every *other* field
+// precedes `ops` so none of their offsets move either. Independently
+// confirmed with a host-native `rustc` layout probe replicating this
+// exact field set (dyn-trait stand-in) before editing these numbers.
 const _: () = {
-    assert!(core::mem::size_of::<KobjectOps>() == 8, "kobject_ops size");
+    assert!(core::mem::size_of::<KobjectOps>() == 16, "kobject_ops size");
     assert!(core::mem::align_of::<KobjectOps>() == 8, "kobject_ops alignment");
     assert!(core::mem::offset_of!(KobjectOps, release) == 0, "kobject_ops.release offset");
-    assert!(core::mem::size_of::<Kobject>() == 40, "kobject size");
+    assert!(core::mem::size_of::<Kobject>() == 48, "kobject size");
     assert!(core::mem::align_of::<Kobject>() == 8, "kobject alignment");
     assert!(core::mem::offset_of!(Kobject, list_entry) == 0, "kobject.list_entry offset");
     assert!(core::mem::offset_of!(Kobject, refcount) == 16, "kobject.refcount offset");
     assert!(core::mem::offset_of!(Kobject, name) == 24, "kobject.name offset");
     assert!(core::mem::offset_of!(Kobject, ops) == 32, "kobject.ops offset");
+    assert!(
+        core::mem::size_of::<Option<&'static dyn KobjectRelease>>() == 16,
+        "kobject release fat pointer size"
+    );
+    assert!(
+        core::mem::align_of::<Option<&'static dyn KobjectRelease>>() == 8,
+        "kobject release fat pointer alignment"
+    );
 };
 
 use crate::proc::proc_shims::xv6_panic;
@@ -357,7 +371,7 @@ impl Kobject {
                 Kobject::detach(obj);
                 match (*obj).ops.release {
                     None => crate::mm::kalloc::Kmem::kmm_free(obj as *mut c_void),
-                    Some(release) => release(obj),
+                    Some(release) => release.release(obj),
                 }
             }
         }
@@ -414,38 +428,32 @@ pub unsafe trait HasKobject {
     fn kobj_ptr(this: *mut Self) -> *mut Kobject;
 }
 
-/// Per-type "run when the refcount reaches zero" behavior -- the Rust-side
-/// analog of the raw C `kobject_ops.release` function pointer.
+/// Per-kobject-embedder "run when the refcount reaches zero" behavior --
+/// the trait-object replacement (TRAIT-OPS campaign) for the raw C
+/// `kobject_ops.release` function pointer
+/// (`Option<unsafe extern "C" fn(*mut Kobject)>`).
 ///
-/// This is *not* wired into every `KArc` automatically: `kobject_put`
-/// (which `KArc`'s `Drop` calls) always dispatches through whatever is
-/// installed in `obj->ops.release` at `kobject_init` time -- several
-/// existing consumers (`dev/dev.rs`'s `underlying_kobject_release`) do
-/// real work there beyond a plain free (table unregistration) and must
-/// keep doing so. `KobjectRelease` plus [`karc_release_trampoline`] is
-/// offered so a *new*, pure-Rust `KArc`-only type can hand a monomorphic
-/// trampoline to `ops.release` instead of hand-writing an `extern "C" fn`
-/// shim (see `dev/bio.rs`'s `bio_release_kobj_cb` for the shape being
-/// replaced) -- adoption is opt-in per type, not required by `KArc`
-/// itself.
-pub trait KobjectRelease: HasKobject {
-    fn release(self_ptr: *mut Self);
-}
-
-/// `kobject_ops.release`-shaped trampoline for [`KobjectRelease`]: install
-/// this (`Some(karc_release_trampoline::<T>)`) as `kobj.ops.release`
-/// instead of hand-writing a per-type `extern "C" fn(*mut Kobject)` shim.
-/// Only sound to install for a `T` whose `HasKobject::kobj_ptr` impl
-/// returns the exact pointer `kobject_put` will pass back in here.
-pub extern "C" fn karc_release_trampoline<T: KobjectRelease>(obj: *mut Kobject) {
-    // SAFETY: `kobject_put` (this callback's only caller) only invokes
-    // `ops.release` once the refcount it manages has reached zero, and
-    // `T::kobj_ptr`'s contract (see `HasKobject`) is that `obj` is exactly
-    // the pointer that function returns for the live `T` this kobject is
-    // embedded in -- so reinterpreting it back to `*mut T` here recovers
-    // that same live object, now uniquely owned (no other reference
-    // exists once the count hit zero).
-    T::release(obj as *mut T);
+/// This *is* the mechanism `kobject_put` dispatches through directly
+/// (`(*obj).ops.release`, see [`Kobject::kobject_put`]) -- not a
+/// `KArc`-only opt-in. `KArc`'s `Drop` always goes through
+/// `kobject_put`/`ops.release` too, so any `T: HasKobject` whose
+/// `kobject_init` installed a `KobjectRelease` implementor gets it run
+/// automatically on the last drop; a `None` slot instead falls back to a
+/// plain `kmm_free(obj)` (the pre-conversion `ops.release.is_none()`
+/// branch, preserved exactly).
+///
+/// Implementors are typically stateless ZSTs (one `'static` instance per
+/// embedding type, e.g. `dev/dev.rs`'s device-table unregister-then-
+/// release, `dev/bio.rs`'s plain free, `vfs/fs.rs`'s `slab_free` via
+/// `container_of`) installed as `Some(&INSTANCE)` at `kobject_init` time.
+pub trait KobjectRelease: Sync {
+    /// # Safety
+    /// Invoked by [`Kobject::kobject_put`] exactly once per kobject, when
+    /// `obj`'s refcount has just reached zero and it has already been
+    /// detached from the global registry -- `obj` is uniquely owned (no
+    /// other reference exists) for the duration of this call, exactly the
+    /// contract the old `unsafe extern "C" fn(*mut Kobject)` callback had.
+    unsafe fn release(&self, obj: *mut Kobject);
 }
 
 /// An `Arc`-analog over the kernel's kobject refcount. `Clone` bumps the

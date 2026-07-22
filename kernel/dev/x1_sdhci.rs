@@ -1804,7 +1804,7 @@ unsafe fn bio_endio(bio_ptr: *mut bio) {
     if let Some(cb) = unsafe { (*bio_ptr).end_io } {
         // SAFETY: `cb` is the bio owner's completion callback, invoked
         // with the same `bio_ptr` per the C `end_io(bio)` contract.
-        unsafe { cb(bio_ptr) };
+        unsafe { cb.end_io(bio_ptr) };
     }
 }
 

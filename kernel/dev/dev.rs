@@ -94,7 +94,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::bindings::{
     device_major_t, device_t, dev_type_e, dev_type_e_DEV_TYPE_BLOCK,
-    dev_type_e_DEV_TYPE_CHAR, kobject, slab_cache_t,
+    dev_type_e_DEV_TYPE_CHAR, slab_cache_t,
     spinlock_t, EALREADY, EBUSY, EINVAL, ENODEV, ENOMEM, ENOSPC, ENOTTY, SLAB_FLAG_DEBUG_BITMAP,
     SLAB_FLAG_EMBEDDED,
 };
@@ -755,22 +755,30 @@ extern "C" fn dev_type_rcu_free(data: *mut c_void) {
     DevTable::type_free(data as *mut device_major_t);
 }
 
-/// kobject release callback (`kobject_ops.release`): unregister the
+/// `KobjectRelease` implementor for `device_t`'s kobject: unregister the
 /// device from the table, then invoke its own release operation.
 ///
-/// FLOOR: address-taken `extern "C"` kobject-release callback (installed
-/// as a bare fn-pointer at `DeviceInstance::register`'s `(*dev).kobj.ops.
-/// release = Some(underlying_kobject_release)` below) -- kept a free fn
-/// per this wave's floor rule.
-extern "C" fn underlying_kobject_release(obj: *mut kobject) {
-    // SAFETY: `kobject_put` only invokes this once refcount reaches zero;
-    // `kobj` is `device_t`'s first field (offset 0), so this cast is
-    // exact -- matches the C `container_of(obj, device_t, kobj)`, which
-    // reduces to the same reinterpretation on this layout.
-    let dev = obj as *mut device_t;
-    DevTable::unregister_from_table(dev);
-    DevTable::call_release(dev);
+/// TRAIT-OPS: stateless ZST installed as `Some(&UNDERLYING_KOBJECT_RELEASE)`
+/// at `DeviceInstance::register`'s `(*dev).kobj.ops.release = ...` below --
+/// replaces the former address-taken `extern "C" fn` callback.
+struct UnderlyingKobjectRelease;
+
+impl crate::kobject::KobjectRelease for UnderlyingKobjectRelease {
+    unsafe fn release(&self, obj: *mut Kobject) {
+        // SAFETY: `kobject_put` only invokes this once refcount reaches
+        // zero; `kobj` is `device_t`'s first field (offset 0), so this
+        // cast is exact -- matches the C `container_of(obj, device_t,
+        // kobj)`, which reduces to the same reinterpretation on this
+        // layout.
+        let dev = obj as *mut device_t;
+        unsafe {
+            DevTable::unregister_from_table(dev);
+            DevTable::call_release(dev);
+        }
+    }
 }
+
+static UNDERLYING_KOBJECT_RELEASE: UnderlyingKobjectRelease = UnderlyingKobjectRelease;
 
 // ---------------------------------------------------------------------------
 // `impl DeviceInstance` -- `device_t`-level public C ABI. KERNEL-OO
@@ -908,7 +916,7 @@ impl DeviceInstance {
                 // table`, any future caller) must see the real assigned
                 // minor, not the `0` auto-assign sentinel.
                 (*dev).minor = am;
-                (*dev).kobj.ops.release = Some(underlying_kobject_release);
+                (*dev).kobj.ops.release = Some(&UNDERLYING_KOBJECT_RELEASE);
                 Kobject::kobject_init(&raw mut (*dev).kobj);
             }
             // SAFETY: `dm` is live and only ever mutated under

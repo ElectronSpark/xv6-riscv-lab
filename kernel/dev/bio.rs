@@ -52,7 +52,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use crate::bindings::{bio, bio_vec, blkdev_t, bool_, kobject, page_t, PGSIZE};
+use crate::bindings::{bio, bio_vec, blkdev_t, bool_, page_t, PGSIZE};
 use crate::kobject::{HasKobject, Kobject};
 
 // ---------------------------------------------------------------------------
@@ -193,6 +193,20 @@ impl BioFlagBits {
     }
 }
 
+/// Per-`bio` I/O-completion callback -- the trait-object replacement
+/// (TRAIT-OPS campaign) for the raw C `end_io` function pointer
+/// (`Option<unsafe extern "C" fn(*mut Bio)>`). Invoked by
+/// `bio_endio()`-equivalents (`virtio_disk.rs`, `ramdisk.rs`,
+/// `dev/x1_sdhci.rs`) once a submitted `bio`'s I/O has completed, with
+/// `bio_ptr` still live (see each call site's own safety comment).
+pub trait BioEndIo: Sync {
+    /// # Safety
+    /// `bio` must point to a live `struct bio` whose I/O has just
+    /// completed -- exactly the precondition the old
+    /// `unsafe extern "C" fn(*mut Bio)` callback had.
+    unsafe fn end_io(&self, bio: *mut Bio);
+}
+
 /// `struct bio` (`kernel/inc/dev/bio_types.h`). The align(64) is the
 /// `completion_t` typedef's `__ALIGNED_CACHELINE` riding in through the
 /// `io_completion` member, exactly as bindgen emitted it
@@ -208,7 +222,7 @@ pub struct Bio {
     pub done_size: crate::bindings::uint16,
     pub blkno: crate::bindings::uint64,
     pub flags: BioFlagBits,
-    pub end_io: Option<unsafe extern "C" fn(bio: *mut Bio)>,
+    pub end_io: Option<&'static dyn BioEndIo>,
     pub private_data: *mut c_void,
     pub error: c_int,
     pub(crate) _pad0: [u64; 2],
@@ -216,22 +230,30 @@ pub struct Bio {
     pub bvecs: crate::bindings::__IncompleteArrayField<BioVec>,
 }
 
-// P3-N4 hardcoded layout proof — values captured from the
-// pre-nativization bindgen output (kernel_bindings.rs: `pub struct
-// bio_vec { bv_page: *mut page_t, len: uint16, offset: uint16 }`,
-// `pub struct bio { kobj: kobject, list_entry: list_node_t, bdev: *mut
-// blkdev_t, block_shift: uint16, vec_length: int16, size: uint16,
-// done_size: uint16, blkno: uint64, __bindgen_anon_1: bio__bindgen_ty_1,
-// end_io: Option<unsafe extern "C" fn(*mut bio)>, private_data: *mut
-// c_void, error: c_int, __bindgen_padding_0: [u64; 2], io_completion:
-// completion_t, bvecs: __IncompleteArrayField<bio_vec> }`,
-// `#[repr(align(64))]`) and independently confirmed by a
-// riscv64-unknown-elf-gcc `_Static_assert` probe (rv64gc/lp64d) against
-// `kernel/inc/dev/bio_types.h` — see the P3-N4 wave record: bio_vec
-// 16/8 offsets 0/8/10, bio 256/64 offsets 0/40/56/64/66/68/70/72/[80]/
-// 88/96/104/128/256 (the anonymous bitfield struct occupies [80,88);
-// completion_t itself proven 128/64 by the same probe; `bvecs` — the
-// C flexible array member — sits at the padded struct end, 256).
+// P3-N4 hardcoded layout proof, updated by two TRAIT-OPS conversions
+// stacked on the original bindgen-derived layout:
+//
+// 1. `Kobject.ops.release` fn-pointer -> `Option<&'static dyn
+//    KobjectRelease>`: `Kobject` grows 40 -> 48 (see `kernel/kobject.rs`).
+//    `kobj` is `Bio`'s first field, so every field from `list_entry`
+//    onward shifts +8.
+// 2. This wave's own `Bio.end_io` fn-pointer -> `Option<&'static dyn
+//    BioEndIo>`: the field itself grows from an 8-byte thin `Option<fn>`
+//    to a 16-byte fat pointer, shifting every field from `private_data`
+//    onward by a further +8.
+//
+// Net effect beyond `kobj` (unchanged offset 0): every field up to and
+// including `flags` shifts +8 (the Kobject growth only); `end_io` itself
+// also shifts +8 (Kobject growth) but then grows in place to 16 bytes;
+// every field after it (`private_data` onward) shifts +8+8 = +16.
+// `error` (c_int, ends at 124) no longer lands `_pad0`+`io_completion` on
+// the same 192 cache-line boundary the old layout hit at 128 -- the
+// natural `align(64)` requirement on `io_completion` (from
+// `completion_t`'s own `align(64)`) pushes it to 192 instead, growing
+// `Bio` from 256 to 320 total. Recomputed independently with a
+// host-native `rustc` layout probe replicating this exact field set
+// (dyn-trait stand-ins for both fat pointers) before editing these
+// numbers -- not hand-arithmetic.
 const _: () = {
     assert!(core::mem::size_of::<BioVec>() == 16, "bio_vec size");
     assert!(core::mem::align_of::<BioVec>() == 8, "bio_vec alignment");
@@ -242,22 +264,30 @@ const _: () = {
     assert!(core::mem::align_of::<BioFlagBits>() == 8, "bio anon bitfield alignment");
     assert!(core::mem::size_of::<crate::bindings::completion_t>() == 128, "completion_t size");
     assert!(core::mem::align_of::<crate::bindings::completion_t>() == 64, "completion_t alignment");
-    assert!(core::mem::size_of::<Bio>() == 256, "bio size");
+    assert!(core::mem::size_of::<Bio>() == 320, "bio size");
     assert!(core::mem::align_of::<Bio>() == 64, "bio alignment");
     assert!(core::mem::offset_of!(Bio, kobj) == 0, "bio.kobj offset");
-    assert!(core::mem::offset_of!(Bio, list_entry) == 40, "bio.list_entry offset");
-    assert!(core::mem::offset_of!(Bio, bdev) == 56, "bio.bdev offset");
-    assert!(core::mem::offset_of!(Bio, block_shift) == 64, "bio.block_shift offset");
-    assert!(core::mem::offset_of!(Bio, vec_length) == 66, "bio.vec_length offset");
-    assert!(core::mem::offset_of!(Bio, size) == 68, "bio.size offset");
-    assert!(core::mem::offset_of!(Bio, done_size) == 70, "bio.done_size offset");
-    assert!(core::mem::offset_of!(Bio, blkno) == 72, "bio.blkno offset");
-    assert!(core::mem::offset_of!(Bio, flags) == 80, "bio anon bitfield offset");
-    assert!(core::mem::offset_of!(Bio, end_io) == 88, "bio.end_io offset");
-    assert!(core::mem::offset_of!(Bio, private_data) == 96, "bio.private_data offset");
-    assert!(core::mem::offset_of!(Bio, error) == 104, "bio.error offset");
-    assert!(core::mem::offset_of!(Bio, io_completion) == 128, "bio.io_completion offset");
-    assert!(core::mem::offset_of!(Bio, bvecs) == 256, "bio.bvecs offset");
+    assert!(core::mem::offset_of!(Bio, list_entry) == 48, "bio.list_entry offset");
+    assert!(core::mem::offset_of!(Bio, bdev) == 64, "bio.bdev offset");
+    assert!(core::mem::offset_of!(Bio, block_shift) == 72, "bio.block_shift offset");
+    assert!(core::mem::offset_of!(Bio, vec_length) == 74, "bio.vec_length offset");
+    assert!(core::mem::offset_of!(Bio, size) == 76, "bio.size offset");
+    assert!(core::mem::offset_of!(Bio, done_size) == 78, "bio.done_size offset");
+    assert!(core::mem::offset_of!(Bio, blkno) == 80, "bio.blkno offset");
+    assert!(core::mem::offset_of!(Bio, flags) == 88, "bio anon bitfield offset");
+    assert!(core::mem::offset_of!(Bio, end_io) == 96, "bio.end_io offset");
+    assert!(core::mem::offset_of!(Bio, private_data) == 112, "bio.private_data offset");
+    assert!(core::mem::offset_of!(Bio, error) == 120, "bio.error offset");
+    assert!(core::mem::offset_of!(Bio, io_completion) == 192, "bio.io_completion offset");
+    assert!(core::mem::offset_of!(Bio, bvecs) == 320, "bio.bvecs offset");
+    assert!(
+        core::mem::size_of::<Option<&'static dyn BioEndIo>>() == 16,
+        "bio end_io fat pointer size"
+    );
+    assert!(
+        core::mem::align_of::<Option<&'static dyn BioEndIo>>() == 8,
+        "bio end_io fat pointer alignment"
+    );
 };
 
 // ---------------------------------------------------------------------------
@@ -284,25 +314,31 @@ unsafe impl HasKobject for bio {
 // kobject release callback.
 // ---------------------------------------------------------------------------
 
-/// Mirrors `__bio_relase_kobj_cb()`. See the module doc's "Preserved-as-
-/// is" note: the C original's page-cleanup loop was entirely commented
-/// out, so this is faithfully just a free.
+/// `KobjectRelease` implementor for `bio`'s kobject. See the module doc's
+/// "Preserved-as-is" note: the C original's page-cleanup loop was
+/// entirely commented out, so this is faithfully just a free.
 ///
-/// FLOOR: address-taken `extern "C"` kobject-release callback (installed
-/// as a bare fn-pointer at `Bio::alloc_inner`'s `(*bio_ptr).kobj.ops.
-/// release = Some(bio_release_kobj_cb)` below) -- kept a free fn per this
-/// wave's floor rule, matching `dev/dev.rs`'s `underlying_kobject_release`.
-extern "C" fn bio_release_kobj_cb(obj: *mut kobject) {
-    // `kobj` is `struct bio`'s first field (offset 0) -- plain
-    // reinterpret cast, not `container_of` arithmetic (see module doc).
-    let bio_ptr = obj as *mut bio;
-    // SAFETY: `kobject_put` (this callback's only caller) guarantees
-    // `obj` was live and its refcount just reached zero, i.e. `bio_ptr`
-    // is a valid, uniquely-owned `struct bio` allocation from
-    // `kmm_alloc` in `Bio::alloc_inner` below -- freeing it here is
-    // exactly the deallocation `Bio::alloc_inner` paired it with.
-    unsafe { crate::mm::kalloc::Kmem::kmm_free(bio_ptr as *mut c_void) };
+/// TRAIT-OPS: stateless ZST installed as `Some(&BIO_RELEASE_KOBJ)` at
+/// `Bio::alloc_inner`'s `(*bio_ptr).kobj.ops.release = ...` below --
+/// replaces the former address-taken `extern "C" fn` callback (matching
+/// `dev/dev.rs`'s `UnderlyingKobjectRelease`).
+struct BioReleaseKobj;
+
+impl crate::kobject::KobjectRelease for BioReleaseKobj {
+    unsafe fn release(&self, obj: *mut Kobject) {
+        // `kobj` is `struct bio`'s first field (offset 0) -- plain
+        // reinterpret cast, not `container_of` arithmetic (see module doc).
+        let bio_ptr = obj as *mut bio;
+        // SAFETY: `kobject_put` (this callback's only caller) guarantees
+        // `obj` was live and its refcount just reached zero, i.e.
+        // `bio_ptr` is a valid, uniquely-owned `struct bio` allocation
+        // from `kmm_alloc` in `Bio::alloc_inner` below -- freeing it here
+        // is exactly the deallocation `Bio::alloc_inner` paired it with.
+        unsafe { crate::mm::kalloc::Kmem::kmm_free(bio_ptr as *mut c_void) };
+    }
 }
+
+static BIO_RELEASE_KOBJ: BioReleaseKobj = BioReleaseKobj;
 
 // ---------------------------------------------------------------------------
 // Public C ABI -- exact symbol/signature parity with `kernel/inc/dev/bio.h`.
@@ -328,7 +364,7 @@ impl Bio {
         bdev: *mut blkdev_t,
         vec_length: i16,
         rw: bool_,
-        end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
+        end_io: Option<&'static dyn BioEndIo>,
         private_data: *mut c_void,
     ) -> *mut bio {
         result_to_errptr(Self::alloc_inner(bdev, vec_length, rw, end_io, private_data))
@@ -338,7 +374,7 @@ impl Bio {
         bdev: *mut blkdev_t,
         vec_length: i16,
         rw: bool_,
-        end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
+        end_io: Option<&'static dyn BioEndIo>,
         private_data: *mut c_void,
     ) -> KResult<*mut bio> {
         if bdev.is_null() || vec_length <= 0 || vec_length > BIO_MAX_VECS {
@@ -363,7 +399,7 @@ impl Bio {
             (*bio_ptr).end_io = end_io;
             (*bio_ptr).private_data = private_data;
             (*bio_ptr).kobj.name = c"bio".as_ptr();
-            (*bio_ptr).kobj.ops.release = Some(bio_release_kobj_cb);
+            (*bio_ptr).kobj.ops.release = Some(&BIO_RELEASE_KOBJ);
             Kobject::kobject_init(&raw mut (*bio_ptr).kobj);
             RawCompletion::init(&raw mut (*bio_ptr).io_completion);
         }

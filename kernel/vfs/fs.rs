@@ -608,15 +608,23 @@ const _: () = {
     );
     assert!(core::mem::size_of::<VfsFsTypeFlagBits>() == 8, "vfs_fs_type anon bitfield size");
     assert!(core::mem::align_of::<VfsFsTypeFlagBits>() == 8, "vfs_fs_type anon bitfield align");
-    assert!(core::mem::size_of::<VfsFsType>() == 112, "vfs_fs_type size");
+    // TRAIT-OPS `Kobject.ops.release` conversion (fn-pointer -> `Option<&
+    // 'static dyn KobjectRelease>`): `Kobject` grows 40 -> 48 (its own
+    // `ops` field went from an 8-byte thin fn pointer to a 16-byte fat
+    // pointer). `kobj` sits at the same offset (32, preceded only by
+    // `list_entry`/`superblocks`), but every field *after* it shifts +8;
+    // `vfs_fs_type` total size grows 112 -> 120. Recomputed independently
+    // with a host-native `rustc` layout probe replicating this exact
+    // field set before editing these numbers.
+    assert!(core::mem::size_of::<VfsFsType>() == 120, "vfs_fs_type size");
     assert!(core::mem::align_of::<VfsFsType>() == 8, "vfs_fs_type alignment");
     assert!(core::mem::offset_of!(VfsFsType, list_entry) == 0, "vfs_fs_type.list_entry offset");
     assert!(core::mem::offset_of!(VfsFsType, superblocks) == 16, "vfs_fs_type.superblocks offset");
     assert!(core::mem::offset_of!(VfsFsType, kobj) == 32, "vfs_fs_type.kobj offset");
-    assert!(core::mem::offset_of!(VfsFsType, flags) == 72, "vfs_fs_type anon bitfield offset");
-    assert!(core::mem::offset_of!(VfsFsType, sb_count) == 80, "vfs_fs_type.sb_count offset");
-    assert!(core::mem::offset_of!(VfsFsType, name) == 88, "vfs_fs_type.name offset");
-    assert!(core::mem::offset_of!(VfsFsType, ops) == 96, "vfs_fs_type.ops offset");
+    assert!(core::mem::offset_of!(VfsFsType, flags) == 80, "vfs_fs_type anon bitfield offset");
+    assert!(core::mem::offset_of!(VfsFsType, sb_count) == 88, "vfs_fs_type.sb_count offset");
+    assert!(core::mem::offset_of!(VfsFsType, name) == 96, "vfs_fs_type.name offset");
+    assert!(core::mem::offset_of!(VfsFsType, ops) == 104, "vfs_fs_type.ops offset");
     assert!(core::mem::size_of::<VfsSuperblockFlagBits>() == 8, "vfs_superblock anon bitfield size");
     assert!(
         core::mem::align_of::<VfsSuperblockFlagBits>() == 8,
@@ -1082,6 +1090,32 @@ impl VfsInode {
     }
 }
 
+/// `KobjectRelease` implementor for `vfs_fs_type`'s kobject (`kobj` is
+/// *not* at offset 0 in `VfsFsType`, so this uses `container_of` rather
+/// than a plain reinterpret cast -- mirrors the pre-conversion
+/// `__vfs_fs_type_kobj_release()`).
+///
+/// TRAIT-OPS: stateless ZST installed as `Some(&VFS_FS_TYPE_KOBJ_RELEASE)`
+/// at `VfsFsType::vfs_register_fs_type`'s `(*fs_type).kobj.ops.release =
+/// ...` below -- replaces the former address-taken `unsafe extern "C" fn`
+/// callback (matching `dev/dev.rs`'s `UnderlyingKobjectRelease`,
+/// `dev/bio.rs`'s `BioReleaseKobj`).
+struct VfsFsTypeKobjRelease;
+
+impl crate::kobject::KobjectRelease for VfsFsTypeKobjRelease {
+    unsafe fn release(&self, kobj: *mut Kobject) {
+        unsafe {
+            let fs_type = crate::mm::cffi::container_of::<vfs_fs_type, kobject>(
+                kobj,
+                offset_of!(vfs_fs_type, kobj),
+            );
+            slab_free(fs_type as *mut c_void);
+        }
+    }
+}
+
+static VFS_FS_TYPE_KOBJ_RELEASE: VfsFsTypeKobjRelease = VfsFsTypeKobjRelease;
+
 impl VfsFsType {
     /// Mirrors `__vfs_register_fs_type_locked()`.
     unsafe fn register_fs_type_locked(fs_type: *mut vfs_fs_type) {
@@ -1134,17 +1168,6 @@ impl VfsFsType {
         ptr::null_mut()
     }
 
-    /// Mirrors `__vfs_fs_type_kobj_release()`.
-    unsafe extern "C" fn vfs_fs_type_kobj_release(kobj: *mut kobject) {
-        unsafe {
-            let fs_type = crate::mm::cffi::container_of::<vfs_fs_type, kobject>(
-                kobj,
-                offset_of!(vfs_fs_type, kobj),
-            );
-            slab_free(fs_type as *mut c_void);
-        }
-    }
-
     /// Mirrors `VfsFsType::vfs_fs_type_allocate()`.
     ///
     /// Locking: none.
@@ -1185,7 +1208,7 @@ impl VfsFsType {
             if (*fs_type).flags.registered() != 0 {
                 return neg(EALREADY);
             }
-            (*fs_type).kobj.ops.release = Some(VfsFsType::vfs_fs_type_kobj_release);
+            (*fs_type).kobj.ops.release = Some(&VFS_FS_TYPE_KOBJ_RELEASE);
             (*fs_type).kobj.name = c"fs_type".as_ptr();
             crate::kobject::Kobject::kobject_init(&raw mut (*fs_type).kobj);
             if VFS_FS_TYPE_COUNT >= MAX_FS_TYPES {

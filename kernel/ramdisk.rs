@@ -195,7 +195,7 @@ impl Ramdisk {
         // SAFETY: caller contract.
         if let Some(cb) = unsafe { (*bio_ptr).end_io } {
             // SAFETY: `cb` is the bio owner's completion callback.
-            unsafe { cb(bio_ptr) };
+            unsafe { cb.end_io(bio_ptr) };
         }
     }
 
