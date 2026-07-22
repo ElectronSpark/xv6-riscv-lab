@@ -59,7 +59,7 @@ use crate::proc::Scheduler;
 // level -- see `timer/sched_timer.rs`'s module doc for the `E0659` class
 // this sidesteps).
 use crate::exec::exec;
-use crate::irq::trap::usertrapret;
+use crate::irq::trap::Trap;
 // P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path.
@@ -1176,7 +1176,7 @@ extern "C" fn init_entry(prev: *mut context) {
         kassert!(ret >= 0, "init_entry: exec /bin/init failed");
 
         core::sync::atomic::fence(Ordering::SeqCst);
-        usertrapret();
+        Trap::usertrapret();
     }
 }
 

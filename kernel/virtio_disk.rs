@@ -123,7 +123,7 @@ use crate::kstd::KResult;
 // `.status` byte is a device DMA-WRITE target -- see [`virtio_disk_rw`])
 // stay raw. `tq_wait` is reached through the guard's `wait_on`.
 use crate::sync::SpinLock;
-use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
+use crate::irq::irq_core::{IrqCore, IrqDesc};
 // P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
 // that their `#[no_mangle]` exports are gone; reached by crate path.
 use crate::lock::completion::RawCompletion;
@@ -1221,7 +1221,7 @@ fn virtio_blkdev_init(diskno: usize) {
         // `VIRTIO0_IRQ + diskno` -- matches the C original exactly:
         // always `__virtio_irqno[0]` (not `[diskno]`) plus the disk
         // offset, not a per-index IRQ-table lookup.
-        register_irq_handler(plic_irq((__virtio_irqno[0] + diskno as u64) as c_int), &raw mut virtio_irq)
+        IrqCore::register_irq_handler(IrqCore::plic_irq((__virtio_irqno[0] + diskno as u64) as c_int), &raw mut virtio_irq)
     };
     if ret != 0 {
         panic_fmt_i32!("virtio_blkdev_init: register_irq_handler failed: {}", ret);

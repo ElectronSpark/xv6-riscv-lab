@@ -80,7 +80,7 @@ use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::bindings::{mbuf, netdev, netdev_ops, rx_desc, tx_desc};
-use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
+use crate::irq::irq_core::{IrqCore, IrqDesc};
 use crate::sync::SpinLock;
 
 // ---------------------------------------------------------------------------
@@ -559,7 +559,7 @@ pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
     let ret = unsafe {
         let mut e1000_irq =
             IrqDesc { handler: Some(e1000_intr), data: ptr::null_mut(), dev: ptr::null_mut(), irq: 0, count: 0, rcu_head: core::mem::zeroed() };
-        register_irq_handler(plic_irq(__e1000_pci_irqno as c_int), &raw mut e1000_irq)
+        IrqCore::register_irq_handler(IrqCore::plic_irq(__e1000_pci_irqno as c_int), &raw mut e1000_irq)
     };
     if ret != 0 {
         panic_fixed(c"e1000_init: failed to register irq handler");

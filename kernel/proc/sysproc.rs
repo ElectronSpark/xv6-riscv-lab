@@ -107,9 +107,9 @@ struct CloneArgs {
 // `#[no_mangle]` exports are gone (the extern block that used to sit
 // here is deleted; `safestrcpy` moved to its own block below --
 // string.rs's libc-shaped exports are a mandated keep).
-use crate::irq::syscall::{argaddr, argint, argint64};
+use crate::irq::syscall::Syscall;
 use crate::start_kernel::__physical_memory_start;
-use crate::timer::timer_core::get_jiffs;
+use crate::timer::timer_core::TimerCore;
 
 unsafe extern "C" {
     // Strings.
@@ -147,8 +147,8 @@ use crate::proc::Pgroup;
 // `pid_t`/`c_int` signatures, so these become plain crate-path imports
 // instead of `extern "C"` redeclarations.
 use crate::tty::session::SessionTable;
-use crate::timer::sched_timer::sleep_ms_interruptible;
-use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
+use crate::timer::sched_timer::SchedTimer;
+use crate::timer::goldfish_rtc::GoldfishRtc;
 // P3-1B2: `thread_group_exit`/`thread_tgid`/`signal_pending` used to be
 // bridged via hand-maintained `extern "C"` redeclarations here, one of
 // which (`thread_group_exit`) had drifted from the truth -- declared
@@ -198,7 +198,7 @@ fn current() -> *mut bindings::thread { xv6_current_thread() }
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_exit() -> u64 {
     let mut n: c_int = 0;
-    argint(0, &mut n);
+    Syscall::argint(0, &mut n);
     Proc::exit(n); // does not return
 }
 
@@ -237,7 +237,7 @@ pub(crate) extern "C" fn sys_gettid() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_exit_group() -> u64 {
     let mut n: c_int = 0;
-    argint(0, &mut n);
+    Syscall::argint(0, &mut n);
     // `thread_group_exit`'s real signature returns `()`, not `!` (see the
     // P3-1B2 note above): every reachable path (`current()` is never
     // null) actually diverges internally via `exit(code)`, but the type
@@ -265,7 +265,7 @@ pub(crate) extern "C" fn sys_vfork() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_clone() -> u64 {
     let mut uargs: u64 = 0;
-    argaddr(0, &mut uargs);
+    Syscall::argaddr(0, &mut uargs);
 
     let mut args = CloneArgs::default();
     if uargs == 0 {
@@ -296,7 +296,7 @@ pub(crate) extern "C" fn sys_clone() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_wait() -> u64 {
     let mut p: u64 = 0;
-    argaddr(0, &mut p);
+    Syscall::argaddr(0, &mut p);
     Proc::wait(p) as u64
 }
 
@@ -306,9 +306,9 @@ pub(crate) extern "C" fn sys_waitpid() -> u64 {
     let mut pid:     c_int = 0;
     let mut opts:    c_int = 0;
     let mut status_addr: u64 = 0;
-    argint(0, &mut pid);
-    argaddr(1, &mut status_addr);
-    argint(2, &mut opts);
+    Syscall::argint(0, &mut pid);
+    Syscall::argaddr(1, &mut status_addr);
+    Syscall::argint(2, &mut opts);
     Proc::waitpid(pid, status_addr, opts) as u64
 }
 
@@ -316,7 +316,7 @@ pub(crate) extern "C" fn sys_waitpid() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_sbrk() -> u64 {
     let mut n: i64 = 0;
-    argint64(0, &mut n);
+    Syscall::argint64(0, &mut n);
     // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
     // currently running thread's pointer (from
     // `xv6_current_thread()`/`current()`) is a kernel-wide invariant: always
@@ -336,9 +336,9 @@ pub(crate) extern "C" fn sys_sbrk() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_sleep() -> u64 {
     let mut n: c_int = 0;
-    argint(0, &mut n);
+    Syscall::argint(0, &mut n);
     let n = if n < 0 { 0u64 } else { n as u64 };
-    let remaining = sleep_ms_interruptible(n);
+    let remaining = SchedTimer::sleep_ms_interruptible(n);
     if remaining > 0 && crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) {
         return (-EINTR) as u64;
     }
@@ -347,21 +347,21 @@ pub(crate) extern "C" fn sys_sleep() -> u64 {
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
-pub(crate) extern "C" fn sys_uptime() -> u64 { get_jiffs() }
+pub(crate) extern "C" fn sys_uptime() -> u64 { TimerCore::get_jiffs() }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_gettimeofday() -> u64 {
     let mut tv_addr: u64 = 0;
     let mut tz_addr: u64 = 0;
-    argaddr(0, &mut tv_addr);
-    argaddr(1, &mut tz_addr);
+    Syscall::argaddr(0, &mut tv_addr);
+    Syscall::argaddr(1, &mut tz_addr);
     let _ = tz_addr;
 
     if tv_addr == 0 {
         return (-EINVAL) as u64;
     }
-    let t = goldfish_rtc_read_ns();
+    let t = GoldfishRtc::goldfish_rtc_read_ns();
     let tv = Timeval {
         tv_sec:  (t / NS_PER_SEC) as i64,
         tv_usec: ((t % NS_PER_SEC) / NS_PER_US) as i64,
@@ -378,8 +378,8 @@ pub(crate) extern "C" fn sys_gettimeofday() -> u64 {
 pub(crate) extern "C" fn sys_nanosleep() -> u64 {
     let mut req_addr: u64 = 0;
     let mut rem_addr: u64 = 0;
-    argaddr(0, &mut req_addr);
-    argaddr(1, &mut rem_addr);
+    Syscall::argaddr(0, &mut req_addr);
+    Syscall::argaddr(1, &mut rem_addr);
 
     if req_addr == 0 {
         return (-EINVAL) as u64;
@@ -400,7 +400,7 @@ pub(crate) extern "C" fn sys_nanosleep() -> u64 {
     let mut ms = (total_ns + 999_999) / 1_000_000;
     if total_ns > 0 && ms == 0 { ms = 1; }
 
-    let remaining_ms = sleep_ms_interruptible(ms);
+    let remaining_ms = SchedTimer::sleep_ms_interruptible(ms);
 
     if remaining_ms > 0 && crate::proc::access::ThreadAccess::from_ptr(current()).is_some_and(|ta| ta.signal_pending()) {
         if rem_addr != 0 {
@@ -430,7 +430,7 @@ pub(crate) extern "C" fn sys_nanosleep() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_uname() -> u64 {
     let mut addr: u64 = 0;
-    argaddr(0, &mut addr);
+    Syscall::argaddr(0, &mut addr);
     if addr == 0 {
         return (-EINVAL) as u64;
     }
@@ -463,8 +463,8 @@ pub(crate) extern "C" fn sys_kernbase() -> u64 {
 pub(crate) extern "C" fn sys_setpgid() -> u64 {
     let mut pid:  c_int = 0;
     let mut pgid: c_int = 0;
-    argint(0, &mut pid);
-    argint(1, &mut pgid);
+    Syscall::argint(0, &mut pid);
+    Syscall::argint(1, &mut pgid);
     Pgroup::setpgid(pid, pgid) as u64
 }
 
@@ -472,7 +472,7 @@ pub(crate) extern "C" fn sys_setpgid() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_getpgid() -> u64 {
     let mut pid: c_int = 0;
-    argint(0, &mut pid);
+    Syscall::argint(0, &mut pid);
     Pgroup::getpgid(pid) as u64
 }
 
@@ -484,7 +484,7 @@ pub(crate) extern "C" fn sys_setsid() -> u64 { SessionTable::setsid() as u64 }
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_getsid() -> u64 {
     let mut pid: c_int = 0;
-    argint(0, &mut pid);
+    Syscall::argint(0, &mut pid);
     SessionTable::getsid(pid) as u64
 }
 
@@ -493,8 +493,8 @@ pub(crate) extern "C" fn sys_getsid() -> u64 {
 pub(crate) extern "C" fn sys_getrandom() -> u64 {
     let mut ubuf: u64 = 0;
     let mut len:  c_int = 0;
-    argaddr(0, &mut ubuf);
-    argint(1, &mut len);
+    Syscall::argaddr(0, &mut ubuf);
+    Syscall::argint(1, &mut len);
 
     if len < 0 { return (-EINVAL) as u64; }
     if len == 0 { return 0; }

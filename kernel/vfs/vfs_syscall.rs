@@ -109,7 +109,7 @@ unsafe extern "C" {
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 
 // P3-D3b: proc/workqueue.rs's entry points (deferred vfs_fput after an
 // RCU grace period) are plain safe Rust fns now that their
@@ -124,7 +124,7 @@ unsafe extern "C" {
 // P3-D3c: `irq/syscall.rs`'s arg-fetch helpers are plain (safe) Rust fns
 // now that their `#[no_mangle]` exports are gone; identical signatures,
 // plain `use`.
-use crate::irq::syscall::{argaddr, argint, argint64, argstr};
+use crate::irq::syscall::Syscall;
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; reached as crate-path items
@@ -470,7 +470,7 @@ impl Sys {
 
 pub(crate) extern "C" fn sys_vfs_dup() -> u64 {
     let mut fd: c_int = 0;
-    argint(0, &mut fd);
+    Syscall::argint(0, &mut fd);
 
     match Sys::dup_inner(fd) {
         Ok(newfd) => ret64(newfd),
@@ -521,8 +521,8 @@ impl Sys {
 pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
     let mut oldfd: c_int = 0;
     let mut newfd: c_int = 0;
-    argint(0, &mut oldfd);
-    argint(1, &mut newfd);
+    Syscall::argint(0, &mut oldfd);
+    Syscall::argint(1, &mut newfd);
 
     match Sys::dup2_inner(oldfd, newfd) {
         Ok(v) => ret64(v),
@@ -554,9 +554,9 @@ pub(crate) extern "C" fn sys_vfs_read() -> u64 {
     let mut n: c_int = 0;
     let mut p: u64 = 0;
 
-    argint(0, &mut fd);
-    argaddr(1, &mut p);
-    argint(2, &mut n);
+    Syscall::argint(0, &mut fd);
+    Syscall::argaddr(1, &mut p);
+    Syscall::argint(2, &mut n);
 
     match Sys::read_inner(fd, p, n) {
         Ok(v) => v as u64,
@@ -585,9 +585,9 @@ pub(crate) extern "C" fn sys_vfs_write() -> u64 {
     let mut n: c_int = 0;
     let mut p: u64 = 0;
 
-    argint(0, &mut fd);
-    argaddr(1, &mut p);
-    argint(2, &mut n);
+    Syscall::argint(0, &mut fd);
+    Syscall::argaddr(1, &mut p);
+    Syscall::argint(2, &mut n);
 
     match Sys::write_inner(fd, p, n) {
         Ok(v) => v as u64,
@@ -617,7 +617,7 @@ impl Sys {
 
 pub(crate) extern "C" fn sys_vfs_close() -> u64 {
     let mut fd: c_int = 0;
-    argint(0, &mut fd);
+    Syscall::argint(0, &mut fd);
 
     ret64(result_to_neg_errno(Sys::close_inner(fd)))
 }
@@ -662,8 +662,8 @@ pub(crate) extern "C" fn sys_vfs_fstat() -> u64 {
     let mut fd: c_int = 0;
     let mut st: u64 = 0;
 
-    argint(0, &mut fd);
-    argaddr(1, &mut st);
+    Syscall::argint(0, &mut fd);
+    Syscall::argaddr(1, &mut st);
 
     ret64(result_to_neg_errno(Sys::fstat_inner(fd, st)))
 }
@@ -692,9 +692,9 @@ pub(crate) extern "C" fn sys_vfs_lseek() -> u64 {
     let mut fd: c_int = 0;
     let mut whence: c_int = 0;
     let mut offset: i64 = 0;
-    argint(0, &mut fd);
-    argint64(1, &mut offset);
-    argint(2, &mut whence);
+    Syscall::argint(0, &mut fd);
+    Syscall::argint64(1, &mut offset);
+    Syscall::argint(2, &mut whence);
 
     match Sys::lseek_inner(fd, offset, whence) {
         Ok(v) => v as u64,
@@ -723,8 +723,8 @@ impl Sys {
 pub(crate) extern "C" fn sys_vfs_ftruncate() -> u64 {
     let mut fd: c_int = 0;
     let mut length: i64 = 0;
-    argint(0, &mut fd);
-    argint64(1, &mut length);
+    Syscall::argint(0, &mut fd);
+    Syscall::argint64(1, &mut length);
 
     match Sys::ftruncate_inner(fd, length) {
         Ok(v) => ret64(v),
@@ -806,9 +806,9 @@ pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
     let mut fd: c_int = 0;
     let mut cmd: c_int = 0;
     let mut arg: c_int = 0;
-    argint(0, &mut fd);
-    argint(1, &mut cmd);
-    argint(2, &mut arg);
+    Syscall::argint(0, &mut fd);
+    Syscall::argint(1, &mut cmd);
+    Syscall::argint(2, &mut arg);
 
     match Sys::fcntl_inner(fd, cmd, arg) {
         Ok(v) => ret64(v),
@@ -856,8 +856,8 @@ impl Sys {
     fn stat_inner() -> KResult<()> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
         let mut st_addr: u64 = 0;
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
-        argaddr(1, &mut st_addr);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        Syscall::argaddr(1, &mut st_addr);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -922,8 +922,8 @@ impl Sys {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
         let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
         let mut st_addr: u64 = 0;
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
-        argaddr(1, &mut st_addr);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        Syscall::argaddr(1, &mut st_addr);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -982,8 +982,8 @@ impl Sys {
     fn access_inner() -> KResult<()> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
         let mut mode: c_int = 0;
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
-        argint(1, &mut mode);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        Syscall::argint(1, &mut mode);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -1036,9 +1036,9 @@ impl Sys {
         let mut buf_addr: u64 = 0;
         let mut bufsz: c_int = 0;
 
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
-        argaddr(1, &mut buf_addr);
-        argint(2, &mut bufsz);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        Syscall::argaddr(1, &mut buf_addr);
+        Syscall::argint(2, &mut bufsz);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -1113,8 +1113,8 @@ impl Sys {
         let mut newpath: [c_char; MAXPATH] = [0; MAXPATH];
         let mut oldname: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
         let mut newname: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
-        let n1 = argstr(0, oldpath.as_mut_ptr(), MAXPATH as c_int);
-        let n2 = argstr(1, newpath.as_mut_ptr(), MAXPATH as c_int);
+        let n1 = Syscall::argstr(0, oldpath.as_mut_ptr(), MAXPATH as c_int);
+        let n2 = Syscall::argstr(1, newpath.as_mut_ptr(), MAXPATH as c_int);
         if n1 < 0 || n2 < 0 {
             return Err(Errno::Fault);
         }
@@ -1195,8 +1195,8 @@ impl Sys {
         let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
         let mut omode: c_int = 0;
 
-        argint(1, &mut omode);
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        Syscall::argint(1, &mut omode);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -1325,7 +1325,7 @@ impl Sys {
     fn mkdir_inner() -> KResult<()> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
         let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -1366,13 +1366,13 @@ impl Sys {
         let mut major: c_int = 0;
         let mut minor: c_int = 0;
 
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
-        argint(1, &mut mode);
-        argint(2, &mut major);
-        argint(3, &mut minor);
+        Syscall::argint(1, &mut mode);
+        Syscall::argint(2, &mut major);
+        Syscall::argint(3, &mut minor);
 
         let parent = VfsInode::vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
         if is_err(parent) {
@@ -1409,7 +1409,7 @@ impl Sys {
     fn unlink_inner() -> KResult<c_int> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
         let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -1448,8 +1448,8 @@ impl Sys {
         let mut old: [c_char; MAXPATH] = [0; MAXPATH];
         let mut new: [c_char; MAXPATH] = [0; MAXPATH];
         let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
-        let n1 = argstr(0, old.as_mut_ptr(), MAXPATH as c_int);
-        let n2 = argstr(1, new.as_mut_ptr(), MAXPATH as c_int);
+        let n1 = Syscall::argstr(0, old.as_mut_ptr(), MAXPATH as c_int);
+        let n2 = Syscall::argstr(1, new.as_mut_ptr(), MAXPATH as c_int);
         if n1 < 0 || n2 < 0 {
             return Err(Errno::Fault);
         }
@@ -1628,8 +1628,8 @@ impl Sys {
         let mut target: [c_char; MAXPATH] = [0; MAXPATH];
         let mut linkpath: [c_char; MAXPATH] = [0; MAXPATH];
         let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
-        let n1 = argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
-        let n2 = argstr(1, linkpath.as_mut_ptr(), MAXPATH as c_int);
+        let n1 = Syscall::argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
+        let n2 = Syscall::argstr(1, linkpath.as_mut_ptr(), MAXPATH as c_int);
         if n1 < 0 || n2 < 0 {
             return Err(Errno::Fault);
         }
@@ -1676,7 +1676,7 @@ pub(crate) extern "C" fn sys_vfs_symlink() -> u64 {
 impl Sys {
     fn chdir_inner() -> KResult<()> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -1829,8 +1829,8 @@ pub(crate) extern "C" fn sys_getcwd() -> u64 {
     let mut buf_addr: u64 = 0;
     let mut size: c_int = 0;
 
-    argaddr(0, &mut buf_addr);
-    argint(1, &mut size);
+    Syscall::argaddr(0, &mut buf_addr);
+    Syscall::argint(1, &mut size);
 
     match Sys::getcwd_inner(buf_addr, size) {
         Ok(v) => v,
@@ -1919,7 +1919,7 @@ impl Sys {
 
 pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
     let mut fdarray: u64 = 0;
-    argaddr(0, &mut fdarray);
+    Syscall::argaddr(0, &mut fdarray);
 
     ret64(result_to_neg_errno(Sys::pipe_inner(fdarray)))
 }
@@ -1960,9 +1960,9 @@ pub(crate) extern "C" fn sys_vfs_connect() -> u64 {
     let mut lport: c_int = 0;
     let mut rport: c_int = 0;
 
-    argint(0, &mut raddr);
-    argint(1, &mut lport);
-    argint(2, &mut rport);
+    Syscall::argint(0, &mut raddr);
+    Syscall::argint(1, &mut lport);
+    Syscall::argint(2, &mut rport);
 
     match Sys::connect_inner(raddr, lport, rport) {
         Ok(v) => ret64(v),
@@ -2092,9 +2092,9 @@ pub(crate) extern "C" fn sys_getdents() -> u64 {
     let mut dirp: u64 = 0;
     let mut count: c_int = 0;
 
-    argint(0, &mut fd);
-    argaddr(1, &mut dirp);
-    argint(2, &mut count);
+    Syscall::argint(0, &mut fd);
+    Syscall::argaddr(1, &mut dirp);
+    Syscall::argint(2, &mut count);
 
     match Sys::getdents_inner(fd, dirp, count) {
         Ok(v) => v as u64,
@@ -2114,7 +2114,7 @@ pub(crate) extern "C" fn sys_getdents() -> u64 {
 impl Sys {
     fn chroot_inner() -> KResult<c_int> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -2236,9 +2236,9 @@ impl Sys {
         let mut target: [c_char; MAXPATH] = [0; MAXPATH];
         let mut fstype: [c_char; 32] = [0; 32];
 
-        let n1 = argstr(0, source.as_mut_ptr(), MAXPATH as c_int);
-        let n2 = argstr(1, target.as_mut_ptr(), MAXPATH as c_int);
-        if n1 < 0 || n2 < 0 || argstr(2, fstype.as_mut_ptr(), 32) < 0 {
+        let n1 = Syscall::argstr(0, source.as_mut_ptr(), MAXPATH as c_int);
+        let n2 = Syscall::argstr(1, target.as_mut_ptr(), MAXPATH as c_int);
+        if n1 < 0 || n2 < 0 || Syscall::argstr(2, fstype.as_mut_ptr(), 32) < 0 {
             return Err(Errno::Fault);
         }
 
@@ -2344,7 +2344,7 @@ impl Vfs {
 impl Sys {
     fn umount_inner() -> KResult<c_int> {
         let mut target: [c_char; MAXPATH] = [0; MAXPATH];
-        let n = argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -2374,7 +2374,7 @@ impl Sys {
     fn dumpinode_inner() -> KResult<()> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
 
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
         if n < 0 {
             // No path argument: dump every superblock.
             VfsFsType::vfs_dump_inodes();
@@ -2518,9 +2518,9 @@ pub(crate) extern "C" fn sys_vfs_ioctl() -> u64 {
     let mut cmd_raw: u64 = 0;
     let mut arg: u64 = 0;
 
-    argint(0, &mut fd);
-    argaddr(1, &mut cmd_raw);
-    argaddr(2, &mut arg);
+    Syscall::argint(0, &mut fd);
+    Syscall::argaddr(1, &mut cmd_raw);
+    Syscall::argaddr(2, &mut arg);
 
     match Sys::ioctl_inner(fd, cmd_raw, arg) {
         Ok(v) => ret64(v),
@@ -2556,8 +2556,8 @@ pub(crate) extern "C" fn sys_tcgetattr() -> u64 {
     let mut fd: c_int = 0;
     let mut termios_p: u64 = 0;
 
-    argint(0, &mut fd);
-    argaddr(1, &mut termios_p);
+    Syscall::argint(0, &mut fd);
+    Syscall::argaddr(1, &mut termios_p);
 
     match Sys::tcgetattr_inner(fd, termios_p) {
         Ok(v) => ret64(v),
@@ -2601,9 +2601,9 @@ pub(crate) extern "C" fn sys_tcsetattr() -> u64 {
     let mut optional_actions: c_int = 0;
     let mut termios_p: u64 = 0;
 
-    argint(0, &mut fd);
-    argint(1, &mut optional_actions);
-    argaddr(2, &mut termios_p);
+    Syscall::argint(0, &mut fd);
+    Syscall::argint(1, &mut optional_actions);
+    Syscall::argaddr(2, &mut termios_p);
 
     match Sys::tcsetattr_inner(fd, optional_actions, termios_p) {
         Ok(v) => ret64(v),
@@ -2619,8 +2619,8 @@ impl Sys {
     fn statfs_inner() -> KResult<()> {
         let mut path: [c_char; MAXPATH] = [0; MAXPATH];
         let mut buf_addr: u64 = 0;
-        let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
-        argaddr(1, &mut buf_addr);
+        let n = Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
+        Syscall::argaddr(1, &mut buf_addr);
         if n < 0 {
             return Err(Errno::Fault);
         }
@@ -2808,7 +2808,7 @@ impl Sys {
                 if !(timeout_ms < 0 || (crate::machine::Riscv::read_time() - start) < timeout_ticks) {
                     break;
                 }
-                sleep_ms(1);
+                SchedTimer::sleep_ms(1);
                 if crate::proc::access::ThreadAccess::from_ptr(Sys::current()).is_some_and(|ta| ta.signal_pending()) {
                     return Err(Errno::Intr);
                 }
@@ -2845,7 +2845,7 @@ impl Sys {
             if timeout_ms > 0 && (crate::machine::Riscv::read_time() - start) >= timeout_ticks {
                 break;
             }
-            sleep_ms(1);
+            SchedTimer::sleep_ms(1);
             if crate::proc::access::ThreadAccess::from_ptr(Sys::current()).is_some_and(|ta| ta.signal_pending()) {
                 ready = neg(EINTR);
                 break;
@@ -2872,9 +2872,9 @@ pub(crate) extern "C" fn sys_vfs_poll() -> u64 {
     let mut nfds: c_int = 0;
     let mut timeout_ms: c_int = 0;
 
-    argaddr(0, &mut fds_addr);
-    argint(1, &mut nfds);
-    argint(2, &mut timeout_ms);
+    Syscall::argaddr(0, &mut fds_addr);
+    Syscall::argint(1, &mut nfds);
+    Syscall::argint(2, &mut timeout_ms);
 
     match Sys::poll_inner(fds_addr, nfds, timeout_ms) {
         Ok(v) => ret64(v),

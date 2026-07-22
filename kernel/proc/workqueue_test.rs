@@ -91,7 +91,7 @@ use crate::proc::Scheduler;
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 
 const WORK_STRUCT_FLAG_RUN_ON_DRAIN: u32 = 1 << 0;
 const WORK_STRUCT_FLAG_FREE_AFTER_RUN: u32 = 1 << 1;
@@ -145,7 +145,7 @@ fn wait_for(cell: &AtomicI32, expected: i32, mut budget_ms: u64) -> bool {
         if cell.load(Ordering::SeqCst) == expected {
             return true;
         }
-        sleep_ms(5);
+        SchedTimer::sleep_ms(5);
         budget_ms = budget_ms.saturating_sub(5);
     }
     cell.load(Ordering::SeqCst) == expected

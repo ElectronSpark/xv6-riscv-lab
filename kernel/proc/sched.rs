@@ -37,7 +37,7 @@ use crate::proc::access::{
 // `select_task_rq`/`flush_wake_list`/...); import the type, call
 // `Rq::method(..)` at the sites below.
 use crate::proc::Rq;
-use crate::timer::sched_timer::__do_timer_tick;
+use crate::timer::sched_timer::SchedTimer;
 use crate::ipi::Ipi;
 
 // ===========================================================================
@@ -275,7 +275,7 @@ pub struct Scheduler;
 // ---------------- extern C primitives -----------------------------------
 // P3-D3c: `timer/timer_core.rs`'s `get_jiffs` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::timer_core::get_jiffs;
+use crate::timer::timer_core::TimerCore;
 
 unsafe extern "C" {
     fn __swtch_context(cur: *mut context, target: *mut context) -> *mut context;
@@ -593,7 +593,7 @@ fn sched_pick_next() -> *mut thread {
 impl Scheduler {
 fn switch_to_impl(cur: *mut thread, target: *mut thread) -> *mut thread {
     unsafe {
-        let now = get_jiffs();
+        let now = TimerCore::get_jiffs();
         Scheduler::cpu_access().store_rcu_timestamp_release(now);
         Scheduler::cpu_access().set_proc(target);
         let cur_se = ThreadAccess::from_raw(cur).unwrap_unchecked().sched_entity_ptr();
@@ -630,7 +630,7 @@ fn switch_to_internal(p: *mut thread) -> *mut thread {
 // ---------------- scheduler_yield ---------------------------------------
 impl Scheduler {
 fn scheduler_yield_inner() {
-    __do_timer_tick();
+    SchedTimer::__do_timer_tick();
     // SAFETY: `rq_flush_wake_list` (kernel/proc/rq.rs) is `unsafe` because
     // it walks the wake list through raw pointers; `Riscv::cpuid()` always
     // yields a valid, in-range CPU id into the statically-allocated,

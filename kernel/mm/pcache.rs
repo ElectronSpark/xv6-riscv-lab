@@ -347,8 +347,8 @@ mod ffi {
 // exports are gone; re-exported here so the module-wide `use ffi::*`
 // keeps resolving them (the extern redeclarations above are deleted).
 pub(crate) use crate::printf::{__panic_end, __panic_start};
-pub(crate) use crate::timer::sched_timer::sleep_ms;
-pub(crate) use crate::timer::timer_core::get_jiffs;
+pub(crate) use crate::timer::sched_timer::SchedTimer;
+pub(crate) use crate::timer::timer_core::TimerCore;
 pub(crate) use crate::lock::completion::RawCompletion;
 pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
 // P3-D3b: `kthread_create` (proc/thread.rs) and the proc/workqueue.rs
@@ -1639,12 +1639,12 @@ impl Pcache {
 // ---------------------------------------------------------------------------
 impl Pcache {
     fn get_jiffs() -> u64 {
-        get_jiffs()
+        TimerCore::get_jiffs()
     }
 
 
     fn sleep_ms(ms: u64) {
-        sleep_ms(ms);
+        SchedTimer::sleep_ms(ms);
     }
 
 

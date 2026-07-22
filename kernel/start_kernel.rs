@@ -41,7 +41,7 @@
 //!   `STARTED.store(1, Release)` followed by `Sbi::start_secondary_harts(
 //!   &_entry as *const u8 as u64)` — a Linux-style explicit
 //!   `sbi_hart_start()` per hart, entering at the same `_entry` symbol
-//!   `entry.S`/the boot hart used. `sleep_ms(100)` after the SBI call gives
+//!   `entry.S`/the boot hart used. `SchedTimer::sleep_ms(100)` after the SBI call gives
 //!   them time to reach the `smp_cond_load_acquire` spin before boot
 //!   continues — the C's own comment, carried over verbatim below.
 //! * Once released, each secondary hart runs [`__start_kernel_secondary_hart`]
@@ -96,14 +96,14 @@ use crate::machine;
 // (verified individually: none of these seven names is defined more than
 // once anywhere under `proc/`, so the glob resolves unambiguously).
 use crate::ipi::Ipi;
-use crate::irq::irq_core::irq_desc_init;
-use crate::irq::plic::{plicinit, plicinithart};
-use crate::irq::trap::{trapinit, trapinithart};
+use crate::irq::irq_core::IrqCore;
+use crate::irq::plic::Plic;
+use crate::irq::trap::Trap;
 use crate::proc::{Scheduler, Workqueue, workqueue_test_launch_tests};
 // NO-STANDALONE-FN: the thread bring-up entry points are now associated fns on
 // `Thread` (`proctab_init`/`userinit`/`install_user_root`/`idle_init`).
 use crate::proc::thread::Thread;
-use crate::timer::sched_timer::sched_timer_init;
+use crate::timer::sched_timer::SchedTimer;
 // P3-1C mesh sweep: printf.rs/vfs/tty/console.rs are in scope for this
 // wave, so these become plain crate-path imports instead of `extern "C"`
 // redeclarations (all no-arg/no-return, identical signatures).
@@ -199,7 +199,7 @@ use crate::lock::semaphore_test::semaphore_launch_tests;
 use crate::mm::early_allocator::early_allocator_init;
 use crate::mm::pcache_test::pcache_launch_tests;
 use crate::mm::PageTable;
-use crate::timer::sched_timer::sleep_ms;
+
 
 // P3-D3a: `pcache_global_init` (mm/pcache.rs, an ordinary safe Rust fn
 // now that its `#[no_mangle]` export is gone) and `kinit` (genuinely
@@ -289,11 +289,11 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         Tty::init(); // Initialize TTY subsystem
         Scheduler::init(); // initialize the scheduler
         Workqueue::init(); // workqueue subsystem initialization
-        irq_desc_init(); // IRQ descriptor initialization
-        trapinit(); // trap vectors
-        trapinithart(); // install kernel trap vector
-        plicinit(); // set up interrupt controller
-        plicinithart(); // ask PLIC for device interrupts
+        IrqCore::irq_desc_init(); // IRQ descriptor initialization
+        Trap::trapinit(); // trap vectors
+        Trap::trapinithart(); // install kernel trap vector
+        Plic::plicinit(); // set up interrupt controller
+        Plic::plicinithart(); // ask PLIC for device interrupts
         Ipi::init(); // inter-processor interrupts
         consoleinit();
         Netdev::init();
@@ -307,9 +307,9 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         // mark this CPU as active. Without an active CPU, Rq::select_task_rq()
         // returns NULL and new threads cannot be enqueued to any run queue.
         Thread::idle_init();
-        sched_timer_init();
+        SchedTimer::sched_timer_init();
         // Post-init device drivers: spawned as kthreads so they run with
-        // the scheduler active and can use sleep_ms() / Scheduler::yield_now().
+        // the scheduler active and can use SchedTimer::sleep_ms() / Scheduler::yield_now().
         X1EmacSoftc::init(); // SpacemiT X1 EMAC (probes via FDT)
         SdhciSoftc::init(); // SpacemiT X1 SDHCI SD/eMMC (probes via FDT)
         // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
@@ -328,7 +328,7 @@ fn __start_kernel_secondary_hart(hartid: c_int) {
     // safe to touch. Matches the C original's call order exactly.
     unsafe {
         // Set tp to physical address first. cpus[] was already zeroed by boot
-        // hart's Ipi::cpus_init(), and intr_sp will be set by trapinit() before we
+        // hart's Ipi::cpus_init(), and intr_sp will be set by Trap::trapinit() before we
         // proceed.
         Ipi::mycpu_init(hartid as u64, false);
 
@@ -341,8 +341,8 @@ fn __start_kernel_secondary_hart(hartid: c_int) {
         // Now switch TP to trampoline virtual address (paging is now on)
         Ipi::mycpu_init(hartid as u64, true);
         Thread::idle_init();
-        trapinithart(); // install kernel trap vector
-        plicinithart(); // ask PLIC for device interrupts
+        Trap::trapinithart(); // install kernel trap vector
+        Plic::plicinithart(); // ask PLIC for device interrupts
         Rcu::cpu_init(machine::Riscv::cpuid()); // Initialize RCU for this CPU
     }
 }
@@ -480,7 +480,7 @@ pub(crate) fn start_kernel_post_init() {
     // module doc) before boot proceeds.
     unsafe {
         Sbi::start_secondary_harts(&raw const _entry as u64);
-        sleep_ms(100); // Give secondary harts time to start
+        SchedTimer::sleep_ms(100); // Give secondary harts time to start
     }
 
     // #ifdef WORKQUEUE_RUNTIME_SMOKE_TEST in the C original -- same

@@ -43,14 +43,14 @@ use crate::proc::access::TqRef;
 // safe facade for the unchanged call sites.
 /// SAFETY: see [`crate::timer::sched_timer::sched_timer_set`]'s contract.
 fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int {
-    unsafe { crate::timer::sched_timer::sched_timer_set(tn, ticks) }
+    unsafe { crate::timer::sched_timer::SchedTimer::sched_timer_set(tn, ticks) }
 }
 /// SAFETY: see [`crate::timer::sched_timer::sched_timer_done`]'s contract.
 fn sched_timer_done(tn: *mut timer_node) {
-    unsafe { crate::timer::sched_timer::sched_timer_done(tn) }
+    unsafe { crate::timer::sched_timer::SchedTimer::sched_timer_done(tn) }
 }
 // `sleep_ms` stayed a safe fn -- plain crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 use crate::lock::spinlock::RawSpinlock;
 
 /// See `completion.rs`'s identical note: `crate::lock::spinlock::RawSpinlock::init`
@@ -342,7 +342,7 @@ impl RawSemaphore {
             if ret == 0 { return 0; }
             if ret != -(EAGAIN as c_int) { return ret; }
             if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) { return -(EINTR as c_int); }
-            sleep_ms(1);
+            SchedTimer::sleep_ms(1);
         }
     }
 

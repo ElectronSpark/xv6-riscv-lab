@@ -36,11 +36,11 @@ use crate::proc::access::TqRef;
 // safe facade for the unchanged call sites.
 /// SAFETY: see [`crate::timer::sched_timer::sched_timer_set`]'s contract.
 fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int {
-    unsafe { crate::timer::sched_timer::sched_timer_set(tn, ticks) }
+    unsafe { crate::timer::sched_timer::SchedTimer::sched_timer_set(tn, ticks) }
 }
 /// SAFETY: see [`crate::timer::sched_timer::sched_timer_done`]'s contract.
 fn sched_timer_done(tn: *mut timer_node) {
-    unsafe { crate::timer::sched_timer::sched_timer_done(tn) }
+    unsafe { crate::timer::sched_timer::SchedTimer::sched_timer_done(tn) }
 }
 use crate::lock::spinlock::RawSpinlock;
 

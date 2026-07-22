@@ -61,7 +61,7 @@
 //! `copyinstr2`'s embedded big-argument sub-test execs `/bin/echo` with
 //! three arguments each exactly `PGSIZE` (4096) bytes long (no room for
 //! the NUL terminator within a `PGSIZE`-sized kernel buffer) — this is
-//! the *exact* `fetchstr(uarg, argv[i], PGSIZE)` bound classic xv6-riscv
+//! the *exact* `Syscall::fetchstr(uarg, argv[i], PGSIZE)` bound classic xv6-riscv
 //! itself uses (this file's `sys_exec` is byte-for-byte the same shape).
 //! Debug instrumentation confirmed `fetchstr` returns `-ENAMETOOLONG` on
 //! the very first oversized argument and `sys_exec` takes the `goto bad`
@@ -155,7 +155,7 @@ unsafe extern "C" {
 // P3-D3c: `irq/syscall.rs`'s arg-fetch helpers are plain (safe) Rust fns
 // now that their `#[no_mangle]` exports are gone; identical signatures,
 // plain `use`.
-use crate::irq::syscall::{argaddr, argstr, fetchaddr, fetchstr};
+use crate::irq::syscall::Syscall;
 
 // P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
 // their `#[no_mangle]` exports are gone; reached as crate-path items
@@ -825,9 +825,9 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
     let mut uargv: u64 = 0;
     let mut uenvp: u64 = 0;
 
-    argaddr(1, &mut uargv);
-    argaddr(2, &mut uenvp);
-    if argstr(0, path.as_mut_ptr(), MAXPATH as c_int) < 0 {
+    Syscall::argaddr(1, &mut uargv);
+    Syscall::argaddr(2, &mut uenvp);
+    if Syscall::argstr(0, path.as_mut_ptr(), MAXPATH as c_int) < 0 {
         return (-1_i32) as u64;
     }
 
@@ -853,7 +853,7 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
             cleanup_and_fail!();
         }
         let mut uarg: u64 = 0;
-        if fetchaddr(uargv + (i * size_of::<u64>()) as u64, &mut uarg) < 0 {
+        if Syscall::fetchaddr(uargv + (i * size_of::<u64>()) as u64, &mut uarg) < 0 {
             cleanup_and_fail!();
         }
         if uarg == 0 {
@@ -865,7 +865,7 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
             cleanup_and_fail!();
         }
         argv[i] = buf as *mut c_char;
-        if fetchstr(uarg, argv[i], PGSIZE as c_int) < 0 {
+        if Syscall::fetchstr(uarg, argv[i], PGSIZE as c_int) < 0 {
             cleanup_and_fail!();
         }
         i += 1;
@@ -880,7 +880,7 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
                 break; // too many env vars, just truncate
             }
             let mut uenv: u64 = 0;
-            if fetchaddr(uenvp + (j * size_of::<u64>()) as u64, &mut uenv) < 0 {
+            if Syscall::fetchaddr(uenvp + (j * size_of::<u64>()) as u64, &mut uenv) < 0 {
                 break; // invalid pointer, treat as no envp
             }
             if uenv == 0 {
@@ -892,7 +892,7 @@ pub(crate) extern "C" fn sys_exec() -> u64 {
                 cleanup_and_fail!();
             }
             envp[j] = buf as *mut c_char;
-            if fetchstr(uenv, envp[j], PGSIZE as c_int) < 0 {
+            if Syscall::fetchstr(uenv, envp[j], PGSIZE as c_int) < 0 {
                 kfree(envp[j] as *mut c_void);
                 envp[j] = ptr::null_mut();
                 break; // invalid string, stop here

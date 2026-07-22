@@ -80,7 +80,7 @@ use crate::proc::access::TqRef;
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -1024,9 +1024,9 @@ extern "C" fn rcu_cb_kthread(cpu_id: u64, _arg2: u64) -> c_int {
 
         if !notready.is_empty() {
             rcp.requeue_notready(&notready);
-            sleep_ms(50);
+            SchedTimer::sleep_ms(50);
         } else {
-            sleep_ms(5000);
+            SchedTimer::sleep_ms(5000);
         }
     }
 }

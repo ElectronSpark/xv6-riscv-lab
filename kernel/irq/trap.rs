@@ -87,8 +87,8 @@ use crate::machine::CpuLocal;
 // (only caller anywhere in the tree is this file), referenced via their
 // fully-qualified submodule paths rather than `extern "C"`
 // redeclarations.
-use crate::irq::irq_core::do_irq;
-use crate::irq::syscall::syscall;
+use crate::irq::irq_core::IrqCore;
+use crate::irq::syscall::Syscall;
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_disable_bt`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
 use crate::printf::{panic_disable_bt, Cs, Ptr};
@@ -322,20 +322,32 @@ const KIRQSTACKTOP: u64 = MAXVA - ((PGSIZE as u64) << 6);
 const INTR_STACK_ORDER: u64 = 2;
 const INTR_STACK_SIZE: u64 = 1u64 << (PAGE_SHIFT as u64 + INTR_STACK_ORDER);
 
-/// `KIRQSTACK(hartid)` macro: each hart's interrupt stack, with guard
-/// pages above and below (`kernel/inc/mm/memlayout.h`).
-#[inline(always)]
-const fn kirqstack(hartid: u64) -> u64 {
-    KIRQSTACKTOP - (hartid + 1) * (INTR_STACK_SIZE << 1)
-}
+/// Trap entry/exit surface -- ZST housing every free fn this file used to
+/// export at crate scope (P3-OO mesh sweep, see `git show 91ef670` for the
+/// established convention). No receiver: every fn below keeps its exact
+/// C-derived parameter list. The four `#[no_mangle]` asm entry points
+/// (`user_kirq_entrance`/`usertrap`/`kerneltrap`/`kernel_irq`) and
+/// `__user_kirq_return` (address-taken as a `sw_noret_cb_t` fn-pointer
+/// value passed to `__switch_noreturn`) stay free functions below this
+/// impl block -- see each one's own doc comment for why.
+pub(crate) struct Trap;
 
-/// `MAKE_SATP(pagetable)` macro (`kernel/inc/riscv.h`). A private local
-/// duplicate of the canonical helper -- `mm/vm_pgtab.rs` has its own
-/// (also private) copy for the same reason; folding both into a shared
-/// `machine.rs` helper is a follow-up, not in this wave's touch scope.
-#[inline(always)]
-fn make_satp(pagetable: *mut u64) -> u64 {
-    (8u64 << 60) | ((pagetable as u64) >> 12)
+impl Trap {
+    /// `KIRQSTACK(hartid)` macro: each hart's interrupt stack, with guard
+    /// pages above and below (`kernel/inc/mm/memlayout.h`).
+    #[inline(always)]
+    const fn kirqstack(hartid: u64) -> u64 {
+        KIRQSTACKTOP - (hartid + 1) * (INTR_STACK_SIZE << 1)
+    }
+
+    /// `MAKE_SATP(pagetable)` macro (`kernel/inc/riscv.h`). A private local
+    /// duplicate of the canonical helper -- `mm/vm_pgtab.rs` has its own
+    /// (also private) copy for the same reason; folding both into a shared
+    /// `machine.rs` helper is a follow-up, not in this wave's touch scope.
+    #[inline(always)]
+    fn make_satp(pagetable: *mut u64) -> u64 {
+        (8u64 << 60) | ((pagetable as u64) >> 12)
+    }
 }
 
 // ===========================================================================
@@ -405,48 +417,50 @@ static mut TRAMPOLINE_USERRET: Option<unsafe extern "C" fn(u64, u64)> = None;
 // `machine.rs` is a follow-up, not this wave's touch scope).
 // ===========================================================================
 
-/// Write SSTATUS. Mirrors the C `w_sstatus()` inline.
-#[inline(always)]
-fn write_sstatus(v: u64) {
-    // SAFETY: `csrw sstatus` writes a supervisor CSR; cannot violate
-    // memory safety by itself (see `machine::write_satp`'s identical
-    // reasoning for why this omits `nomem`).
-    unsafe {
-        core::arch::asm!("csrw sstatus, {0}", in(reg) v, options(nostack, preserves_flags));
+impl Trap {
+    /// Write SSTATUS. Mirrors the C `w_sstatus()` inline.
+    #[inline(always)]
+    fn write_sstatus(v: u64) {
+        // SAFETY: `csrw sstatus` writes a supervisor CSR; cannot violate
+        // memory safety by itself (see `machine::write_satp`'s identical
+        // reasoning for why this omits `nomem`).
+        unsafe {
+            core::arch::asm!("csrw sstatus, {0}", in(reg) v, options(nostack, preserves_flags));
+        }
     }
-}
 
-/// Write STVEC (trap-vector base). Mirrors the C `w_stvec()` inline.
-#[inline(always)]
-fn write_stvec(v: u64) {
-    // SAFETY: `csrw stvec` writes a supervisor CSR; no memory effect,
-    // cannot trap.
-    unsafe {
-        core::arch::asm!("csrw stvec, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+    /// Write STVEC (trap-vector base). Mirrors the C `w_stvec()` inline.
+    #[inline(always)]
+    fn write_stvec(v: u64) {
+        // SAFETY: `csrw stvec` writes a supervisor CSR; no memory effect,
+        // cannot trap.
+        unsafe {
+            core::arch::asm!("csrw stvec, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+        }
     }
-}
 
-/// Write SSCRATCH. Mirrors the C `w_sscratch()` inline.
-#[inline(always)]
-fn write_sscratch(v: u64) {
-    // SAFETY: `csrw sscratch` writes a supervisor scratch CSR; no memory
-    // effect, cannot trap.
-    unsafe {
-        core::arch::asm!("csrw sscratch, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+    /// Write SSCRATCH. Mirrors the C `w_sscratch()` inline.
+    #[inline(always)]
+    fn write_sscratch(v: u64) {
+        // SAFETY: `csrw sscratch` writes a supervisor scratch CSR; no memory
+        // effect, cannot trap.
+        unsafe {
+            core::arch::asm!("csrw sscratch, {0}", in(reg) v, options(nomem, nostack, preserves_flags));
+        }
     }
-}
 
-/// Read the `gp` (global pointer) register. Mirrors the C `r_gp()`
-/// inline.
-#[inline(always)]
-fn read_gp() -> u64 {
-    let v: u64;
-    // SAFETY: `mv {0}, gp` reads a general-purpose register with no
-    // memory effects and cannot trap.
-    unsafe {
-        core::arch::asm!("mv {0}, gp", out(reg) v, options(nomem, nostack, preserves_flags));
+    /// Read the `gp` (global pointer) register. Mirrors the C `r_gp()`
+    /// inline.
+    #[inline(always)]
+    fn read_gp() -> u64 {
+        let v: u64;
+        // SAFETY: `mv {0}, gp` reads a general-purpose register with no
+        // memory effects and cannot trap.
+        unsafe {
+            core::arch::asm!("mv {0}, gp", out(reg) v, options(nomem, nostack, preserves_flags));
+        }
+        v
     }
-    v
 }
 
 // ===========================================================================
@@ -459,63 +473,65 @@ fn read_gp() -> u64 {
 // expected fallback ("where they exist").
 // ===========================================================================
 
-#[inline]
-fn needs_resched() -> bool {
-    CpuLocal::current().flags() & CPU_FLAG_NEEDS_RESCHED != 0
-}
+impl Trap {
+    #[inline]
+    fn needs_resched() -> bool {
+        CpuLocal::current().flags() & CPU_FLAG_NEEDS_RESCHED != 0
+    }
 
-#[inline]
-fn cpu_in_itr() -> bool {
-    CpuLocal::current().flags() & CPU_FLAG_IN_ITR != 0
-}
+    #[inline]
+    fn cpu_in_itr() -> bool {
+        CpuLocal::current().flags() & CPU_FLAG_IN_ITR != 0
+    }
 
-#[inline]
-fn cpu_set_in_itr() {
-    let cpu = CpuLocal::current();
-    // SAFETY: mutates only this hart's own `cpu_local.flags` field.
-    unsafe { (*cpu.as_ptr()).flags |= CPU_FLAG_IN_ITR };
-}
+    #[inline]
+    fn cpu_set_in_itr() {
+        let cpu = CpuLocal::current();
+        // SAFETY: mutates only this hart's own `cpu_local.flags` field.
+        unsafe { (*cpu.as_ptr()).flags |= CPU_FLAG_IN_ITR };
+    }
 
-#[inline]
-fn cpu_clear_in_itr() {
-    let cpu = CpuLocal::current();
-    // SAFETY: see `cpu_set_in_itr`.
-    unsafe { (*cpu.as_ptr()).flags &= !CPU_FLAG_IN_ITR };
-}
+    #[inline]
+    fn cpu_clear_in_itr() {
+        let cpu = CpuLocal::current();
+        // SAFETY: see `cpu_set_in_itr`.
+        unsafe { (*cpu.as_ptr()).flags &= !CPU_FLAG_IN_ITR };
+    }
 
-#[inline]
-fn intr_depth() -> c_int {
-    let cpu = CpuLocal::current();
-    // SAFETY: reads only this hart's own `cpu_local.intr_depth` field.
-    unsafe { (*cpu.as_ptr()).intr_depth }
-}
+    #[inline]
+    fn intr_depth() -> c_int {
+        let cpu = CpuLocal::current();
+        // SAFETY: reads only this hart's own `cpu_local.intr_depth` field.
+        unsafe { (*cpu.as_ptr()).intr_depth }
+    }
 
-#[inline]
-fn intr_depth_inc() {
-    let cpu = CpuLocal::current();
-    // SAFETY: see `intr_depth`.
-    unsafe { (*cpu.as_ptr()).intr_depth += 1 };
-}
+    #[inline]
+    fn intr_depth_inc() {
+        let cpu = CpuLocal::current();
+        // SAFETY: see `intr_depth`.
+        unsafe { (*cpu.as_ptr()).intr_depth += 1 };
+    }
 
-#[inline]
-fn intr_depth_dec() {
-    let cpu = CpuLocal::current();
-    // SAFETY: see `intr_depth`.
-    unsafe { (*cpu.as_ptr()).intr_depth -= 1 };
-}
+    #[inline]
+    fn intr_depth_dec() {
+        let cpu = CpuLocal::current();
+        // SAFETY: see `intr_depth`.
+        unsafe { (*cpu.as_ptr()).intr_depth -= 1 };
+    }
 
-/// Post-increment `intr_depth`, returning the value *before* the
-/// increment. Mirrors the C `mycpu()->intr_depth++` expression used as a
-/// condition in [`kerneltrap`].
-#[inline]
-fn intr_depth_postinc() -> c_int {
-    let cpu = CpuLocal::current();
-    // SAFETY: see `intr_depth`.
-    unsafe {
-        let p = cpu.as_ptr();
-        let old = (*p).intr_depth;
-        (*p).intr_depth = old + 1;
-        old
+    /// Post-increment `intr_depth`, returning the value *before* the
+    /// increment. Mirrors the C `mycpu()->intr_depth++` expression used as a
+    /// condition in [`kerneltrap`].
+    #[inline]
+    fn intr_depth_postinc() -> c_int {
+        let cpu = CpuLocal::current();
+        // SAFETY: see `intr_depth`.
+        unsafe {
+            let p = cpu.as_ptr();
+            let old = (*p).intr_depth;
+            (*p).intr_depth = old + 1;
+            old
+        }
     }
 }
 
@@ -524,33 +540,35 @@ fn intr_depth_postinc() -> c_int {
 // inline, reimplemented).
 // ===========================================================================
 
-fn scause_to_str(scause: u64) -> &'static CStr {
-    if scause & 0x8000_0000_0000_0000 != 0 {
-        // Interrupts are negative, exceptions are positive.
-        match scause & 0x7FFF_FFFF_FFFF_FFFF {
-            0 => c"User software interrupt",
-            1 => c"Supervisor software interrupt",
-            4 => c"User timer interrupt",
-            5 => c"Supervisor timer interrupt",
-            8 => c"User external interrupt",
-            9 => c"Supervisor external interrupt",
-            _ => c"Unknown interrupt",
-        }
-    } else {
-        match scause {
-            0 => c"Instruction address misaligned",
-            1 => c"Instruction access fault",
-            2 => c"Illegal instruction",
-            3 => c"Breakpoint",
-            5 => c"Load access fault",
-            6 => c"Store/AMO address misaligned",
-            7 => c"Store/AMO access fault",
-            8 => c"Environment call from U-mode",
-            9 => c"Environment call from S-mode",
-            12 => c"Instruction page fault",
-            13 => c"Load page fault",
-            15 => c"Store/AMO page fault",
-            _ => c"Unknown exception",
+impl Trap {
+    fn scause_to_str(scause: u64) -> &'static CStr {
+        if scause & 0x8000_0000_0000_0000 != 0 {
+            // Interrupts are negative, exceptions are positive.
+            match scause & 0x7FFF_FFFF_FFFF_FFFF {
+                0 => c"User software interrupt",
+                1 => c"Supervisor software interrupt",
+                4 => c"User timer interrupt",
+                5 => c"Supervisor timer interrupt",
+                8 => c"User external interrupt",
+                9 => c"Supervisor external interrupt",
+                _ => c"Unknown interrupt",
+            }
+        } else {
+            match scause {
+                0 => c"Instruction address misaligned",
+                1 => c"Instruction access fault",
+                2 => c"Illegal instruction",
+                3 => c"Breakpoint",
+                5 => c"Load access fault",
+                6 => c"Store/AMO address misaligned",
+                7 => c"Store/AMO access fault",
+                8 => c"Environment call from U-mode",
+                9 => c"Environment call from S-mode",
+                12 => c"Instruction page fault",
+                13 => c"Load page fault",
+                15 => c"Store/AMO page fault",
+                _ => c"Unknown exception",
+            }
         }
     }
 }
@@ -571,45 +589,51 @@ fn scause_to_str(scause: u64) -> &'static CStr {
 // substitution, to keep the rendered diagnostic byte-identical to the C
 // original.
 
-#[cold]
-fn kpanic_msg(line: u32, function: &CStr, msg: &CStr) -> ! {
-    __panic_start();
-    crate::kprintln!(
-        "PANIC {}:{}: In function '{}':",
-        Cs(c"kernel/irq/trap.rs".as_ptr()),
-        line,
-        Cs(function.as_ptr()),
-    );
-    crate::kprint!("{}", Cs(msg.as_ptr()));
-    crate::kprintln!();
-    __panic_end()
+impl Trap {
+    #[cold]
+    fn kpanic_msg(line: u32, function: &CStr, msg: &CStr) -> ! {
+        __panic_start();
+        crate::kprintln!(
+            "PANIC {}:{}: In function '{}':",
+            Cs(c"kernel/irq/trap.rs".as_ptr()),
+            line,
+            Cs(function.as_ptr()),
+        );
+        crate::kprint!("{}", Cs(msg.as_ptr()));
+        crate::kprintln!();
+        __panic_end()
+    }
+
+    #[cold]
+    fn kassert_fail(line: u32, function: &CStr, msg: &CStr) -> ! {
+        __panic_start();
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            Cs(c"kernel/irq/trap.rs".as_ptr()),
+            line,
+            Cs(function.as_ptr()),
+        );
+        crate::kprint!("{}", Cs(msg.as_ptr()));
+        crate::kprintln!();
+        __panic_end()
+    }
 }
 
-#[cold]
-fn kassert_fail(line: u32, function: &CStr, msg: &CStr) -> ! {
-    __panic_start();
-    crate::kprintln!(
-        "ASSERTION_FAILURE {}:{}: In function '{}':",
-        Cs(c"kernel/irq/trap.rs".as_ptr()),
-        line,
-        Cs(function.as_ptr()),
-    );
-    crate::kprint!("{}", Cs(msg.as_ptr()));
-    crate::kprintln!();
-    __panic_end()
-}
-
+// Both helpers above are called from methods on `Trap` and from the four
+// free (`#[no_mangle]`) asm entry points below -- `Trap::` is always in
+// scope in this file, so a fully-qualified path works from either call
+// site without per-invocation `Self::` vs `Trap::` bookkeeping.
 macro_rules! kassert {
     ($cond:expr, $func:expr, $msg:expr) => {
         if !($cond) {
-            kassert_fail(line!(), $func, $msg)
+            Trap::kassert_fail(line!(), $func, $msg)
         }
     };
 }
 
 macro_rules! kpanic {
     ($func:expr, $msg:expr) => {
-        kpanic_msg(line!(), $func, $msg)
+        Trap::kpanic_msg(line!(), $func, $msg)
     };
 }
 
@@ -617,186 +641,190 @@ macro_rules! kpanic {
 // trapinit / trapinithart
 // ===========================================================================
 
-/// Rust port of `trapinit()`. Called once, on the boot hart, before any
-/// hart can reach [`usertrapret`] (hard boot-order invariant -- see the
-/// module doc).
-// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
-// `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn trapinit() {
-    // SAFETY: boot-time, single-hart execution (before any other hart is
-    // started and before any `usertrapret()` call anywhere in the
-    // kernel); every static/extern touched below is either write-once
-    // here or, for `ipi.rs`'s `cpus`, exclusively owned by this hart's slice of the
-    // loop until other harts start.
-    unsafe {
-        let trampoline_addr = (&raw const trampoline) as u64;
-        let userret_addr = (&raw const userret) as u64;
-        let uservec_addr = (&raw const uservec) as u64;
+impl Trap {
+    /// Rust port of `trapinit()`. Called once, on the boot hart, before any
+    /// hart can reach [`usertrapret`] (hard boot-order invariant -- see the
+    /// module doc).
+    // P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+    // `extern` redeclaration) -- demoted.
+    pub(crate) extern "C" fn trapinit() {
+        // SAFETY: boot-time, single-hart execution (before any other hart is
+        // started and before any `usertrapret()` call anywhere in the
+        // kernel); every static/extern touched below is either write-once
+        // here or, for `ipi.rs`'s `cpus`, exclusively owned by this hart's slice of the
+        // loop until other harts start.
+        unsafe {
+            let trampoline_addr = (&raw const trampoline) as u64;
+            let userret_addr = (&raw const userret) as u64;
+            let uservec_addr = (&raw const uservec) as u64;
 
-        let userret_offset = userret_addr - trampoline_addr;
-        let target = TRAMPOLINE + userret_offset;
-        TRAMPOLINE_USERRET = Some(core::mem::transmute::<u64, unsafe extern "C" fn(u64, u64)>(
-            target,
-        ));
-        crate::kprintln!("trapinit: trampoline_userret at {}", Ptr(target));
+            let userret_offset = userret_addr - trampoline_addr;
+            let target = TRAMPOLINE + userret_offset;
+            TRAMPOLINE_USERRET = Some(core::mem::transmute::<u64, unsafe extern "C" fn(u64, u64)>(
+                target,
+            ));
+            crate::kprintln!("trapinit: trampoline_userret at {}", Ptr(target));
 
-        // send syscalls, interrupts, and exceptions to uservec in
-        // trampoline.S
-        trampoline_uservec = TRAMPOLINE + (uservec_addr - trampoline_addr);
-        crate::kprintln!(
-            "trapinit: trampoline_uservec at {}",
-            Ptr(trampoline_uservec),
-        );
-
-        // Allocate and map interrupt stacks for each CPU hart.
-        let kpgtbl = (&raw const _data_ktlb) as *const u8 as *mut u64;
-        for i in 0..(NCPU as u64) {
-            let stack_mem = crate::mm::page::Page::page_alloc(INTR_STACK_ORDER, 0);
-            kassert!(
-                !stack_mem.is_null(),
-                c"trapinit",
-                c"trapinit: page_alloc for intr_stacks failed"
-            );
-            memset(stack_mem, 0, INTR_STACK_SIZE as usize);
-            PageTable::kvmmap(
-                kpgtbl,
-                kirqstack(i),
-                stack_mem as u64,
-                INTR_STACK_SIZE,
-                (PTE_R | PTE_W) as c_int,
-            );
-            // `cpu_local.intr_stacks` is C-typed `void **` but only ever
-            // holds a plain scalar VA here (matches the C original's
-            // `cpus[i].intr_stacks = (void *)KIRQSTACK(i);` -- an
-            // implicit-conversion-with-warning in C, never dereferenced
-            // as an actual array anywhere in the kernel; preserved
-            // as-is for 1:1 fidelity rather than "fixed" at this wave's
-            // boundary).
-            let cpu_i = (&raw mut crate::ipi::cpus)
-                .cast::<cpu_local>()
-                .add(i as usize);
-            (*cpu_i).intr_stacks = kirqstack(i) as *mut *mut c_void;
-            (*cpu_i).intr_sp = (*cpu_i).intr_stacks as u64 + INTR_STACK_SIZE;
+            // send syscalls, interrupts, and exceptions to uservec in
+            // trampoline.S
+            trampoline_uservec = TRAMPOLINE + (uservec_addr - trampoline_addr);
             crate::kprintln!(
-                "trapinit: CPU {} intr_stack at {:x} -> {}",
-                i as c_int,
-                kirqstack(i),
-                Ptr(stack_mem as u64),
+                "trapinit: trampoline_uservec at {}",
+                Ptr(trampoline_uservec),
             );
+
+            // Allocate and map interrupt stacks for each CPU hart.
+            let kpgtbl = (&raw const _data_ktlb) as *const u8 as *mut u64;
+            for i in 0..(NCPU as u64) {
+                let stack_mem = crate::mm::page::Page::page_alloc(INTR_STACK_ORDER, 0);
+                kassert!(
+                    !stack_mem.is_null(),
+                    c"trapinit",
+                    c"trapinit: page_alloc for intr_stacks failed"
+                );
+                memset(stack_mem, 0, INTR_STACK_SIZE as usize);
+                PageTable::kvmmap(
+                    kpgtbl,
+                    Self::kirqstack(i),
+                    stack_mem as u64,
+                    INTR_STACK_SIZE,
+                    (PTE_R | PTE_W) as c_int,
+                );
+                // `cpu_local.intr_stacks` is C-typed `void **` but only ever
+                // holds a plain scalar VA here (matches the C original's
+                // `cpus[i].intr_stacks = (void *)KIRQSTACK(i);` -- an
+                // implicit-conversion-with-warning in C, never dereferenced
+                // as an actual array anywhere in the kernel; preserved
+                // as-is for 1:1 fidelity rather than "fixed" at this wave's
+                // boundary).
+                let cpu_i = (&raw mut crate::ipi::cpus)
+                    .cast::<cpu_local>()
+                    .add(i as usize);
+                (*cpu_i).intr_stacks = Self::kirqstack(i) as *mut *mut c_void;
+                (*cpu_i).intr_sp = (*cpu_i).intr_stacks as u64 + INTR_STACK_SIZE;
+                crate::kprintln!(
+                    "trapinit: CPU {} intr_stack at {:x} -> {}",
+                    i as c_int,
+                    Self::kirqstack(i),
+                    Ptr(stack_mem as u64),
+                );
+            }
         }
     }
-}
 
-/// Rust port of `trapinithart()`: set up to take exceptions and traps
-/// while in the kernel.
-// P3-1B: called internally (`user_kirq_entrance`/`usertrap`, this file)
-// and from `start_kernel.rs` (crate-path `use`, not an `extern`
-// redeclaration) -- demoted.
-pub(crate) extern "C" fn trapinithart() {
-    let intr_sp = {
-        let cpu = CpuLocal::current();
-        // SAFETY: reads this hart's own `intr_sp`, set once for every
-        // hart by `trapinit()` before any hart reaches this function.
-        unsafe { (*cpu.as_ptr()).intr_sp }
-    };
-    write_sscratch(intr_sp);
-    write_stvec(kernelvec as usize as u64);
+    /// Rust port of `trapinithart()`: set up to take exceptions and traps
+    /// while in the kernel.
+    // P3-1B: called internally (`user_kirq_entrance`/`usertrap`, this file)
+    // and from `start_kernel.rs` (crate-path `use`, not an `extern`
+    // redeclaration) -- demoted.
+    pub(crate) extern "C" fn trapinithart() {
+        let intr_sp = {
+            let cpu = CpuLocal::current();
+            // SAFETY: reads this hart's own `intr_sp`, set once for every
+            // hart by `trapinit()` before any hart reaches this function.
+            unsafe { (*cpu.as_ptr()).intr_sp }
+        };
+        Self::write_sscratch(intr_sp);
+        Self::write_stvec(kernelvec as usize as u64);
+    }
 }
 
 // ===========================================================================
 // kerneltrap diagnostics
 // ===========================================================================
 
-fn kerneltrap_dump_regs(tf: *mut trapframe) {
-    // SAFETY: `tf` is a live trapframe for the duration of this call (see
-    // callers).
-    unsafe {
-        crate::kprintln!("kerneltrap_dump_regs:");
-        crate::kprintln!("pc: 0x{:x}", (*tf).sepc);
-        crate::kprintln!(
-            "ra: 0x{:x}, sp: 0x{:x}, s0: 0x{:x}",
-            (*tf).ra,
-            (*tf).sp,
-            (*tf).s0,
-        );
-        crate::kprintln!(
-            "tp: 0x{:x}, t0: 0x{:x}, t1: 0x{:x}, t2: 0x{:x}",
-            machine::Riscv::read_tp(),
-            (*tf).t0,
-            (*tf).t1,
-            (*tf).t2,
-        );
-        crate::kprintln!(
-            "a0: 0x{:x}, a1: 0x{:x}, a2: 0x{:x}, a3: 0x{:x}",
-            (*tf).a0,
-            (*tf).a1,
-            (*tf).a2,
-            (*tf).a3,
-        );
-        crate::kprintln!(
-            "a4: 0x{:x}, a5: 0x{:x}, a6: 0x{:x}, a7: 0x{:x}",
-            (*tf).a4,
-            (*tf).a5,
-            (*tf).a6,
-            (*tf).a7,
-        );
-        crate::kprintln!(
-            "t3: 0x{:x}, t4: 0x{:x}, t5: 0x{:x}, t6: 0x{:x}",
-            (*tf).t3,
-            (*tf).t4,
-            (*tf).t5,
-            (*tf).t6,
-        );
-        crate::kprintln!("gp: 0x{:x}", read_gp());
-    }
-}
-
-/// Rust port of the file-local `__trap_panic()`: an interrupt or trap
-/// from an unknown source. Always diverges (every path in the C original
-/// ends in `panic()` too -- the trailing `mycpu()->intr_depth--;` after
-/// [`kerneltrap`]'s final unconditional call into this function was
-/// already unreachable dead code there; typing this `-> !` lets the
-/// compiler confirm it instead of silently dropping it, and that trailing
-/// decrement is simply not carried over).
-#[cold]
-fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
-    // SAFETY: `tf` is a live trapframe for a trap that just occurred on
-    // this hart, supplied by the kernelvec.S/trampoline.S asm contract;
-    // the pre-trapframe stack write 8 bytes below `tf` mirrors the C
-    // original's intentional (documented as "to enconvinient gdb back
-    // trace") scribble into the stack slot immediately preceding the
-    // trapframe, which is live stack memory on both the kernel-stack and
-    // interrupt-stack trap-entry paths.
-    unsafe {
-        crate::kprintln!(
-            "scause=0x{:x}({}) sepc=0x{:x} stval=0x{:x}",
-            (*tf).scause,
-            Cs(scause_to_str((*tf).scause).as_ptr()),
-            (*tf).sepc,
-            (*tf).stval,
-        );
-        (*tf).ra = (*tf).sepc;
-        *((tf as u64 - 8) as *mut u64) = (*tf).sepc;
+impl Trap {
+    fn kerneltrap_dump_regs(tf: *mut trapframe) {
+        // SAFETY: `tf` is a live trapframe for the duration of this call (see
+        // callers).
+        unsafe {
+            crate::kprintln!("kerneltrap_dump_regs:");
+            crate::kprintln!("pc: 0x{:x}", (*tf).sepc);
+            crate::kprintln!(
+                "ra: 0x{:x}, sp: 0x{:x}, s0: 0x{:x}",
+                (*tf).ra,
+                (*tf).sp,
+                (*tf).s0,
+            );
+            crate::kprintln!(
+                "tp: 0x{:x}, t0: 0x{:x}, t1: 0x{:x}, t2: 0x{:x}",
+                machine::Riscv::read_tp(),
+                (*tf).t0,
+                (*tf).t1,
+                (*tf).t2,
+            );
+            crate::kprintln!(
+                "a0: 0x{:x}, a1: 0x{:x}, a2: 0x{:x}, a3: 0x{:x}",
+                (*tf).a0,
+                (*tf).a1,
+                (*tf).a2,
+                (*tf).a3,
+            );
+            crate::kprintln!(
+                "a4: 0x{:x}, a5: 0x{:x}, a6: 0x{:x}, a7: 0x{:x}",
+                (*tf).a4,
+                (*tf).a5,
+                (*tf).a6,
+                (*tf).a7,
+            );
+            crate::kprintln!(
+                "t3: 0x{:x}, t4: 0x{:x}, t5: 0x{:x}, t6: 0x{:x}",
+                (*tf).t3,
+                (*tf).t4,
+                (*tf).t5,
+                (*tf).t6,
+            );
+            crate::kprintln!("gp: 0x{:x}", Self::read_gp());
+        }
     }
 
-    let p = machine::Riscv::current_thread_ptr();
-    if p.is_null() {
-        crate::kprintln!("kerneltrap: no current thread");
-        kerneltrap_dump_regs(tf);
+    /// Rust port of the file-local `__trap_panic()`: an interrupt or trap
+    /// from an unknown source. Always diverges (every path in the C original
+    /// ends in `panic()` too -- the trailing `mycpu()->intr_depth--;` after
+    /// [`kerneltrap`]'s final unconditional call into this function was
+    /// already unreachable dead code there; typing this `-> !` lets the
+    /// compiler confirm it instead of silently dropping it, and that trailing
+    /// decrement is simply not carried over).
+    #[cold]
+    fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
+        // SAFETY: `tf` is a live trapframe for a trap that just occurred on
+        // this hart, supplied by the kernelvec.S/trampoline.S asm contract;
+        // the pre-trapframe stack write 8 bytes below `tf` mirrors the C
+        // original's intentional (documented as "to enconvinient gdb back
+        // trace") scribble into the stack slot immediately preceding the
+        // trapframe, which is live stack memory on both the kernel-stack and
+        // interrupt-stack trap-entry paths.
+        unsafe {
+            crate::kprintln!(
+                "scause=0x{:x}({}) sepc=0x{:x} stval=0x{:x}",
+                (*tf).scause,
+                Cs(Self::scause_to_str((*tf).scause).as_ptr()),
+                (*tf).sepc,
+                (*tf).stval,
+            );
+            (*tf).ra = (*tf).sepc;
+            *((tf as u64 - 8) as *mut u64) = (*tf).sepc;
+        }
+
+        let p = machine::Riscv::current_thread_ptr();
+        if p.is_null() {
+            crate::kprintln!("kerneltrap: no current thread");
+            Self::kerneltrap_dump_regs(tf);
+            panic_disable_bt();
+            kpanic!(c"trap_panic_dump", c"kerneltrap");
+        }
+
+        // SAFETY: `p` is non-null, checked above; `kstack`/`kstack_order` are
+        // plain scalar fields of a live `struct thread` (this can only run
+        // while `p` is the thread currently executing).
+        unsafe {
+            let kstack_size = 1u64 << (PAGE_SHIFT as u64 + (*p).kstack_order as u64);
+            print_backtrace((*tf).s0, (*p).kstack, (*p).kstack + kstack_size);
+        }
+        Self::kerneltrap_dump_regs(tf);
         panic_disable_bt();
         kpanic!(c"trap_panic_dump", c"kerneltrap");
     }
-
-    // SAFETY: `p` is non-null, checked above; `kstack`/`kstack_order` are
-    // plain scalar fields of a live `struct thread` (this can only run
-    // while `p` is the thread currently executing).
-    unsafe {
-        let kstack_size = 1u64 << (PAGE_SHIFT as u64 + (*p).kstack_order as u64);
-        print_backtrace((*tf).s0, (*p).kstack, (*p).kstack + kstack_size);
-    }
-    kerneltrap_dump_regs(tf);
-    panic_disable_bt();
-    kpanic!(c"trap_panic_dump", c"kerneltrap");
 }
 
 // ===========================================================================
@@ -809,7 +837,7 @@ fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
 /// preserve the asm-visible two-argument signature.
 #[no_mangle]
 pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
-    enter_irq();
+    Trap::enter_irq();
     let p = machine::Riscv::current_thread_ptr();
     // SAFETY: `p` is the thread that just trapped from user mode into
     // this handler (uservec's asm contract); `trapframe` is its live
@@ -825,16 +853,16 @@ pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
         Vm::vm_cpu_offline((*p).vm, machine::Riscv::cpuid());
 
         // redirect traps to kerneltrap() -- since we are on kernel stack
-        trapinithart();
+        Trap::trapinithart();
 
         let tf = &raw mut (*(*p).trapframe).trapframe;
-        if do_irq(tf) < 0 {
-            trap_panic_dump(tf, s0);
+        if IrqCore::do_irq(tf) < 0 {
+            Trap::trap_panic_dump(tf, s0);
         }
     }
-    exit_irq();
+    Trap::exit_irq();
 
-    if needs_resched() {
+    if Trap::needs_resched() {
         // If anyone has requested a reschedule, do it now. Switch to
         // kernel stack first (so yield() runs on the right stack).
         // SAFETY: `p.ksp` is this thread's live kernel stack pointer;
@@ -849,7 +877,7 @@ pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
     // returns to this point when taken above -- matches the C original's
     // structure exactly: no early `return` there either, it's simply
     // unreachable in practice.)
-    usertrapret();
+    Trap::usertrapret();
 }
 
 /// Rust port of `__user_kirq_return(uint64 irq_sp, uint64 s0)`: the
@@ -862,7 +890,7 @@ pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
 // demoted; kept as `extern "C" fn` (not a plain `fn`) since its type must
 // still match `unsafe extern "C" fn(u64, u64)` at that coercion site.
 pub(crate) extern "C" fn __user_kirq_return(_irq_sp: u64, _s0: u64) {
-    usertrapret();
+    Trap::usertrapret();
 }
 
 /// Rust port of `usertrap()`: handle an interrupt, exception, or system
@@ -888,7 +916,7 @@ pub extern "C" fn usertrap() {
         Vm::vm_cpu_offline((*p).vm, machine::Riscv::cpuid());
 
         // redirect traps to kerneltrap() -- since we are on kernel stack
-        trapinithart();
+        Trap::trapinithart();
 
         match scause {
             RISCV_ENV_CALL_FROM_U_MODE => {
@@ -904,7 +932,7 @@ pub extern "C" fn usertrap() {
                 // enable only now that we're done with those registers.
                 machine::Riscv::intr_on();
 
-                syscall();
+                Syscall::syscall();
             }
             RISCV_INSTRUCTION_PAGE_FAULT => {
                 let va = (*(*p).trapframe).trapframe.stval;
@@ -967,7 +995,7 @@ pub extern "C" fn usertrap() {
         }
     }
 
-    usertrapret();
+    Trap::usertrapret();
 }
 
 // ===========================================================================
@@ -1045,6 +1073,7 @@ pub(crate) struct Ucontext {
     uc_mcontext: McContext,
 }
 
+impl Trap {
 /// Rust port of `push_sigframe()`. Will only modify user-space memory
 /// and `p->signal.sig_ucontext`; callers that need further thread-struct
 /// changes on success must do them themselves (matches the C original's
@@ -1266,11 +1295,13 @@ pub(crate) extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext)
         0 // Success
     }
 }
+}
 
 // ===========================================================================
 // usertrapret
 // ===========================================================================
 
+impl Trap {
 /// Rust port of `usertrapret()`: return to user space.
 // P3-1B: only callers are `proc/clone.rs` and `proc/thread.rs` (both
 // crate-path `use crate::irq::trap::usertrapret`, not `extern`
@@ -1285,7 +1316,7 @@ pub(crate) extern "C" fn usertrapret() {
 
     crate::proc::Signal::handle_signal();
 
-    if needs_resched() {
+    if Self::needs_resched() {
         Scheduler::yield_now();
     }
 
@@ -1322,7 +1353,7 @@ pub(crate) extern "C" fn usertrapret() {
     let mut x = machine::Riscv::read_sstatus();
     x &= !SSTATUS_SPP; // clear SPP to 0 for user mode
     x |= SSTATUS_SPIE; // enable interrupts in user mode
-    write_sstatus(x);
+    Self::write_sstatus(x);
 
     // Before returning, mark the current CPU as online for this
     // process's VM and get the trapframe base virtual address for this
@@ -1330,7 +1361,7 @@ pub(crate) extern "C" fn usertrapret() {
     // SAFETY: `p` is the current thread; `vm` is its live address space.
     let (trapframe_base, satp) = unsafe {
         let base = Vm::vm_cpu_online((*p).vm, machine::Riscv::cpuid());
-        let satp = make_satp((*(*p).vm).pagetable);
+        let satp = Self::make_satp((*(*p).vm).pagetable);
         (base, satp)
     };
 
@@ -1349,6 +1380,7 @@ pub(crate) extern "C" fn usertrapret() {
         f(trapframe_base, satp);
     }
 }
+}
 
 // ===========================================================================
 // kerneltrap / kernel_irq / enter_irq / exit_irq
@@ -1359,42 +1391,42 @@ pub(crate) extern "C" fn usertrapret() {
 /// is.
 #[no_mangle]
 pub extern "C" fn kerneltrap(sp: *mut trapframe, s0: u64) {
-    if cpu_in_itr() {
+    if Trap::cpu_in_itr() {
         crate::kprint!(
             "kerneltrap: exception preempted interrupt. level={}",
-            intr_depth(),
+            Trap::intr_depth(),
         );
-        trap_panic_dump(sp, s0);
+        Trap::trap_panic_dump(sp, s0);
     }
-    if intr_depth_postinc() != 0 {
+    if Trap::intr_depth_postinc() != 0 {
         crate::kprint!(
             "kerneltrap: nested interrupts not supported. level={}",
-            intr_depth(),
+            Trap::intr_depth(),
         );
-        trap_panic_dump(sp, s0);
+        Trap::trap_panic_dump(sp, s0);
     }
     // SAFETY: `sp` is a live trapframe supplied by kernelvec.S's asm
     // trap-entry contract.
     let sstatus = unsafe { (*sp).sstatus };
     if (sstatus & SSTATUS_SPP) == 0 {
         crate::kprint!("kerneltrap: not from supervisor mode");
-        trap_panic_dump(sp, s0);
+        Trap::trap_panic_dump(sp, s0);
     }
     if machine::Riscv::intr_get() {
         crate::kprint!("kerneltrap: interrupts enabled");
-        trap_panic_dump(sp, s0);
+        Trap::trap_panic_dump(sp, s0);
     }
 
     // By now there's no valid exception from kernel mode.
     // SAFETY: format string matches its argument.
     unsafe { crate::kprintln!("kerneltrap: unexpected scause 0x{:x}", (*sp).scause) };
-    trap_panic_dump(sp, s0);
+    Trap::trap_panic_dump(sp, s0);
 }
 
 /// Rust port of `kernel_irq()`.
 #[no_mangle]
 pub extern "C" fn kernel_irq(sp: *mut trapframe, s0: u64) {
-    enter_irq();
+    Trap::enter_irq();
     // SAFETY: `sp` is a live trapframe supplied by kernelvec.S's asm
     // trap-entry contract.
     unsafe {
@@ -1403,53 +1435,55 @@ pub extern "C" fn kernel_irq(sp: *mut trapframe, s0: u64) {
             c"kernel_irq",
             c"kerneltrap: not from supervisor mode"
         );
-        if do_irq(sp) < 0 {
-            trap_panic_dump(sp, s0);
+        if IrqCore::do_irq(sp) < 0 {
+            Trap::trap_panic_dump(sp, s0);
         }
     }
-    exit_irq();
+    Trap::exit_irq();
 }
 
-/// Rust port of `enter_irq()`.
-// P3-1B: no caller anywhere outside this file (`kernel_irq`/
-// `user_kirq_entrance`, both below) -- demoted.
-pub(crate) extern "C" fn enter_irq() {
-    if cpu_in_itr() {
-        // Special-cased rather than routed through `kassert!`: the C
-        // `assert(cond, fmt, ...)` here carries a runtime `%d` argument
-        // (`mycpu()->intr_depth`), unlike every other assert in this
-        // file, which pass a fixed literal message.
-        __panic_start();
-        crate::kprintln!(
-            "ASSERTION_FAILURE {}:{}: In function '{}':",
-            Cs(c"kernel/irq/trap.rs".as_ptr()),
-            line!(),
-            Cs(c"enter_irq".as_ptr()),
+impl Trap {
+    /// Rust port of `enter_irq()`.
+    // P3-1B: no caller anywhere outside this file (`kernel_irq`/
+    // `user_kirq_entrance`, both below) -- demoted.
+    pub(crate) extern "C" fn enter_irq() {
+        if Self::cpu_in_itr() {
+            // Special-cased rather than routed through `kassert!`: the C
+            // `assert(cond, fmt, ...)` here carries a runtime `%d` argument
+            // (`mycpu()->intr_depth`), unlike every other assert in this
+            // file, which pass a fixed literal message.
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                Cs(c"kernel/irq/trap.rs".as_ptr()),
+                line!(),
+                Cs(c"enter_irq".as_ptr()),
+            );
+            crate::kprint!(
+                "enter_irq: nested interrupts not supported. level={}",
+                Self::intr_depth(),
+            );
+            crate::kprintln!();
+            __panic_end();
+        }
+        Self::intr_depth_inc();
+        if Self::intr_depth() == 1 {
+            Self::cpu_set_in_itr();
+        }
+        kassert!(
+            !machine::Riscv::intr_get(),
+            c"enter_irq",
+            c"kerneltrap: interrupts enabled"
         );
-        crate::kprint!(
-            "enter_irq: nested interrupts not supported. level={}",
-            intr_depth(),
-        );
-        crate::kprintln!();
-        __panic_end();
     }
-    intr_depth_inc();
-    if intr_depth() == 1 {
-        cpu_set_in_itr();
-    }
-    kassert!(
-        !machine::Riscv::intr_get(),
-        c"enter_irq",
-        c"kerneltrap: interrupts enabled"
-    );
-}
 
-/// Rust port of `exit_irq()`.
-// P3-1B: no caller anywhere outside this file (`kernel_irq`/
-// `user_kirq_entrance`, both above) -- demoted.
-pub(crate) extern "C" fn exit_irq() {
-    intr_depth_dec();
-    if intr_depth() == 0 {
-        cpu_clear_in_itr();
+    /// Rust port of `exit_irq()`.
+    // P3-1B: no caller anywhere outside this file (`kernel_irq`/
+    // `user_kirq_entrance`, both above) -- demoted.
+    pub(crate) extern "C" fn exit_irq() {
+        Self::intr_depth_dec();
+        if Self::intr_depth() == 0 {
+            Self::cpu_clear_in_itr();
+        }
     }
 }

@@ -170,7 +170,7 @@ use crate::proc::{Scheduler, Rq};
 // `proctab_proc_add` takes `pid::Thread`, a distinct (but layout-
 // identical) opaque marker from this file's own `Thread` -- reinterpret
 // via a thin wrapper, same precedent as `sysproc.rs`'s `thread_clone`.
-use crate::irq::trap::usertrapret;
+use crate::irq::trap::Trap;
 use crate::proc::pid::Pid;
 #[inline(always)]
 fn proctab_proc_add(t: *mut Thread) {
@@ -247,7 +247,7 @@ extern "C" fn forkret_entry(prev: *mut Context) {
     crate::machine::Riscv::intr_on();
     Rcu::check_callbacks();
     crate::machine::Riscv::smp_mb();
-    usertrapret();
+    Trap::usertrapret();
 }
 
 #[inline]

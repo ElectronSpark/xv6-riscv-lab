@@ -102,7 +102,7 @@ const _: () = {
 // ---------------------------------------------------------------------------
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 
 // P3-D2a: proc/sched.rs entry point, reached as a plain crate-path item
 // instead of an `extern "C"` redeclaration.
@@ -398,7 +398,7 @@ impl Yt8531 {
         // `goto reset_done` -- see module doc's diff-review note.
         let mut reset_ok = false;
         for _ in 0..50 {
-            sleep_ms(10);
+            SchedTimer::sleep_ms(10);
             // SAFETY: caller contract.
             let bmcr = unsafe { Self::mdio_read(base, phy_addr, MII_BMCR) };
             if bmcr >= 0 && (bmcr as u32 & BMCR_RESET as u32) == 0 {
@@ -568,7 +568,7 @@ impl Yt8531 {
                 // SAFETY: caller contract.
                 return unsafe { Self::yt8531_poll_link(base, phy_addr, state) };
             }
-            sleep_ms(interval as u64);
+            SchedTimer::sleep_ms(interval as u64);
             elapsed += interval;
         }
 

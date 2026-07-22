@@ -135,7 +135,7 @@ pub(crate) struct Ipi;
 use crate::printf::{__panic_end, __panic_start};
 use crate::start_kernel::{__physical_memory_end, __physical_memory_start};
 
-use crate::irq::irq_core::{register_irq_handler, IrqDesc};
+use crate::irq::irq_core::{IrqCore, IrqDesc};
 // P3-D2a: `kernel/proc/rq.rs` (SECTION 19 of the former
 // `proc_rust_shims.c`), now reached as a plain crate-path item instead
 // of an `extern "C"` redeclaration. Documented there as IRQ-safe
@@ -677,7 +677,7 @@ impl Ipi {
         };
         // SAFETY: `ipi_desc` is a live, fully-initialized `IrqDesc` for the
         // duration of this call.
-        let ret = unsafe { register_irq_handler(IRQ_S_SOFT, &raw mut ipi_desc) };
+        let ret = unsafe { IrqCore::register_irq_handler(IRQ_S_SOFT, &raw mut ipi_desc) };
         if ret != 0 {
             __panic_start();
             crate::kprintln!(

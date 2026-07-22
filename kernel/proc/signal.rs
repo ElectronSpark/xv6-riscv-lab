@@ -545,11 +545,11 @@ use crate::proc::{ProcTable, Pgroup};
 // `vfork_done` wrappers from this same wave.
 #[inline(always)]
 fn push_sigframe(p: *mut thread, signo: c_int, sa: *mut sigaction_t, info: *mut ksiginfo_t) -> c_int {
-    crate::irq::trap::push_sigframe(p, signo, sa, info)
+    crate::irq::trap::Trap::push_sigframe(p, signo, sa, info)
 }
 #[inline(always)]
 fn restore_sigframe(p: *mut thread, ret_uc: *mut UContext) -> c_int {
-    crate::irq::trap::restore_sigframe(p, ret_uc as *mut c_void as *mut _)
+    crate::irq::trap::Trap::restore_sigframe(p, ret_uc as *mut c_void as *mut _)
 }
 
 // ---------- ucontext_t (not in bindings - declare locally) ----------

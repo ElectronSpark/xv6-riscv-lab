@@ -518,7 +518,7 @@ mod ffi {
     // their `#[no_mangle]` exports; the globals are read through the
     // accessors below (crate path + `unsafe`, boot-write-once contract)
     // and `argint` is re-exported here so call sites compile unchanged.
-    pub(crate) use crate::irq::syscall::argint;
+    pub(crate) use crate::irq::syscall::Syscall;
 pub(crate) use crate::mm::early_allocator::{early_alloc_align, early_alloc_end_ptr};
 pub(crate) use crate::mm::slab::slab_free;
 
@@ -2424,7 +2424,7 @@ const MEMSTAT_ADD_USED: u32 = 1 << 5;
 
 pub(crate) extern "C" fn sys_memstat() -> u64 {
     let mut flags_arg: c_int = 0;
-    ffi::argint(0, &mut flags_arg);
+    ffi::Syscall::argint(0, &mut flags_arg);
     let flags = flags_arg as u32;
 
     let mut total_free_pages: u64 = 0;

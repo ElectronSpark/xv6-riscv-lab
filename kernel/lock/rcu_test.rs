@@ -37,8 +37,8 @@ use crate::proc::Scheduler;
 
 // P3-D3c: plain crate-path imports instead of `extern "C"` redeclarations
 // (both demoted from `#[no_mangle]` in the same wave).
-use crate::timer::sched_timer::sleep_ms;
-use crate::timer::timer_core::get_jiffs;
+use crate::timer::sched_timer::SchedTimer;
+use crate::timer::timer_core::TimerCore;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -470,14 +470,14 @@ fn test_timestamp_overflow() {
     crate::kprintln!("  Testing timestamp update mechanism");
 
     let cpu = machine::Riscv::cpuid() as usize;
-    let start_time = get_jiffs();
+    let start_time = TimerCore::get_jiffs();
     let cpu_ts_before = rcu_api::cpu_timestamp(cpu);
 
     // Completing a grace period forces context switches, which update
     // timestamps.
     rcu_api::synchronize();
 
-    let after_time = get_jiffs();
+    let after_time = TimerCore::get_jiffs();
     let cpu_ts_after = rcu_api::cpu_timestamp(cpu);
 
     crate::kprintln!("  Time before: {}, after: {}", start_time, after_time);
@@ -1085,11 +1085,11 @@ fn test_stress_list_rcu() {
 fn test_stress_grace_periods() {
     crate::kprintln!("STRESS TEST: {} Rapid Grace Periods", STRESS_ITERATIONS);
 
-    let start_time = get_jiffs();
+    let start_time = TimerCore::get_jiffs();
     for _ in 0..STRESS_ITERATIONS {
         rcu_api::synchronize();
     }
-    let end_time = get_jiffs();
+    let end_time = TimerCore::get_jiffs();
     let elapsed = end_time.wrapping_sub(start_time);
 
     crate::kprintln!("  Completed {} grace periods in {} jiffies", STRESS_ITERATIONS, elapsed);
@@ -1222,7 +1222,7 @@ fn banner() {
 /// `kernel/inc/lock/rcu.h`; the call site in `kernel/start_kernel.c` is
 /// (and remains) commented out.
 pub(crate) fn rcu_run_tests() {
-    sleep_ms(100);
+    SchedTimer::sleep_ms(100);
     crate::kprintln!();
     banner();
     crate::kprintln!("RCU Test Suite Starting");

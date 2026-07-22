@@ -126,108 +126,115 @@ use crate::mm::{
 // `argaddr`/`argstr`/`fetchaddr`/`fetchstr` prototypes).
 // ===========================================================================
 
-/// Fetch the `u64` at `addr` from the current thread's user address space.
-/// Rust port of `fetchaddr()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
-    let p = machine::Riscv::current_thread_ptr();
-    // if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed,
-    // in case of overflow
-    //   return -1;
-    // (kept commented out in the C original too -- `vm_copyin` does its own
-    // full bounds validation, see the module doc.)
-    // SAFETY: `p` is the live current thread (called only from a syscall's
-    // own context, i.e. from a `sys_*` implementation reached through
-    // `syscall()` below); `ip` is caller-owned space for one `u64`, per this
-    // function's C-ABI out-parameter contract.
-    unsafe {
-        if Vm::vm_copyin((*p).vm, ip as *mut c_void, addr, size_of::<u64>() as u64) != 0 {
-            return -1;
+/// The syscall dispatch table and argument-fetch helpers, as a ZST (P3-OO
+/// mesh sweep, see `git show 91ef670` for the established convention). No
+/// receiver: every fn below keeps its exact C-derived parameter list.
+pub(crate) struct Syscall;
+
+impl Syscall {
+    /// Fetch the `u64` at `addr` from the current thread's user address space.
+    /// Rust port of `fetchaddr()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn fetchaddr(addr: u64, ip: *mut u64) -> c_int {
+        let p = machine::Riscv::current_thread_ptr();
+        // if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed,
+        // in case of overflow
+        //   return -1;
+        // (kept commented out in the C original too -- `vm_copyin` does its own
+        // full bounds validation, see the module doc.)
+        // SAFETY: `p` is the live current thread (called only from a syscall's
+        // own context, i.e. from a `sys_*` implementation reached through
+        // `syscall()` below); `ip` is caller-owned space for one `u64`, per this
+        // function's C-ABI out-parameter contract.
+        unsafe {
+            if Vm::vm_copyin((*p).vm, ip as *mut c_void, addr, size_of::<u64>() as u64) != 0 {
+                return -1;
+            }
+        }
+        0
+    }
+
+    /// Fetch the nul-terminated string at `addr` from the current thread's user
+    /// address space. Returns the length of the string (not including the nul),
+    /// or -1 on error. Rust port of `fetchstr()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
+        let p = machine::Riscv::current_thread_ptr();
+        // SAFETY: `p` is the live current thread; `buf` is caller-owned space of
+        // at least `max` bytes, per this function's C-ABI contract. `vm_copyinstr`
+        // nul-terminates `buf` on success (0 return), so `strlen` below reads a
+        // valid nul-terminated string.
+        unsafe {
+            if Vm::vm_copyinstr((*p).vm, buf, addr, max as u64) < 0 {
+                return -1;
+            }
+            strlen(buf) as c_int
         }
     }
-    0
-}
 
-/// Fetch the nul-terminated string at `addr` from the current thread's user
-/// address space. Returns the length of the string (not including the nul),
-/// or -1 on error. Rust port of `fetchstr()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn fetchstr(addr: u64, buf: *mut c_char, max: c_int) -> c_int {
-    let p = machine::Riscv::current_thread_ptr();
-    // SAFETY: `p` is the live current thread; `buf` is caller-owned space of
-    // at least `max` bytes, per this function's C-ABI contract. `vm_copyinstr`
-    // nul-terminates `buf` on success (0 return), so `strlen` below reads a
-    // valid nul-terminated string.
-    unsafe {
-        if Vm::vm_copyinstr((*p).vm, buf, addr, max as u64) < 0 {
-            return -1;
-        }
-        strlen(buf) as c_int
-    }
-}
-
-/// Fetch the raw `u64` value of the `n`th system-call argument register
-/// (`a0`..`a5`). Rust port of `argraw()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn argraw(n: c_int) -> u64 {
-    let p = machine::Riscv::current_thread_ptr();
-    // SAFETY: `p` is the live current thread trapping into the kernel via a
-    // syscall; `trapframe` is its live `utrapframe`, populated by
-    // `uservec`/`usertrap` before `syscall()` (and therefore any `sys_*` ->
-    // `argN`) ever runs.
-    unsafe {
-        match n {
-            0 => (*(*p).trapframe).trapframe.a0,
-            1 => (*(*p).trapframe).trapframe.a1,
-            2 => (*(*p).trapframe).trapframe.a2,
-            3 => (*(*p).trapframe).trapframe.a3,
-            4 => (*(*p).trapframe).trapframe.a4,
-            5 => (*(*p).trapframe).trapframe.a5,
-            _ => xv6_panic(c"argraw".as_ptr()),
+    /// Fetch the raw `u64` value of the `n`th system-call argument register
+    /// (`a0`..`a5`). Rust port of `argraw()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn argraw(n: c_int) -> u64 {
+        let p = machine::Riscv::current_thread_ptr();
+        // SAFETY: `p` is the live current thread trapping into the kernel via a
+        // syscall; `trapframe` is its live `utrapframe`, populated by
+        // `uservec`/`usertrap` before `syscall()` (and therefore any `sys_*` ->
+        // `argN`) ever runs.
+        unsafe {
+            match n {
+                0 => (*(*p).trapframe).trapframe.a0,
+                1 => (*(*p).trapframe).trapframe.a1,
+                2 => (*(*p).trapframe).trapframe.a2,
+                3 => (*(*p).trapframe).trapframe.a3,
+                4 => (*(*p).trapframe).trapframe.a4,
+                5 => (*(*p).trapframe).trapframe.a5,
+                _ => xv6_panic(c"argraw".as_ptr()),
+            }
         }
     }
-}
 
-/// Fetch the nth 32-bit system call argument. Rust port of `argint()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn argint(n: c_int, ip: *mut c_int) {
-    // SAFETY: `ip` is caller-owned space for one `c_int`, per this
-    // function's C-ABI out-parameter contract (matches every call site
-    // across the crate/tree).
-    unsafe { *ip = argraw(n) as c_int };
-}
+    /// Fetch the nth 32-bit system call argument. Rust port of `argint()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn argint(n: c_int, ip: *mut c_int) {
+        // SAFETY: `ip` is caller-owned space for one `c_int`, per this
+        // function's C-ABI out-parameter contract (matches every call site
+        // across the crate/tree).
+        unsafe { *ip = Self::argraw(n) as c_int };
+    }
 
-/// Fetch the nth 64-bit system call argument. Rust port of `argint64()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn argint64(n: c_int, ip: *mut i64) {
-    // SAFETY: see `argint`.
-    unsafe { *ip = argraw(n) as i64 };
-}
+    /// Fetch the nth 64-bit system call argument. Rust port of `argint64()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn argint64(n: c_int, ip: *mut i64) {
+        // SAFETY: see `argint`.
+        unsafe { *ip = Self::argraw(n) as i64 };
+    }
 
-/// Retrieve an argument as a pointer. Doesn't check for legality, since
-/// copyin/copyout will do that. Rust port of `argaddr()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn argaddr(n: c_int, ip: *mut u64) {
-    // SAFETY: see `argint`.
-    unsafe { *ip = argraw(n) };
-}
+    /// Retrieve an argument as a pointer. Doesn't check for legality, since
+    /// copyin/copyout will do that. Rust port of `argaddr()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn argaddr(n: c_int, ip: *mut u64) {
+        // SAFETY: see `argint`.
+        unsafe { *ip = Self::argraw(n) };
+    }
 
-/// Fetch the nth word-sized system call argument as a null-terminated
-/// string. Copies into `buf`, at most `max` bytes. Returns the string
-/// length on success (not including the nul, per `fetchstr`), or -1 on
-/// error. Rust port of `argstr()`.
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
-// by crate path now.
-pub(crate) fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int {
-    let mut addr: u64 = 0;
-    argaddr(n, &mut addr);
-    fetchstr(addr, buf, max)
+    /// Fetch the nth word-sized system call argument as a null-terminated
+    /// string. Copies into `buf`, at most `max` bytes. Returns the string
+    /// length on success (not including the nul, per `fetchstr`), or -1 on
+    /// error. Rust port of `argstr()`.
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every consumer imports it
+    // by crate path now.
+    pub(crate) fn argstr(n: c_int, buf: *mut c_char, max: c_int) -> c_int {
+        let mut addr: u64 = 0;
+        Self::argaddr(n, &mut addr);
+        Self::fetchstr(addr, buf, max)
+    }
 }
 
 // ===========================================================================
@@ -354,127 +361,131 @@ type SyscallFn = extern "C" fn() -> u64;
 /// = 517), matching the C original's designated-initializer array size.
 const NSYSCALLS: usize = SYS_dumpinode + 1;
 
-/// Build [`SYSCALLS`] at compile time. One `t[SYS_x] = Some(sys_x);` line
-/// per entry in `kernel/irq/syscall.c`'s `syscalls[]`, same order, so the
-/// two are diffable line-for-line (see the module doc).
-const fn build_syscalls() -> [Option<SyscallFn>; NSYSCALLS] {
-    let mut t: [Option<SyscallFn>; NSYSCALLS] = [None; NSYSCALLS];
-    t[SYS_clone] = Some(sys_clone);
-    t[SYS_exit] = Some(sys_exit);
-    t[SYS_wait] = Some(sys_wait);
-    t[SYS_pipe] = Some(sys_vfs_pipe); // VFS
-    t[SYS_read] = Some(sys_vfs_read); // VFS
-    t[SYS_kill] = Some(sys_kill);
-    t[SYS_exec] = Some(sys_exec);
-    t[SYS_fstat] = Some(sys_vfs_fstat); // VFS
-    t[SYS_chdir] = Some(sys_vfs_chdir); // VFS
-    t[SYS_dup] = Some(sys_vfs_dup); // VFS
-    t[SYS_getpid] = Some(sys_getpid);
-    t[SYS_getppid] = Some(sys_getppid);
-    t[SYS_sbrk] = Some(sys_sbrk);
-    t[SYS_sleep] = Some(sys_sleep);
-    t[SYS_uptime] = Some(sys_uptime);
-    t[SYS_open] = Some(sys_vfs_open); // VFS
-    t[SYS_write] = Some(sys_vfs_write); // VFS
-    t[SYS_mknod] = Some(sys_vfs_mknod); // VFS
-    t[SYS_unlink] = Some(sys_vfs_unlink); // VFS
-    t[SYS_link] = Some(sys_vfs_link); // VFS
-    t[SYS_mkdir] = Some(sys_vfs_mkdir); // VFS
-    t[SYS_close] = Some(sys_vfs_close); // VFS
-    t[SYS_connect] = Some(sys_vfs_connect); // VFS
-    t[SYS_symlink] = Some(sys_vfs_symlink); // VFS
-    // SYS_sigalarm: dead, see the const's own comment above.
-    t[SYS_sigaction] = Some(sys_sigaction);
-    t[SYS_sigreturn] = Some(sys_sigreturn);
-    t[SYS_sigpending] = Some(sys_sigpending);
-    t[SYS_sigprocmask] = Some(sys_sigprocmask);
-    t[SYS_pause] = Some(sys_pause);
-    t[SYS_sigsuspend] = Some(sys_sigsuspend);
-    t[SYS_sigwait] = Some(sys_sigwait);
-    t[SYS_tkill] = Some(sys_tkill);
-    t[SYS_gettid] = Some(sys_gettid);
-    t[SYS_exit_group] = Some(sys_exit_group);
-    t[SYS_tgkill] = Some(sys_tgkill);
-    t[SYS_vfork] = Some(sys_vfork);
-    t[SYS_setpgid] = Some(sys_setpgid);
-    t[SYS_getpgid] = Some(sys_getpgid);
-    t[SYS_setsid] = Some(sys_setsid);
-    t[SYS_getsid] = Some(sys_getsid);
-    t[SYS_getrandom] = Some(sys_getrandom);
-    t[SYS_mmap] = Some(sys_mmap);
-    t[SYS_munmap] = Some(sys_munmap);
-    t[SYS_mprotect] = Some(sys_mprotect);
-    t[SYS_mremap] = Some(sys_mremap);
-    t[SYS_msync] = Some(sys_msync);
-    t[SYS_mincore] = Some(sys_mincore);
-    t[SYS_madvise] = Some(sys_madvise);
-    t[SYS_memstat] = Some(sys_memstat);
-    t[SYS_dumpproc] = Some(sys_dumpproc);
-    t[SYS_dumpchan] = Some(sys_dumpchan);
-    t[SYS_dumppcache] = Some(sys_dumppcache);
-    t[SYS_dumprq] = Some(sys_dumprq);
-    t[SYS_kernbase] = Some(sys_kernbase);
-    t[SYS_dumpinode] = Some(sys_dumpinode);
-    t[SYS_sync] = Some(sys_sync);
-    t[SYS_ioctl] = Some(sys_vfs_ioctl);
-    t[SYS_tcgetattr] = Some(sys_tcgetattr);
-    t[SYS_tcsetattr] = Some(sys_tcsetattr);
-    t[SYS_lseek] = Some(sys_vfs_lseek);
-    t[SYS_dup2] = Some(sys_vfs_dup2);
-    t[SYS_fcntl] = Some(sys_vfs_fcntl);
-    t[SYS_access] = Some(sys_vfs_access);
-    t[SYS_rename] = Some(sys_vfs_rename);
-    t[SYS_readlink] = Some(sys_vfs_readlink);
-    t[SYS_stat] = Some(sys_vfs_stat);
-    t[SYS_lstat] = Some(sys_vfs_lstat);
-    t[SYS_poll] = Some(sys_vfs_poll);
-    t[SYS_ftruncate] = Some(sys_vfs_ftruncate);
-    t[SYS_gettimeofday] = Some(sys_gettimeofday);
-    t[SYS_waitpid] = Some(sys_waitpid);
-    t[SYS_nanosleep] = Some(sys_nanosleep);
-    t[SYS_uname] = Some(sys_uname);
-    t[SYS_getdents] = Some(sys_getdents);
-    t[SYS_statfs] = Some(sys_statfs);
-    t[SYS_chroot] = Some(sys_chroot);
-    t[SYS_mount] = Some(sys_mount);
-    t[SYS_umount] = Some(sys_umount);
-    t[SYS_getcwd] = Some(sys_getcwd);
-    t
+impl Syscall {
+    /// Build [`SYSCALLS`] at compile time. One `t[SYS_x] = Some(sys_x);` line
+    /// per entry in `kernel/irq/syscall.c`'s `syscalls[]`, same order, so the
+    /// two are diffable line-for-line (see the module doc).
+    const fn build_syscalls() -> [Option<SyscallFn>; NSYSCALLS] {
+        let mut t: [Option<SyscallFn>; NSYSCALLS] = [None; NSYSCALLS];
+        t[SYS_clone] = Some(sys_clone);
+        t[SYS_exit] = Some(sys_exit);
+        t[SYS_wait] = Some(sys_wait);
+        t[SYS_pipe] = Some(sys_vfs_pipe); // VFS
+        t[SYS_read] = Some(sys_vfs_read); // VFS
+        t[SYS_kill] = Some(sys_kill);
+        t[SYS_exec] = Some(sys_exec);
+        t[SYS_fstat] = Some(sys_vfs_fstat); // VFS
+        t[SYS_chdir] = Some(sys_vfs_chdir); // VFS
+        t[SYS_dup] = Some(sys_vfs_dup); // VFS
+        t[SYS_getpid] = Some(sys_getpid);
+        t[SYS_getppid] = Some(sys_getppid);
+        t[SYS_sbrk] = Some(sys_sbrk);
+        t[SYS_sleep] = Some(sys_sleep);
+        t[SYS_uptime] = Some(sys_uptime);
+        t[SYS_open] = Some(sys_vfs_open); // VFS
+        t[SYS_write] = Some(sys_vfs_write); // VFS
+        t[SYS_mknod] = Some(sys_vfs_mknod); // VFS
+        t[SYS_unlink] = Some(sys_vfs_unlink); // VFS
+        t[SYS_link] = Some(sys_vfs_link); // VFS
+        t[SYS_mkdir] = Some(sys_vfs_mkdir); // VFS
+        t[SYS_close] = Some(sys_vfs_close); // VFS
+        t[SYS_connect] = Some(sys_vfs_connect); // VFS
+        t[SYS_symlink] = Some(sys_vfs_symlink); // VFS
+        // SYS_sigalarm: dead, see the const's own comment above.
+        t[SYS_sigaction] = Some(sys_sigaction);
+        t[SYS_sigreturn] = Some(sys_sigreturn);
+        t[SYS_sigpending] = Some(sys_sigpending);
+        t[SYS_sigprocmask] = Some(sys_sigprocmask);
+        t[SYS_pause] = Some(sys_pause);
+        t[SYS_sigsuspend] = Some(sys_sigsuspend);
+        t[SYS_sigwait] = Some(sys_sigwait);
+        t[SYS_tkill] = Some(sys_tkill);
+        t[SYS_gettid] = Some(sys_gettid);
+        t[SYS_exit_group] = Some(sys_exit_group);
+        t[SYS_tgkill] = Some(sys_tgkill);
+        t[SYS_vfork] = Some(sys_vfork);
+        t[SYS_setpgid] = Some(sys_setpgid);
+        t[SYS_getpgid] = Some(sys_getpgid);
+        t[SYS_setsid] = Some(sys_setsid);
+        t[SYS_getsid] = Some(sys_getsid);
+        t[SYS_getrandom] = Some(sys_getrandom);
+        t[SYS_mmap] = Some(sys_mmap);
+        t[SYS_munmap] = Some(sys_munmap);
+        t[SYS_mprotect] = Some(sys_mprotect);
+        t[SYS_mremap] = Some(sys_mremap);
+        t[SYS_msync] = Some(sys_msync);
+        t[SYS_mincore] = Some(sys_mincore);
+        t[SYS_madvise] = Some(sys_madvise);
+        t[SYS_memstat] = Some(sys_memstat);
+        t[SYS_dumpproc] = Some(sys_dumpproc);
+        t[SYS_dumpchan] = Some(sys_dumpchan);
+        t[SYS_dumppcache] = Some(sys_dumppcache);
+        t[SYS_dumprq] = Some(sys_dumprq);
+        t[SYS_kernbase] = Some(sys_kernbase);
+        t[SYS_dumpinode] = Some(sys_dumpinode);
+        t[SYS_sync] = Some(sys_sync);
+        t[SYS_ioctl] = Some(sys_vfs_ioctl);
+        t[SYS_tcgetattr] = Some(sys_tcgetattr);
+        t[SYS_tcsetattr] = Some(sys_tcsetattr);
+        t[SYS_lseek] = Some(sys_vfs_lseek);
+        t[SYS_dup2] = Some(sys_vfs_dup2);
+        t[SYS_fcntl] = Some(sys_vfs_fcntl);
+        t[SYS_access] = Some(sys_vfs_access);
+        t[SYS_rename] = Some(sys_vfs_rename);
+        t[SYS_readlink] = Some(sys_vfs_readlink);
+        t[SYS_stat] = Some(sys_vfs_stat);
+        t[SYS_lstat] = Some(sys_vfs_lstat);
+        t[SYS_poll] = Some(sys_vfs_poll);
+        t[SYS_ftruncate] = Some(sys_vfs_ftruncate);
+        t[SYS_gettimeofday] = Some(sys_gettimeofday);
+        t[SYS_waitpid] = Some(sys_waitpid);
+        t[SYS_nanosleep] = Some(sys_nanosleep);
+        t[SYS_uname] = Some(sys_uname);
+        t[SYS_getdents] = Some(sys_getdents);
+        t[SYS_statfs] = Some(sys_statfs);
+        t[SYS_chroot] = Some(sys_chroot);
+        t[SYS_mount] = Some(sys_mount);
+        t[SYS_umount] = Some(sys_umount);
+        t[SYS_getcwd] = Some(sys_getcwd);
+        t
+    }
 }
 
-static SYSCALLS: [Option<SyscallFn>; NSYSCALLS] = build_syscalls();
+static SYSCALLS: [Option<SyscallFn>; NSYSCALLS] = Syscall::build_syscalls();
 
-/// Rust port of `syscall()`: dispatch the current thread's pending system
-/// call (its number is in trapframe register `a7`) and write the return
-/// value back into `a0`. Called from `usertrap()` (`irq/trap.rs`) exactly
-/// where the C original was.
-// P3-1B: only caller is `irq/trap.rs::usertrap` (crate-path `use`, not an
-// `extern` redeclaration) -- demoted.
-pub(crate) extern "C" fn syscall() {
-    let p = machine::Riscv::current_thread_ptr();
+impl Syscall {
+    /// Rust port of `syscall()`: dispatch the current thread's pending system
+    /// call (its number is in trapframe register `a7`) and write the return
+    /// value back into `a0`. Called from `usertrap()` (`irq/trap.rs`) exactly
+    /// where the C original was.
+    // P3-1B: only caller is `irq/trap.rs::usertrap` (crate-path `use`, not an
+    // `extern` redeclaration) -- demoted.
+    pub(crate) extern "C" fn syscall() {
+        let p = machine::Riscv::current_thread_ptr();
 
-    // SAFETY: `p` is the live current thread that just trapped into the
-    // kernel via `ecall` (this function's only caller, `usertrap()`, is
-    // reached exclusively on that path); `trapframe` is its live
-    // `utrapframe`.
-    let num = unsafe { (*(*p).trapframe).trapframe.a7 } as c_int;
+        // SAFETY: `p` is the live current thread that just trapped into the
+        // kernel via `ecall` (this function's only caller, `usertrap()`, is
+        // reached exclusively on that path); `trapframe` is its live
+        // `utrapframe`.
+        let num = unsafe { (*(*p).trapframe).trapframe.a7 } as c_int;
 
-    if num > 0 && (num as usize) < SYSCALLS.len() {
-        if let Some(f) = SYSCALLS[num as usize] {
-            let ret = f();
-            // SAFETY: same trapframe as the read above; writing `a0` is
-            // exactly the C original's `p->trapframe->trapframe.a0 =
-            // syscalls[num]();`.
-            unsafe { (*(*p).trapframe).trapframe.a0 = ret };
-            return;
+        if num > 0 && (num as usize) < SYSCALLS.len() {
+            if let Some(f) = SYSCALLS[num as usize] {
+                let ret = f();
+                // SAFETY: same trapframe as the read above; writing `a0` is
+                // exactly the C original's `p->trapframe->trapframe.a0 =
+                // syscalls[num]();`.
+                unsafe { (*(*p).trapframe).trapframe.a0 = ret };
+                return;
+            }
         }
-    }
 
-    // SAFETY: `(*p).pid`/`(*p).name` are live fields of the current
-    // thread; `num` is a plain scalar already read above. Matches
-    // `printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);`.
-    unsafe {
-        crate::kprintln!("{} {}: unknown sys call {}", (*p).pid, crate::printf::Cs((*p).name.as_ptr()), num);
-        (*(*p).trapframe).trapframe.a0 = (-(ENOSYS as i32)) as i64 as u64;
+        // SAFETY: `(*p).pid`/`(*p).name` are live fields of the current
+        // thread; `num` is a plain scalar already read above. Matches
+        // `printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);`.
+        unsafe {
+            crate::kprintln!("{} {}: unknown sys call {}", (*p).pid, crate::printf::Cs((*p).name.as_ptr()), num);
+            (*(*p).trapframe).trapframe.a0 = (-(ENOSYS as i32)) as i64 as u64;
+        }
     }
 }

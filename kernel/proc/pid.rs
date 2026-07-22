@@ -57,7 +57,7 @@ use crate::proc::proc_shims::{
 
 // P3-D3c: `irq/syscall.rs`'s `argint` is a plain (safe) Rust fn now that
 // its `#[no_mangle]` export is gone.
-use crate::irq::syscall::argint;
+use crate::irq::syscall::Syscall;
 
 /// Marker type for the process table + `pid_lock` + initproc + `procdump`.
 /// All operations are associated functions (NO-STANDALONE-FN); it is never
@@ -312,8 +312,8 @@ fn procdump_sessions_sid(target_sid: i32) {
 pub(crate) extern "C" fn sys_dumpproc() -> u64 {
     let mut mode: i32 = 0;
     let mut id: i32 = 0;
-    argint(0, &mut mode);
-    argint(1, &mut id);
+    Syscall::argint(0, &mut mode);
+    Syscall::argint(1, &mut id);
     let target = if id >= 0 { Some(id) } else { None };
     match (mode, target) {
         (1, Some(pid)) => procdump_tree_pid(pid),

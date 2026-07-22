@@ -39,7 +39,7 @@ mod ffi {
     // P3-D3c: arg extraction (`irq/syscall.rs`) -- plain (safe) Rust fns
     // now that their `#[no_mangle]` exports are gone; re-exported so the
     // `ffi::arg*` call sites compile unchanged.
-    pub(crate) use crate::irq::syscall::{argaddr, argint};
+    pub(crate) use crate::irq::syscall::Syscall;
 
     // `Vm` above only ever carries an opaque `*mut c_void` (it never
     // touches the real `vm` layout); this file's original extern
@@ -164,12 +164,12 @@ unsafe fn read_current_vm() -> *mut c_void {
 // ---------------------------------------------------------------------------
 fn arg_addr(n: i32) -> u64 {
     let mut v: u64 = 0;
-    ffi::argaddr(n, &mut v);
+    ffi::Syscall::argaddr(n, &mut v);
     v
 }
 fn arg_int(n: i32) -> i32 {
     let mut v: c_int = 0;
-    ffi::argint(n, &mut v);
+    ffi::Syscall::argint(n, &mut v);
     v
 }
 

@@ -47,7 +47,7 @@ type sigset_t = u64;
 // P3-D3c: `irq/syscall.rs`'s arg-fetch helpers are plain (safe) Rust fns
 // now that their `#[no_mangle]` exports are gone; identical signatures,
 // plain `use`.
-use crate::irq::syscall::{argaddr, argint};
+use crate::irq::syscall::Syscall;
 
 // P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
 // Rust fns now that their `#[no_mangle]` exports are gone; reached as
@@ -90,9 +90,9 @@ pub(crate) extern "C" fn sys_sigprocmask() -> u64 {
     let mut how:        c_int = 0;
     let mut set_addr:   u64   = 0;
     let mut oldset_addr: u64  = 0;
-    argint(0, &mut how);
-    argaddr(1, &mut set_addr);
-    argaddr(2, &mut oldset_addr);
+    Syscall::argint(0, &mut how);
+    Syscall::argaddr(1, &mut set_addr);
+    Syscall::argaddr(2, &mut oldset_addr);
 
     let mut set: sigset_t = 0;
     let mut oldset: sigset_t = 0;
@@ -122,9 +122,9 @@ pub(crate) extern "C" fn sys_sigaction() -> u64 {
     let mut signum:      c_int = 0;
     let mut act_addr:    u64   = 0;
     let mut oldact_addr: u64   = 0;
-    argint(0, &mut signum);
-    argaddr(1, &mut act_addr);
-    argaddr(2, &mut oldact_addr);
+    Syscall::argint(0, &mut signum);
+    Syscall::argaddr(1, &mut act_addr);
+    Syscall::argaddr(2, &mut oldact_addr);
 
     // Sanity: drift guard for SIZEOF_SIGACTION.
     debug_assert_eq!(xv6_sizeof_sigaction(), SIZEOF_SIGACTION);
@@ -173,7 +173,7 @@ pub(crate) extern "C" fn sys_sigaction() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_sigpending() -> u64 {
     let mut set_addr: u64 = 0;
-    argaddr(0, &mut set_addr);
+    Syscall::argaddr(0, &mut set_addr);
     let mut set: sigset_t = 0;
     let ret = crate::proc::access::ThreadAccess::from_ptr(current()).map_or(-22, |ta| ta.sigpending_query(&mut set));
     if ret < 0 { return ret as u64; }
@@ -223,8 +223,8 @@ pub(crate) extern "C" fn sys_pause() -> u64 {
 pub(crate) extern "C" fn sys_kill() -> u64 {
     let mut pid: c_int = 0;
     let mut sig: c_int = 0;
-    argint(0, &mut pid);
-    argint(1, &mut sig);
+    Syscall::argint(0, &mut pid);
+    Syscall::argint(1, &mut sig);
     crate::proc::Signal::kill(pid, sig) as u64
 }
 
@@ -234,9 +234,9 @@ pub(crate) extern "C" fn sys_tgkill() -> u64 {
     let mut tgid: c_int = 0;
     let mut tid:  c_int = 0;
     let mut sig:  c_int = 0;
-    argint(0, &mut tgid);
-    argint(1, &mut tid);
-    argint(2, &mut sig);
+    Syscall::argint(0, &mut tgid);
+    Syscall::argint(1, &mut tid);
+    Syscall::argint(2, &mut sig);
     crate::proc::Signal::tgkill(tgid, tid, sig) as u64
 }
 
@@ -245,8 +245,8 @@ pub(crate) extern "C" fn sys_tgkill() -> u64 {
 pub(crate) extern "C" fn sys_tkill() -> u64 {
     let mut tid: c_int = 0;
     let mut sig: c_int = 0;
-    argint(0, &mut tid);
-    argint(1, &mut sig);
+    Syscall::argint(0, &mut tid);
+    Syscall::argint(1, &mut sig);
     crate::proc::Signal::tkill(tid, sig) as u64
 }
 
@@ -254,7 +254,7 @@ pub(crate) extern "C" fn sys_tkill() -> u64 {
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
 pub(crate) extern "C" fn sys_sigsuspend() -> u64 {
     let mut mask_addr: u64 = 0;
-    argaddr(0, &mut mask_addr);
+    Syscall::argaddr(0, &mut mask_addr);
     if mask_addr == 0 { return (-EINVAL) as u64; }
 
     let mut mask: sigset_t = 0;
@@ -270,8 +270,8 @@ pub(crate) extern "C" fn sys_sigsuspend() -> u64 {
 pub(crate) extern "C" fn sys_sigwait() -> u64 {
     let mut set_addr: u64 = 0;
     let mut sig_addr: u64 = 0;
-    argaddr(0, &mut set_addr);
-    argaddr(1, &mut sig_addr);
+    Syscall::argaddr(0, &mut set_addr);
+    Syscall::argaddr(1, &mut sig_addr);
 
     if set_addr == 0 || sig_addr == 0 {
         return (-EINVAL) as u64;

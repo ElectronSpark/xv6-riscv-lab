@@ -112,7 +112,7 @@ use crate::lock::mutex::RawMutex;
 // ---------------------------------------------------------------------------
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     // string.rs.
@@ -608,7 +608,7 @@ impl SdhciSoftc {
         unsafe { ptr::write_volatile(apmu_reg, val) };
         fence(Ordering::SeqCst);
 
-        sleep_ms(1); // let clocks and reset stabilize
+        SchedTimer::sleep_ms(1); // let clocks and reset stabilize
 
         // SAFETY: caller contract; `apmu_reg`/`apmu_axi_reg` live (or null,
         // handled by the `0` fallback matching the C ternary).
@@ -742,7 +742,7 @@ impl SdhciSoftc {
     unsafe fn set_power(sc: *mut SdhciSoftc) {
         // SAFETY: caller contract.
         unsafe { SdhciSoftc::writeb(sc, SDHCI_POWER_CONTROL, SDHCI_POWER_330 | SDHCI_POWER_ON) };
-        sleep_ms(10);
+        SchedTimer::sleep_ms(10);
     }
 
     /// Apply vendor-specific (KY X1) quirks after reset. All instances start
@@ -1318,7 +1318,7 @@ impl SdhciSoftc {
         // CMD0: Go idle.
         // SAFETY: caller contract.
         unsafe { SdhciSoftc::send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, ptr::null_mut()) };
-        sleep_ms(10);
+        SchedTimer::sleep_ms(10);
 
         // CMD8: Send IF Condition (voltage check for SD 2.0+).
         // SAFETY: caller contract.
@@ -1351,7 +1351,7 @@ impl SdhciSoftc {
                 crate::kprintln!("x1_sdhci{}: ACMD41 timeout -- card not ready", unsafe { (*sc).index });
                 return neg(crate::bindings::ETIMEDOUT);
             }
-            sleep_ms(10);
+            SchedTimer::sleep_ms(10);
             if resp[0] & MMC_OCR_BUSY != 0 {
                 break;
             }
@@ -1520,7 +1520,7 @@ impl SdhciSoftc {
         // CMD0: Go idle.
         // SAFETY: caller contract.
         unsafe { SdhciSoftc::send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, ptr::null_mut()) };
-        sleep_ms(10);
+        SchedTimer::sleep_ms(10);
 
         // CMD1: SEND_OP_COND -- negotiate operating conditions. Requests
         // sector addressing mode + 3.3V. eMMC may take time to power up, so
@@ -1547,7 +1547,7 @@ impl SdhciSoftc {
                 );
                 return neg(crate::bindings::ETIMEDOUT);
             }
-            sleep_ms(10);
+            SchedTimer::sleep_ms(10);
         }
 
         if !cmd1_ok {
@@ -1689,7 +1689,7 @@ impl SdhciSoftc {
                 SdhciSoftc::writeb(sc, SDHCI_HOST_CONTROL, ctrl);
                 (*sc).bus_width = 8;
             }
-            sleep_ms(1);
+            SchedTimer::sleep_ms(1);
         } else {
             // SAFETY: caller contract.
             unsafe {
@@ -2105,7 +2105,7 @@ extern "C" fn x1_sdhci_init_one_kthread(idx: u64, _arg2: u64) {
 
 /// Kernel thread entry point: spawns per-instance init kthreads so that
 /// all SDHCI slots probe in parallel. Running in kthread context allows
-/// `sleep_ms()` (scheduler-based timer sleep) instead of busy-waiting,
+/// `SchedTimer::sleep_ms()` (scheduler-based timer sleep) instead of busy-waiting,
 /// friendlier to the system during potentially slow SD/eMMC enumeration.
 extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
     // SAFETY: `platform` boot-time-populated, read-only from this point.
@@ -2139,7 +2139,7 @@ impl SdhciSoftc {
     /// `void SdhciSoftc::init(void)` -- schedule SDHCI probing as a post-init
     /// kthread. Called from `start_kernel`. The actual hardware probing and
     /// card enumeration run in a dedicated kernel thread so that:
-    /// 1. The scheduler is already running -> `sleep_ms()` works.
+    /// 1. The scheduler is already running -> `SchedTimer::sleep_ms()` works.
     /// 2. Boot proceeds without blocking on slow card init.
     // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
     // crate-path `use` instead of an `extern` redeclaration -- demoted.

@@ -80,7 +80,7 @@ use core::ptr;
 use core::sync::atomic::{fence, AtomicI32, Ordering};
 
 use crate::bindings::{mbuf, netdev, netdev_ops, phy_state, platform_info, spinlock_t, x1_rx_desc, x1_tx_desc};
-use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
+use crate::irq::irq_core::{IrqCore, IrqDesc};
 use crate::sync::KSpinlock;
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ use crate::sync::KSpinlock;
 // ---------------------------------------------------------------------------
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 // P3-D3c: the spinlock primitives are genuinely `unsafe fn`s in
 // `crate::lock::spinlock` now that their `#[no_mangle]` exports are gone;
 // this file's original extern declarations asserted `safe fn` (usual
@@ -732,10 +732,10 @@ impl X1EmacSoftc {
         unsafe {
             Self::wr(sc, DMA_CONFIGURATION, DMA_CFG_SW_RESET);
         }
-        sleep_ms(10);
+        SchedTimer::sleep_ms(10);
         // SAFETY: caller contract.
         unsafe { Self::wr(sc, DMA_CONFIGURATION, 0) };
-        sleep_ms(10);
+        SchedTimer::sleep_ms(10);
 
         0
     }
@@ -1356,7 +1356,7 @@ impl X1EmacSoftc {
                 count: 0,
                 rcu_head: core::mem::zeroed(),
             };
-            register_irq_handler(plic_irq((*sc).irq), &raw mut emac_irq)
+            IrqCore::register_irq_handler(IrqCore::plic_irq((*sc).irq), &raw mut emac_irq)
         };
         if ret != 0 {
             crate::kprintln!("x1_emac{}: failed to register IRQ {}", idx as c_int, unsafe { (*sc).irq });
@@ -1460,7 +1460,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
     // Wait for all init threads to finish.
     for done in EMAC_INIT_DONE.iter().take(n) {
         while done.load(Ordering::Acquire) == 0 {
-            sleep_ms(50);
+            SchedTimer::sleep_ms(50);
         }
     }
 
@@ -1470,7 +1470,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
     // changes we update the netdev and notify upper layers (e.g. lwIP)
     // via the link-change callback.
     loop {
-        sleep_ms(2000);
+        SchedTimer::sleep_ms(2000);
 
         for i in 0..n {
             if EMAC_INIT_DONE[i].load(Ordering::Acquire) != 1 {
@@ -1528,7 +1528,7 @@ impl X1EmacSoftc {
     /// `void x1_emac_init(void)` -- schedule EMAC probing as a post-init
     /// kthread. Called from `start_kernel`. The actual hardware probing, PHY
     /// init, and auto-negotiation run in a dedicated kernel thread so that:
-    /// 1. The scheduler is already running -> `sleep_ms()` works.
+    /// 1. The scheduler is already running -> `SchedTimer::sleep_ms()` works.
     /// 2. Boot proceeds without blocking on slow PHY negotiation.
     // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
     // crate-path `use` instead of an `extern` redeclaration -- demoted.

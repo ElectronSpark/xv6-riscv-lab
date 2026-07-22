@@ -127,7 +127,7 @@ use crate::proc::Scheduler;
 
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 
 // P3-D3b: `kthread_create` (proc/thread.rs) is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone; reached via the `crate::proc`
@@ -285,7 +285,7 @@ static SLOW_READ: AtomicI32 = AtomicI32::new(0);
 unsafe extern "C" fn cb_read_page(_p: *mut Pcache, _page: *mut Page) -> c_int {
     READ_PAGE_CALLS.fetch_add(1, Ordering::SeqCst);
     if SLOW_READ.load(Ordering::SeqCst) != 0 {
-        sleep_ms(50);
+        SchedTimer::sleep_ms(50);
     }
     -(READ_PAGE_ERR.swap(0, Ordering::SeqCst))
 }
@@ -1026,7 +1026,7 @@ fn a2_background_flusher_eventually_cleans() {
         // module doc), not a precise timing assertion.
         let mut waited_ms: u64 = 0;
         while node_dirty(node) && waited_ms < 5000 {
-            sleep_ms(50);
+            SchedTimer::sleep_ms(50);
             waited_ms += 50;
         }
         // Best-effort: the background flusher's dirty-rate/time gating
@@ -1160,7 +1160,7 @@ fn c3_conc_io_wait_and_complete() {
             *CONC_IO_CTX[1].as_mut_ptr() = ConcIoCtx { cache, page, result: -1 };
         }
         if !spawn(c"pc_c3a", conc_read_page_thread, 0, 0) { case_fail(); }
-        sleep_ms(5); // let thread A win the race to start IO first
+        SchedTimer::sleep_ms(5); // let thread A win the race to start IO first
         if !spawn(c"pc_c3b", conc_read_page_thread, 1, 0) { case_fail(); }
         if !wait_for(&CONC_DONE[0], 1, 400_000) { case_fail(); }
         if !wait_for(&CONC_DONE[1], 1, 400_000) { case_fail(); }

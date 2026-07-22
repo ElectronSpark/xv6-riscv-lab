@@ -89,7 +89,7 @@ use crate::printf::{__panic_end, __panic_start};
 // glob re-export.
 // P3-D3c: `timer/sched_timer.rs`'s `sleep_ms` is a plain safe Rust fn now
 // that its `#[no_mangle]` export is gone -- crate-path import.
-use crate::timer::sched_timer::sleep_ms;
+use crate::timer::sched_timer::SchedTimer;
 
 // P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
 // Rust fns now that their `#[no_mangle]` exports are gone; reached as
@@ -114,13 +114,7 @@ use crate::proc::ProcTable;
 /// zero-overwrites `rcu_head` after the copy). `irq_core::IrqDesc` uses the
 /// real bindgen `rcu_head`/`device_t` types, so it's byte-for-byte
 /// layout-compatible with the C struct and the over-read is gone.
-use crate::irq::irq_core::{plic_irq, IrqDesc, PLIC_IRQ_OFFSET};
-
-// P3-D3c: `irq/irq_core.rs`'s `register_irq_handler` is a plain
-// crate-path import now that its `#[no_mangle]` export is gone (genuinely
-// `unsafe fn`; the call site below already sits in an `unsafe` block),
-// same as every other consumer of it in the tree.
-use crate::irq::irq_core::register_irq_handler;
+use crate::irq::irq_core::{IrqCore, IrqDesc, PLIC_IRQ_OFFSET};
 
 // P3-1C mesh sweep: tty/tty.rs and vfs/pipe.rs are in scope for this wave,
 // so these become plain crate-path imports instead of `extern "C"`
@@ -815,7 +809,7 @@ extern "C" fn sbi_console_poll_thread(_arg1: u64, _arg2: u64) {
         if !got_input {
             // No input available, sleep briefly to avoid busy-waiting.
             // Use 1ms for responsive interactive typing.
-            sleep_ms(1);
+            SchedTimer::sleep_ms(1);
         }
         // If we got input, immediately check for more without
         // sleeping.
@@ -835,7 +829,7 @@ extern "C" fn console_tty_input_thread(_arg1: u64, _arg2: u64) {
 
         if r == w {
             // Nothing to process -- poll every 1 ms.
-            sleep_ms(1);
+            SchedTimer::sleep_ms(1);
             continue;
         }
 
@@ -881,7 +875,7 @@ extern "C" fn console_tty_drain_thread(_arg1: u64, _arg2: u64) {
         // SAFETY: see `console_tty_input_thread`.
         let n = unsafe { Tty::output(tty_ptr, buf.as_mut_ptr() as *mut c_char, buf.len() as u64) };
         if n <= 0 {
-            sleep_ms(1);
+            SchedTimer::sleep_ms(1);
             continue;
         }
         // N-METH (goal #2): drain the filled prefix by slice iteration
@@ -940,7 +934,7 @@ pub(crate) extern "C" fn consoledevinit() {
             // (see `irq_core::register_irq_handler`).
             rcu_head: unsafe { core::mem::zeroed() },
         };
-        let errno = register_irq_handler(plic_irq(crate::uart::__uart0_irqno as c_int), &raw mut irq_desc);
+        let errno = IrqCore::register_irq_handler(IrqCore::plic_irq(crate::uart::__uart0_irqno as c_int), &raw mut irq_desc);
         if errno != 0 {
             __panic_start();
             crate::kprintln!(

@@ -44,7 +44,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bindings::{list_node_t, rb_node, rb_root, rb_root_opts, spinlock_t, timer_node, timer_root};
-use crate::irq::irq_core::{register_irq_handler, IrqDesc};
+use crate::irq::irq_core::{IrqCore, IrqDesc};
 use crate::machine;
 use crate::sync::KSpinlock;
 
@@ -191,14 +191,25 @@ pub(crate) static mut __jiff_ticks: u64 = 0;
 const CPU_FLAG_NEEDS_RESCHED: u64 = 1;
 const CPU_FLAG_BOOT_HART: u64 = 2;
 
-#[inline(always)]
-fn is_boot_hart() -> bool {
-    machine::CpuLocal::current().flags() & CPU_FLAG_BOOT_HART != 0
-}
+/// Timer wheel core -- ZST housing every free fn this file used to export
+/// at crate scope (P3-OO mesh sweep, see `git show 91ef670` for the
+/// established convention). No receiver: every fn below keeps its exact
+/// C-derived parameter list. `timer_root_keys_cmp_fun`/
+/// `timer_root_get_key_fun` (address-taken in [`TIMER_ROOT_OPTS`]) and
+/// `clockintr` (address-taken as an `IrqDesc::handler` value in
+/// [`TimerCore::timer_init`]) stay free functions below this impl block.
+pub(crate) struct TimerCore;
 
-#[inline(always)]
-fn set_needs_resched() {
-    machine::CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
+impl TimerCore {
+    #[inline(always)]
+    fn is_boot_hart() -> bool {
+        machine::CpuLocal::current().flags() & CPU_FLAG_BOOT_HART != 0
+    }
+
+    #[inline(always)]
+    fn set_needs_resched() {
+        machine::CpuLocal::current().flags_or(CPU_FLAG_NEEDS_RESCHED);
+    }
 }
 
 // ===========================================================================
@@ -217,28 +228,30 @@ unsafe extern "C" {
     // printf is variadic, so it cannot be declared `safe`.
 }
 
-#[inline]
-fn neg(errno: u32) -> c_int {
-    -(errno as c_int)
-}
-
-/// Replicates the C `assert(expr, fmt)` macro expansion (no format args --
-/// every call site below passes a literal message). Same pattern as
-/// `irq/irq_core.rs`'s `irq_assert`.
-fn timer_assert(cond: bool, line: u32, function: &core::ffi::CStr, msg: &core::ffi::CStr) {
-    if cond {
-        return;
+impl TimerCore {
+    #[inline]
+    fn neg(errno: u32) -> c_int {
+        -(errno as c_int)
     }
-    __panic_start();
-    crate::kprintln!(
-        "ASSERTION_FAILURE {}:{}: In function '{}':",
-        "kernel/timer/timer_core.rs",
-        line as c_int,
-        crate::printf::Cs(function.as_ptr()),
-    );
-    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
-    crate::kprintln!();
-    __panic_end()
+
+    /// Replicates the C `assert(expr, fmt)` macro expansion (no format args --
+    /// every call site below passes a literal message). Same pattern as
+    /// `irq/irq_core.rs`'s `irq_assert`.
+    fn timer_assert(cond: bool, line: u32, function: &core::ffi::CStr, msg: &core::ffi::CStr) {
+        if cond {
+            return;
+        }
+        __panic_start();
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            "kernel/timer/timer_core.rs",
+            line as c_int,
+            crate::printf::Cs(function.as_ptr()),
+        );
+        crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
+        crate::kprintln!();
+        __panic_end()
+    }
 }
 
 // ===========================================================================
@@ -250,13 +263,15 @@ fn timer_assert(cond: bool, line: u32, function: &core::ffi::CStr, msg: &core::f
 // ===========================================================================
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Rust port of `get_jiffs()`.
-// @TODO: consider overflow (matches the C original's own TODO comment).
-// P3-D3c: `#[no_mangle] extern "C"` dropped -- every reader (`mm/pcache.rs`,
-// `lock/rcu_test.rs`, `proc/sched.rs`, `proc/sysproc.rs`) now imports it by
-// crate path.
-pub(crate) fn get_jiffs() -> u64 {
-    TICKS.load(Ordering::SeqCst)
+impl TimerCore {
+    /// Rust port of `get_jiffs()`.
+    // @TODO: consider overflow (matches the C original's own TODO comment).
+    // P3-D3c: `#[no_mangle] extern "C"` dropped -- every reader (`mm/pcache.rs`,
+    // `lock/rcu_test.rs`, `proc/sched.rs`, `proc/sysproc.rs`) now imports it by
+    // crate path.
+    pub(crate) fn get_jiffs() -> u64 {
+        TICKS.load(Ordering::SeqCst)
+    }
 }
 
 // ===========================================================================
@@ -266,6 +281,8 @@ pub(crate) fn get_jiffs() -> u64 {
 /// Rust port of `__timer_root_keys_cmp_fun`. Keys are `timer_node*` cast to
 /// `u64` (see `__timer_root_get_key_fun`); primary order is `expires`,
 /// ties are broken by node address so no two live nodes ever compare equal.
+/// Kept as a free fn: its address is taken (`Some(timer_root_keys_cmp_fun)`)
+/// in the static [`TIMER_ROOT_OPTS`].
 unsafe extern "C" fn timer_root_keys_cmp_fun(key1: u64, key2: u64) -> c_int {
     let node1 = key1 as *const timer_node;
     let node2 = key2 as *const timer_node;
@@ -287,9 +304,11 @@ unsafe extern "C" fn timer_root_keys_cmp_fun(key1: u64, key2: u64) -> c_int {
     }
 }
 
-/// Rust port of `__timer_root_get_key_fun`.
+/// Rust port of `__timer_root_get_key_fun`. Kept as a free fn: its address
+/// is taken (`Some(timer_root_get_key_fun)`) in the static
+/// [`TIMER_ROOT_OPTS`].
 unsafe extern "C" fn timer_root_get_key_fun(node: *mut rb_node) -> u64 {
-    timer_assert(!node.is_null(), line!(), c"timer_root_get_key_fun", c"node is NULL");
+    TimerCore::timer_assert(!node.is_null(), line!(), c"timer_root_get_key_fun", c"node is NULL");
     // SAFETY: `node` is a live `rb_node` embedded in a `timer_node` (the
     // only rb-tree this callback is ever installed on), non-null per the
     // assert above.
@@ -302,27 +321,29 @@ static TIMER_ROOT_OPTS: rb_root_opts = rb_root_opts {
     get_key_fun: Some(timer_root_get_key_fun),
 };
 
-/// Rust port of `kernel/inc/bintree.h`'s `rb_root_init()` static inline
-/// (no external linkage in C, so unreachable from Rust; reimplemented here
-/// the same way `bintree.rs` reimplements the rest of that header's
-/// `static inline`s it needs).
-unsafe fn rb_root_init(root: *mut crate::bindings::rb_root, opts: *mut rb_root_opts) -> *mut crate::bindings::rb_root {
-    if root.is_null() || opts.is_null() {
-        return ptr::null_mut();
+impl TimerCore {
+    /// Rust port of `kernel/inc/bintree.h`'s `rb_root_init()` static inline
+    /// (no external linkage in C, so unreachable from Rust; reimplemented here
+    /// the same way `bintree.rs` reimplements the rest of that header's
+    /// `static inline`s it needs).
+    unsafe fn rb_root_init(root: *mut crate::bindings::rb_root, opts: *mut rb_root_opts) -> *mut crate::bindings::rb_root {
+        if root.is_null() || opts.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `opts` is `&raw const TIMER_ROOT_OPTS` at every call site
+        // below -- a live, fully-initialized 'static `rb_root_opts`.
+        let o = unsafe { &*opts };
+        if o.keys_cmp_fun.is_none() || o.get_key_fun.is_none() {
+            return ptr::null_mut();
+        }
+        // SAFETY: `root` is caller-owned per this function's contract (mirrors
+        // the C `rb_root_init`); we only write its two fields.
+        unsafe {
+            (*root).node = ptr::null_mut();
+            (*root).opts = opts;
+        }
+        root
     }
-    // SAFETY: `opts` is `&raw const TIMER_ROOT_OPTS` at every call site
-    // below -- a live, fully-initialized 'static `rb_root_opts`.
-    let o = unsafe { &*opts };
-    if o.keys_cmp_fun.is_none() || o.get_key_fun.is_none() {
-        return ptr::null_mut();
-    }
-    // SAFETY: `root` is caller-owned per this function's contract (mirrors
-    // the C `rb_root_init`); we only write its two fields.
-    unsafe {
-        (*root).node = ptr::null_mut();
-        (*root).opts = opts;
-    }
-    root
 }
 
 // ===========================================================================
@@ -330,45 +351,47 @@ unsafe fn rb_root_init(root: *mut crate::bindings::rb_root, opts: *mut rb_root_o
 // specialised to `timer_node::list_entry`.
 // ===========================================================================
 
-#[inline(always)]
-fn list_entry_to_node(head: *mut list_node_t, entry: *mut list_node_t) -> *mut timer_node {
-    if entry.is_null() || entry == head {
-        return ptr::null_mut();
+impl TimerCore {
+    #[inline(always)]
+    fn list_entry_to_node(head: *mut list_node_t, entry: *mut list_node_t) -> *mut timer_node {
+        if entry.is_null() || entry == head {
+            return ptr::null_mut();
+        }
+        machine::Riscv::list_container_of::<timer_node>(entry, offset_of!(timer_node, list_entry))
     }
-    machine::Riscv::list_container_of::<timer_node>(entry, offset_of!(timer_node, list_entry))
-}
 
-/// Mirrors `LIST_FIRST_NODE(&timer->list_head, struct timer_node, list_entry)`.
-///
-/// # Safety
-/// `timer` must point at a live, initialized `timer_root`.
-unsafe fn first_node(timer: *mut timer_root) -> *mut timer_node {
-    // SAFETY: caller contract.
-    let head = unsafe { &raw mut (*timer).list_head };
-    list_entry_to_node(head, machine::Riscv::list_entry_next(head))
-}
+    /// Mirrors `LIST_FIRST_NODE(&timer->list_head, struct timer_node, list_entry)`.
+    ///
+    /// # Safety
+    /// `timer` must point at a live, initialized `timer_root`.
+    unsafe fn first_node(timer: *mut timer_root) -> *mut timer_node {
+        // SAFETY: caller contract.
+        let head = unsafe { &raw mut (*timer).list_head };
+        Self::list_entry_to_node(head, machine::Riscv::list_entry_next(head))
+    }
 
-/// Mirrors `LIST_NEXT_NODE(&timer->list_head, node, list_entry)`.
-///
-/// # Safety
-/// `timer` must point at a live, initialized `timer_root`; `node` must be
-/// a live node currently linked into `timer`'s list.
-unsafe fn next_node(timer: *mut timer_root, node: *mut timer_node) -> *mut timer_node {
-    // SAFETY: caller contract.
-    let head = unsafe { &raw mut (*timer).list_head };
-    let entry = unsafe { &raw mut (*node).list_entry };
-    list_entry_to_node(head, machine::Riscv::list_entry_next(entry))
-}
+    /// Mirrors `LIST_NEXT_NODE(&timer->list_head, node, list_entry)`.
+    ///
+    /// # Safety
+    /// `timer` must point at a live, initialized `timer_root`; `node` must be
+    /// a live node currently linked into `timer`'s list.
+    unsafe fn next_node(timer: *mut timer_root, node: *mut timer_node) -> *mut timer_node {
+        // SAFETY: caller contract.
+        let head = unsafe { &raw mut (*timer).list_head };
+        let entry = unsafe { &raw mut (*node).list_entry };
+        Self::list_entry_to_node(head, machine::Riscv::list_entry_next(entry))
+    }
 
-/// Mirrors `__timer_update_next_tick()`.
-///
-/// # Safety
-/// `timer` must point at a live, initialized `timer_root`.
-unsafe fn update_next_tick(timer: *mut timer_root) {
-    // SAFETY: caller contract.
-    let next = unsafe { first_node(timer) };
-    unsafe {
-        (*timer).next_tick = if next.is_null() { 0 } else { (*next).expires };
+    /// Mirrors `__timer_update_next_tick()`.
+    ///
+    /// # Safety
+    /// `timer` must point at a live, initialized `timer_root`.
+    unsafe fn update_next_tick(timer: *mut timer_root) {
+        // SAFETY: caller contract.
+        let next = unsafe { Self::first_node(timer) };
+        unsafe {
+            (*timer).next_tick = if next.is_null() { 0 } else { (*next).expires };
+        }
     }
 }
 
@@ -377,6 +400,9 @@ unsafe fn update_next_tick(timer: *mut timer_root) {
 // "Interrupt-context discipline" section: no sleep, no allocation, no lock
 // other than the atomic ops below.
 // ===========================================================================
+
+/// Kept as a free fn: its address is taken (`Some(clockintr)`) as an
+/// `IrqDesc::handler` value in [`TimerCore::timer_init`].
 unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
     // Ask for the next timer interrupt. This also clears the interrupt
     // request. `__jiff_ticks` is about a tenth of a second.
@@ -385,7 +411,7 @@ unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
     let jiff_ticks = unsafe { __jiff_ticks };
     machine::Riscv::write_stimecmp(machine::Riscv::read_time() + jiff_ticks);
 
-    if is_boot_hart() {
+    if TimerCore::is_boot_hart() {
         // SAFETY: `data` is `&raw mut TICKS` (an `AtomicU64`), set once in
         // `timer_init` and never changed; `AtomicU64` has the same size and
         // alignment as the `uint64` the C original reinterpreted via
@@ -393,10 +419,10 @@ unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
         // `count_atomic`).
         let ticks = unsafe { &*(data as *const AtomicU64) };
         ticks.fetch_add(1, Ordering::SeqCst);
-        crate::timer::sched_timer::sched_timer_tick();
+        crate::timer::sched_timer::SchedTimer::sched_timer_tick();
     }
     if Scheduler::holding() == 0 {
-        set_needs_resched();
+        TimerCore::set_needs_resched();
     }
 }
 
@@ -406,52 +432,54 @@ unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
 // own `extern` declarations, and `proc/sysproc.rs` for `get_jiffs`).
 // ===========================================================================
 
-/// Rust port of `timer_init()`.
-///
-/// # Safety
-/// `timer` must be null or point at caller-owned, writable storage for a
-/// `timer_root` (it is unconditionally zeroed and reinitialized).
-// P3-1B: only caller is `timer/sched_timer.rs::sched_timer_init` (already a
-// direct crate-path `use`, not an extern block) -- demoted.
-pub(crate) unsafe fn timer_init(timer: *mut timer_root) {
-    if timer.is_null() {
-        return;
-    }
-    // SAFETY: `timer` is caller-owned per this function's contract; this
-    // mirrors the C `memset(timer, 0, sizeof(struct timer_root))`.
-    unsafe { ptr::write_bytes(timer as *mut u8, 0, core::mem::size_of::<timer_root>()) };
+impl TimerCore {
+    /// Rust port of `timer_init()`.
+    ///
+    /// # Safety
+    /// `timer` must be null or point at caller-owned, writable storage for a
+    /// `timer_root` (it is unconditionally zeroed and reinitialized).
+    // P3-1B: only caller is `timer/sched_timer.rs::sched_timer_init` (already a
+    // direct crate-path `use`, not an extern block) -- demoted.
+    pub(crate) unsafe fn timer_init(timer: *mut timer_root) {
+        if timer.is_null() {
+            return;
+        }
+        // SAFETY: `timer` is caller-owned per this function's contract; this
+        // mirrors the C `memset(timer, 0, sizeof(struct timer_root))`.
+        unsafe { ptr::write_bytes(timer as *mut u8, 0, core::mem::size_of::<timer_root>()) };
 
-    // SAFETY: `timer` was just zeroed above and is exclusively owned here.
-    unsafe {
-        rb_root_init(&raw mut (*timer).root, &raw const TIMER_ROOT_OPTS as *mut rb_root_opts);
-        machine::Riscv::list_entry_init(&raw mut (*timer).list_head);
-        (*timer).next_tick = 0;
-        (*timer).current_tick = 0;
-        (*timer).flags.set_valid(1);
-    }
-    TICKS.store(0, Ordering::SeqCst);
-    // SAFETY: `timer` is exclusively owned here, before any other hart can
-    // reach it (it is not yet published anywhere).
-    KSpinlock::from_bindings(unsafe { &raw mut (*timer).lock }).init(c"timer_lock".as_ptr());
+        // SAFETY: `timer` was just zeroed above and is exclusively owned here.
+        unsafe {
+            Self::rb_root_init(&raw mut (*timer).root, &raw const TIMER_ROOT_OPTS as *mut rb_root_opts);
+            machine::Riscv::list_entry_init(&raw mut (*timer).list_head);
+            (*timer).next_tick = 0;
+            (*timer).current_tick = 0;
+            (*timer).flags.set_valid(1);
+        }
+        TICKS.store(0, Ordering::SeqCst);
+        // SAFETY: `timer` is exclusively owned here, before any other hart can
+        // reach it (it is not yet published anywhere).
+        KSpinlock::from_bindings(unsafe { &raw mut (*timer).lock }).init(c"timer_lock".as_ptr());
 
-    let mut timer_irq_desc = IrqDesc {
-        handler: Some(clockintr),
-        data: (&raw const TICKS) as *mut c_void,
-        dev: ptr::null_mut(),
-        irq: 0,
-        count: 0,
-        // SAFETY: `rcu_head` is plain-old-data; `register_irq_handler`
-        // overwrites it unconditionally (see `irq/irq_core.rs`).
-        rcu_head: unsafe { core::mem::zeroed() },
-    };
-    // SAFETY: `timer_irq_desc` is a live, fully-initialized `IrqDesc` for
-    // the duration of this call; `__clint_timer_irqno` has a single
-    // boot-time writer (see the module doc), read-only thereafter.
-    let ret = unsafe {
-        let irqno = __clint_timer_irqno as c_int;
-        register_irq_handler(irqno, &raw mut timer_irq_desc)
-    };
-    timer_assert(ret == 0, line!(), c"timer_init", c"timer_init: Failed to register timer IRQ handler");
+        let mut timer_irq_desc = IrqDesc {
+            handler: Some(clockintr),
+            data: (&raw const TICKS) as *mut c_void,
+            dev: ptr::null_mut(),
+            irq: 0,
+            count: 0,
+            // SAFETY: `rcu_head` is plain-old-data; `register_irq_handler`
+            // overwrites it unconditionally (see `irq/irq_core.rs`).
+            rcu_head: unsafe { core::mem::zeroed() },
+        };
+        // SAFETY: `timer_irq_desc` is a live, fully-initialized `IrqDesc` for
+        // the duration of this call; `__clint_timer_irqno` has a single
+        // boot-time writer (see the module doc), read-only thereafter.
+        let ret = unsafe {
+            let irqno = __clint_timer_irqno as c_int;
+            IrqCore::register_irq_handler(irqno, &raw mut timer_irq_desc)
+        };
+        Self::timer_assert(ret == 0, line!(), c"timer_init", c"timer_init: Failed to register timer IRQ handler");
+    }
 }
 
 /// Rust port of `timer_node_init()`.
@@ -474,6 +502,7 @@ pub(crate) unsafe fn timer_init(timer: *mut timer_root) {
 /// `timer_node` (it is unconditionally zeroed and reinitialized).
 // P3-1B: only caller is `timer/sched_timer.rs` (direct crate-path `use`) --
 // demoted.
+impl TimerCore {
 pub(crate) unsafe fn timer_node_init(
     node: *mut timer_node,
     expires: u64,
@@ -506,12 +535,12 @@ pub(crate) unsafe fn timer_node_init(
 // demoted.
 pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) -> c_int {
     if timer.is_null() || node.is_null() {
-        return neg(crate::bindings::EINVAL);
+        return Self::neg(crate::bindings::EINVAL);
     }
     // SAFETY: non-null per the check above; caller contract guarantees
     // liveness for the duration of this call.
     if unsafe { (*node).callback }.is_none() {
-        return neg(crate::bindings::EINVAL);
+        return Self::neg(crate::bindings::EINVAL);
     }
 
     // SAFETY: `timer` is non-null and live per the caller contract.
@@ -519,11 +548,11 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
     // SAFETY: see above.
     unsafe {
         if (*timer).flags.valid() == 0 {
-            return neg(crate::bindings::EINVAL);
+            return Self::neg(crate::bindings::EINVAL);
         }
         if (*timer).current_tick >= (*node).expires {
             // Timer already expired.
-            return neg(crate::bindings::EINVAL);
+            return Self::neg(crate::bindings::EINVAL);
         }
     }
 
@@ -531,11 +560,11 @@ pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) ->
     // not linked into any tree yet (also part of the caller contract).
     let inserted = unsafe { crate::rbtree::rb_insert_color(&raw mut (*timer).root, &raw mut (*node).rb) };
     if inserted.is_null() {
-        return neg(crate::bindings::ETXTBSY);
+        return Self::neg(crate::bindings::ETXTBSY);
     }
     // SAFETY: see above.
     if inserted != unsafe { &raw mut (*node).rb } {
-        return neg(crate::bindings::EEXIST);
+        return Self::neg(crate::bindings::EEXIST);
     }
 
     // SAFETY: `node` is now linked into `timer`'s tree by the insert above.
@@ -573,7 +602,7 @@ unsafe fn timer_remove_unlocked(timer: *mut timer_root, node: *mut timer_node) {
         crate::rbtree::rb_delete_node_color(&raw mut (*timer).root, &raw mut (*node).rb);
         machine::Riscv::list_entry_detach(&raw mut (*node).list_entry);
         (*node).timer = ptr::null_mut();
-        update_next_tick(timer);
+        Self::update_next_tick(timer);
     }
 }
 
@@ -596,7 +625,7 @@ pub(crate) unsafe fn timer_remove(node: *mut timer_node) {
     // SAFETY: `node` is live per the caller contract; `timer` is the tree
     // it was linked into (just read from `node->timer` above), still held
     // locked by `_g`.
-    unsafe { timer_remove_unlocked(timer, node) };
+    unsafe { Self::timer_remove_unlocked(timer, node) };
 }
 
 /// Rust port of `timer_tick()`. See the module doc's "Interrupt-context
@@ -634,11 +663,11 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
     }
 
     // SAFETY: `timer` remains live and locked (`_g`) for the whole loop.
-    let mut pos = unsafe { first_node(timer) };
+    let mut pos = unsafe { Self::first_node(timer) };
     while !pos.is_null() {
         let node = pos;
         // SAFETY: `node` is live and currently linked into `timer`.
-        let next = unsafe { next_node(timer, node) };
+        let next = unsafe { Self::next_node(timer, node) };
         // SAFETY: see above.
         if unsafe { (*node).expires } > ticks {
             break;
@@ -651,7 +680,7 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
                 // SAFETY: `node->timer` is still `timer` -- `node` has not
                 // been removed yet.
                 let nt = unsafe { (*node).timer };
-                unsafe { timer_remove_unlocked(nt, node) };
+                unsafe { Self::timer_remove_unlocked(nt, node) };
             }
             Some(cb) => {
                 // Because many callback functions wake up a thread, and the
@@ -667,7 +696,7 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
                 let expired = unsafe { (*node).retry >= (*node).retry_limit };
                 if expired {
                     let nt = unsafe { (*node).timer };
-                    unsafe { timer_remove_unlocked(nt, node) };
+                    unsafe { Self::timer_remove_unlocked(nt, node) };
                 }
                 // SAFETY: `cb` was supplied by the registrant along with
                 // `node`'s other fields (via `timer_node_init`) and is
@@ -680,4 +709,5 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
         }
         pos = next;
     }
+}
 }
