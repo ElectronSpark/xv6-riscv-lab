@@ -297,6 +297,8 @@ int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
     return ret == 0 ? 0 : -EIO;
 }
 
+#include "virtio_gpu_fence_probe.c"
+
 int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
                            uint32 nr_dwords, const uint32 *resources,
@@ -307,7 +309,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
     struct virtio_gpu_async_submit prep;
-    uint64 fence_id;
+    uint64 fence_id = 0;
     uint64 present_wait_fence;
     int trace = virtio_gpu_submit_trace_collect_enabled();
     uint64 trace_start = trace ? r_time() : 0;
@@ -322,6 +324,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     int ret;
     int async_submit;
     int first_submit_reserved = 0;
+    int probe_role = 0;
 
     if (first_submit)
         *first_submit = 0;
@@ -377,9 +380,13 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     }
     spin_unlock(&g->lock);
 
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
+    /* B waits before any fence reservation; A waits after preparation. */
+    if (!(flags & FB_GPU_VIRGL_SUBMIT_ASYNC)) {
+        probe_role = virtio_gpu_fence_probe_before(
+            g, owner_id, owner_tgid, ctx_id, 0, 0);
+        if (probe_role < 0)
+            return probe_role;
+    }
 
     async_submit = (flags & FB_GPU_VIRGL_SUBMIT_ASYNC) != 0;
     int allow_imported_resources =
@@ -389,7 +396,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
         if (trace)
             trace_prepare_start = r_time();
         ret = virtio_gpu_submit_3d_async_prepare(
-            g, ctx_id, cmds, nr_dwords, fence_id, &prep);
+            g, ctx_id, cmds, nr_dwords, true, &prep);
         if (trace)
             trace_prepare_ticks = r_time() - trace_prepare_start;
         if (ret != 0) {
@@ -400,6 +407,14 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                     trace_prepare_ticks, 0, 0, 1, ret, shape);
             return ret;
         }
+    }
+
+    if (async_submit)
+        probe_role = virtio_gpu_fence_probe_before(
+            g, owner_id, owner_tgid, ctx_id, 1, fence_id);
+    if (probe_role < 0) {
+        virtio_gpu_async_submit_free(&prep);
+        return probe_role;
     }
 
     if (trace)
@@ -553,7 +568,10 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     } else if (async_submit)
         ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep, 0);
     else
-        ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
+        ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, true,
+                                   &fence_id);
+    if (async_submit && ret == 0)
+        fence_id = prep.fence_id;
     if (trace)
         trace_post_ticks = r_time() - trace_post_start;
 out_unlock_submit:
@@ -569,6 +587,7 @@ out_unlock_submit:
     if (trace)
         virtio_gpu_submit_trace_clear_current(g);
     virtio_gpu_op_unlock(g);
+    virtio_gpu_fence_probe_after(g, probe_role, ret, fence_id);
     if (ret != 0)
         virtio_gpu_async_submit_free(&prep);
     if (ret != 0) {
@@ -601,7 +620,8 @@ out_unlock_submit:
                 !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
                                           owner_id, owner_tgid))
                 continue;
-            res->last_submit_fence = fence_id;
+            if (fence_id > res->last_submit_fence)
+                res->last_submit_fence = fence_id;
         }
     }
     spin_unlock(&g->lock);

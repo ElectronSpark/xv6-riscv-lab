@@ -77,7 +77,7 @@ static int virtio_gpu_context_resource_mixed_async(
 
 static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
                                 const uint32 *cmds, uint32 nr_dwords,
-                                uint64 fence_id)
+                                bool fenced, uint64 *fence_out)
 {
     struct virtio_gpu_cmd_submit *cmd =
         (struct virtio_gpu_cmd_submit *)g->cmd_page;
@@ -85,6 +85,8 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
         (struct virtio_gpu_ctrl_hdr *)g->resp_page;
     uint32 bytes = nr_dwords * sizeof(uint32);
 
+    if (fence_out != NULL)
+        *fence_out = 0;
     if (nr_dwords == 0 || bytes > PGSIZE * 64) {
         virtio_gpu_count_failure(g);
         return -1;
@@ -93,10 +95,8 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
     memset(cmd, 0, sizeof(*cmd));
     cmd->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
     cmd->hdr.ctx_id = ctx_id;
-    if (fence_id != 0) {
+    if (fenced)
         cmd->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-        cmd->hdr.fence_id = fence_id;
-    }
     cmd->size = bytes;
 
     if (virtio_gpu_submit(g, cmd, sizeof(*cmd), (void *)cmds, bytes, false,
@@ -104,24 +104,14 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
                           VIRTIO_GPU_RESP_OK_NODATA) != 0)
         return -1;
 
-    if (fence_id != 0) {
-        if (resp->fence_id != fence_id) {
-            virtio_gpu_count_failure(g);
-            printf("virtio_gpu: fence mismatch got=%lu expected=%lu\n",
-                   resp->fence_id, fence_id);
-            return -1;
-        }
-        spin_lock(&g->lock);
-        g->stats.fences++;
-        g->stats.last_fence = fence_id;
-        spin_unlock(&g->lock);
-    }
+    if (fence_out != NULL)
+        *fence_out = cmd->hdr.fence_id;
     return 0;
 }
 
 static int virtio_gpu_submit_3d_async_prepare(
     struct virtio_gpu *g, uint32 ctx_id, const uint32 *cmds,
-    uint32 nr_dwords, uint64 fence_id, struct virtio_gpu_async_submit *prep)
+    uint32 nr_dwords, bool fenced, struct virtio_gpu_async_submit *prep)
 {
     struct virtio_gpu_cmd_submit *cmd;
     struct virtio_gpu_ctrl_hdr *resp;
@@ -163,14 +153,13 @@ static int virtio_gpu_submit_3d_async_prepare(
     memcpy(data, cmds, bytes);
     cmd->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
     cmd->hdr.ctx_id = ctx_id;
-    if (fence_id != 0) {
+    if (fenced)
         cmd->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-        cmd->hdr.fence_id = fence_id;
-    }
     cmd->size = bytes;
 
     prep->ctx_id = ctx_id;
-    prep->fence_id = fence_id;
+    /* The transport assigns the ID only when it publishes the command. */
+    prep->fence_id = 0;
     prep->type = VIRTIO_GPU_CMD_SUBMIT_3D;
     prep->expected = VIRTIO_GPU_RESP_OK_NODATA;
     prep->cmd = cmd;
@@ -194,7 +183,6 @@ static void virtio_gpu_smoke_context(struct virtio_gpu *g)
 {
     uint32 ctx_id = 1;
     uint32 nop = VIRGL_CMD0(VIRGL_CCMD_NOP, 0, 0);
-    uint64 fence_id;
     struct virtio_gpu_resource *res = NULL;
     int created = 0;
     int attached_to_ctx = 0;
@@ -231,10 +219,7 @@ static void virtio_gpu_smoke_context(struct virtio_gpu *g)
     }
     attached_to_ctx = 1;
 
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
-    if (virtio_gpu_submit_3d(g, ctx_id, &nop, 1, fence_id) != 0) {
+    if (virtio_gpu_submit_3d(g, ctx_id, &nop, 1, true, NULL) != 0) {
         printf("virtio_gpu: 3D NOP submit failed\n");
         goto out;
     }

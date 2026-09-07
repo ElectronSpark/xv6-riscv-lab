@@ -565,7 +565,6 @@ static int virtio_gpu_user_set_cursor_sync(const void *pixels, uint32 width,
     struct virtio_gpu_update_cursor cmd;
     struct virtio_gpu_resource *res;
     uint32 *dst;
-    uint64 fence_id;
     uint64 alpha_nonzero;
     int qemu_gtk_cursor_compat;
     int ret;
@@ -631,13 +630,10 @@ static int virtio_gpu_user_set_cursor_sync(const void *pixels, uint32 width,
             row_dst[col] = virtio_gpu_cursor_qemu_gtk_pixel(src[col]);
     }
 
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
     if (virtio_gpu_resource_transfer_2d_fenced(g, res, 0, 0,
                                                VIRTIO_GPU_CURSOR_DIM,
                                                VIRTIO_GPU_CURSOR_DIM,
-                                               fence_id) != 0) {
+                                               true) != 0) {
         mutex_unlock(&g->op_lock);
         return -EIO;
     }
@@ -1667,12 +1663,7 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
 
             if (virtio_gpu_cmdline_enabled(
                     "virtio_gpu_fenced_scanout_flush")) {
-                spin_lock(&g->lock);
-                present_fence = ++g->next_fence_id;
-                spin_unlock(&g->lock);
                 hdr->flags = VIRTIO_GPU_FLAG_FENCE;
-                hdr->fence_id = present_fence;
-                scanout_flush_prep.fence_id = present_fence;
             }
             if (virtio_gpu_async_post_prepared(
                     g, &scanout_flush_prep,
@@ -1680,6 +1671,7 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
                 present_fence = 0;
                 ret = -EIO;
             } else {
+                present_fence = scanout_flush_prep.fence_id;
                 ret = 0;
             }
         } else {

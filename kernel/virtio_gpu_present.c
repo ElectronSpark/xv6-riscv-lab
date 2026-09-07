@@ -413,14 +413,9 @@ static int virtio_gpu_clear_texture_rect(struct virtio_gpu *g,
                                          uint32 color)
 {
     uint32 cmds[VIRGL_CLEAR_TEXTURE_SIZE + 1];
-    uint64 fence_id;
 
     if (resource_id == 0 || w == 0 || h == 0)
         return -EINVAL;
-
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
 
     memset(cmds, 0, sizeof(cmds));
     cmds[0] = VIRGL_CMD0(VIRGL_CCMD_CLEAR_TEXTURE, 0,
@@ -440,7 +435,7 @@ static int virtio_gpu_clear_texture_rect(struct virtio_gpu *g,
 
     return virtio_gpu_submit_3d(g, ctx_id, cmds,
                                 sizeof(cmds) / sizeof(cmds[0]),
-                                fence_id) == 0 ? 0 : -EIO;
+                                true, NULL) == 0 ? 0 : -EIO;
 }
 
 static int virtio_gpu_submit_blit_rect(struct virtio_gpu *g,
@@ -452,7 +447,7 @@ static int virtio_gpu_submit_blit_rect(struct virtio_gpu *g,
                                        uint32 src_resource_id,
                                        uint32 src_format,
                                        uint32 src_x, uint32 src_y,
-                                       uint64 fence_id)
+                                       bool fenced)
 {
     uint32 cmds[VIRGL_CMD_BLIT_SIZE + 1];
 
@@ -482,7 +477,7 @@ static int virtio_gpu_submit_blit_rect(struct virtio_gpu *g,
     cmds[21] = 1;
     return virtio_gpu_submit_3d(g, ctx_id, cmds,
                                 sizeof(cmds) / sizeof(cmds[0]),
-                                fence_id) == 0 ? 0 : -EIO;
+                                fenced, NULL) == 0 ? 0 : -EIO;
 }
 
 static int virtio_gpu_submit_copy_rect(struct virtio_gpu *g,
@@ -492,7 +487,7 @@ static int virtio_gpu_submit_copy_rect(struct virtio_gpu *g,
                                        uint32 w, uint32 h,
                                        uint32 src_resource_id,
                                        uint32 src_x, uint32 src_y,
-                                       uint64 fence_id)
+                                       bool fenced)
 {
     uint32 cmds[VIRGL_CMD_RESOURCE_COPY_REGION_SIZE + 1];
 
@@ -514,7 +509,7 @@ static int virtio_gpu_submit_copy_rect(struct virtio_gpu *g,
     cmds[13] = 1;
     return virtio_gpu_submit_3d(g, ctx_id, cmds,
                                 sizeof(cmds) / sizeof(cmds[0]),
-                                fence_id) == 0 ? 0 : -EIO;
+                                fenced, NULL) == 0 ? 0 : -EIO;
 }
 
 static int virtio_gpu_submit_copy_transfer_rect(struct virtio_gpu *g,
@@ -524,7 +519,7 @@ static int virtio_gpu_submit_copy_transfer_rect(struct virtio_gpu *g,
                                                 uint32 w, uint32 h,
                                                 struct virtio_gpu_resource *src,
                                                 uint32 src_x, uint32 src_y,
-                                                uint64 fence_id)
+                                                bool fenced)
 {
     uint32 cmds[VIRGL_COPY_TRANSFER3D_SIZE + 1];
     uint64 src_offset;
@@ -555,7 +550,7 @@ static int virtio_gpu_submit_copy_transfer_rect(struct virtio_gpu *g,
                VIRGL_COPY_TRANSFER3D_FLAGS_READ_FROM_HOST;
     return virtio_gpu_submit_3d(g, ctx_id, cmds,
                                 sizeof(cmds) / sizeof(cmds[0]),
-                                fence_id) == 0 ? 0 : -EIO;
+                                fenced, NULL) == 0 ? 0 : -EIO;
 }
 
 static int virtio_gpu_submit_present_copy_method(
@@ -563,23 +558,23 @@ static int virtio_gpu_submit_present_copy_method(
     struct virtio_gpu_resource *dst, uint32 dst_x, uint32 dst_y,
     uint32 w, uint32 h,
     struct virtio_gpu_resource *src, uint32 src_x, uint32 src_y,
-    uint64 fence_id, int use_copy_transfer, int use_blit)
+    bool fenced, int use_copy_transfer, int use_blit)
 {
     if (dst == NULL || src == NULL)
         return -EINVAL;
     if (use_copy_transfer) {
         return virtio_gpu_submit_copy_transfer_rect(g, ctx_id, dst, dst_x,
                                                     dst_y, w, h, src, src_x,
-                                                    src_y, fence_id);
+                                                    src_y, fenced);
     }
     if (use_blit) {
         return virtio_gpu_submit_blit_rect(
             g, ctx_id, dst->id, dst->format, dst_x, dst_y, w, h,
-            src->id, src->format, src_x, src_y, fence_id);
+            src->id, src->format, src_x, src_y, fenced);
     }
     return virtio_gpu_submit_copy_rect(g, ctx_id, dst->id, dst_x, dst_y,
                                        w, h, src->id, src_x, src_y,
-                                       fence_id);
+                                       fenced);
 }
 
 static int virtio_gpu_try_pageflip_copy(
@@ -592,7 +587,6 @@ static int virtio_gpu_try_pageflip_copy(
     struct virtio_gpu_resource *flip = NULL;
     uint32 base_resource_id;
     uint32 flip_slot = 0;
-    uint64 fence_id;
     int ret;
     int base_attached = 0;
     int flip_attached = 0;
@@ -695,13 +689,10 @@ static int virtio_gpu_try_pageflip_copy(
     }
     flip_attached = 1;
 
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
     if (need_base_copy) {
         ret = virtio_gpu_submit_present_copy_method(
             g, ctx_id, flip, 0, 0, scanout->width, scanout->height,
-            base, 0, 0, fence_id, 0, use_blit);
+            base, 0, 0, true, 0, use_blit);
         if (ret != 0) {
             if (fail_logs < 8) {
                 printf("virtio_gpu: pageflip-copy base-copy failed ret=%d ctx=%u base=%u flip=%u size=%ux%u mode=%s\n",
@@ -721,12 +712,9 @@ static int virtio_gpu_try_pageflip_copy(
         flush_h = h;
     }
 
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
     ret = virtio_gpu_submit_present_copy_method(
         g, ctx_id, flip, dst_x, dst_y, w, h, src, src_x, src_y,
-        fence_id, use_copy_transfer, use_blit);
+        true, use_copy_transfer, use_blit);
     if (ret != 0) {
         if (fail_logs < 8) {
             printf("virtio_gpu: pageflip-copy overlay-copy failed ret=%d ctx=%u src=%u flip=%u rect=%u,%u %ux%u mode=%s\n",
@@ -956,7 +944,6 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     uint32 src_height = 0;
     uint32 dst_width = 0;
     uint32 dst_height = 0;
-    uint64 fence_id;
     uint64 src_submit_fence = 0;
     uint64 completed_fence = 0;
     int should_wait_src_fence = 0;
@@ -1143,7 +1130,6 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
         struct virtio_gpu_resource *tmp = NULL;
         struct virtio_gpu_present_samples src_samples;
         struct virtio_gpu_present_samples tmp_samples;
-        uint64 tmp_fence;
         int tmp_ret;
         int tmp_attached = 0;
         int tmp_ctx_attached = 0;
@@ -1171,21 +1157,18 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
             tmp_ctx_attached = tmp_ret == 0;
         }
         if (tmp_ret == 0) {
-            spin_lock(&g->lock);
-            tmp_fence = ++g->next_fence_id;
-            spin_unlock(&g->lock);
             if (use_copy_transfer) {
                 tmp_ret = virtio_gpu_submit_copy_transfer_rect(
                     g, ctx_id, tmp, 0, 0, w, h, src, src_x, src_y,
-                    tmp_fence);
+                    true);
             } else if (use_blit) {
                 tmp_ret = virtio_gpu_submit_blit_rect(
                     g, ctx_id, tmp->id, tmp->format, 0, 0, w, h,
-                    src_resource_id, src->format, src_x, src_y, tmp_fence);
+                    src_resource_id, src->format, src_x, src_y, true);
             } else {
                 tmp_ret = virtio_gpu_submit_copy_rect(
                     g, ctx_id, tmp->id, 0, 0, w, h,
-                    src_resource_id, src_x, src_y, tmp_fence);
+                    src_resource_id, src_x, src_y, true);
             }
         }
         src_ret = virtio_gpu_resource_host_samples(g, src, ctx_id,
@@ -1243,9 +1226,6 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
         g->bound_scanout_resource_id = dst_resource_id;
     }
 
-    spin_lock(&g->lock);
-    fence_id = ++g->next_fence_id;
-    spin_unlock(&g->lock);
     if (unbind_scanout_copy &&
         g->bound_scanout_resource_id == dst_resource_id) {
         if (virtio_gpu_set_scanout(g, 0, NULL, 0, 0, 0, 0) != 0) {
@@ -1257,17 +1237,17 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     if (use_copy_transfer) {
         ret = virtio_gpu_submit_copy_transfer_rect(g, ctx_id, dst, dst_x,
                                                    dst_y, w, h, src, src_x,
-                                                   src_y, fence_id);
+                                                   src_y, true);
     } else if (use_blit) {
         ret = virtio_gpu_submit_blit_rect(g, ctx_id, dst_resource_id,
                                           dst->format, dst_x, dst_y, w, h,
                                           src_resource_id, src->format,
-                                          src_x, src_y, fence_id);
+                                          src_x, src_y, true);
     } else {
         ret = virtio_gpu_submit_copy_rect(g, ctx_id, dst_resource_id,
                                           dst_x, dst_y, w, h,
                                           src_resource_id, src_x, src_y,
-                                          fence_id);
+                                          true);
     }
     if (validate_copy && ret == 0 &&
         copy_validation_state < 0 &&
@@ -1368,7 +1348,6 @@ int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
     uint32 ctx_id = 0;
     uint64 src_submit_fence = 0;
     uint64 completed_fence = 0;
-    uint64 fence_id;
     int should_wait_src_fence = 0;
     int src_attached = 0;
     int dst_attached = 0;
@@ -1469,14 +1448,13 @@ int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
     spin_lock(&g->lock);
     src = virtio_gpu_lookup_resource_locked(g, src_resource_id);
     dst = virtio_gpu_lookup_resource_locked(g, dst_resource_id);
-    fence_id = ++g->next_fence_id;
     spin_unlock(&g->lock);
     if (src == NULL || dst == NULL) {
         ret = -EINVAL;
         goto out_detach_dst;
     }
     ret = virtio_gpu_submit_present_copy_method(
-        g, ctx_id, dst, dst_x, dst_y, w, h, src, src_x, src_y, fence_id,
+        g, ctx_id, dst, dst_x, dst_y, w, h, src, src_x, src_y, true,
         use_copy_transfer, use_blit);
 
 out_detach_dst:

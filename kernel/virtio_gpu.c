@@ -851,6 +851,7 @@ struct virtio_gpu {
     struct virtio_gpu_submit_trace_key submit_trace_current;
     struct virtio_gpu_submit_trace_shape submit_trace_current_shape;
     int submit_trace_current_valid;
+    /* ctrlq.lock: allocate only when publishing a fenced command. */
     uint64 next_fence_id;
     struct virtio_gpu_async_submit async_ring[VIRTIO_GPU_ASYNC_MAX_DEPTH];
     /*
@@ -2521,19 +2522,45 @@ static void virtio_gpu_intr(int irq, void *data, device_t *dev)
  * more the user moved the cursor.  Monotonic max: a stale sync fence
  * must never regress fence progress.
  */
-static void virtio_gpu_record_sync_fence(struct virtio_gpu *g,
-                                         const void *cmd)
+static int virtio_gpu_record_sync_fence(struct virtio_gpu *g,
+                                        const void *cmd, const void *resp)
 {
     const struct virtio_gpu_ctrl_hdr *hdr = cmd;
+    const struct virtio_gpu_ctrl_hdr *resp_hdr = resp;
 
-    if (hdr == NULL || !(hdr->flags & VIRTIO_GPU_FLAG_FENCE) ||
-        hdr->fence_id == 0)
-        return;
+    if (hdr == NULL || !(hdr->flags & VIRTIO_GPU_FLAG_FENCE))
+        return 0;
+    if (hdr->fence_id == 0 ||
+        !(resp_hdr->flags & VIRTIO_GPU_FLAG_FENCE) ||
+        resp_hdr->fence_id != hdr->fence_id) {
+        virtio_gpu_count_failure(g);
+        printf("virtio_gpu: command 0x%x fence mismatch flags=0x%x got=%lu expected=%lu\n",
+               hdr->type, resp_hdr->flags, resp_hdr->fence_id,
+               hdr->fence_id);
+        return -1;
+    }
     spin_lock(&g->lock);
     g->stats.fences++;
     if (hdr->fence_id > g->stats.last_fence)
         g->stats.last_fence = hdr->fence_id;
     spin_unlock(&g->lock);
+    return 0;
+}
+
+/*
+ * ctrlq.lock held, with admission complete and publication guaranteed.
+ * A prepared command carries only FENCE intent: reserving an ID before
+ * op_lock admission lets a later command publish and complete first.  Both
+ * our global completion watermark and the host's cumulative fence callback
+ * require IDs to follow control-queue publication order.
+ */
+static uint64 virtio_gpu_assign_fence_locked(struct virtio_gpu *g, void *cmd)
+{
+    struct virtio_gpu_ctrl_hdr *hdr = cmd;
+
+    hdr->fence_id = (hdr->flags & VIRTIO_GPU_FLAG_FENCE) ?
+        ++g->next_fence_id : 0;
+    return hdr->fence_id;
 }
 
 /* Cumulative budget for movement-renewal retry loops: total wall time
@@ -2665,6 +2692,7 @@ static int virtio_gpu_sync_post(struct virtio_gpu *g,
     q->desc[resp_desc].flags = VRING_DESC_F_WRITE;
     q->desc[resp_desc].next = 0;
 
+    (void)virtio_gpu_assign_fence_locked(g, cmd);
     q->avail->ring[q->avail->idx % q->size] = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     q->avail->idx++;
@@ -2832,7 +2860,8 @@ static int virtio_gpu_submit_internal(struct virtio_gpu *g, void *cmd,
         return -1;
     }
 
-    virtio_gpu_record_sync_fence(g, cmd);
+    if (virtio_gpu_record_sync_fence(g, cmd, resp) != 0)
+        return -1;
     virtio_gpu_count_command(g, type);
     return 0;
 }
@@ -2884,7 +2913,8 @@ static int virtio_gpu_submit_mixed_async(struct virtio_gpu *g, void *cmd,
                type, resp_hdr->type, expected);
         return -1;
     }
-    virtio_gpu_record_sync_fence(g, cmd);
+    if (virtio_gpu_record_sync_fence(g, cmd, resp) != 0)
+        return -1;
     virtio_gpu_count_command(g, type);
     return 0;
 }
@@ -4350,9 +4380,11 @@ static void virtio_gpu_note_present_copy_drain(struct virtio_gpu *g,
  * g->op_lock held and a slot reserved by virtio_gpu_async_reserve_slot().
  */
 static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
-                                         struct virtio_gpu_async_submit *a)
+                                         struct virtio_gpu_async_submit *a,
+                                         uint64 *fence_out)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
+    struct virtio_gpu_async_submit posted;
     uint32 base = a->desc_base;
     uint64 trace_async_count = 0;
     int arm_watchdog = 0;
@@ -4392,11 +4424,18 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
      */
     if (a->state != VIRTIO_GPU_ASYNC_SLOT_CLAIMED)
         printf("virtio_gpu: async post on slot in state %d\n", a->state);
+    a->fence_id = virtio_gpu_assign_fence_locked(g, a->cmd);
+    if (fence_out != NULL)
+        *fence_out = a->fence_id;
+    a->posted_ticks = r_time();
     a->state = VIRTIO_GPU_ASYNC_SLOT_POSTED;
     if (!g->async_watchdog_armed) {
         g->async_watchdog_armed = 1;
         arm_watchdog = 1;
     }
+    /* The reaper may free and clear a immediately after publication. */
+    posted = *a;
+    trace_async_count = g->async_count;
     q->avail->ring[q->avail->idx % q->size] = (uint16)base;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     q->avail->idx++;
@@ -4407,10 +4446,9 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
         virtio_gpu_async_watchdog_schedule(
             g, virtio_gpu_async_wait_window_ms());
     spin_lock(&g->lock);
-    virtio_gpu_count_async_posted_locked(g, a->type);
-    trace_async_count = __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE);
+    virtio_gpu_count_async_posted_locked(g, posted.type);
     spin_unlock(&g->lock);
-    virtio_gpu_submit_trace_record_async_post(g, a, trace_async_count);
+    virtio_gpu_submit_trace_record_async_post(g, &posted, trace_async_count);
 }
 
 /*
@@ -4505,7 +4543,7 @@ static int virtio_gpu_async_post_prepared(
         return -1;
     }
     a->ctx_id = prep->ctx_id;
-    a->fence_id = prep->fence_id;
+    a->fence_id = 0;
     a->type = prep->type;
     a->expected = prep->expected;
     a->cmd = prep->cmd;
@@ -4515,13 +4553,12 @@ static int virtio_gpu_async_post_prepared(
     a->data_order = prep->data_order;
     a->resp = prep->resp;
     a->resp_len = prep->resp_len;
-    a->posted_ticks = r_time();
     a->trace_shape = prep->trace_shape;
     prep->cmd = NULL;
     prep->data = NULL;
     prep->resp = NULL;
 
-    virtio_gpu_async_post_locked(g, a);
+    virtio_gpu_async_post_locked(g, a, &prep->fence_id);
     return 0;
 }
 
