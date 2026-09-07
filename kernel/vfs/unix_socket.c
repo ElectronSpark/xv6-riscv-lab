@@ -1753,6 +1753,101 @@ static void unix_chrome_epipe_trace(struct unix_sock *sk, const char *reason,
 }
 
 /*
+ * Publish each stream segment and its credentials under the same lock.  A
+ * receiver must never consume the bytes before their SCM entry exists: a late
+ * entry behind tx.nread can otherwise look like a control-only read (EOF) on
+ * a still-connected stream.  Each committed segment also remains complete if
+ * the syscall later returns a short write, encounters a fault, or is signaled.
+ */
+static ssize_t unix_stream_write(struct vfs_file *file, const char *buf,
+                                  size_t count, bool user)
+{
+    struct unix_sock *sk = file->private_data;
+    struct unix_scm_cred cred = unix_current_scm_cred();
+    bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
+    size_t total = 0;
+    char tmp[UNIX_IO_CHUNK];
+
+    if (count == 0) {
+        spin_lock(&sk->lock);
+        int closed = sk->peer == NULL ||
+            (sk->shutdown_flags & UNIX_SHUT_WR) ||
+            unix_peer_read_shutdown_locked(sk);
+        spin_unlock(&sk->lock);
+        return closed ? -EPIPE : 0;
+    }
+
+    while (total < count) {
+        size_t chunk = count - total;
+        if (chunk > sizeof(tmp))
+            chunk = sizeof(tmp);
+        if (user) {
+            if (vm_copyin(current->vm, tmp, (uint64)(buf + total), chunk) < 0)
+                return total > 0 ? (ssize_t)total : -EFAULT;
+        } else {
+            memmove(tmp, buf + total, chunk);
+        }
+
+        size_t wrote = 0;
+        while (wrote < chunk) {
+            spin_lock(&sk->lock);
+            struct unix_sock *peer = sk->peer;
+            if (peer == NULL || (sk->shutdown_flags & UNIX_SHUT_WR) ||
+                unix_peer_read_shutdown_locked(sk)) {
+                spin_unlock(&sk->lock);
+                unix_chrome_epipe_trace(sk, "stream-write-shutdown", count,
+                                        (ssize_t)total);
+                return total > 0 ? (ssize_t)total : -EPIPE;
+            }
+
+            int need_cred = unix_peer_passcred_locked(sk);
+            size_t tx_limit = unix_tx_limit_locked(sk);
+            uint start = sk->tx.nwrite;
+            size_t w = 0;
+            if (!need_cred || unix_scm_has_space_locked(sk))
+                w = ring_write(&sk->tx, tmp + wrote, chunk - wrote, tx_limit);
+            if (w == 0) {
+                if (nonblock || signal_pending(current)) {
+                    int err = nonblock ? -EAGAIN : -EINTR;
+                    spin_unlock(&sk->lock);
+                    return total > 0 ? (ssize_t)total : err;
+                }
+                /* Check capacity and enroll in the wait under one lock. */
+                tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
+                                 THREAD_INTERRUPTIBLE);
+                spin_unlock(&sk->lock);
+                if (signal_pending(current))
+                    return total > 0 ? (ssize_t)total : -EINTR;
+                continue;
+            }
+
+            if (need_cred &&
+                unix_enqueue_cred_locked(sk, start, sk->tx.nwrite, cred) < 0)
+                panic("unix_stream_write: metadata queue lost reservation");
+            unix_sock_get(peer);
+            spin_unlock(&sk->lock);
+
+            wrote += w;
+            total += w;
+            spin_lock(&peer->lock);
+            tq_wakeup_all(&peer->rd_queue, 0, 0);
+            struct vfs_file *pf = peer->file ? vfs_fdup(peer->file) : NULL;
+            spin_unlock(&peer->lock);
+            if (pf != NULL) {
+                vfs_file_knote_notify(pf, EVFILT_READ, 0);
+                vfs_fput(pf);
+            }
+            unix_ipc_trace("write-wake-readers", sk, (long)w, (long)wrote);
+            unix_sock_put(peer);
+        }
+    }
+
+    unix_ipc_trace("write", sk, (long)total, (long)count);
+    unix_wayland_trace("write", sk, (long)total, (long)count);
+    return (ssize_t)total;
+}
+
+/*
  * unix_file_write - write data to a connected AF_UNIX socket
  *
  * Writes to our own tx ring buffer (which the peer reads from).
@@ -1772,6 +1867,9 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
     if (sk->state != UNIX_STATE_CONNECTED &&
         unix_sock_connection_oriented(sk))
         return -ENOTCONN;
+
+    if (sk->type == SOCK_STREAM)
+        return unix_stream_write(file, buf, count, user);
 
     bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
     ssize_t total = 0;
