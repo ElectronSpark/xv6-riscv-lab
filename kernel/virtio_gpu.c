@@ -861,7 +861,8 @@ struct virtio_gpu {
      * lock-free readers use __atomic loads and treat the values as
      * hints (exactness is enforced at reserve time under q->lock).
      * async_retire_seq is a monotonic progress counter bumped under
-     * q->lock whenever a used element is consumed or a slot leaves the
+     * q->lock with release ordering after the associated predicate updates
+     * whenever a used element is consumed or a slot leaves the
      * POSTED/ABANDONED population — progress waiters snapshot-compare
      * it (plus the device-written used->idx) instead of inferring
      * progress from used-ring occupancy, which a concurrent consumer
@@ -2276,7 +2277,8 @@ virtio_gpu_async_find_slot_by_desc(struct virtio_gpu *g, uint32 id);
 static int virtio_gpu_async_reap_completed_sample(
     struct virtio_gpu *g, struct virtio_gpu_async_drain_sample *sample);
 static int virtio_gpu_async_wait_progress(struct virtio_gpu *g,
-                                          uint32 budget_ms);
+                                          uint32 budget_ms,
+                                          uint64 observed_retire_seq);
 static int virtio_gpu_drain_async_submit_sample(
     struct virtio_gpu *g, int wait,
     struct virtio_gpu_async_drain_sample *sample);
@@ -2620,11 +2622,16 @@ static int virtio_gpu_sync_park_stale(struct virtio_gpu *g,
     (void)virtio_gpu_async_reap_completed_sample(g, NULL);
     uint64 budget_start = get_jiffs();
     uint32 budget_total = virtio_gpu_wait_window_ms();
-    while (__atomic_load_n(&q->sync_stale, __ATOMIC_ACQUIRE) > 0) {
+    for (;;) {
+        uint64 observed_retire_seq =
+            __atomic_load_n(&g->async_retire_seq, __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&q->sync_stale, __ATOMIC_ACQUIRE) == 0)
+            break;
         uint32 remaining =
             virtio_gpu_wait_budget_remaining(budget_start, budget_total);
         if (remaining == 0 ||
-            !virtio_gpu_async_wait_progress(g, remaining)) {
+            !virtio_gpu_async_wait_progress(g, remaining,
+                                            observed_retire_seq)) {
             /* One final reap before declaring the element lost (a
              * concurrent reaper may have raced our snapshot). */
             (void)virtio_gpu_async_reap_completed_sample(g, NULL);
@@ -3765,12 +3772,14 @@ static int virtio_gpu_async_reap_completed_reaplocked(
                  * response itself). */
                 if (q->sync_stale > 0) {
                     q->sync_stale--;
-                    g->async_retire_seq++;
+                    __atomic_add_fetch(&g->async_retire_seq, 1,
+                                       __ATOMIC_RELEASE);
                     stale_sync = 1;
                 } else if (q->sync_inflight) {
                     q->sync_inflight = 0;
-                    g->async_retire_seq++;
                     __atomic_store_n(&q->sync_done, 1, __ATOMIC_RELEASE);
+                    __atomic_add_fetch(&g->async_retire_seq, 1,
+                                       __ATOMIC_RELEASE);
                     if (q->sync_completion != NULL)
                         complete_all(q->sync_completion);
                 } else {
@@ -3825,7 +3834,7 @@ static int virtio_gpu_async_reap_completed_reaplocked(
             virtio_gpu_async_submit_free(a);
             intena = spin_lock_irqsave(&q->lock);
             g->async_abandoned--;
-            g->async_retire_seq++;
+            __atomic_add_fetch(&g->async_retire_seq, 1, __ATOMIC_RELEASE);
             complete_all(&g->async_wait);
             spin_unlock_irqrestore(&q->lock, intena);
             continue;
@@ -3843,7 +3852,7 @@ static int virtio_gpu_async_reap_completed_reaplocked(
         g->async_count--;
         if (retired_reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D)
             g->async_submit_count--;
-        g->async_retire_seq++;
+        __atomic_add_fetch(&g->async_retire_seq, 1, __ATOMIC_RELEASE);
         complete_all(&g->async_wait);
         spin_unlock_irqrestore(&q->lock, intena);
         spin_lock(&g->lock);
@@ -3876,14 +3885,18 @@ static int virtio_gpu_async_reap_completed(struct virtio_gpu *g)
  * used->idx past the entry snapshot, or a consumer bumps async_retire_seq
  * (both monotonic, snapshot-compared).  Occupancy is only an entry-time
  * short-circuit: an unconsumed element is progress the caller can reap.
- * A healthy queue whose completions are eaten by a concurrent consumer
- * can no longer look stalled (former progress-detection defect).
+ * Callers snapshot async_retire_seq BEFORE testing their wait predicate.
+ * Preserve that snapshot across serialization: another consumer may retire
+ * the last needed element between the predicate check and registration.
+ * Taking a new snapshot here would discard that progress and wait for an
+ * unrelated future completion while the caller may still hold op_lock.
  * Callers must re-reap and re-check their own predicate after a 0 return
  * before treating the queue as wedged.  Lock order: (op_lock) ->
  * async_wait_serialize -> q->lock.
  */
 static int virtio_gpu_async_wait_progress(struct virtio_gpu *g,
-                                          uint32 budget_ms)
+                                          uint32 budget_ms,
+                                          uint64 observed_retire_seq)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
     int trace = virtio_gpu_submit_trace_enabled();
@@ -3900,14 +3913,15 @@ static int virtio_gpu_async_wait_progress(struct virtio_gpu *g,
      * so the completion re-arm never runs under a sleeping waiter. */
     mutex_lock(&g->async_wait_serialize);
     intena = spin_lock_irqsave(&q->lock);
-    if (q->used->idx != q->used_idx) {
+    if (g->async_retire_seq != observed_retire_seq ||
+        q->used->idx != q->used_idx) {
         spin_unlock_irqrestore(&q->lock, intena);
         mutex_unlock(&g->async_wait_serialize);
         ret = 1;
         goto out;
     }
     cond.snap_used_idx = q->used->idx;
-    cond.snap_retire_seq = g->async_retire_seq;
+    cond.snap_retire_seq = observed_retire_seq;
     /* Re-arm under q->lock: every complete_all on async_wait also holds
      * q->lock, so the reinit can never race a wakeup (and the tq/spinlock
      * inside are only ever initialized once, at driver init). */
@@ -4022,7 +4036,7 @@ static int virtio_gpu_async_abort_expired(struct virtio_gpu *g,
             if (a->reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D)
                 g->async_submit_count--;
             g->async_abandoned++;
-            g->async_retire_seq++;
+            __atomic_add_fetch(&g->async_retire_seq, 1, __ATOMIC_RELEASE);
             complete_all(&g->async_wait);
         }
         spin_unlock_irqrestore(&q->lock, intena);
@@ -4132,11 +4146,16 @@ static int virtio_gpu_drain_async_submit_sample(
 
     uint64 budget_start = get_jiffs();
     uint32 budget_total = virtio_gpu_async_wait_window_ms();
-    while (__atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) > 0) {
+    for (;;) {
+        uint64 observed_retire_seq =
+            __atomic_load_n(&g->async_retire_seq, __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE) == 0)
+            break;
         uint32 remaining = virtio_gpu_async_wait_budget_remaining(
             g, budget_start, budget_total);
         if (remaining == 0 ||
-            !virtio_gpu_async_wait_progress(g, remaining)) {
+            !virtio_gpu_async_wait_progress(g, remaining,
+                                            observed_retire_seq)) {
             /* Progress is snapshot-based; reap and re-check once before
              * declaring the queue wedged (a concurrent consumer may
              * have retired the last slot around our snapshot). */
@@ -4175,6 +4194,8 @@ static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
     uint64 budget_start = get_jiffs();
     uint32 budget_total = virtio_gpu_async_wait_window_ms();
     for (;;) {
+        uint64 observed_retire_seq =
+            __atomic_load_n(&g->async_retire_seq, __ATOMIC_ACQUIRE);
         spin_lock(&g->lock);
         done = g->stats.last_fence;
         spin_unlock(&g->lock);
@@ -4190,7 +4211,8 @@ static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
         uint32 remaining = virtio_gpu_async_wait_budget_remaining(
             g, budget_start, budget_total);
         if (remaining == 0 ||
-            !virtio_gpu_async_wait_progress(g, remaining)) {
+            !virtio_gpu_async_wait_progress(g, remaining,
+                                            observed_retire_seq)) {
             /* Reap and re-check once before declaring the queue wedged
              * (progress is snapshot-based; a concurrent consumer may
              * have signaled the fence around our snapshot). */
@@ -4276,7 +4298,11 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
                                           __ATOMIC_ACQUIRE);
     uint64 budget_start = get_jiffs();
     uint32 budget_total = virtio_gpu_async_wait_window_ms();
-    while (!virtio_gpu_async_room_available(g, depth, reason)) {
+    for (;;) {
+        uint64 observed_retire_seq =
+            __atomic_load_n(&g->async_retire_seq, __ATOMIC_ACQUIRE);
+        if (virtio_gpu_async_room_available(g, depth, reason))
+            break;
         uint64 count = __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE);
 
         if (trace && count > trace_count_max)
@@ -4296,7 +4322,8 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
         uint32 remaining = virtio_gpu_async_wait_budget_remaining(
             g, budget_start, budget_total);
         if (remaining == 0 ||
-            !virtio_gpu_async_wait_progress(g, remaining)) {
+            !virtio_gpu_async_wait_progress(g, remaining,
+                                            observed_retire_seq)) {
             /* Progress is snapshot-based; reap and re-check once before
              * declaring the queue wedged (a concurrent consumer may
              * have freed room around our snapshot). */
