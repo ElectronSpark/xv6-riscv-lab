@@ -10,6 +10,7 @@ set(PROC_C_SRCS
     sysproc.c
     pidfd.c
     workqueue.c
+    workqueue_selftest.c
     exit.c
     pid.c
     pgroup.c

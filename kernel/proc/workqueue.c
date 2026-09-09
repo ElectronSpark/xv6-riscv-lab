@@ -240,8 +240,11 @@ static void __manager_routine(void) {
                 break;
             }
         }
+        // Under wq->lock, only non-idle workers without a running callback
+        // are available to dequeue pending work; busy callbacks need no work.
         while (tq_size(&wq->idle_queue) &&
-               wq->nr_workers - tq_size(&wq->idle_queue) < wq->pending_works) {
+               wq->nr_workers - tq_size(&wq->idle_queue) - wq->running_works <
+                   wq->pending_works) {
             // Wake up an idle worker if any
             struct thread *p = tq_wakeup(&wq->idle_queue, 0, 0);
             if (IS_ERR_OR_NULL(p)) {

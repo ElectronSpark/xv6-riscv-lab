@@ -295,4 +295,5 @@ void start_kernel_post_init(void) {
     printf("Releasing secondary CPUs...\n");
     __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
     platform_start_secondary_cpus((uint64)_entry);
+    workqueue_selftest_run_if_enabled(); // optional thread-context regression
 }

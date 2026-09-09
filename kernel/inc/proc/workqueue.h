@@ -8,6 +8,7 @@
 #define WORKQUEUE_DEFAULT_MIN_ACTIVE 2
 
 void workqueue_init(void);
+void workqueue_selftest_run_if_enabled(void);
 struct workqueue *workqueue_create(const char *name, int max_active);
 bool queue_work(struct workqueue *wq, struct work_struct *work);
 void flush_workqueue(struct workqueue *wq);
