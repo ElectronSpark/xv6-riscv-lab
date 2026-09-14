@@ -1034,6 +1034,7 @@ void forkfork(char *s) {
 }
 
 void forkforkfork(char *s) {
+    enum { FORK_RESERVE_BYTES = 16 * 1024 * 1024 };
     unlink("stopforking");
 
     int pid = fork();
@@ -1045,20 +1046,38 @@ void forkforkfork(char *s) {
         while (1) {
             int fd = open("stopforking", 0);
             if (fd >= 0) {
-                exit(0);
+                close(fd);
+                break;
             }
-            if (fork() < 0) {
+            // This kernel permits far more processes than original xv6.
+            // Keep memory for worker/supervisor copy-on-write faults so
+            // they remain alive to reap the tree. mem tests actual OOM.
+            if (memstat(MEMSTAT_ADD_FREE) < FORK_RESERVE_BYTES || fork() < 0) {
                 close(open("stopforking", O_CREAT | O_RDWR));
             }
         }
 
-        exit(0);
+        // Reap the entire descendant tree before returning. A fixed sleep
+        // cannot establish that thousands of workers have been reclaimed.
+        int status, child, failed = 0;
+        while ((child = wait(&status)) > 0) {
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                printf("%s: worker %d failed (wait status %d)\n", s,
+                       child, status);
+                failed = 1;
+            }
+        }
+        if (child != -1) {
+            printf("%s: worker wait failed: %d\n", s, child);
+            failed = 1;
+        }
+        exit(failed);
     }
 
     sleep(2000); // two seconds
     close(open("stopforking", O_CREAT | O_RDWR));
-    wait(0);
-    sleep(1000); // one second
+    int status = wait_child(s, pid);
+    exit(child_exit_code(s, status));
 }
 
 // regression test. does reparent() violate the parent-then-child
@@ -3008,10 +3027,32 @@ int runtests(struct test *tests, char *justone, int continuous) {
     return 0;
 }
 
+static void prefault_supervisor(void) {
+    extern char end[];
+    // user.ld maps this executable contiguously from PAGE_SIZE to end.
+    // Populate its lazy code/data pages before measuring child cleanup.
+    for (uint64 addr = PAGE_SIZE; addr < (uint64)end; addr += PAGE_SIZE)
+        (void)*(volatile unsigned char *)addr;
+
+    // The runner also needs resident stack pages.
+    volatile unsigned char stack_pages[2 * PAGE_SIZE];
+    for (uint i = 0; i < sizeof(stack_pages); i += PAGE_SIZE)
+        stack_pages[i] = 0;
+    stack_pages[sizeof(stack_pages) - 1] = 0;
+    (void)stack_pages[0];
+}
+
+static int free_pages(void) {
+    return memstat(MEMSTAT_ADD_FREE | MEMSTAT_RECLAIM) / PAGE_SIZE;
+}
+
 int drivetests(int quick, int continuous, char *justone) {
     do {
+        prefault_supervisor();
         printf("usertests starting\n");
-        int free0 = memstat(MEMSTAT_ADD_FREE) / PAGE_SIZE;
+        // Exercise the accounting syscall before taking the baseline.
+        (void)free_pages();
+        int free0 = free_pages();
         int free1 = 0;
         if (runtests(quicktests, justone, continuous)) {
             if (continuous != 2) {
@@ -3027,7 +3068,16 @@ int drivetests(int quick, int continuous, char *justone) {
                 }
             }
         }
-        if ((free1 = memstat(MEMSTAT_ADD_FREE) / PAGE_SIZE) < free0) {
+        free1 = free_pages();
+        // RCU and file cleanup can finish after wait returns. Wait at most
+        // two seconds, reclaiming empty caches, without allowing any deficit.
+        int waited = 0;
+        while (free1 < free0 && waited < 2000) {
+            sleep(10);
+            waited += 10;
+            free1 = free_pages();
+        }
+        if (free1 < free0) {
             printf("FAILED -- lost some free pages %d (out of %d)\n", free1,
                    free0);
             if (continuous != 2) {
