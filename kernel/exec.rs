@@ -97,7 +97,7 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void, CStr};
 use core::mem::{align_of, offset_of, size_of, MaybeUninit};
 use core::ptr;
 
@@ -155,7 +155,6 @@ unsafe extern "C" {
     // string.rs.
     safe fn strlen(s: *const c_char) -> usize;
     safe fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-    safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 
 }
 
@@ -768,28 +767,17 @@ pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *
         (*(*p).trapframe).trapframe.a1 = sp + size_of::<u64>() as u64;
     }
 
-    // Save program name for debugging.
-    let mut last = path;
-    let mut s = path;
-    // SAFETY: `path` is a caller-owned, NUL-terminated C string (walked
-    // read-only, same contract as the C original's `for (last=s=path;
-    // *s; s++)`).
-    unsafe {
-        while *s != 0 {
-            if *s == b'/' as c_char {
-                last = s.add(1);
-            }
-            s = s.add(1);
-        }
-    }
-    // SAFETY: `p` is the live current thread; `name` is a plain embedded
-    // `[c_char; 16]` array field (its length taken from the real bindgen
-    // layout via `.len()`, so it tracks `proc/thread_types.h`
-    // automatically instead of hand-copying the 16).
-    unsafe {
-        let name_len = (*p).name.len();
-        safestrcpy(ptr::addr_of_mut!((*p).name) as *mut c_char, last, name_len);
-    }
+    // Save the final path component for debugging. The NUL stays in the
+    // final split component, so even a trailing slash produces a valid name.
+    // SAFETY: path is the caller-owned, terminated exec path, still live.
+    let path_name = unsafe { CStr::from_ptr(path) };
+    let basename = path_name.to_bytes_with_nul().rsplit(|&byte| byte == b'/')
+        .next().expect("a path always has a final component");
+    let basename = CStr::from_bytes_with_nul(basename)
+        .expect("the final path component contains the original terminator");
+    // SAFETY: p is the live current thread. Atomic stores allow concurrent
+    // diagnostic readers without borrowing mutable thread-name storage.
+    unsafe { (*p).name.set(basename); }
 
     // Commit to the user image.
     // SAFETY: `p` is the live current thread, exclusively executing this

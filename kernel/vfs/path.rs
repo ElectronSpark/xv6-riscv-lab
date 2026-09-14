@@ -4,6 +4,8 @@
 //! skipped here, while `.` and `..` remain for the VFS to resolve against
 //! the current directory, process root, and mount tree.
 
+#![forbid(unsafe_code)]
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct KernelPath<'a> {
     bytes: &'a [u8],

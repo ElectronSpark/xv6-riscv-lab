@@ -140,7 +140,7 @@ fn test_yield_priority() {
         let p = xv6_current_thread();
         let my_priority = SchedEntityRef::assume(sched_entity_of(p)).priority();
         crate::kprintln!("  Current process '{}' at priority major={}",
-            crate::printf::Cs(ThreadAccess::assume(p).name_ptr()), MAJOR_PRIORITY(my_priority));
+            ThreadAccess::assume(p).name(), MAJOR_PRIORITY(my_priority));
 
         let mut yields_completed = 0;
         for _ in 0..5 {

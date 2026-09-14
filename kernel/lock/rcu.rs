@@ -175,22 +175,22 @@ impl Rcu {
 // Current-thread access
 // ---------------------------------------------------------------------------
 
-/// Run `f` with an exclusive borrow of the current thread (if any).
-///
-/// The closure runs synchronously; the borrow does not escape. The
-/// current thread is the sole owner of its own fields, so an `&mut`
-/// here cannot race even without preemption-off — but most callers
-/// hold a `PreemptGuard` regardless.
+/// Borrow only the current thread's RCU counter and atomic name field.
+/// The nesting counter belongs to the executing thread; diagnostic readers
+/// can concurrently access the name, so the whole thread must not be borrowed
+/// mutably. The closure cannot retain either field reference.
 #[inline]
-fn with_current_thread<R>(f: impl FnOnce(&mut thread) -> R) -> Option<R> {
+fn with_current_thread<R>(
+    f: impl FnOnce(&mut c_int, &crate::thread_name::AtomicName, c_int) -> R,
+) -> Option<R> {
     let t = machine::Riscv::current_thread_ptr();
     if t.is_null() {
         return None;
     }
-    // SAFETY: `t` points at the current thread, which is unique to
-    // this CPU; the closure observes/mutates only fields owned by
-    // that thread.
-    Some(f(unsafe { &mut *t }))
+    // SAFETY: t is the live current thread. Its RCU nesting counter is owned
+    // by the executing thread; the separate name field allows shared atomic
+    // access. No reference to the entire thread is formed.
+    unsafe { Some(f(&mut (*t).rcu_read_lock_nesting, &(*t).name, (*t).pid)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,12 +454,10 @@ impl Rcu {
     /// the only formatted printf in the read-side fast path.
     #[inline(never)]
     #[cold]
-    fn kpanic_unbalanced_unlock(name_ptr: *const c_char, pid: c_int) -> ! {
-        // SAFETY: `name_ptr` is a NUL-terminated buffer inside the
-        // live current `thread`; `pid` is an `i32`.
+    fn kpanic_unbalanced_unlock(name: crate::thread_name::NameSnapshot, pid: c_int) -> ! {
         crate::kprintln!(
             "PANIC: rcu_read_unlock: unbalanced unlock in thread {} (pid {})",
-            crate::printf::Cs(name_ptr),
+            name,
             pid,
         );
         unsafe {
@@ -691,14 +689,14 @@ impl Rcu {
 
     fn read_lock_impl() {
         machine::Riscv::push_off();
-        with_current_thread(|t| t.rcu_read_lock_nesting += 1);
+        with_current_thread(|nesting, _, _| *nesting += 1);
     }
 
     fn read_unlock_impl() {
-        if let Some(panic_args) = with_current_thread(|t| {
-            t.rcu_read_lock_nesting -= 1;
-            if t.rcu_read_lock_nesting < 0 {
-                Some((t.name.as_ptr(), t.pid))
+        if let Some(panic_args) = with_current_thread(|nesting, name, pid| {
+            *nesting -= 1;
+            if *nesting < 0 {
+                Some((name.snapshot(), pid))
             } else {
                 None
             }
@@ -712,7 +710,7 @@ impl Rcu {
     }
 
     fn is_watching_impl() -> bool {
-        with_current_thread(|t| t.rcu_read_lock_nesting > 0).unwrap_or(false)
+        with_current_thread(|nesting, _, _| *nesting > 0).unwrap_or(false)
     }
 }
 

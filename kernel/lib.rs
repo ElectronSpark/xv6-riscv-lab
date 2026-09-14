@@ -23,8 +23,10 @@
 //!
 //! Run `cargo test --manifest-path kernel/Cargo.toml --target
 //! x86_64-unknown-linux-gnu` from the repository root. The host build uses
-//! `std` and compiles the production list, bit, allocator, and string
-//! algorithms. Hardware modules and their native-type binding facade are
+//! `std` and compiles the production list, bit, allocator, string, path,
+//! packet, wire-format, frame-bound, and typed-lock algorithms. Typed locks
+//! use a host raw-lock backend; packet allocations use a host allocator.
+//! Hardware modules and their native-type binding facade are
 //! excluded; the host binding seam only aliases the production list node.
 //! The early allocator uses a small list/panic backend below.
 //!
@@ -175,6 +177,28 @@ pub mod kobject;
 // .c files of the same name).
 #[path = "string.rs"]
 pub mod string;
+
+mod thread_name;
+
+#[cfg(test)]
+#[path = "vfs/path.rs"]
+mod vfs_path;
+
+#[cfg(test)]
+#[path = "net/wire.rs"]
+mod net_wire;
+
+#[cfg(test)]
+#[path = "net/buffer.rs"]
+mod net_buffer;
+
+#[cfg(test)]
+#[path = "backtrace/frame.rs"]
+mod backtrace_frame;
+
+#[cfg(test)]
+#[path = "sync/spinlock.rs"]
+mod sync;
 
 #[cfg(not(test))]
 #[path = "sbi.rs"]

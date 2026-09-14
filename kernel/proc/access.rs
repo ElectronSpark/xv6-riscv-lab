@@ -692,7 +692,17 @@ impl<'a> ThreadAccess<'a> {
     }
     #[inline] pub fn sched_entity_ptr(&self) -> *mut sched_entity { raw_get!(self, sched_entity) }
     #[inline] pub fn set_sched_entity_ptr(&self, se: *mut sched_entity) { raw_set!(self, sched_entity, se) }
-    #[inline] pub fn name_ptr(&self) -> *const c_char { raw_method!(self, name.as_ptr()) }
+    /// Own a bounded diagnostic snapshot; concurrent renames use atomic bytes.
+    #[inline]
+    pub(crate) fn name(&self) -> crate::thread_name::NameSnapshot {
+        raw_method!(self, name.snapshot())
+    }
+    #[inline]
+    pub(crate) fn set_name(&self, name: &core::ffi::CStr) {
+        // SAFETY: this handle keeps the initialized thread live. Only the
+        // interior-mutable name field is borrowed for atomic stores.
+        unsafe { (*self.raw.as_ptr()).name.set(name) }
+    }
     #[inline] pub fn chan_ptr(&self) -> *mut c_void { raw_get!(self, chan) }
     #[inline] pub fn set_chan(&self, chan: *mut c_void) { raw_set!(self, chan, chan) }
     #[inline] pub fn kstack_addr(&self) -> u64 { raw_get!(self, kstack) }
@@ -707,8 +717,6 @@ impl<'a> ThreadAccess<'a> {
     #[inline] pub fn set_arg(&self, idx: usize, v: u64) { raw_index_set!(self, arg, idx, v) }
     #[inline] pub fn fs_ptr(&self) -> *mut crate::bindings::fs_struct { raw_get!(self, fs) }
     #[inline] pub fn set_fs(&self, v: *mut crate::bindings::fs_struct) { raw_set!(self, fs, v) }
-    #[inline] pub fn name_buf_ptr(&self) -> *mut c_char { raw_method!(self, name.as_mut_ptr()) }
-    #[inline] pub fn name_len(&self) -> usize { raw_method!(self, name.len()) }
     #[inline] pub fn children_count(&self) -> c_int { raw_get!(self, children_count) }
     #[inline] pub fn inc_children_count(&self) { raw_add_assign!(self, children_count, 1) }
     #[inline] pub fn dec_children_count(&self) { raw_sub_assign!(self, children_count, 1) }

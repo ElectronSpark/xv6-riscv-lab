@@ -1,5 +1,7 @@
 //! Ethernet, IPv4, UDP and ARP wire formats, independent of allocation and DMA.
 
+#![forbid(unsafe_code)]
+
 use core::ops::Range;
 
 pub const ETHERNET_LEN: usize = 14;

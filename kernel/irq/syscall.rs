@@ -484,7 +484,7 @@ impl Syscall {
         // thread; `num` is a plain scalar already read above. Matches
         // `printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);`.
         unsafe {
-            crate::kprintln!("{} {}: unknown sys call {}", (*p).pid, crate::printf::Cs((*p).name.as_ptr()), num);
+            crate::kprintln!("{} {}: unknown sys call {}", (*p).pid, (*p).name.snapshot(), num);
             (*(*p).trapframe).trapframe.a0 = (-(ENOSYS as i32)) as i64 as u64;
         }
     }

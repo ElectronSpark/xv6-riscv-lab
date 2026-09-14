@@ -779,12 +779,12 @@ impl RqRef<'_> {
         if !sr.rq_ptr().is_null() {
             let p = sr.thread_ptr();
             let pt = ThreadAccess::from_ptr(p);
-            let pn = pt.map_or(c"NULL".as_ptr(), |t| t.name_ptr());
+            let pn = pt.map_or_else(|| crate::thread_name::NameSnapshot::from_c_str(c"NULL"), |t| t.name());
             let se_rq = sr.rq_ptr();
             crate::kprintln!("RqRef::enqueue BUG: se->rq={} (cpu={}), target rq={} (cpu={})",
                 crate::printf::Ptr(se_rq as u64), if se_rq.is_null() { -1 } else { rq_ref(se_rq).cpu_id() }, crate::printf::Ptr(self.as_ptr() as u64), self.cpu_id());
             crate::kprintln!("  thread={} pid={} state={} on_rq={} on_cpu={} se_cpu={}",
-                crate::printf::Cs(pn), pt.map_or(-1, |t| t.pid()), if p.is_null() { -1 } else { thread_state_get(p) },
+                pn, pt.map_or(-1, |t| t.pid()), if p.is_null() { -1 } else { thread_state_get(p) },
                 sr.on_rq_plain(), sr.on_cpu_plain(), sr.cpu_id());
             kpanic!("RqRef::enqueue: se rq is not NULL");
         }

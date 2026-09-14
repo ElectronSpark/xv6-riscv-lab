@@ -1002,7 +1002,7 @@ unsafe fn scheduler_dump_chan_queue() {
                 crate::kprintln!(
                     "Chan: {},  Proc: {} (PID: {}, State: {})",
                     crate::printf::Ptr((*proc).chan as u64),
-                    crate::printf::Cs((*proc).name.as_ptr()),
+                    t.name(),
                     t.pid(),
                     crate::printf::Cs(Scheduler::state_str(Scheduler::thread_state_get(proc))),
                 );

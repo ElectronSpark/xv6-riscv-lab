@@ -61,10 +61,8 @@ set(KERNEL_C_FILES
     # in Rust (kernel/hlist.rs, kernel/bintree.rs, kernel/rbtree.rs,
     # kernel/kobject.rs — Phase 2 Wave 1). Their symbols are linked in via
     # the xv6_rust staticlib below.
-    # NOTE: bits.c has been rewritten in Rust. The lookup tables it provided
-    # (__uint8_bits_count, __uint8_trailing_zeros, __uint8_leading_zeros,
-    # __uint8_inverse) are now produced by the `xv6_rust` staticlib and
-    # whole-archive-linked into the kernel below.
+    # NOTE: bits.c has been replaced by crate-private Rust const methods.
+    # Its former byte lookup tables have no consumers and are not exported.
     # NOTE: string.c and sbi.c have been rewritten in Rust (kernel/string.rs,
     # kernel/sbi.rs — Phase 2 Wave 2). Their symbols (including
     # memset/memcpy/memmove/memcmp, called from virtually every remaining C
@@ -564,10 +562,8 @@ set(RUST_FORCE_UNDEFINED
     --undefined=strcmp
     --undefined=strncmp
     --undefined=strncpy
-    --undefined=safestrcpy
     --undefined=strlen
     --undefined=strnlen
-    --undefined=strtok_r
     --undefined=strndup
     --undefined=strdup
     --undefined=puts

@@ -364,7 +364,7 @@ impl Printf {
                 "[Core: {}] In thread {} ({}) at {}",
                 machine::Riscv::cpuid() as i64,
                 (*p).pid,
-                Cs((*p).name.as_ptr()),
+                (*p).name.snapshot(),
                 Ptr(fp),
             );
             if BT_ENABLED.load(Ordering::Relaxed) {

@@ -12,7 +12,7 @@
 // See `crate::u`'s doc comment (kernel/lib.rs) for the macro's contract.
 use crate::u;
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void, CStr};
 use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -159,7 +159,6 @@ pub(super) type Tid = GenKey<TID_TAG>;
 /// Native `struct thread` (`kernel/inc/proc/thread_types.h`) — the
 /// per-thread control block, laid out at the top of its kernel stack.
 #[repr(C, align(64))]
-#[derive(Copy, Clone)]
 pub struct Thread {
     // ===== Cache line 0: lock (isolated against false sharing) =====
     pub lock: spinlock_t,
@@ -182,7 +181,7 @@ pub struct Thread {
     pub clone_flags: u64,
     pub kentry: u64,
     pub arg: [u64; 2],
-    pub name: [c_char; 16],
+    pub(crate) name: crate::thread_name::AtomicName,
     pub kstack_order: c_int,
     pub kstack: u64,
     pub trapframe_vbase: u64,
@@ -609,8 +608,6 @@ const THREAD_FLAG_USER_SPACE: u64 = 5;
 // ---------------- extern C primitives -----------------------------------
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-    fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
-    fn safestrcpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
 
     // NOTE: `vfs_struct_lock`/`vfs_struct_unlock` (kernel/inc/vfs/fs.h) are
     // `static inline` wrappers around `spin_lock`/`spin_unlock` — there is
@@ -873,6 +870,8 @@ impl<'a> ThreadAccess<'a> {
     fn pcb_init(&self, fdtable: *mut vfs_fdtable) {
         let p = self.as_ptr();
         thread_raw_layout! {
+            // Initialize before this thread can be observed by diagnostics.
+            ptr::addr_of_mut!((*p).name).write(crate::thread_name::AtomicName::empty());
             self.state_set(THREAD_UNUSED);
             self.sigpending_init();
             // Direct call through the typed signal-substruct field pointer.
@@ -1054,8 +1053,10 @@ impl Thread {
             (*p).arg[0] = arg1;
             (*p).arg[1] = arg2;
             (*p).fs = fs_clone;
-            let name_use = if name.is_null() { c"kthread".as_ptr() } else { name };
-            safestrcpy((*p).name.as_mut_ptr(), name_use, (*p).name.len());
+            // Kernel callers supply a live C string or the default name.
+            // The thread is not published until after this initialization.
+            let name = if name.is_null() { c"kthread" } else { CStr::from_ptr(name) };
+            (*p).name.set(name);
             ThreadAccess::assume(p).state_set(THREAD_UNINTERRUPTIBLE);
 
             ProcTable::wlock();
@@ -1086,7 +1087,7 @@ impl Thread {
 
             (*p).kstack_order = KERNEL_STACK_ORDER;
             (*p).kstack = kstack as u64;
-            strncpy((*p).name.as_mut_ptr(), c"idle".as_ptr(), (*p).name.len());
+            (*p).name.set(c"idle");
             ThreadAccess::assume(p).state_set(THREAD_RUNNING);
             let cpu = CpuLocalRef::assume(Riscv::cpu_local_ptr());
         cpu.set_proc(p);
@@ -1247,7 +1248,7 @@ impl Thread {
             ta_u.set_sigacts(crate::proc::signal::SigActs::init());
             kassert!(!ta_u.sigacts_ptr().is_null(), "userinit: sigacts_init failed");
 
-            safestrcpy((*p).name.as_mut_ptr(), c"initcode".as_ptr(), (*p).name.len());
+            (*p).name.set(c"initcode");
 
             ta_u.set_user_space();
 

@@ -64,6 +64,15 @@ pub fn copy_cstr(dst: &mut [u8], src: &CStr) -> usize {
     copied
 }
 
+/// Build a fully initialized C-layout name field from a borrowed string.
+/// The destination size is inferred from the receiving array; long names are
+/// truncated with a NUL terminator, and unused bytes are zeroed.
+pub fn cstr_array<const N: usize>(src: &CStr) -> [c_char; N] {
+    let mut bytes = [0; N];
+    copy_cstr(&mut bytes, src);
+    bytes.map(|byte| byte as c_char)
+}
+
 // ---------------------------------------------------------------------------
 // memset / memcmp / memmove / memcpy — see module doc for the no-recursion
 // and no-compiler_builtins-conflict rationale. Raw pointer arithmetic only.
@@ -218,33 +227,6 @@ pub unsafe extern "C" fn strncpy(dst: *mut c_char, src: *const c_char, n: usize)
     dst
 }
 
-/// Like `strncpy` but guaranteed to NUL-terminate, without padding.
-///
-/// # Safety
-/// `dst` must be valid for writes of `n` bytes; `src` valid for reads up to
-/// its NUL terminator or `n - 1` bytes, whichever comes first. The buffers
-/// must not overlap. Neither pointer is accessed when `n == 0`.
-#[cfg_attr(not(test), no_mangle)]
-pub unsafe extern "C" fn safestrcpy(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
-    if n == 0 {
-        return dst;
-    }
-    let mut copied = 0;
-    while copied < n - 1 {
-        // SAFETY: copied < n - 1 and no preceding source byte was NUL.
-        let byte = unsafe { *src.add(copied) };
-        if byte == 0 {
-            break;
-        }
-        // SAFETY: copied < n, inside the caller's writable destination.
-        unsafe { *dst.add(copied) = byte };
-        copied += 1;
-    }
-    // SAFETY: copied <= n - 1, including the zero-payload case.
-    unsafe { *dst.add(copied) = 0 };
-    dst
-}
-
 /// # Safety
 /// `s` must point to a valid NUL-terminated string.
 #[cfg_attr(not(test), no_mangle)]
@@ -269,68 +251,6 @@ pub unsafe extern "C" fn strnlen(s: *const c_char, maxlen: usize) -> usize {
             n += 1;
         }
         n
-    }
-}
-
-/// # Safety
-/// `str_` (when non-null) and `delim` must point to valid NUL-terminated
-/// strings; `saveptr` must be a valid, writable `*mut *mut c_char`, and
-/// when `str_` is null, `*saveptr` must be a value this function
-/// previously wrote there (or null).
-#[cfg_attr(not(test), no_mangle)]
-pub unsafe extern "C" fn strtok_r(
-    str_: *mut c_char,
-    delim: *const c_char,
-    saveptr: *mut *mut c_char,
-) -> *mut c_char {
-    unsafe {
-        let mut str_ = str_;
-        if str_.is_null() {
-            str_ = *saveptr;
-        }
-        if str_.is_null() {
-            return ptr::null_mut();
-        }
-
-        // Skip leading delimiters.
-        while *str_ != 0 {
-            let mut d = delim;
-            let mut is_delim = false;
-            while *d != 0 {
-                if *str_ == *d {
-                    is_delim = true;
-                    break;
-                }
-                d = d.add(1);
-            }
-            if !is_delim {
-                break;
-            }
-            str_ = str_.add(1);
-        }
-
-        if *str_ == 0 {
-            *saveptr = str_;
-            return ptr::null_mut();
-        }
-
-        let token = str_;
-
-        while *str_ != 0 {
-            let mut d = delim;
-            while *d != 0 {
-                if *str_ == *d {
-                    *str_ = 0;
-                    *saveptr = str_.add(1);
-                    return token;
-                }
-                d = d.add(1);
-            }
-            str_ = str_.add(1);
-        }
-
-        *saveptr = str_;
-        token
     }
 }
 
@@ -409,8 +329,7 @@ mod tests {
         for src in [c"", c"a", c"abcd", c"abcdef"] {
             for n in 0..=5 {
                 let mut dst = [0x55u8; 7];
-                // SAFETY: source is a valid C string; n fits the destination.
-                unsafe { safestrcpy(dst.as_mut_ptr().add(1).cast(), src.as_ptr(), n) };
+                copy_cstr(&mut dst[1..n + 1], src);
                 assert_eq!(dst[0], 0x55);
                 let copied = src.to_bytes().len().min(n.saturating_sub(1));
                 let end = if n == 0 { 1 } else { copied + 2 };
@@ -448,20 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_handles_null_saved_cursor_and_repeated_exhaustion() {
-        let mut saved = ptr::null_mut();
-        let mut bytes = *b"//a///b/\0";
-        // SAFETY: bytes is writable and terminated, the delimiter is a valid
-        // C string, and saved is exclusively borrowed for each call.
-        unsafe {
-            assert!(strtok_r(ptr::null_mut(), c"/".as_ptr(), &mut saved).is_null());
-            let a = strtok_r(bytes.as_mut_ptr().cast(), c"/".as_ptr(), &mut saved);
-            assert_eq!(CStr::from_ptr(a), c"a");
-            let b = strtok_r(ptr::null_mut(), c"/".as_ptr(), &mut saved);
-            assert_eq!(CStr::from_ptr(b), c"b");
-            assert!(strtok_r(ptr::null_mut(), c"/".as_ptr(), &mut saved).is_null());
-            assert!(strtok_r(ptr::null_mut(), c"/".as_ptr(), &mut saved).is_null());
-        }
+    fn c_layout_names_are_initialized_and_terminated() {
+        assert_eq!(cstr_array::<0>(c"abc"), []);
+        assert_eq!(cstr_array::<1>(c"abc"), [0]);
+        assert_eq!(cstr_array::<4>(c"abcde").map(|byte| byte as u8), *b"abc\0");
+        assert_eq!(cstr_array::<4>(c"a").map(|byte| byte as u8), *b"a\0\0\0");
+        let high_byte = CStr::from_bytes_with_nul(b"\xff\0").unwrap();
+        assert_eq!(cstr_array::<2>(high_byte).map(|byte| byte as u8), [0xff, 0]);
     }
 
     #[test]
@@ -477,7 +389,6 @@ mod tests {
             assert_eq!(&bytes[..3], &[0xff; 3]);
             assert_eq!(memcmp(bytes.as_ptr().cast(), bytes.as_ptr().cast(), 6), 0);
             strncpy(ptr::null_mut(), ptr::null(), 0);
-            safestrcpy(ptr::null_mut(), ptr::null(), 0);
         }
     }
 }

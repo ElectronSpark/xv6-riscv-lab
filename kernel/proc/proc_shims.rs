@@ -1944,35 +1944,12 @@ pub(super) fn for_each_proctab_thread(mut f: impl FnMut(*mut thread)) {
     }
 }
 
-// ===========================================================================
-// SECTION 11 leftover: xv6_t_copy_name (was C — safestrcpy of thread.name)
-// ===========================================================================
-
-/// Copy `src->name` into `dst->name` with the same bounds-check semantics
-/// as the C `safestrcpy`: copies at most `len-1` non-NUL bytes, then writes
-/// a terminating NUL. `len` is the fixed size of `thread.name` (16).
+/// Copy the current parent's diagnostic name into an unpublished child.
+/// Both thread lifetimes follow the existing clone caller's field contract.
 pub(super) fn xv6_t_copy_name(dst: *mut thread, src: *mut thread) {
-    let dn = field_ptr_mut!(dst, name) as *mut u8;
-    let sn = field_ptr_const!(src, name) as *const u8;
-    let n = 16usize;
-    // N-ITER: manual index → range walk (was `while i + 1 < n`); `written`
-    // carries the count for the trailing NUL, identical semantics.
-    let mut written = 0usize;
-    for i in 0..n - 1 {
-        // SAFETY: `sn` points into `src`'s fixed `[c_char; 16]` `name`
-        // array (valid per `field_ptr_const!`); the range bound keeps
-        // `i <= n - 2`, so `sn.add(i)` stays in bounds.
-        let c = u! { *sn.add(i) };
-        if c == 0 { break; }
-        // SAFETY: see above (same bound on `i`), for `dn` into `dst`'s
-        // `name` array (valid per `field_ptr_mut!`).
-        u! { *dn.add(i) = c; }
-        written = i + 1;
-    }
-    // SAFETY: `written <= n - 1` (either it stopped at the last copied
-    // index + 1 == n - 1, or broke out earlier with a smaller value), so
-    // `dn.add(written)` is still in bounds of the 16-byte array.
-    u! { *dn.add(written) = 0; }
+    // SAFETY: the clone caller owns the child and is executing as the parent.
+    let name = unsafe { ThreadAccess::assume(src) }.name();
+    unsafe { ThreadAccess::assume(dst) }.set_name(name.as_c_str());
 }
 
 // ===========================================================================
@@ -2008,12 +1985,6 @@ use crate::backtrace::Backtrace;
 /// from proc-table iteration or a caller-checked lookup, generally while
 /// `tcb_lock(p)` is held for the fields it protects.
 #[inline]
-unsafe fn t_name_ptr(p: *mut thread) -> *const c_char {
-    // SAFETY: see the fn-level contract above.
-    u! { &raw const (*p).name as *const c_char }
-}
-/// SAFETY (caller): see `t_name_ptr`.
-#[inline]
 unsafe fn s10_t_user_space(p: *mut thread) -> bool {
     // THREAD_FLAG_USER_SPACE = 5
     // SAFETY: see the fn-level contract above. Plain (non-atomic) read of
@@ -2021,7 +1992,7 @@ unsafe fn s10_t_user_space(p: *mut thread) -> bool {
     // equivalent) is held.
     u! { ((*p).flags & (1u64 << 5)) != 0 }
 }
-/// SAFETY (caller): see `t_name_ptr`; additionally `p->sched_entity` must
+/// SAFETY (caller): see `s10_t_user_space`; additionally `p->sched_entity` must
 /// be non-null, which holds for every live thread (set at creation time).
 #[inline]
 unsafe fn se_on_cpu(p: *mut thread) -> bool {
@@ -2038,7 +2009,7 @@ unsafe fn se_cpu_id(p: *mut thread) -> c_int {
     // SAFETY: see the fn-level contract above.
     u! { (*(*p).sched_entity).cpu_id }
 }
-/// SAFETY (caller): see `t_name_ptr`.
+/// SAFETY (caller): see `s10_t_user_space`.
 #[inline]
 unsafe fn t_state_load(p: *mut thread) -> c_int {
     // Mirror __thread_state_get: smp_load_acquire on thread.state.
@@ -2062,31 +2033,6 @@ unsafe fn tg_load_int(p: *mut Tgroup, off: usize) -> c_int {
         let base = p as *mut u8;
         AtomicI32::from_ptr(base.add(off) as *mut i32).load(Ordering::Acquire)
     }
-}
-
-/// safestrcpy reimplementation, returns count written excluding NUL.
-///
-/// SAFETY (caller): `src` must be a valid pointer to a NUL-terminated
-/// C string readable for at least `min(strlen(src), dst.len() - 1) + 1`
-/// bytes — every call site passes a `t_name_ptr(p)` result, i.e. a pointer
-/// into a live thread's fixed-size, always-NUL-terminated `name` array.
-#[inline]
-unsafe fn safestr(dst: &mut [u8], src: *const c_char) -> usize {
-    let n = dst.len();
-    if n == 0 { return 0; }
-    // N-ITER: manual index → range walk (was `while i + 1 < n`); `written`
-    // carries the count for the trailing NUL, identical semantics.
-    let mut written = 0usize;
-    for i in 0..n - 1 {
-        // SAFETY: see the fn-level contract above; `i` stays `< n - 1 <=
-        // src`'s guaranteed-readable prefix length.
-        let c = u! { *(src.add(i) as *const u8) };
-        if c == 0 { break; }
-        dst[i] = c;
-        written = i + 1;
-    }
-    dst[written] = 0;
-    written
 }
 
 pub(super) fn xv6_procdump_header() {
@@ -2116,24 +2062,21 @@ pub(super) fn xv6_procdump_one(p: *mut thread) -> c_int {
     // fixed 'static literal hand-verified against its argument list (see
     // `xv6_procdump_header`).
     u! {
-        let mut name = [0u8; 16];
-        let mut pname = [0u8; 16];
-
         ThreadAccess::assume(p).tcb_lock();
         let pstate = t_state_load(p);
         let tid = (*p).pid;
         let tgid = (*p).tgid;
         let pgid_v = (*p).pgid;
         let sid_v = (*p).sid;
-        safestr(&mut name, t_name_ptr(p));
+        let name = ThreadAccess::assume(p).name();
         // N-R6d-1: `parent` is a generational `Tid` — resolve through the
         // registry (stale → null) instead of reading the field as a pointer.
         let parent = t_parent(p);
-        if !parent.is_null() {
-            safestr(&mut pname, t_name_ptr(parent));
+        let pname = if !parent.is_null() {
+            ThreadAccess::assume(parent).name()
         } else {
-            pname[..4].copy_from_slice(b"N/A\0");
-        }
+            crate::thread_name::NameSnapshot::from_c_str(c"N/A")
+        };
         ThreadAccess::assume(p).tcb_unlock();
 
         // THREAD_UNUSED = 0
@@ -2166,8 +2109,8 @@ pub(super) fn xv6_procdump_one(p: *mut thread) -> c_int {
             crate::printf::Cs(cpubuf.as_ptr() as *const c_char),
             crate::printf::Cs(xv6_thread_state_short(pstate)),
             ustr,
-            crate::printf::Cs(pname.as_ptr() as *const c_char),
-            crate::printf::Cs(name.as_ptr() as *const c_char),
+            pname,
+            name,
         );
         1
     }
@@ -2209,14 +2152,13 @@ pub(super) fn xv6_procdump_bt_one(p: *mut thread) {
     // an extern C helper given the thread's own `context`/`kstack`/
     // `kstack_order`, matching the C call site's arguments.
     u! {
-        let mut name = [0u8; 16];
         ThreadAccess::assume(p).tcb_lock();
         let pstate = t_state_load(p);
         let pid = (*p).pid;
         let tgid = (*p).tgid;
         let pgid_v = (*p).pgid;
         let sid_v = (*p).sid;
-        safestr(&mut name, t_name_ptr(p));
+        let name = ThreadAccess::assume(p).name();
 
         // INTERRUPTIBLE=2, UNINTERRUPTIBLE=6
         if pstate == 2 || pstate == 6 {
@@ -2224,12 +2166,12 @@ pub(super) fn xv6_procdump_bt_one(p: *mut thread) {
             if se_on_cpu(p) {
                 crate::kprintln!(
                     "\n--- {}:{}:{}:{} [{}] {} --- (on CPU, cannot backtrace)",
-                    sid_v, pgid_v, tgid, pid, stype, crate::printf::Cs(name.as_ptr() as *const c_char),
+                    sid_v, pgid_v, tgid, pid, stype, name,
                 );
             } else {
                 crate::kprintln!(
                     "\n--- {}:{}:{}:{} [{}] {} ---",
-                    sid_v, pgid_v, tgid, pid, stype, crate::printf::Cs(name.as_ptr() as *const c_char),
+                    sid_v, pgid_v, tgid, pid, stype, name,
                 );
                 let pse = (*p).sched_entity;
                 Backtrace::print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
@@ -2256,8 +2198,7 @@ pub(super) fn xv6_procdump_bt_pid(pid: c_int) {
         }
         ThreadAccess::assume(p).tcb_lock();
         let pstate = t_state_load(p);
-        let mut name = [0u8; 16];
-        safestr(&mut name, t_name_ptr(p));
+        let name = ThreadAccess::assume(p).name();
         let tgid = (*p).tgid;
         let pgid_v = (*p).pgid;
         let sid_v = (*p).sid;
@@ -2265,7 +2206,7 @@ pub(super) fn xv6_procdump_bt_pid(pid: c_int) {
             "\n--- {}:{}:{}:{} [{}] {} ---",
             sid_v, pgid_v, tgid, pid,
             crate::printf::Cs(xv6_thread_state_short(pstate)),
-            crate::printf::Cs(name.as_ptr() as *const c_char),
+            name,
         );
         if se_on_cpu(p) {
             crate::kprintln!("Process is currently on a CPU, context not saved");
@@ -2300,15 +2241,14 @@ pub(super) fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
         let tgid = (*p).tgid;
         let pgid_v = (*p).pgid;
         let sid_v = (*p).sid;
-        let mut name = [0u8; 16];
-        safestr(&mut name, t_name_ptr(p));
+        let name = ThreadAccess::assume(p).name();
         let ustr = if s10_t_user_space(p) { "U" } else { "K" };
         crate::kprint!(
             "{}:{}:{}:{} {} [{}] {}",
             sid_v, pgid_v, tgid, pid,
             crate::printf::Cs(xv6_thread_state_short(pstate)),
             ustr,
-            crate::printf::Cs(name.as_ptr() as *const c_char),
+            name,
         );
         if se_on_cpu(p) {
             crate::kprintln!(" (CPU: {})", se_cpu_id(p));
@@ -2387,7 +2327,7 @@ pub(super) fn xv6_dump_session(s: *mut Session) {
                     crate::kprintln!(
                         "      tid {:<4} [{}] {:<2} {}{}{}",
                         (*t).pid, ustr, crate::printf::Cs(st),
-                        crate::printf::Cs(t_name_ptr(t)),
+                        ThreadAccess::assume(t).name(),
                         leader, cpu_n,
                     );
                 });

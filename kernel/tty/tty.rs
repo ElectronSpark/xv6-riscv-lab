@@ -52,7 +52,7 @@
 //! `tq_wait(&tty->raw_wait, &tty->lock, NULL)`.
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_short, c_void};
+use core::ffi::{c_char, c_int, c_short, c_void, CStr};
 use core::mem::MaybeUninit;
 
 use crate::bindings::{pid_t, pipe, session, slab_cache_t, termios, thread, tty};
@@ -452,11 +452,6 @@ const _: () = {
 // that their `#[no_mangle]` exports are gone -- crate-path imports.
 use crate::printf::Printf;
 
-unsafe extern "C" {
-    pub safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
-
-}
-
 // P3-D3a: `either_copyin`/`either_copyout` (mm/vm.rs) are ordinary (safe)
 // Rust fns now that their `#[no_mangle]` exports are gone; reached as
 // crate-path items instead of the `extern "C"` redeclarations that used
@@ -723,7 +718,9 @@ impl Tty {
             (*raw).output_pipe = outp;
             (*raw).driver_data = core::ptr::null_mut();
             (*raw).session = core::ptr::null_mut();
-            safestrcpy((*raw).name.as_mut_ptr(), name, (*raw).name.len());
+            // The caller supplies a terminated name; build its bounded,
+            // initialized value before publishing this newly allocated TTY.
+            (*raw).name = crate::string::cstr_array(CStr::from_ptr(name));
         }
 
         raw

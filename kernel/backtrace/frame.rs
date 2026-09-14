@@ -1,5 +1,7 @@
 //! Checked address arithmetic for RISC-V frame records.
 
+#![forbid(unsafe_code)]
+
 const PAGE_SHIFT: u32 = 12;
 const FRAME_SIZE: u64 = 16;
 
