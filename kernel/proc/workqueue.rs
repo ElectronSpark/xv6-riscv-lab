@@ -44,7 +44,7 @@ use crate::proc::access::{
 //
 // Fault-default semantics: every real installer in this crate
 // (`sched_timer.rs::work_callback`, `pcache.rs::pcache_flush_worker`,
-// `vfs_syscall.rs::vfs_fput_work_func`, `fs.rs::iput_work_func`) only
+// `vfs_syscall.rs::vfs_fput_work_func`) only
 // ever populated the old `func` slot and left `fault` at its
 // zero-initialized `None` (grep-confirmed: no in-tree caller ever passed
 // `Some` for the old `fault` parameter). `execute()` below only reaches
@@ -58,9 +58,13 @@ pub(crate) trait WorkHandler: Sync {
     /// # Safety
     /// `w` must point to a live `work_struct` this handler was installed
     /// on (via [`WorkStruct::init`]/[`WorkStruct::create`] or their `_ex`
-    /// forms), valid for the duration of the call — see the module-level
-    /// `# Safety` note in `crate::proc::access` that every
-    /// `WorkStructRef` method already relies on.
+    /// forms). The item is detached from its queue before invocation.
+    /// If `FREE_AFTER_RUN` was set when execution began, the executor owns
+    /// reclamation: the handler must leave the allocation live and must
+    /// not requeue it. Otherwise the handler may free the item, including
+    /// an enclosing allocation, and the executor will not access it again.
+    /// The executor snapshots flags before the call; changing them inside
+    /// a handler does not transfer reclamation ownership for this execution.
     unsafe fn run(&self, w: *mut work_struct);
 
     /// Run instead of `run` when a `RUN_ON_DRAIN` item is executed
@@ -470,22 +474,26 @@ impl<'a> WorkStructRef<'a> {
         self.set_data(data);
         self.set_flags(flags);
     }
-    /// Run the callback (or, on a drained inactive queue, the fault
-    /// handler), then free the item if `FREE_AFTER_RUN` is set. After a
-    /// free the handle is dangling and must not be reused (it is not).
+    /// Snapshot execution metadata before transferring control to a handler,
+    /// which may consume the item when automatic reclamation is disabled.
     fn execute(&self, queue_active: bool) {
-        let run = queue_active || self.flag_set(WORK_STRUCT_FLAG_RUN_ON_DRAIN);
+        let work = self.as_ptr();
+        let flags = self.flags();
+        let handler = self.handler();
+        let run = queue_active || flags & WORK_STRUCT_FLAG_RUN_ON_DRAIN != 0;
+        let free_after_run = flags & WORK_STRUCT_FLAG_FREE_AFTER_RUN != 0;
         if run {
-            if let Some(h) = self.handler() {
-                // SAFETY: `self.as_ptr()` is this handle's own live
-                // `work_struct`, exactly the contract `WorkHandler::run`/
-                // `::fault` document.
+            if let Some(h) = handler {
+                // SAFETY: work is live and detached. The snapshotted flags
+                // select the reclamation contract documented by WorkHandler.
                 unsafe {
-                    if !queue_active { h.fault(self.as_ptr()); } else { h.run(self.as_ptr()); }
+                    if !queue_active { h.fault(work); } else { h.run(work); }
                 }
             }
         }
-        if self.flag_set(WORK_STRUCT_FLAG_FREE_AFTER_RUN) { free_ptr(self.as_ptr()); }
+        // Do not read through self here: VFS and timer handlers can already
+        // have freed work. With automatic reclamation, handlers retain it.
+        if free_after_run { free_ptr(work); }
     }
 }
 

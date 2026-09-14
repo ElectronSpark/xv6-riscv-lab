@@ -83,7 +83,7 @@ use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use crate::bindings::{
     fs_struct, hlist_bucket_t, hlist_entry_t, hlist_t, kobject, list_node_t,
     mutex_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
-    vfs_inode, vfs_inode_ref, vfs_superblock, work_struct,
+    vfs_inode, vfs_inode_ref, vfs_superblock,
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
 };
@@ -743,7 +743,7 @@ unsafe extern "C" {
 // P3-D3b: proc/workqueue.rs's entry points (the deferred-iput workqueue)
 // are plain safe Rust fns now that their `#[no_mangle]` exports are
 // gone; reached via the `crate::proc` glob re-export.
-use crate::proc::{WorkHandler, WorkStruct, Workqueue};
+use crate::proc::Workqueue;
 
 // P3-D3a: the slab entry points are genuinely `unsafe fn` in
 // `crate::mm::slab` now that their `#[no_mangle]` exports are gone; this
@@ -968,11 +968,9 @@ static mut VFS_FS_TYPES: list_node_t = list_node_t { prev: ptr::null_mut(), next
 static mut VFS_FS_TYPE_COUNT: u16 = 0;
 const MAX_FS_TYPES: u16 = 256;
 
-/// Workqueue for deferred `VfsInode::vfs_iput()` operations. `VfsInode::vfs_iput()` can block
-/// on the superblock wlock, inode mutex, and filesystem transactions; it
-/// must not be called directly from RCU callbacks (deadlock risk against
-/// threads waiting on the same locks for a grace period). RCU callbacks
-/// queue work here instead.
+/// Workqueue for file release after fd-table RCU reclamation. Releasing a
+/// file can call `VfsInode::vfs_iput()` and block on filesystem locks or
+/// transactions; the normal RCU callback queues that work here.
 static mut __VFS_DEFERRED_IPUT_WQ: *mut workqueue = ptr::null_mut();
 
 /// The absolute VFS root inode: a synthesized sentinel with no
@@ -2081,29 +2079,28 @@ impl VfsSuperblock {
             if inode.is_null() {
                 return Err(Errno::NoEnt);
             }
-            // CRITICAL: take a reference BEFORE locking to prevent
-            // use-after-free. Backendless filesystems keep refcount=0,
-            // n_links>0 inodes alive in cache; allow bumping from 0 in that
-            // case, otherwise the inode is unreachable.
+            // The caller's superblock read/write lock pins every inode in
+            // this hash: removal and reclamation require its write lock.
+            // Validate under the inode mutex before taking a reference, so
+            // a rejected lookup never needs a possibly allocating deferred
+            // iput while the caller still holds the superblock lock.
+            VfsInode::vfs_ilock(inode);
+            if (*inode).flags.valid() == 0 || (*inode).flags.destroying() != 0 {
+                VfsInode::vfs_iunlock(inode);
+                return Err(Errno::NoEnt);
+            }
+            // Backendless filesystems keep linked, valid inodes cached at
+            // refcount zero. The inode mutex serializes their resurrection.
             if !VfsInode::vfs_idup_not_zero(inode) {
                 if (*sb).flags.backendless() != 0
                     && (*inode).n_links > 0
-                    && (*inode).flags.valid() != 0
-                    && (*inode).flags.destroying() == 0
+                    && VfsInode::inode_refcount(inode) == 0
                 {
                     VfsInode::inode_refcount_atomic(inode).fetch_add(1, Ordering::SeqCst);
                 } else {
+                    VfsInode::vfs_iunlock(inode);
                     return Err(Errno::NoEnt); // Inode is dying.
                 }
-            }
-            VfsInode::vfs_ilock(inode);
-            if (*inode).flags.valid() == 0 || (*inode).flags.destroying() != 0 {
-                // Invalidated or being destroyed after being fetched from the
-                // cache. Can't call vfs_iput here (caller may hold sb wlock);
-                // queue to the workqueue instead.
-                VfsInode::vfs_iunlock(inode);
-                Vfs::queue_deferred_iput(inode);
-                return Err(Errno::NoEnt);
             }
             Ok(inode)
         }
@@ -3107,24 +3104,6 @@ impl VfsInode {
 /// is a zero-sized marker, same precedent as `mm/kalloc.rs`'s `Kmem`.
 pub(crate) struct Vfs;
 
-/// ZST `WorkHandler` implementor (TRAIT-OPS): one `'static` instance's
-/// address is taken (`Some(&VFS_IPUT_WORK_HANDLER)`) as the work item's
-/// handler in `Vfs::queue_deferred_iput` below. Body moved verbatim from
-/// the former `Vfs::iput_work_func` associated fn (was the old `func`
-/// slot); this item never populated the old `fault` slot, so
-/// `WorkHandler::fault`'s default (no-op) is used unmodified.
-struct VfsIputWorkHandler;
-impl WorkHandler for VfsIputWorkHandler {
-    unsafe fn run(&self, work: *mut work_struct) {
-        unsafe {
-            let inode = (*work).data as *mut vfs_inode;
-            VfsInode::vfs_iput(inode);
-            WorkStruct::free(work);
-        }
-    }
-}
-static VFS_IPUT_WORK_HANDLER: VfsIputWorkHandler = VfsIputWorkHandler;
-
 impl Vfs {
     /// Mirrors `Vfs::vfs_init()`.
     ///
@@ -3242,26 +3221,6 @@ impl Vfs {
     /// Mirrors `Vfs::vfs_get_deferred_iput_wq()`.
     pub(crate) fn vfs_get_deferred_iput_wq() -> *mut workqueue {
         unsafe { __VFS_DEFERRED_IPUT_WQ }
-    }
-
-    /// Mirrors `__vfs_queue_deferred_iput()`.
-    unsafe fn queue_deferred_iput(inode: *mut vfs_inode) {
-        unsafe {
-            let wq = Vfs::vfs_get_deferred_iput_wq();
-            if wq.is_null() {
-                VfsInode::vfs_iput(inode);
-                return;
-            }
-            let work = WorkStruct::create(Some(&VFS_IPUT_WORK_HANDLER), inode as u64);
-            if work.is_null() {
-                crate::kprintln!(
-                    "__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput"
-                );
-                VfsInode::vfs_iput(inode);
-                return;
-            }
-            Workqueue::queue(wq, work);
-        }
     }
 
     /// Mirrors `Vfs::__vfs_shrink_caches()`. Called from `tmpfs`/`xv6fs` smoketest

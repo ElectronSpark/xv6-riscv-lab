@@ -44,6 +44,8 @@
 //!   * T7 `free_after_run_stress` — `WORK_STRUCT_FLAG_FREE_AFTER_RUN`
 //!     correctly self-frees a batch of heap work structs after they run,
 //!     with no caller-side `free_work_struct` call, and without crashing.
+//!   * T8 `callback_owned_work` — default-flag callbacks free their own
+//!     work items, exercising the ownership used by VFS and timer handlers.
 //!
 //! Not attempted: deterministically forcing the *drain* path (a killed
 //! workqueue's idle workers running still-queued `RUN_ON_DRAIN` work through
@@ -62,7 +64,7 @@
 //! this is a real, pre-existing property of the API (the one production
 //! workqueue, the global pcache flush queue, is meant to live for the
 //! kernel's lifetime), not a bug in this test file. Each case here leaks one
-//! small slab-backed `workqueue` object; at 7 cases total this is
+//! small slab-backed `workqueue` object; at 8 cases total this is
 //! negligible and was judged not worth carrying scope into `workqueue.rs`
 //! (not in this task's touch list) to add a destructor.
 //!
@@ -194,6 +196,17 @@ impl WorkHandler for CbNoop {
     unsafe fn run(&self, _w: *mut work_struct) {}
 }
 static CB_NOOP: CbNoop = CbNoop;
+
+/// Matches VFS/timer ownership: the callback consumes the work allocation,
+/// and the executor must not inspect its flags or handler afterward.
+struct CbSelfFree;
+impl WorkHandler for CbSelfFree {
+    unsafe fn run(&self, work: *mut work_struct) {
+        WorkStruct::free(work);
+        RUN_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+}
+static CB_SELF_FREE: CbSelfFree = CbSelfFree;
 
 // ===========================================================================
 // T1: ctor invoked synchronously on create.
@@ -370,6 +383,36 @@ fn t7_free_after_run_stress() {
 }
 
 // ===========================================================================
+// T8: callbacks reclaim their own default-flag work, as VFS and timers do.
+// ===========================================================================
+fn t8_callback_owned_work() {
+    RUN_COUNT.store(0, Ordering::SeqCst);
+    let wq = Workqueue::create(c"wqtest_t8".as_ptr(), 4);
+    if wq.is_null() {
+        case_fail();
+        return;
+    }
+    let mut queued = 0;
+    for _ in 0..64 {
+        let work = WorkStruct::create(Some(&CB_SELF_FREE), 0);
+        if work.is_null() {
+            case_fail();
+            break;
+        }
+        if !Workqueue::queue(wq, work) {
+            WorkStruct::free(work);
+            case_fail();
+            break;
+        }
+        queued += 1;
+    }
+    if !wait_for(&RUN_COUNT, queued, 4000) {
+        case_fail();
+    }
+    Workqueue::kill(wq);
+}
+
+// ===========================================================================
 // Master + entry point
 // ===========================================================================
 
@@ -386,6 +429,7 @@ extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
     run_test(c"T5 queue_work_fails_when_killed", t5_queue_work_fails_when_killed);
     run_test(c"T6 multi_worker_concurrency", t6_multi_worker_concurrency);
     run_test(c"T7 free_after_run_stress", t7_free_after_run_stress);
+    run_test(c"T8 callback_owned_work", t8_callback_owned_work);
 
     let passed = TESTS_PASSED.load(Ordering::SeqCst);
     let total = TESTS_RUN.load(Ordering::SeqCst);
