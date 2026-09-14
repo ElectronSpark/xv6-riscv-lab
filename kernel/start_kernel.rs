@@ -256,8 +256,14 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         // Early memory detection from FDT (lightweight scan, no allocations)
         let mut mem_base: u64 = 0x8000_0000; // Default for QEMU
         let mut mem_size: u64 = 128 * 1024 * 1024;
-        if Fdt::fdt_early_scan_memory(fdt_base, &mut mem_base, &mut mem_size) == 0 {
-            // Successfully found memory from FDT
+        let kernel_end = (&raw const end) as u64;
+        let source = Fdt::source_extent(fdt_base);
+        if let Ok(Some(region)) = Fdt::early_memory(fdt_base) {
+            // The allocator manages one bank, which must contain the kernel.
+            if region.base <= kernel_end && region.base.checked_add(region.size).is_some_and(|limit| limit > kernel_end) {
+                mem_base = region.base;
+                mem_size = region.size;
+            }
         }
 
         // Set up memory boundaries for early allocator
@@ -265,16 +271,32 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         __physical_memory_end = mem_base + mem_size;
         __physical_total_pages = mem_size >> 12;
 
-        // Early allocator uses memory after kernel end
-        early_allocator_init(&raw const end as *mut c_void, __physical_memory_end as *mut c_void);
+        // The firmware DTB can live inside RAM (QEMU puts it near the top).
+        // Keep the entire source outside the arena until Fdt::init has copied
+        // it; allocator metadata must not overwrite bytes being parsed.
+        let arena_end = if let Ok(ref extent) = source {
+            assert!(extent.end <= kernel_end || extent.start >= kernel_end,
+                "boot device tree overlaps the kernel end");
+            if extent.start >= kernel_end { __physical_memory_end.min(extent.start) }
+                else { __physical_memory_end }
+        } else { __physical_memory_end };
+        assert!(arena_end > kernel_end, "no memory for early allocations");
+        early_allocator_init(kernel_end as *mut c_void, arena_end as *mut c_void);
         Kobject::kobject_global_init();
         Printf::printfinit();
         crate::kprintln!(
             "\nxv6 kernel booting (hart {})\n",
             hartid,
         );
-        Fdt::fdt_init(fdt_base);
-        // Fdt::fdt_walk(fdt_base);
+        // Rejected bytes were not reserved from the arena and must not be
+        // inspected again after early allocation has begun.
+        let fdt_result = match source {
+            Ok(_) => Fdt::init(fdt_base),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = fdt_result {
+            crate::kprintln!("device tree initialization failed: {:?}", error);
+        }
 
         // Apply platform configuration from FDT to kernel globals
         Fdt::fdt_apply_platform_config();
