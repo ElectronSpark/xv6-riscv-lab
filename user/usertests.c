@@ -6,6 +6,7 @@
 #include "uabi/signo.h"
 #include "uabi/linux_dirent64.h"
 #include "uabi/statfs.h"
+#include "uabi/wait.h"
 
 //
 // Tests xv6 system calls.  usertests without arguments runs them all
@@ -25,6 +26,35 @@ static int MAXFILE;
 #define BUFSZ ((MAXOPBLOCKS + 2) * BSIZE)
 
 char buf[(MAXOPBLOCKS + 2) * 4096]; // statically sized to max possible BUFSZ
+
+// Wait returns a POSIX status word, not the argument passed to exit().
+// A negative expected_pid permits any child when collecting a group.
+static int wait_child(char *s, int expected_pid) {
+    int status;
+    int pid = wait(&status);
+    if (pid < 0 || (expected_pid >= 0 && pid != expected_pid)) {
+        printf("%s: wait returned %d, expected child %d\n", s, pid,
+               expected_pid);
+        exit(1);
+    }
+    return status;
+}
+
+static int child_exit_code(char *s, int status) {
+    if (!WIFEXITED(status)) {
+        printf("%s: child did not exit normally (wait status %d)\n", s,
+               status);
+        exit(1);
+    }
+    return WEXITSTATUS(status);
+}
+
+static void expect_segv(char *s, int status) {
+    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV) {
+        printf("%s: expected SIGSEGV, got wait status %d\n", s, status);
+        exit(1);
+    }
+}
 
 //
 // Section with tests that run fairly quickly.  Use -q if you want to
@@ -194,7 +224,7 @@ void copyinstr2(char *s) {
     }
 
     int st = 0;
-    wait(&st);
+    st = wait_child(s, pid);
     if (!WIFEXITED(st) || WEXITSTATUS(st) != (747 & 0xff)) {
         printf("exec(echo, BIG) succeeded, should have failed\n");
         exit(1);
@@ -411,9 +441,9 @@ void truncate3(char *s) {
         close(fd);
     }
 
-    wait(&xstatus);
+    xstatus = wait_child(s, pid);
     unlink("truncfile");
-    exit(xstatus);
+    exit(child_exit_code(s, xstatus));
 }
 
 // does chdir() call iput(p->cwd) in a transaction?
@@ -476,8 +506,8 @@ void exitiputtest(char *s) {
         }
         exit(0);
     }
-    wait(&xstatus);
-    exit(xstatus);
+    xstatus = wait_child(s, pid);
+    exit(child_exit_code(s, xstatus));
 }
 
 // does the error path in open() for attempt to write a
@@ -516,8 +546,8 @@ void openiputtest(char *s) {
         printf("%s: rmdir failed\n", s);
         exit(1);
     }
-    wait(&xstatus);
-    exit(xstatus);
+    xstatus = wait_child(s, pid);
+    exit(child_exit_code(s, xstatus));
 }
 
 // simple file system tests
@@ -730,9 +760,10 @@ void exectest(char *s) {
     }
     if (wait(&xstatus) != pid) {
         printf("%s: wait failed!\n", s);
+        exit(1);
     }
     if (xstatus != 0)
-        exit(xstatus);
+        exit(child_exit_code(s, xstatus));
 
     fd = open("echo-ok", O_RDONLY);
     if (fd < 0) {
@@ -797,8 +828,8 @@ void pipe1(char *s) {
             exit(1);
         }
         close(fds[0]);
-        wait(&xstatus);
-        exit(xstatus);
+        xstatus = wait_child(s, pid);
+        exit(child_exit_code(s, xstatus));
     } else {
         printf("%s: fork() failed\n", s);
         exit(1);
@@ -824,7 +855,7 @@ void killstatus(char *s) {
         }
         sleep(100);
         kill(pid1, SIGKILL);
-        wait(&xst);
+        xst = wait_child(s, pid1);
         if (!WIFSIGNALED(xst) || WTERMSIG(xst) != SIGKILL) {
             printf("%s: status should indicate death by SIGKILL\n", s);
             exit(1);
@@ -994,7 +1025,7 @@ void forkfork(char *s) {
 
     int xstatus;
     for (int i = 0; i < N; i++) {
-        wait(&xstatus);
+        xstatus = wait_child(s, -1);
         if (xstatus != 0) {
             printf("%s: fork in child failed", s);
             exit(1);
@@ -1058,7 +1089,12 @@ void mem(char *s) {
     void *m1, *m2;
     int pid;
 
-    if ((pid = fork()) == 0) {
+    pid = fork();
+    if (pid < 0) {
+        printf("%s: fork failed\n", s);
+        exit(1);
+    }
+    if (pid == 0) {
         m1 = 0;
         while ((m2 = malloc(10001)) != 0) {
             *(char **)m2 = m1;
@@ -1078,13 +1114,13 @@ void mem(char *s) {
         exit(0);
     } else {
         int xstatus;
-        wait(&xstatus);
-        if (xstatus == -1) {
-            // probably page fault, so might be lazy lab,
-            // so OK.
+        xstatus = wait_child(s, pid);
+        if (WIFSIGNALED(xstatus) && WTERMSIG(xstatus) == SIGSEGV) {
+            // Lazy sbrk reserves address space. Physical exhaustion can
+            // instead terminate the child while malloc touches a page.
             exit(0);
         }
-        exit(xstatus);
+        exit(child_exit_code(s, xstatus));
     }
 }
 
@@ -1104,6 +1140,10 @@ void sharedfd(char *s) {
         exit(1);
     }
     pid = fork();
+    if (pid < 0) {
+        printf("%s: fork failed\n", s);
+        exit(1);
+    }
     memset(buf, pid == 0 ? 'c' : 'p', sizeof(buf));
     for (i = 0; i < N; i++) {
         if (write(fd, buf, sizeof(buf)) != sizeof(buf)) {
@@ -1115,9 +1155,9 @@ void sharedfd(char *s) {
         exit(0);
     } else {
         int xstatus;
-        wait(&xstatus);
+        xstatus = wait_child(s, pid);
         if (xstatus != 0)
-            exit(xstatus);
+            exit(child_exit_code(s, xstatus));
     }
 
     close(fd);
@@ -1183,9 +1223,9 @@ void fourfiles(char *s) {
 
     int xstatus;
     for (pi = 0; pi < NCHILD; pi++) {
-        wait(&xstatus);
+        xstatus = wait_child(s, -1);
         if (xstatus != 0)
-            exit(xstatus);
+            exit(child_exit_code(s, xstatus));
     }
 
     for (i = 0; i < NCHILD; i++) {
@@ -1248,7 +1288,7 @@ void createdelete(char *s) {
 
     int xstatus;
     for (pi = 0; pi < NCHILD; pi++) {
-        wait(&xstatus);
+        xstatus = wait_child(s, -1);
         if (xstatus != 0)
             exit(1);
     }
@@ -1410,7 +1450,7 @@ void concreate(char *s) {
             exit(0);
         } else {
             int xstatus;
-            wait(&xstatus);
+            xstatus = wait_child(s, pid);
             if (xstatus != 0)
                 exit(1);
         }
@@ -2040,8 +2080,10 @@ void sbrkbasic(char *s) {
         exit(1);
     }
 
-    wait(&xstatus);
-    if (xstatus == 1) {
+    xstatus = wait_child(s, pid);
+    if (WIFSIGNALED(xstatus)) {
+        expect_segv(s, xstatus);
+    } else if (child_exit_code(s, xstatus) != 0) {
         printf("%s: too much memory allocated!\n", s);
         exit(1);
     }
@@ -2070,8 +2112,8 @@ void sbrkbasic(char *s) {
     }
     if (pid == 0)
         exit(0);
-    wait(&xstatus);
-    exit(xstatus);
+    xstatus = wait_child(s, pid);
+    exit(child_exit_code(s, xstatus));
 }
 
 void sbrkmuch(char *s) {
@@ -2153,9 +2195,8 @@ void kernmem(char *s) {
             exit(1);
         }
         int xstatus;
-        wait(&xstatus);
-        if (xstatus >= 0) // did kernel kill child?
-            exit(1);
+        xstatus = wait_child(s, pid);
+        expect_segv(s, xstatus);
     }
 }
 
@@ -2175,9 +2216,8 @@ void MAXVAplus(char *s) {
             exit(1);
         }
         int xstatus;
-        wait(&xstatus);
-        if (xstatus >= 0) // did kernel kill child?
-            exit(1);
+        xstatus = wait_child(s, pid);
+        expect_segv(s, xstatus);
     }
 }
 
@@ -2245,9 +2285,8 @@ void sbrkfail(char *s) {
         printf("%s: allocate a lot of memory succeeded %d\n", s, n);
         exit(1);
     }
-    wait(&xstatus);
-    if (xstatus >= 0 && xstatus != 2)
-        exit(1);
+    xstatus = wait_child(s, pid);
+    expect_segv(s, xstatus);
 }
 
 // test reads/writes from/to allocated memory
@@ -2331,9 +2370,9 @@ void bigargtest(char *s) {
         exit(1);
     }
 
-    wait(&xstatus);
+    xstatus = wait_child(s, pid);
     if (xstatus != 0)
-        exit(xstatus);
+        exit(child_exit_code(s, xstatus));
     fd = open("bigarg-ok", 0);
     if (fd < 0) {
         printf("%s: bigarg test failed!\n", s);
@@ -2422,11 +2461,9 @@ void stacktest(char *s) {
         printf("%s: fork failed\n", s);
         exit(1);
     }
-    wait(&xstatus);
-    if (xstatus == -1) // kernel killed child?
-        exit(0);
-    else
-        exit(xstatus);
+    xstatus = wait_child(s, pid);
+    expect_segv(s, xstatus);
+    exit(0);
 }
 
 // check that writes to a few forbidden addresses
@@ -2452,11 +2489,8 @@ void nowrite(char *s) {
             printf("%s: fork failed\n", s);
             exit(1);
         }
-        wait(&xstatus);
-        if (xstatus == 0) {
-            // kernel did not kill child!
-            exit(1);
-        }
+        xstatus = wait_child(s, pid);
+        expect_segv(s, xstatus);
     }
     exit(0);
 }
@@ -2736,9 +2770,9 @@ void manywrites(char *s) {
 
     for (int ci = 0; ci < nchildren; ci++) {
         int st = 0;
-        wait(&st);
+        st = wait_child(s, -1);
         if (st != 0)
-            exit(st);
+            exit(child_exit_code(s, st));
     }
     exit(0);
 }
@@ -2951,9 +2985,9 @@ int run(void f(char *), char *s) {
         f(s);
         exit(0);
     } else {
-        wait(&xstatus);
+        xstatus = wait_child(s, pid);
         if (xstatus != 0)
-            printf("FAILED\n");
+            printf("FAILED (wait status %d)\n", xstatus);
         else
             printf("OK\n");
         return xstatus == 0;
