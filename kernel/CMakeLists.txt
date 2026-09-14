@@ -302,6 +302,10 @@ if(DEFINED ENV{WORKQUEUE_TEST})
     message(STATUS "WORKQUEUE_TEST enabled")
     list(APPEND RUST_TEST_FEATURES "workqueue_test")
 endif()
+if(DEFINED ENV{RCU_TEST})
+    message(STATUS "RCU_TEST enabled")
+    list(APPEND RUST_TEST_FEATURES "rcu_test")
+endif()
 list(JOIN RUST_TEST_FEATURES "," RUST_TEST_FEATURES_STR)
 
 # CMake's `Unix Makefiles` generator (this project's generator) does not

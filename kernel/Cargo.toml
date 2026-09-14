@@ -33,6 +33,8 @@ workqueue_smoke_test = []
 # gate this task leaves untouched.
 pcache_test = []
 workqueue_test = []
+# Bounded RCU synchronization/callback smoke tests, launched after SMP startup.
+rcu_test = []
 
 [profile.release]
 panic = "abort"

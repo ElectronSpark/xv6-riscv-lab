@@ -6,12 +6,10 @@
 //! (with a simple use-after-free "ASAN" poison check), negative/edge-case
 //! tests, and large-scale stress tests.
 //!
-//! Entry point: [`rcu_run_tests`] (`#[no_mangle] extern "C"`). The C
-//! prototype lives in `kernel/inc/lock/rcu.h`; the call site in
-//! `kernel/start_kernel.c` is commented out (RCU processing is now done
-//! per-CPU in idle loops), exactly as it was before this port — this
-//! module only preserves the symbol so that comment/call can be restored
-//! without further changes.
+//! `RCU_TEST=1` at CMake configuration enables the bounded smoke entry
+//! [`rcu_test_launch_tests`]. The larger legacy suite remains separately
+//! callable through [`rcu_run_tests`]; its barrier/stress and timing-based
+//! negative cases are not included in this synchronization regression gate.
 //!
 //! Uses the idiomatic [`crate::lock::rcu`] API (`KRcuRead`, `RcuPtr<T>`,
 //! `api::*`) rather than the raw C-ABI `rcu_*` functions.
@@ -1230,6 +1228,124 @@ fn test_stress_mixed_workload() {
 }
 
 // ============================================================================
+// Bounded SMP synchronization smoke gate
+// ============================================================================
+
+static HELD_READER_READY: AtomicI32 = AtomicI32::new(0);
+static HELD_READER_RELEASE: AtomicI32 = AtomicI32::new(0);
+static HELD_READER_DONE: AtomicI32 = AtomicI32::new(0);
+static HELD_WAITER_STARTED: AtomicI32 = AtomicI32::new(0);
+static HELD_WAITER_DONE: AtomicI32 = AtomicI32::new(0);
+
+fn spawn_pinned(name: &'static CStr, entry: extern "C" fn(u64, u64) -> c_int, cpu: usize, arg: u64) {
+    let thread = crate::proc::thread::Thread::kthread_create(
+        name.as_ptr(), entry as *mut c_void, arg, 0, KERNEL_STACK_ORDER,
+    );
+    kassert(!is_err_or_null(thread), c"RCU smoke: failed to create thread\n");
+    let mut attr: crate::bindings::sched_attr = unsafe { core::mem::zeroed() };
+    crate::proc::SchedAttr::init(&mut attr);
+    attr.affinity_mask = 1u64 << cpu;
+    // SAFETY: the newly constructed thread is not runnable until wakeup.
+    let entity = unsafe { (*thread).sched_entity };
+    kassert(crate::proc::SchedEntity::set_attr(entity, &attr) == 0,
+        c"RCU smoke: failed to pin thread\n");
+    Scheduler::wakeup(thread);
+}
+
+extern "C" fn held_reader(_arg: u64, _unused: u64) -> c_int {
+    let reader = KRcuRead::new();
+    HELD_READER_READY.store(1, Ordering::Release);
+    // Deliberately keep this hart non-quiescent. Only the coordinator on the
+    // other hart may release it; there is no sleeping/yielding inside RCU.
+    while HELD_READER_RELEASE.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    drop(reader);
+    HELD_READER_DONE.store(1, Ordering::Release);
+    0
+}
+
+extern "C" fn held_waiter(expedited: u64, _unused: u64) -> c_int {
+    HELD_WAITER_STARTED.store(1, Ordering::Release);
+    if expedited != 0 {
+        rcu_api::synchronize_expedited();
+    } else {
+        rcu_api::synchronize();
+    }
+    HELD_WAITER_DONE.store(1, Ordering::Release);
+    0
+}
+
+fn test_synchronize_waits_for_remote_reader() {
+    let active = crate::ipi::Ipi::get_cpu_active_mask();
+    let coordinator_cpu = machine::Riscv::cpuid() as usize;
+    let reader_cpu = (0..crate::bindings::NCPU as usize)
+        .find(|&cpu| cpu != coordinator_cpu && active & (1u64 << cpu) != 0)
+        .expect("RCU smoke requires two online harts");
+    for expedited in [0, 1] {
+        HELD_READER_READY.store(0, Ordering::Release);
+        HELD_READER_RELEASE.store(0, Ordering::Release);
+        HELD_READER_DONE.store(0, Ordering::Release);
+        HELD_WAITER_STARTED.store(0, Ordering::Release);
+        HELD_WAITER_DONE.store(0, Ordering::Release);
+        spawn_pinned(c"rcu_held_reader", held_reader, reader_cpu, 0);
+        while HELD_READER_READY.load(Ordering::Acquire) == 0 {
+            Scheduler::yield_now();
+        }
+        spawn_pinned(c"rcu_waiter", held_waiter, coordinator_cpu, expedited);
+        while HELD_WAITER_STARTED.load(Ordering::Acquire) == 0 {
+            Scheduler::yield_now();
+        }
+        // The held reader disables interrupts on its hart. A timer worker
+        // needed by sleep_ms may run there, so sleeping could prevent the
+        // coordinator from ever releasing the reader. Keep it runnable and
+        // use the hardware time counter, which advances independently of
+        // timer interrupts, while giving the waiter time to attempt its wait.
+        let observation_started = machine::Riscv::read_time();
+        let observation_ticks = machine::Riscv::ms_to_rawticks(20);
+        while machine::Riscv::read_time().wrapping_sub(observation_started) < observation_ticks {
+            Scheduler::yield_now();
+        }
+        let completed_early = HELD_WAITER_DONE.load(Ordering::Acquire) != 0;
+        // Release before reporting a failure so the remote hart is not left
+        // spinning with interrupts disabled when panic diagnostics run.
+        HELD_READER_RELEASE.store(1, Ordering::Release);
+        kassert(!completed_early, c"RCU synchronization completed with a remote reader held\n");
+        while HELD_READER_DONE.load(Ordering::Acquire) == 0
+            || HELD_WAITER_DONE.load(Ordering::Acquire) == 0
+        {
+            Scheduler::yield_now();
+        }
+    }
+    crate::kprintln!("  PASS: normal and expedited waits block until remote reader exits");
+}
+
+extern "C" fn rcu_smoke_thread(_arg: u64, _unused: u64) -> c_int {
+    crate::kprintln!("RCU synchronization smoke tests starting");
+    test_rcu_read_lock();
+    test_rcu_pointers();
+    test_synchronize_rcu();
+    test_call_rcu();
+    test_grace_period();
+    test_concurrent_readers();
+    test_list_rcu_basic();
+    test_list_rcu_concurrent_rw();
+    test_concurrent_grace_periods();
+    test_synchronize_waits_for_remote_reader();
+    crate::kprintln!("RCU synchronization smoke tests: ALL TESTS PASSED");
+    0
+}
+
+/// Launch the bounded existing-case smoke suite plus a held-remote-reader
+/// regression. The coordinator is pinned so it can always release the reader
+/// while a separate waiter yields on the same hart. Requires SMP startup.
+pub(crate) fn rcu_test_launch_tests() {
+    let active = crate::ipi::Ipi::get_cpu_active_mask();
+    kassert(active.count_ones() >= 2, c"RCU smoke requires two online harts\n");
+    spawn_pinned(c"rcu_smoke", rcu_smoke_thread, active.trailing_zeros() as usize, 0);
+}
+
+// ============================================================================
 // Main Test Runner
 // ============================================================================
 
@@ -1237,10 +1353,8 @@ fn banner() {
     crate::kprintln!("====================================================================================");
 }
 
-/// Run the full RCU test suite. Preserves the original `void
-/// rcu_run_tests(void)` C-ABI entry point declared in
-/// `kernel/inc/lock/rcu.h`; the call site in `kernel/start_kernel.c` is
-/// (and remains) commented out.
+/// Run the full legacy RCU suite, including its large stress cases.
+/// The boot feature uses the bounded smoke launcher above instead.
 pub(crate) fn rcu_run_tests() {
     SchedTimer::sleep_ms(100);
     crate::kprintln!();

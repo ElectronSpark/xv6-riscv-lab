@@ -333,7 +333,6 @@ struct RcuState {
     gp_in_progress: AtomicI32,
     gp_lazy_start: AtomicI32,
     lazy_cb_count: AtomicI32,
-    expedited_in_progress: AtomicI32,
     expedited_seq: AtomicU64,
     gp_count: AtomicU64,
     cb_invoked: AtomicU64,
@@ -348,7 +347,6 @@ impl RcuState {
             gp_in_progress: AtomicI32::new(0),
             gp_lazy_start: AtomicI32::new(0),
             lazy_cb_count: AtomicI32::new(0),
-            expedited_in_progress: AtomicI32::new(0),
             expedited_seq: AtomicU64::new(0),
             gp_count: AtomicU64::new(0),
             cb_invoked: AtomicU64::new(0),
@@ -663,7 +661,6 @@ impl Rcu {
         RCU_STATE.cb_invoked.store(0, Ordering::Release);
         RCU_STATE.gp_lazy_start.store(1, Ordering::Release);
         RCU_STATE.lazy_cb_count.store(0, Ordering::Release);
-        RCU_STATE.expedited_in_progress.store(0, Ordering::Release);
         RCU_STATE.expedited_seq.store(0, Ordering::Release);
         RCU_STATE.expedited_count.store(0, Ordering::Release);
 
@@ -798,6 +795,10 @@ impl Rcu {
         let cpu = preempt.cpuid();
         let now = machine::Riscv::read_time();
         Self::cpu_rcu_ts(cpu).store(now, Ordering::Release);
+        // Publish this quiescent state before any subsequent reader loads.
+        // Release alone only orders accesses that preceded the store. This
+        // full barrier pairs with synchronize's unlink-before-snapshot one.
+        machine::Riscv::smp_mb();
         RCU_CPU_DATA[cpu].qs_count.fetch_add(1, Ordering::Release);
         Self::advance_gp();
     }
@@ -813,7 +814,10 @@ impl Rcu {
         } else {
             let allocated = slab_alloc(RCU_HEAD_SLAB.as_mut_ptr()) as *mut RawRcuHead;
             if allocated.is_null() {
-                // Allocation failure → degrade to synchronous behaviour.
+                // A dynamic-head caller must be allowed to block on OOM.
+                // synchronize_impl validates that context and never returns
+                // before the full grace period; an invalid context is fatal
+                // instead of invoking a reclaim callback on live readers.
                 Self::synchronize_impl();
                 // SAFETY: caller-provided `RcuCallback` impl; its contract.
                 unsafe { invoke_cb(cb, data); }
@@ -902,27 +906,77 @@ impl Rcu {
     // --- synchronize ---
 
     fn synchronize_impl() {
-        let sync_ts = machine::Riscv::read_time();
-        Self::note_context_switch_impl();
+        // Capture the participants while pinned. Unlike a single wall-clock
+        // deadline, requiring a fresh publication from each hart cannot
+        // confuse an older quiescent state in the same timer tick with a new
+        // one. An online hart with timestamp zero must publish its first QS.
+        let observed = {
+            let interrupts_enabled = machine::Riscv::intr_get();
+            let pinned = PreemptGuard::new();
+            let cpu = machine::Riscv::cpu_local_ptr();
+            // SAFETY: preemption/IRQs are disabled; cpu is this hart's live
+            // static slot. The thread pointer and its own nesting counter
+            // remain valid throughout this local snapshot.
+            let (thread, in_interrupt, noff, spin_depth) = unsafe {
+                ((*cpu).proc_, (*cpu).intr_depth != 0 || (*cpu).flags & 4 != 0,
+                 (*cpu).noff, (*cpu).spin_depth)
+            };
+            if thread.is_null() {
+                Self::kpanic_msg(c"PANIC: synchronize_rcu requires a current thread\n");
+            }
+            if unsafe { (*thread).rcu_read_lock_nesting } != 0 {
+                Self::kpanic_msg(c"PANIC: synchronize_rcu inside an RCU read-side section\n");
+            }
+            if in_interrupt {
+                Self::kpanic_msg(c"PANIC: synchronize_rcu in interrupt context\n");
+            }
+            // This function's temporary pin contributes exactly one noff.
+            if !interrupts_enabled || noff != 1 || spin_depth != 0 {
+                Self::kpanic_msg(c"PANIC: synchronize_rcu requires interrupts enabled and no spinlocks\n");
+            }
 
-        let max_wait: c_int = 100_000;
-        let mut wait_count: c_int = 0;
-
-        let my_cpu = {
-            let g = PreemptGuard::new();
-            g.cpuid() as c_int
+            // Order the caller's unlink/publication before the snapshots.
+            // Each later Acquire load pairs with the remote QS Release store,
+            // placing that hart's preceding reader accesses before reclaim.
+            machine::Riscv::smp_mb();
+            let active = crate::ipi::Ipi::get_cpu_active_mask();
+            let caller_cpu = pinned.cpuid();
+            let observed: [Option<u64>; NCPU as usize] = core::array::from_fn(|index| {
+                if index != caller_cpu && active & (1u64 << index) != 0 {
+                    Some(Self::cpu_rcu_ts(index).load(Ordering::Acquire))
+                } else {
+                    None
+                }
+            });
+            // The caller has no active reader. Record that fact while it is
+            // still pinned, helping concurrent grace-period waiters too.
+            Self::note_context_switch_impl();
+            observed
         };
 
-        while wait_count < max_wait {
-            let min_ts = Self::min_other_cpu_ts(my_cpu);
-            if min_ts >= sync_ts {
+        Self::wakeup_all_kthreads();
+        let mut yields_since_warning = 0u32;
+        loop {
+            let complete = observed.iter().enumerate().all(|(cpu, previous)| {
+                previous.is_none_or(|previous| {
+                    Self::cpu_rcu_ts(cpu).load(Ordering::Acquire) > previous
+                })
+            });
+            if complete {
+                machine::Riscv::smp_mb();
                 Self::wakeup_all_kthreads();
                 return;
             }
             Scheduler::yield_now();
-            wait_count += 1;
+            yields_since_warning += 1;
+            if yields_since_warning == 100_000 {
+                // A slow/stalled reader is never permission to reclaim it.
+                // Keep waiting; the warning is diagnostic, not success.
+                Self::kwarn_msg(c"synchronize_rcu: still waiting for quiescent states\n");
+                Self::wakeup_all_kthreads();
+                yields_since_warning = 0;
+            }
         }
-        Self::kwarn_msg(c"synchronize_rcu: WARNING - not all CPUs passed quiescent state\n");
     }
 
     fn barrier_impl() {
@@ -963,65 +1017,16 @@ impl Rcu {
 
     // --- expedited ---
 
-    fn expedited_gp() {
-        let exp_start = {
-            let _g = Self::gp_lock().lock();
-            if RCU_STATE.expedited_in_progress.load(Ordering::Acquire) != 0 {
-                return;
-            }
-            RCU_STATE.expedited_in_progress.store(1, Ordering::Release);
-            RCU_STATE.expedited_seq.fetch_add(1, Ordering::AcqRel);
-            machine::Riscv::read_time()
-        };
-
-        let max_wait: c_int = 10_000;
-        let mut wait_count: c_int = 0;
-        while wait_count < max_wait {
-            let mut all_switched = true;
-            for i in 0..NCPU as usize {
-                let ts = Self::cpu_rcu_ts(i).load(Ordering::Acquire);
-                if ts == 0 {
-                    continue;
-                }
-                if ts <= exp_start {
-                    all_switched = false;
-                    break;
-                }
-            }
-            if all_switched {
-                break;
-            }
-            Scheduler::yield_now();
-            wait_count += 1;
-        }
-
-        let _g = Self::gp_lock().lock();
-        RCU_STATE.expedited_in_progress.store(0, Ordering::Release);
+    fn synchronize_expedited_impl() {
+        // Waking the per-hart drainers requests prompt scheduling/QS progress.
+        // The same strict waiter decides completion; a sequence increment at
+        // GP start or a retry budget is not evidence that readers have left.
+        Self::start_gp();
+        Self::synchronize_impl();
+        RCU_STATE.expedited_seq.fetch_add(1, Ordering::Release);
         RCU_STATE.expedited_count.fetch_add(1, Ordering::Release);
     }
 
-    fn synchronize_expedited_impl() {
-        let start_exp = RCU_STATE.expedited_seq.load(Ordering::Acquire);
-        let old_lazy = RCU_STATE.gp_lazy_start.swap(0, Ordering::AcqRel);
-
-        Self::expedited_gp();
-        Self::start_gp();
-
-        let max_wait: c_int = 50_000;
-        let mut wait_count: c_int = 0;
-        while wait_count < max_wait {
-            let current_exp = RCU_STATE.expedited_seq.load(Ordering::Acquire);
-            if current_exp > start_exp {
-                RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
-                return;
-            }
-            Self::advance_gp();
-            Scheduler::yield_now();
-            wait_count += 1;
-        }
-        RCU_STATE.gp_lazy_start.store(old_lazy, Ordering::Release);
-        Self::kwarn_msg(c"synchronize_rcu_expedited: WARNING - expedited GP did not complete\n");
-    }
 }
 
 // --- per-CPU drainer kthread ---
@@ -1322,7 +1327,9 @@ pub mod api {
     pub fn is_watching() -> bool { Rcu::is_watching_impl() }
 
     /// Wait for all pre-existing RCU read-side critical sections on
-    /// every CPU to complete.
+    /// every online CPU to complete. Requires thread context, interrupts
+    /// enabled, no spinlocks and no enclosing RCU read-side section. Invalid
+    /// contexts panic; a stalled grace period keeps waiting without reclaim.
     #[inline]
     pub fn synchronize() { Rcu::synchronize_impl() }
 
@@ -1374,8 +1381,10 @@ pub mod api {
     /// Schedule `func.run(data)` after a grace period.
     ///
     /// If `head` is null, a slab-allocated head is used and freed by
-    /// the drainer; otherwise the caller-supplied head is kept and
-    /// the caller owns it again once `func` returns.
+    /// the drainer. Allocation failure waits synchronously for a grace period,
+    /// so null-head calls require the blocking context of [`synchronize`].
+    /// Supplying an embedded head avoids that allocation and synchronous wait;
+    /// it must remain live until callback invocation.
     ///
     /// # Safety
     /// * `func` must be a valid [`RcuCallback`] impl.

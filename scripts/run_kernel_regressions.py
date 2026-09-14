@@ -46,6 +46,9 @@ def main():
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--boot-timeout", type=float, default=45)
+    parser.add_argument("--boot-marker", action="append", default=[],
+                        help="literal in-kernel test success marker required before shell tests; repeatable")
     parser.add_argument("--memory", default="1024M", help="QEMU guest RAM")
     parser.add_argument("--log", type=Path, default=Path("build/rustify-regressions.log"))
     args = parser.parse_args()
@@ -97,7 +100,7 @@ def run(args, selected, images):
         selector = selectors.DefaultSelector()
         selector.register(proc.stdout, selectors.EVENT_READ)
 
-        def until_prompt(timeout):
+        def until_prompt(timeout, required=()):
             output = bytearray()
             deadline = time.monotonic() + timeout
             failure_at = None
@@ -120,15 +123,21 @@ def run(args, selected, images):
                         failure_at = time.monotonic()
                     if time.monotonic() - failure_at >= 0.5:
                         raise RuntimeError(f"kernel/test failure:\n{clean[-5000:].decode(errors='replace')}")
-                if failure_at is None and PROMPT.search(clean):
+                if (failure_at is None and PROMPT.search(clean)
+                        and all(marker in decoded for marker in required)):
                     return clean.decode(errors="replace")
-            raise RuntimeError(f"shell timed out after {timeout:g}s")
+            raise RuntimeError(f"shell/test markers timed out after {timeout:g}s")
 
         try:
-            boot = until_prompt(45)
-            if boot.count("init: starting sh") != 1 or FAILURE.search(boot):
+            boot = until_prompt(args.boot_timeout, args.boot_marker)
+            # Concurrent in-kernel tests can interleave their output with
+            # init's character-at-a-time message. Their exact success markers
+            # plus a live shell prompt establish boot in that configuration.
+            if (not args.boot_marker and boot.count("init: starting sh") != 1) or FAILURE.search(boot):
                 raise RuntimeError("boot gate failed")
             print("PASS boot", flush=True)
+            for marker in args.boot_marker:
+                print(f"PASS {marker}", flush=True)
             for case in selected:
                 shell_command, expected = CASES[case]
                 if case == "rustnettest":

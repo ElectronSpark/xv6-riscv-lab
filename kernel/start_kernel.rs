@@ -508,8 +508,10 @@ pub(crate) fn start_kernel_post_init() {
         workqueue_test_launch_tests();
     }
 
-    // RCU processing is now done per-CPU in idle loops
-    // rcu_run_tests();
+    // A bounded synchronization/callback suite on a dedicated kernel thread.
+    // Launch after secondary harts so the held-reader regression can use SMP.
+    #[cfg(feature = "rcu_test")]
+    crate::lock::rcu_test::rcu_test_launch_tests();
 
     // #ifdef RQ_RUNTIME_TEST
     // Run queue priority tests

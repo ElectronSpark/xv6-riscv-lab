@@ -593,8 +593,12 @@ fn sched_pick_next() -> *mut thread {
 impl Scheduler {
 fn switch_to_impl(cur: *mut thread, target: *mut thread) -> *mut thread {
     unsafe {
-        let now = TimerCore::get_jiffs();
+        // RCU timestamps use the same clock on every publication path.
+        let now = Riscv::read_time();
         Scheduler::cpu_access().store_rcu_timestamp_release(now);
+        // Order this quiescent-state publication before any reader loads in
+        // the next thread. Release alone orders only the preceding accesses.
+        Riscv::smp_mb();
         Scheduler::cpu_access().set_proc(target);
         let cur_se = ThreadAccess::from_raw(cur).unwrap_unchecked().sched_entity_ptr();
         let target_se = ThreadAccess::from_raw(target).unwrap_unchecked().sched_entity_ptr();
