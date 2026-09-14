@@ -238,6 +238,7 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 #define SNDRV_PCM_HW_PARAM_BUFFER_BYTES 18
 #define SNDRV_PCM_HW_PARAM_TICK_TIME    19
 
+#define SNDRV_PCM_INFO_BATCH 0x00000010
 #define SNDRV_PCM_INFO_INTERLEAVED 0x00000100
 #define SNDRV_PCM_INFO_BLOCK_TRANSFER 0x00010000
 
@@ -2388,6 +2389,20 @@ static int alsa_ctl_elem_write(uint64 uarg)
     return alsa_ctl_elem_read(uarg);
 }
 
+static uint alsa_pcm_info_flags(void)
+{
+    uint info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER;
+
+    /*
+     * Virtio reports progress when transfer buffers complete, rather than a
+     * continuously advancing DMA position. Advertise the same BATCH contract
+     * as Linux virtio-snd so timer-driven clients account for that granularity.
+     */
+    if (virtio_snd_available())
+        info |= SNDRV_PCM_INFO_BATCH;
+    return info;
+}
+
 static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params, int finalize)
 {
     alsa_interval_t *rate_ival;
@@ -2468,7 +2483,13 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params, int finalize)
         uint min_period_frames = 64;
         uint max_period_frames = max_buffer_frames / 2;
         uint min_buffer_frames = 128;
-        uint max_periods = OSS_FRAGMENTS;
+        /*
+         * ALSA periods are logical progress intervals, not OSS fragments or
+         * virtio descriptors. Virtio writes split them into bounded transfers,
+         * so every period size in this range can use the full device buffer.
+         */
+        uint max_periods = virtio_snd_available() ?
+                          max_buffer_frames / min_period_frames : OSS_FRAGMENTS;
         uint min_rate = rate_ival->min != 0 ? rate_ival->min : 8000;
         uint max_rate = rate_ival->max != 0 ? rate_ival->max : 96000;
 
@@ -2552,8 +2573,7 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params, int finalize)
                                                 channels * 2 : 0) < 0)
             return -EINVAL;
 
-        params->info = SNDRV_PCM_INFO_INTERLEAVED |
-                       SNDRV_PCM_INFO_BLOCK_TRANSFER;
+        params->info = alsa_pcm_info_flags();
         params->msbits = 16;
         params->rate_num = 0;
         params->rate_den = 0;
@@ -2652,7 +2672,7 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params, int finalize)
     alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIODS,
                                &old_periods);
 
-    params->info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER;
+    params->info = alsa_pcm_info_flags();
     params->msbits = 16;
     params->rate_num = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE)->min;
     params->rate_den = 1;
