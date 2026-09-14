@@ -859,6 +859,27 @@ pub(super) fn wakeup_stopped(p: *mut thread) { Scheduler::scheduler_wakeup_stopp
 }
 
 // ---------------- sleep_on_chan / wakeup_on_chan ------------------------
+/// Channel waits retain SLEEP_LOCK until the actual context switch. On
+/// return, reacquire it before the tree removes an interrupted waiter.
+struct ChannelWait;
+
+impl super::thread_queue::TqWait for ChannelWait {
+    unsafe fn sleep(&self, _data: *mut c_void) -> c_int {
+        // context_switch_finish releases SLEEP_LOCK after switching away.
+        0
+    }
+
+    unsafe fn wake(&self, _data: *mut c_void, _status: c_int) {
+        // A no-switch yield retains ownership. Otherwise restore it before
+        // TtreeRef::wait_cb inspects or mutates shared waiter-tree links.
+        if Scheduler::chan_holding_impl() == 0 {
+            Scheduler::sleep_lock_irqsave_impl();
+        }
+    }
+}
+
+static CHANNEL_WAIT: ChannelWait = ChannelWait;
+
 impl Scheduler {
 fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: thread_state) -> c_int {
     let intr = Scheduler::sleep_lock_irqsave_impl();
@@ -883,13 +904,12 @@ fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: t
     }
 
     let ret = TtreeRef::from_ptr(Scheduler::chan_queue_ptr())
-        .map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(chan as u64, core::ptr::null_mut(), core::ptr::null_mut()));
+        .map_or(-(crate::bindings::EINVAL as c_int), |r| {
+            r.wait_cb(chan as u64, &CHANNEL_WAIT, core::ptr::null_mut(), core::ptr::null_mut())
+        });
 
-    // A real context switch releases SLEEP_LOCK in context_switch_finish.
-    // If yield returns without switching, this hart still owns it.
-    if Scheduler::chan_holding_impl() == 0 {
-        Scheduler::sleep_lock_irqsave_impl();
-    }
+    // CHANNEL_WAIT restores the lock before interrupted-waiter removal;
+    // the null-queue error path also still owns the original lock.
     Scheduler::thread_clear_flag(cur, THREAD_FLAG_ONCHAN);
     // SAFETY: `cur` is proven non-null by the diverging `kassert!` above.
     unsafe { ThreadAccess::assume(cur) }.set_chan(core::ptr::null_mut());

@@ -717,7 +717,7 @@ impl<'a> TtreeRef<'a> {
 
     /// Park the calling thread on this tree keyed by `key`.
     /// (Former free fn `ttree_wait_cb_impl`, valid-queue path.)
-    fn wait_cb(
+    pub(super) fn wait_cb(
         &self,
         key: uint64,
         cb: &'static dyn TqWait,
@@ -755,14 +755,6 @@ impl<'a> TtreeRef<'a> {
             write_out(rdata, wr.data());
         }
         wr.error_no()
-    }
-
-    /// Spinlock-backed keyed park. (Former free fn `ttree_wait_impl`,
-    /// valid-queue path.) NO-STANDALONE-FN: `pub(super)` — sole caller is
-    /// `crate::proc::sched` (former `ttree_wait` delegator deleted).
-    #[inline]
-    pub(super) fn wait(&self, key: uint64, lock: *mut spinlock_t, rdata: *mut u64) -> c_int {
-        self.wait_cb(key, &SPIN_TQ_WAIT, lock as *mut c_void, rdata)
     }
 
     /// Wake the smallest-key waiter matching `key`. (Former free fn
