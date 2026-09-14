@@ -19,6 +19,78 @@ static void expect_file(const char *path) {
     close(fd);
 }
 
+static void check_directory_records(const char *directory) {
+    const char *linkpath = "/rvfstest/mnt/padding";
+    char target[64];
+    memset(target, 'P', sizeof(target) - 1);
+    // This kernel stores symlink targets as absolute paths. Keep the fixture
+    // absolute so normalization cannot prepend '/' and exceed the 64-byte
+    // readlink buffer (the backend also reserves space for a terminator).
+    target[0] = '/';
+    target[sizeof(target) - 1] = 0;
+    if (symlink(target, linkpath) < 0)
+        fail("create padding-test symlink");
+
+    int fd = open(directory, O_RDONLY);
+    unsigned char bytes[64];
+    if (fd < 0)
+        fail("open directory for record checks");
+    if (getdents(fd, bytes, -1) != -EINVAL)
+        fail("negative getdents count must return EINVAL");
+    if (getdents(fd, bytes, 0) != 0 || getdents(fd, bytes, 1) != 0)
+        fail("short directory buffer changed behavior");
+
+    int records = 0;
+    for (;;) {
+        // Dirty a scratch allocation in the same size class immediately
+        // before getdents. Its previous raw slab buffer copied this old data
+        // through the padding after each directory entry's name.
+        char copied[64];
+        if (readlink(linkpath, copied, sizeof(copied)) != 63 ||
+            memcmp(copied, target, 63) != 0)
+            fail("readlink scratch buffer contents");
+        memset(bytes, 0xcc, sizeof(bytes));
+        int n = getdents(fd, bytes, sizeof(bytes));
+        if (n < 0 || n > sizeof(bytes))
+            fail("directory read size");
+        if (n == 0)
+            break;
+        for (int offset = 0; offset < n;) {
+            if (n - offset < 19)
+                fail("truncated directory record header");
+            uint16 reclen;
+            memmove(&reclen, bytes + offset + 16, sizeof(reclen));
+            if (reclen < 20 || reclen % 8 || reclen > n - offset)
+                fail("invalid directory record length");
+            int end = offset + reclen;
+            int name_end = offset + 19;
+            while (name_end < end && bytes[name_end] != 0)
+                name_end++;
+            if (name_end == end)
+                fail("directory name has no terminator");
+            for (int i = name_end + 1; i < end; i++)
+                if (bytes[i] != 0)
+                    fail("directory record leaked nonzero padding");
+            records++;
+            offset = end;
+        }
+        for (int i = n; i < sizeof(bytes); i++)
+            if (bytes[i] != 0xcc)
+                fail("getdents wrote past returned byte count");
+    }
+    if (records < 3)
+        fail("directory record checks did not cover multiple entries");
+    close(fd);
+    fd = open(directory, O_RDONLY);
+    if (fd < 0 || getdents(fd, (void *)-1, sizeof(bytes)) != -EFAULT)
+        fail("getdents invalid copy address");
+    close(fd);
+    if (readlink(linkpath, (char *)-1, 64) != -EFAULT)
+        fail("readlink invalid copy address");
+    if (unlink(linkpath) < 0)
+        fail("remove padding-test symlink");
+}
+
 int main(void) {
     const char *base = "/rvfstest";
     const char *mounted = "/rvfstest/mnt";
@@ -76,6 +148,8 @@ int main(void) {
     expect_file("../file");
     if (chdir("/") < 0)
         fail("restore working directory");
+
+    check_directory_records(mounted);
 
     int pid = fork();
     if (pid < 0)

@@ -8,6 +8,7 @@
 //! at the crate root — `mm` does not own them.
 
 mod bits;
+pub(crate) mod buffer;
 pub(crate) mod cffi;
 pub(crate) mod page;
 pub(crate) mod slab;

@@ -67,8 +67,8 @@
 //! `size_of` is 24 bytes (8 + 8 + 2 + 1, rounded up to 8-byte
 //! alignment), identical to the C `sizeof(struct linux_dirent64)`, and
 //! [`sys_getdents`] writes the variable-length name and NUL terminator
-//! itself via raw pointer arithmetic at `header_size + name_len + 1`,
-//! exactly like the C original's `de->d_name[name_len] = '\0'`.
+//! using checked byte slices at the ABI name offset. Every returned record,
+//! including its alignment padding, is initialized before copying to userspace.
 //! `struct pollfd_k` (userspace's `struct pollfd`, never exposed in any
 //! kernel header — the C original defined it locally too) is
 //! hand-mirrored as [`PollfdK`] for the same reason.
@@ -126,14 +126,7 @@ unsafe extern "C" {
 // plain `use`.
 use crate::irq::syscall::Syscall;
 
-// P3-D3a: the mm/vm.rs entry points are ordinary (safe) Rust fns now that
-// their `#[no_mangle]` exports are gone; reached as crate-path items
-// instead of the `extern "C"` redeclarations that used to sit in the
-// block above (identical signatures). `kmm_alloc`/`kmm_free` are
-// genuinely `unsafe fn` in `crate::mm::kalloc`; `cffi::raw`'s existing
-// thin safe wrappers (identical signatures) preserve the `safe fn`
-// facade the old redeclarations asserted.
-use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
+use crate::mm::buffer::KernelBuffer;
 use crate::mm::{either_copyin, either_copyout, Vm};
 
 // P3-1C mesh sweep: vfs/{inode,file,fdtable,fs}.rs are in scope for this
@@ -319,6 +312,12 @@ struct PollfdK {
     events: c_short,
     revents: c_short,
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<PollfdK>() == 8);
+    assert!(core::mem::offset_of!(PollfdK, events) == 4);
+    assert!(core::mem::offset_of!(PollfdK, revents) == 6);
+};
 
 #[inline(always)]
 fn mkdev(major: c_int, minor: c_int) -> crate::bindings::dev_t {
@@ -1103,24 +1102,20 @@ impl Sys {
             return Err(Errno::NoEnt);
         }
 
-        let kbuf = kmm_alloc(bufsz as usize);
-        if kbuf.is_null() {
-            VfsInode::vfs_iput(inode);
-            return Err(Errno::NoMem);
-        }
-
-        let len = VfsInode::vfs_readlink(inode, kbuf as *mut c_char, bufsz as usize);
-        VfsInode::vfs_iput(inode);
+        // SAFETY: vfs_get_dentry_inode transferred this held reference.
+        let inode = unsafe { IRef::from_raw(inode) };
+        let mut kbuf = KernelBuffer::zeroed(bufsz as usize).ok_or(Errno::NoMem)?;
+        let len = VfsInode::vfs_readlink(IRef::as_ptr(&inode), kbuf.as_mut_ptr().cast(), kbuf.len());
         if len < 0 {
-            kmm_free(kbuf);
             return Err(Errno::Raw(len as c_int));
         }
-
-        if either_copyout(1, buf_addr, kbuf, len as u64) < 0 {
-            kmm_free(kbuf);
+        // A backend must never claim more initialized bytes than requested.
+        let bytes = kbuf.get(..len as usize).ok_or(Errno::Io)?;
+        // either_copyout's legacy signature takes a mutable source pointer but
+        // only reads the initialized bytes retained by this buffer owner.
+        if either_copyout(1, buf_addr, bytes.as_ptr().cast_mut().cast(), bytes.len() as u64) < 0 {
             return Err(Errno::Fault);
         }
-        kmm_free(kbuf);
         Ok(len)
     }
 }
@@ -2020,99 +2015,92 @@ fn mode_to_dtype(mode: mode_t) -> u8 {
 /// matching the original's unconditional final `bytes_written as u64`.
 impl Sys {
     fn getdents_inner(fd: c_int, dirp: u64, count: c_int) -> KResult<usize> {
+        let count = usize::try_from(count).map_err(|_| Errno::Inval)?;
         let f = Sys::vfs_argfd(fd);
         if f.is_null() {
             return Err(Errno::BadF);
         }
 
-        // SAFETY: non-null `f`.
-        let inode = FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) });
-        if inode.is_null() || !is_dir(unsafe { (*inode).mode }) {
-            VfsFile::vfs_fput(f);
-            return Err(Errno::NotDir);
-        }
+        // The held fd lookup reference pins f throughout the closure. Drop
+        // its mutex guard before releasing that reference below, on every path.
+        let result = (|| {
+            let _guard = KMutex::from_ptr(unsafe { ptr::addr_of_mut!((*f).lock) }).lock();
+            let inode = FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) });
+            if inode.is_null() || !is_dir(unsafe { (*inode).mode }) {
+                return Err(Errno::NotDir);
+            }
+            let mut kbuf = KernelBuffer::zeroed(count).ok_or(Errno::NoMem)?;
+            let mut bytes_written = 0;
 
-        let kbuf = kmm_alloc(count as usize);
-        if kbuf.is_null() {
-            VfsFile::vfs_fput(f);
-            return Err(Errno::NoMem);
-        }
-
-        let mut bytes_written: usize = 0;
-        let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
-
-        while (bytes_written as c_int) < count {
-            // Save iterator state before calling vfs_dir_iter, in case we need
-            // to revert it.
-            // SAFETY: non-null `f`.
-            let (saved_cookies, saved_index) =
-                unsafe { ((*f).pos.dir_iter.cookies, (*f).pos.dir_iter.index) };
-
-            let ret = VfsInode::vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).pos.dir_iter) }, &mut dentry);
-            if ret != 0 {
-                kmm_free(kbuf);
-                VfsFile::vfs_fput(f);
-                return Err(Errno::Raw(ret));
+            // A successful iterator call transfers the allocated entry name.
+            // Its guard releases that name on every record/space/error path.
+            struct Entry(vfs_dentry);
+            impl Drop for Entry {
+                fn drop(&mut self) { vfs_release_dentry(&mut self.0); }
             }
 
-            if dentry.name.is_null() {
-                // End of directory.
-                break;
-            }
-
-            let name_len = dentry.name_len as usize;
-            let mut reclen = core::mem::size_of::<LinuxDirent64Header>() + name_len + 1;
-            reclen = (reclen + 7) & !7; // Align to 8 bytes.
-
-            if bytes_written + reclen > count as usize {
-                // Not enough space; restore the iterator state for the next call.
-                // SAFETY: non-null `f`.
-                unsafe {
-                    (*f).pos.dir_iter.cookies = saved_cookies;
-                    (*f).pos.dir_iter.index = saved_index;
+            while bytes_written < count {
+                // SAFETY: the file reference is live and its mutex serializes
+                // directory cookies with every other operation on this file.
+                let (saved_cookies, saved_index) =
+                    unsafe { ((*f).pos.dir_iter.cookies, (*f).pos.dir_iter.index) };
+                let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
+                let ret = VfsInode::vfs_dir_iter(inode, unsafe { ptr::addr_of_mut!((*f).pos.dir_iter) }, &mut dentry);
+                if ret != 0 {
+                    return Err(Errno::Raw(ret));
                 }
-                vfs_release_dentry(&mut dentry);
-                break;
+                let mut entry = Entry(dentry);
+                let dentry = &mut entry.0;
+                if dentry.name.is_null() { break; }
+
+                let name_len = dentry.name_len as usize;
+                // Retain the existing record-size convention while checking
+                // every addition before creating a slice or truncating to u16.
+                let reclen = core::mem::size_of::<LinuxDirent64Header>()
+                    .checked_add(name_len).and_then(|len| len.checked_add(8))
+                    .map(|len| len & !7).ok_or(Errno::Io)?;
+                let end = bytes_written.checked_add(reclen).ok_or(Errno::Io)?;
+                if end > count {
+                    // Preserve the entry for the next call when it cannot fit.
+                    unsafe {
+                        (*f).pos.dir_iter.cookies = saved_cookies;
+                        (*f).pos.dir_iter.index = saved_index;
+                    }
+                    break;
+                }
+                let reclen_u16 = u16::try_from(reclen).map_err(|_| Errno::Io)?;
+                let child = VfsInode::vfs_get_dentry_inode(dentry);
+                let d_type = if !is_err_or_null(child) {
+                    let kind = mode_to_dtype(unsafe { (*child).mode });
+                    VfsInode::vfs_iput(child);
+                    kind
+                } else { DT_UNKNOWN };
+
+                let record = &mut kbuf[bytes_written..end];
+                // Userspace receives the whole aligned record. Initialize all
+                // padding as well as the fields to avoid exposing old slab data.
+                record.fill(0);
+                record[0..8].copy_from_slice(&dentry.ino.to_ne_bytes());
+                record[8..16].copy_from_slice(&unsafe { (*f).pos.dir_iter.index }.to_ne_bytes());
+                record[16..18].copy_from_slice(&reclen_u16.to_ne_bytes());
+                record[18] = d_type;
+                // SAFETY: a successful iterator owns a name allocation with
+                // name_len readable bytes until Entry drops it below.
+                let name = unsafe { core::slice::from_raw_parts(dentry.name.cast::<u8>(), name_len) };
+                record[LINUX_DIRENT64_NAME_OFFSET..LINUX_DIRENT64_NAME_OFFSET + name_len]
+                    .copy_from_slice(name);
+                bytes_written = end;
             }
 
-            // Get the inode's d_type.
-            let child = VfsInode::vfs_get_dentry_inode(&mut dentry);
-            let mut d_type = DT_UNKNOWN;
-            if !is_err_or_null(child) {
-                d_type = mode_to_dtype(unsafe { (*child).mode });
-                VfsInode::vfs_iput(child);
-            }
-
-            // Fill in the dirent.
-            // SAFETY: `kbuf` has `count` live bytes; `bytes_written + reclen <=
-            // count` was just checked above.
-            unsafe {
-                let de = (kbuf as *mut u8).add(bytes_written) as *mut LinuxDirent64Header;
-                (*de).d_ino = dentry.ino;
-                (*de).d_off = (*f).pos.dir_iter.index;
-                (*de).d_reclen = reclen as u16;
-                (*de).d_type = d_type;
-                let name_dst = (de as *mut u8).add(LINUX_DIRENT64_NAME_OFFSET);
-                memmove(name_dst as *mut c_void, dentry.name as *const c_void, name_len);
-                *name_dst.add(name_len) = 0;
-            }
-
-            bytes_written += reclen;
-            vfs_release_dentry(&mut dentry);
-            dentry = unsafe { core::mem::zeroed() };
-        }
-
-        if bytes_written > 0 {
-            if Vm::vm_copyout(unsafe { (*Sys::current()).vm }, dirp, kbuf, bytes_written as u64) < 0 {
-                kmm_free(kbuf);
-                VfsFile::vfs_fput(f);
+            if bytes_written > 0 && Vm::vm_copyout(
+                unsafe { (*Sys::current()).vm }, dirp, kbuf.as_ptr().cast(), bytes_written as u64,
+            ) < 0 {
                 return Err(Errno::Fault);
             }
-        }
-
-        kmm_free(kbuf);
+            Ok(bytes_written)
+        })();
         VfsFile::vfs_fput(f);
-        Ok(bytes_written)
+        result
     }
 }
 
@@ -2851,25 +2839,28 @@ impl Sys {
         }
 
         let bytes = nfds as usize * core::mem::size_of::<PollfdK>();
-        let pfds_raw = kmm_alloc(bytes) as *mut PollfdK;
-        if pfds_raw.is_null() {
-            return Err(Errno::NoMem);
-        }
-
-        if either_copyin(pfds_raw as *mut c_void, 1, fds_addr, bytes as u64) < 0 {
-            kmm_free(pfds_raw as *mut c_void);
+        let mut pfds = KernelBuffer::zeroed(bytes).ok_or(Errno::NoMem)?;
+        if either_copyin(pfds.as_mut_ptr().cast(), 1, fds_addr, bytes as u64) < 0 {
             return Err(Errno::Fault);
         }
-
-        // SAFETY: `pfds_raw` is a fresh, exclusively-owned `nfds`-element
-        // array, just filled in by `either_copyin` above.
-        let pfds = unsafe { core::slice::from_raw_parts_mut(pfds_raw, nfds as usize) };
 
         let timeout_ticks = if timeout_ms > 0 { crate::machine::Riscv::ms_to_rawticks(timeout_ms as u64) } else { 0 };
         let start = crate::machine::Riscv::read_time();
         let mut ready: c_int;
         loop {
-            ready = Sys::vfs_poll_scan(pfds);
+            ready = 0;
+            // Decode each integer-only UAPI record into a local value. The
+            // scratch allocation is a byte buffer; no typed alignment or
+            // validity assumptions are imposed on its storage.
+            for record in pfds.chunks_exact_mut(core::mem::size_of::<PollfdK>()) {
+                let mut pfd = PollfdK {
+                    fd: c_int::from_ne_bytes(record[0..4].try_into().unwrap()),
+                    events: c_short::from_ne_bytes(record[4..6].try_into().unwrap()),
+                    revents: 0,
+                };
+                ready += Sys::vfs_poll_scan(core::slice::from_mut(&mut pfd));
+                record[6..8].copy_from_slice(&pfd.revents.to_ne_bytes());
+            }
             if ready > 0 {
                 break;
             }
@@ -2887,16 +2878,13 @@ impl Sys {
         }
 
         if ready == neg(EINTR) {
-            kmm_free(pfds_raw as *mut c_void);
             return Err(Errno::Intr);
         }
 
-        if either_copyout(1, fds_addr, pfds_raw as *mut c_void, bytes as u64) < 0 {
-            kmm_free(pfds_raw as *mut c_void);
+        if either_copyout(1, fds_addr, pfds.as_ptr().cast_mut().cast(), bytes as u64) < 0 {
             return Err(Errno::Fault);
         }
 
-        kmm_free(pfds_raw as *mut c_void);
         Ok(ready)
     }
 }
