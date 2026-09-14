@@ -32,6 +32,10 @@ use core::ptr;
 use crate::bindings::{context, rb_node, rb_root};
 use crate::bintree::RbOps;
 
+#[path = "backtrace/frame.rs"]
+mod frame;
+use frame::StackBounds;
+
 // ===========================================================================
 // Externs: printf/panic (`printf.rs`) and the linker-defined boundaries of
 // the embedded symbol sections (`kernel/kernel.ld.in`), mirroring the
@@ -173,8 +177,6 @@ static mut KSYM_ENTRIES_BASE: *mut KSymEntry = ptr::null_mut();
 static mut KSYM_COUNT: i32 = -1;
 
 const BACKTRACE_MAX_DEPTH: u32 = 32;
-const PAGE_SHIFT: u32 = 12;
-const PGSIZE: u64 = 1 << PAGE_SHIFT;
 
 /// Zero-sized facade for the kernel symbol table + frame-pointer
 /// backtrace walker (KERNEL-OO final wave): no per-instance state
@@ -459,41 +461,29 @@ fn bt_get_offset(entry: Option<*mut KSymEntry>, addr: u64) -> i32 {
 }
 
 // ===========================================================================
-// Frame-pointer walking. Mirrors the C `BT_FRAME_TOP`/`BT_RETURN_ADDRESS`/
-// `BT_IS_TOP_FRAME` macros exactly, including their trust model: the very
-// first frame (`context`/`ctx->s0`) is dereferenced *before* any bounds
-// check (the caller -- `tf->s0`, `r_fp()`, or a saved `context.s0` -- is
-// always a currently-live frame pointer); every subsequent frame is
-// bounds-checked against `[stack_start, stack_end)` by the loop body
-// before it is ever dereferenced.
+// Frame-pointer walking. Register s0 is not necessarily a frame pointer:
+// optimized Rust can use it as a general saved register. Validate the
+// complete aligned record before reading either saved word, even for the
+// very first frame. Caller-provided stack bounds still describe mapped,
+// readable memory; corrupt frame values never expand those bounds.
 // ===========================================================================
 
-#[inline(always)]
-fn frame_top(fp: u64) -> u64 {
-    if fp == 0 {
-        0
-    } else {
-        // SAFETY: see module-level note above this section; callers only
-        // invoke this on a frame pointer already known to be live (either
-        // the caller-supplied entry frame, or one just bounds-checked
-        // against the live kernel-stack window).
-        unsafe { *((fp - 16) as *const u64) }
-    }
+pub(crate) fn stack_bounds(start: u64, order: c_int) -> Option<(u64, u64)> {
+    StackBounds::from_order(start, order).map(StackBounds::addresses)
 }
 
-#[inline(always)]
-fn return_address(fp: u64) -> u64 {
-    if fp == 0 {
-        0
-    } else {
-        // SAFETY: see `frame_top`.
-        unsafe { *((fp - 8) as *const u64) }
-    }
-}
-
-#[inline(always)]
-fn is_top_frame(fp: u64) -> bool {
-    fp == 0 || fp == (fp & !(PGSIZE - 1))
+/// # Safety
+/// `stack` must describe readable memory belonging to the live stack.
+unsafe fn read_frame(stack: StackBounds, fp: u64) -> Option<(u64, u64)> {
+    let slots = stack.record(fp)?;
+    // SAFETY: record() proved both aligned words are fully inside the
+    // caller's readable stack bounds before either dereference occurs.
+    Some(unsafe {
+        (
+            (slots.previous_fp as *const u64).read(),
+            (slots.return_address as *const u64).read(),
+        )
+    })
 }
 }
 
@@ -503,62 +493,68 @@ fn is_top_frame(fp: u64) -> bool {
 /// panic path or any interrupt context (see module doc).
 ///
 /// # Safety
-/// `context` must be 0 or a currently-live frame pointer (e.g. `tf->s0`,
-/// `r_fp()`, or a saved `context.s0`); `[stack_start, stack_end)` must
-/// bound the stack that frame pointer chains through.
+/// `[stack_start, stack_end)` must describe readable memory belonging to
+/// the current stack. `context` may be an arbitrary saved register value;
+/// it and each subsequent frame are checked before reading stack memory.
 // P3-1D mesh sweep: every caller (`printf.rs`, `ipi.rs`, `irq/trap.rs`) now
 // imports this via crate-path `use` instead of an `extern` redeclaration --
 // demoted.
 impl Backtrace {
 pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, stack_end: u64) {
-    // SAFETY: see function-level `# Safety` and the frame-walking section
-    // doc above.
-    unsafe {
-        crate::kprintln!("backtrace:");
+    crate::kprintln!("backtrace:");
 
-        let mut last_fp = context;
-        let mut fp = Backtrace::frame_top(context);
-        let mut depth = 0u32;
-        while !Backtrace::is_top_frame(fp) && depth < BACKTRACE_MAX_DEPTH {
-            if fp < stack_start || fp >= stack_end {
-                crate::kprintln!("  * unknown frame: {}", crate::printf::Ptr(fp));
-                break;
-            }
-
-            let mut symbuf = [0u8; 64];
-            let mut filebuf = [0u8; 128];
-            let return_addr_val = Backtrace::return_address(last_fp);
-            if return_addr_val == 0 {
-                crate::kprintln!("  top frame");
-                break;
-            }
-
-            let entry = Backtrace::bt_search_sym(return_addr_val);
-            match entry {
-                None => {
-                    crate::kprintln!(
-                        "  * {}: unknown",
-                        crate::printf::Ptr(return_addr_val),
-                    );
-                }
-                Some(e) => {
-                    Backtrace::fill_symbol(e, &mut symbuf);
-                    let line = Backtrace::bt_get_location(entry, &mut filebuf);
-                    let offset = Backtrace::bt_get_offset(entry, return_addr_val);
-                    crate::kprintln!(
-                        "  * {}:{}: {}+{}",
-                        crate::printf::Cs(filebuf.as_ptr() as *const c_char),
-                        line,
-                        crate::printf::Cs(symbuf.as_ptr() as *const c_char),
-                        offset,
-                    );
-                }
-            }
-
-            last_fp = fp;
-            fp = Backtrace::frame_top(fp);
-            depth += 1;
+    let Some(stack) = StackBounds::new(stack_start, stack_end) else {
+        crate::kprintln!("  * invalid stack bounds");
+        return;
+    };
+    let mut fp = context;
+    for _ in 0..BACKTRACE_MAX_DEPTH {
+        if fp == 0 {
+            break;
         }
+        // SAFETY: the caller supplies readable stack bounds; read_frame
+        // validates the complete record before dereferencing either word.
+        let frame = unsafe { Backtrace::read_frame(stack, fp) };
+        let Some((previous_fp, return_addr_val)) = frame else {
+            crate::kprintln!("  * unknown frame: {}", crate::printf::Ptr(fp));
+            break;
+        };
+
+        let mut symbuf = [0u8; 64];
+        let mut filebuf = [0u8; 128];
+        if return_addr_val == 0 {
+            crate::kprintln!("  top frame");
+            break;
+        }
+
+        let entry = Backtrace::bt_search_sym(return_addr_val);
+        match entry {
+            None => {
+                crate::kprintln!(
+                    "  * {}: unknown",
+                    crate::printf::Ptr(return_addr_val),
+                );
+            }
+            Some(e) => {
+                Backtrace::fill_symbol(e, &mut symbuf);
+                let line = Backtrace::bt_get_location(entry, &mut filebuf);
+                let offset = Backtrace::bt_get_offset(entry, return_addr_val);
+                crate::kprintln!(
+                    "  * {}:{}: {}+{}",
+                    crate::printf::Cs(filebuf.as_ptr() as *const c_char),
+                    line,
+                    crate::printf::Cs(symbuf.as_ptr() as *const c_char),
+                    offset,
+                );
+            }
+        }
+
+        // Stack frames unwind toward higher addresses. Reject self
+        // links and backwards/cyclic chains before another read.
+        if previous_fp <= fp {
+            break;
+        }
+        fp = previous_fp;
     }
 }
 
@@ -572,105 +568,105 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
 // P3-1D mesh sweep: only caller is `proc/proc_shims.rs` (crate-path `use`,
 // not an `extern` redeclaration) -- demoted.
 pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack: u64, kstack_order: c_int) {
-    // SAFETY: see function-level `# Safety` and the frame-walking section
-    // doc above; `ctx`/`kstack` are checked before any dereference,
-    // matching the C original.
-    unsafe {
-        if ctx.is_null() || kstack == 0 {
-            crate::kprintln!("backtrace: invalid context or stack");
-            return;
+    if ctx.is_null() || kstack == 0 {
+        crate::kprintln!("backtrace: invalid context or stack");
+        return;
+    }
+
+    let Some(stack) = StackBounds::from_order(kstack, kstack_order) else {
+        crate::kprintln!("backtrace: invalid stack bounds");
+        return;
+    };
+    // SAFETY: ctx is non-null and the caller keeps the thread stopped.
+    let (fp0, resume) = unsafe { ((*ctx).s0, (*ctx).ra) };
+
+    crate::kprintln!("backtrace:");
+
+    let mut symbuf = [0u8; 64];
+    let mut filebuf = [0u8; 128];
+
+    // Print the resume point (ctx->ra) first.
+    let entry0 = Backtrace::bt_search_sym(resume);
+    match entry0 {
+        None => {
+            crate::kprintln!(
+                "  > {}: unknown (resume point)",
+                crate::printf::Ptr(resume),
+            );
+        }
+        Some(e) => {
+            Backtrace::fill_symbol(e, &mut symbuf);
+            let line = Backtrace::bt_get_location(entry0, &mut filebuf);
+            let offset = Backtrace::bt_get_offset(entry0, resume);
+            crate::kprintln!(
+                "  > {}:{}: {}+{} (resume point) [{}]",
+                crate::printf::Cs(filebuf.as_ptr() as *const c_char),
+                line,
+                crate::printf::Cs(symbuf.as_ptr() as *const c_char),
+                offset,
+                crate::printf::Ptr(resume),
+            );
+        }
+    }
+
+    let mut last_return_addr = resume;
+    let mut repeat_count = 0u32;
+    const MAX_REPEATS: u32 = 3;
+
+    let mut curr_fp = fp0;
+    for depth in 0..BACKTRACE_MAX_DEPTH {
+        if curr_fp == 0 {
+            break;
+        }
+        // SAFETY: the stopped thread's stack remains readable; the full
+        // record is checked before either saved word is accessed.
+        let frame = unsafe { Backtrace::read_frame(stack, curr_fp) };
+        let Some((previous_fp, return_addr_val)) = frame else {
+            crate::kprintln!("  * frame outside stack: {}", crate::printf::Ptr(curr_fp));
+            break;
+        };
+        if return_addr_val == 0 {
+            break;
         }
 
-        let fp0 = (*ctx).s0;
-        let stack_size = 1u64 << ((PAGE_SHIFT as i32 + kstack_order) as u32);
-        let stack_start = kstack;
-        let stack_end = kstack + stack_size;
+        if return_addr_val == last_return_addr {
+            repeat_count += 1;
+            if repeat_count >= MAX_REPEATS {
+                crate::kprintln!("  * ... ({} more repeated frames)", depth as u64);
+                break;
+            }
+        } else {
+            repeat_count = 0;
+            last_return_addr = return_addr_val;
+        }
 
-        crate::kprintln!("backtrace:");
-
-        let mut symbuf = [0u8; 64];
-        let mut filebuf = [0u8; 128];
-
-        // Print the resume point (ctx->ra) first.
-        let entry0 = Backtrace::bt_search_sym((*ctx).ra);
-        match entry0 {
+        let entry = Backtrace::bt_search_sym(return_addr_val);
+        match entry {
             None => {
                 crate::kprintln!(
-                    "  > {}: unknown (resume point)",
-                    crate::printf::Ptr((*ctx).ra),
+                    "  * {}: unknown",
+                    crate::printf::Ptr(return_addr_val),
                 );
             }
             Some(e) => {
                 Backtrace::fill_symbol(e, &mut symbuf);
-                let line = Backtrace::bt_get_location(entry0, &mut filebuf);
-                let offset = Backtrace::bt_get_offset(entry0, (*ctx).ra);
+                let line = Backtrace::bt_get_location(entry, &mut filebuf);
+                let offset = Backtrace::bt_get_offset(entry, return_addr_val);
                 crate::kprintln!(
-                    "  > {}:{}: {}+{} (resume point) [{}]",
+                    "  * {}:{}: {}+{} [{}]",
                     crate::printf::Cs(filebuf.as_ptr() as *const c_char),
                     line,
                     crate::printf::Cs(symbuf.as_ptr() as *const c_char),
                     offset,
-                    crate::printf::Ptr((*ctx).ra),
+                    crate::printf::Ptr(return_addr_val),
                 );
             }
         }
 
-        let mut last_fp = fp0;
-        let mut last_return_addr = (*ctx).ra;
-        let mut repeat_count = 0u32;
-        const MAX_REPEATS: u32 = 3;
-
-        let mut curr_fp = Backtrace::frame_top(fp0);
-        let mut depth = 0u32;
-        while !Backtrace::is_top_frame(curr_fp) && depth < BACKTRACE_MAX_DEPTH {
-            if curr_fp < stack_start || curr_fp >= stack_end {
-                crate::kprintln!("  * frame outside stack: {}", crate::printf::Ptr(curr_fp));
-                break;
-            }
-
-            let return_addr_val = Backtrace::return_address(last_fp);
-            if return_addr_val == 0 {
-                break;
-            }
-
-            if return_addr_val == last_return_addr {
-                repeat_count += 1;
-                if repeat_count >= MAX_REPEATS {
-                    crate::kprintln!("  * ... ({} more repeated frames)", depth as u64);
-                    break;
-                }
-            } else {
-                repeat_count = 0;
-                last_return_addr = return_addr_val;
-            }
-
-            let entry = Backtrace::bt_search_sym(return_addr_val);
-            match entry {
-                None => {
-                    crate::kprintln!(
-                        "  * {}: unknown",
-                        crate::printf::Ptr(return_addr_val),
-                    );
-                }
-                Some(e) => {
-                    Backtrace::fill_symbol(e, &mut symbuf);
-                    let line = Backtrace::bt_get_location(entry, &mut filebuf);
-                    let offset = Backtrace::bt_get_offset(entry, return_addr_val);
-                    crate::kprintln!(
-                        "  * {}:{}: {}+{} [{}]",
-                        crate::printf::Cs(filebuf.as_ptr() as *const c_char),
-                        line,
-                        crate::printf::Cs(symbuf.as_ptr() as *const c_char),
-                        offset,
-                        crate::printf::Ptr(return_addr_val),
-                    );
-                }
-            }
-
-            last_fp = curr_fp;
-            curr_fp = Backtrace::frame_top(curr_fp);
-            depth += 1;
+        if previous_fp <= curr_fp {
+            break;
         }
+        curr_fp = previous_fp;
     }
 }
 }

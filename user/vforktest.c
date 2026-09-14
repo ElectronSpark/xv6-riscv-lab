@@ -65,7 +65,7 @@ void test_vfork_exec(void) {
         shared_var = 200;
         printf("Child: shared_var = %d, calling exec echo\n", shared_var);
         char *argv[] = {"echo", "Child exec'd successfully", 0};
-        exec("echo", argv);
+        exec("/bin/echo", argv);
         printf("FAIL: exec failed\n");
         exit(1);
     }

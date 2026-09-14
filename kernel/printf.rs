@@ -62,10 +62,6 @@ use crate::start_kernel::{__physical_memory_end, __physical_memory_start};
 /// `IPI_REASON_CRASH` (`kernel/inc/smp/ipi.h`).
 const IPI_REASON_CRASH: c_int = 0;
 
-/// `PAGE_SHIFT` (`kernel/inc/param.h`), mirrored the same way
-/// `start.rs`/`machine.rs` already duplicate it locally.
-const PAGE_SHIFT: u32 = 12;
-
 /// Zero-sized facade for the printf/panic-plumbing C-ABI entry points and
 /// helpers (KERNEL-OO final wave): no per-instance state (everything is a
 /// module `static`), so these become associated fns on this ZST, raw
@@ -372,8 +368,11 @@ impl Printf {
                 Ptr(fp),
             );
             if BT_ENABLED.load(Ordering::Relaxed) {
-                let kstack_size = 1u64 << (PAGE_SHIFT + (*p).kstack_order as u32);
-                Backtrace::print_backtrace(fp, (*p).kstack, (*p).kstack + kstack_size);
+                if let Some((start, end)) = Backtrace::stack_bounds((*p).kstack, (*p).kstack_order) {
+                    Backtrace::print_backtrace(fp, start, end);
+                } else {
+                    crate::kprintln!("backtrace: invalid kernel stack metadata");
+                }
             }
         }
     }
