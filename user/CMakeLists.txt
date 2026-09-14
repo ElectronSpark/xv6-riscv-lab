@@ -118,6 +118,8 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/clonetest.c
     ${USER_DIR}/vforktest.c
     ${USER_DIR}/devtest.c
+    ${USER_DIR}/rustvfstest.c
+    ${USER_DIR}/rustnettest.c
     ${USER_DIR}/mount.c
     ${USER_DIR}/umount.c
     ${USER_DIR}/mknod.c

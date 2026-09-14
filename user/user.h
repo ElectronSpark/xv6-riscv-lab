@@ -17,6 +17,7 @@ int clone(struct clone_args *);
 int exit(int) __attribute__((noreturn));
 int wait(int *);
 int pipe(int *);
+int connect(uint32 remote_address, int local_port, int remote_port);
 int write(int, const void *, int);
 int read(int, void *, int);
 int close(int);

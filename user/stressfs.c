@@ -11,6 +11,11 @@
 #include "user/user.h"
 #include "uabi/fcntl.h"
 
+static void fail(const char *operation) {
+    fprintf(2, "stressfs: FAIL: %s\n", operation);
+    exit(1);
+}
+
 int main(int argc, char *argv[]) {
     int fd, i;
     char path[] = "stressfs0";
@@ -19,27 +24,53 @@ int main(int argc, char *argv[]) {
     printf("stressfs starting\n");
     memset(data, 'a', sizeof(data));
 
-    for (i = 0; i < 32; i++)
-        if (fork() > 0)
+    int child = -1;
+    for (i = 0; i < 32; i++) {
+        child = fork();
+        if (child < 0)
+            fail("fork");
+        if (child > 0)
             break;
+    }
+    int worker = i;
 
     printf("write %d\n", i);
 
     path[8] += i;
-    fd = open(path, O_CREAT | O_RDWR);
+    fd = open(path, O_CREAT | O_TRUNC | O_RDWR);
+    if (fd < 0)
+        fail("open for write");
     for (i = 0; i < 20; i++)
-        //    printf(fd, "%d\n", i);
-        write(fd, data, sizeof(data));
+        if (write(fd, data, sizeof(data)) != sizeof(data))
+            fail("write");
     close(fd);
 
     printf("read\n");
 
     fd = open(path, O_RDONLY);
-    for (i = 0; i < 20; i++)
-        read(fd, data, sizeof(data));
+    if (fd < 0)
+        fail("open for read");
+    for (i = 0; i < 20; i++) {
+        memset(data, 0, sizeof(data));
+        if (read(fd, data, sizeof(data)) != sizeof(data))
+            fail("read");
+        for (int byte = 0; byte < sizeof(data); byte++)
+            if (data[byte] != 'a')
+                fail("data mismatch");
+    }
+    if (read(fd, data, 1) != 0)
+        fail("file length");
     close(fd);
 
-    wait(0);
+    if (unlink(path) < 0)
+        fail("unlink");
+    if (child > 0) {
+        int status = -1;
+        if (wait(&status) != child || status != 0)
+            fail("child status");
+    }
+    if (worker == 0)
+        printf("stressfs: ALL TESTS PASSED (33 workers)\n");
 
     exit(0);
 }
