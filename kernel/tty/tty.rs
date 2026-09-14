@@ -1179,7 +1179,8 @@ impl Tty {
                 // `tq_wait(&tty->raw_wait, &tty->lock, NULL)`. Raw queue ptr
                 // formed first (ends the borrow before the `&mut self` call).
                 let q = &raw mut guard.raw_wait;
-                guard.wait_on(q, core::ptr::null_mut());
+                // SAFETY: raw_wait was initialized against this tty lock.
+                unsafe { guard.wait_on(q, core::ptr::null_mut()) };
                 if crate::proc::access::ThreadAccess::from_ptr(cur).is_some_and(|ta| ta.signal_pending()) {
                     drop(guard);
                     return if total > 0 { total } else { -(EINTR as i64) };

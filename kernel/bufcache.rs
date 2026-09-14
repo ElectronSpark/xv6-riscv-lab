@@ -366,6 +366,11 @@ struct BCacheHash {
     buckets: [list_node_t; BIO_HASH_BUCKETS],
 }
 
+// SAFETY: these links refer to the fixed kernel buffer pool. Every list
+// and hash-table access holds BCACHE; moving the metadata between harts
+// transfers no thread-local ownership or unsynchronized pointee access.
+unsafe impl Send for BCacheHash {}
+
 /// Placeholder value for [`BCACHE`]'s `const fn SpinLock::new` -- not a
 /// meaningful "initialized" state; see module doc.
 const fn zeroed_bcache_hash() -> BCacheHash {

@@ -967,7 +967,8 @@ unsafe fn rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mut c_void, si
         // no lost-wakeup window). The raw queue pointer is formed first so
         // no borrow of `d` is retained across the `&mut self` call.
         let wq = &raw mut d.desc_wait_queue;
-        d.wait_on(wq, ptr::null_mut());
+        // SAFETY: this disk queue was initialized against the held lock.
+        unsafe { d.wait_on(wq, ptr::null_mut()) };
     }
 
     // Format the three descriptors. qemu's virtio-blk.c reads them.

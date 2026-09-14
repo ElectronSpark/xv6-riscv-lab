@@ -65,32 +65,21 @@
 //!
 //! Every `unsafe` block is scoped to the smallest expression that needs
 //! it (`unsafe-minimize-scope`) with a `SAFETY:` comment at each
-//! non-obvious site. `struct sock` is a second, file-local mirror of
-//! the real definition in `kernel/sysnet.c` (which stays C through
-//! Wave 28) — this is not a new hazard introduced by the port: the C
-//! original already carries its own local shadow copy of that struct
-//! (see the `// Socket structure from sysnet.c` comment at its
-//! definition below) for exactly the reason this file needs field
-//! access into an object it does not own the type of. `bool` in every
-//! header this file binds against is the project's own
-//! `typedef enum { false = 0, true = 1 } bool` (`kernel/inc/types.h`,
-//! selected because this crate is compiled at `-std=` C17, not C23) —
-//! an `int`-sized (4-byte) enum, *not* the 1-byte C23 `_Bool`/Rust
-//! `bool`. Every signature in this file that carries a C `bool`
-//! parameter (`user` on the read/write paths) therefore uses `c_int`,
-//! matching the convention already established by `kernel/tty/tty.rs`,
-//! `kernel/tty/pty.rs`, and `kernel/console.rs`'s own `pipe_read`/
-//! `pipe_write`/`pipe_set_flags` externs — using Rust's 1-byte `bool`
-//! here would silently break the calling convention.
+//! non-obvious site. Socket allocation uses the canonical `sysnet::Socket`
+//! type. Its operation table opts into concurrent I/O: raw VFS dispatch
+//! snapshots access flags under the file mutex, then releases that mutex
+//! before the socket driver may sleep. The receive queue has its own typed
+//! spinlock, and a held file reference keeps the socket alive throughout.
+//! Historical read/write ABI entry points still accept the address-space
+//! selector as `c_int`; the native driver callbacks use `bool`.
 //!
 //! # Reference-ification (P3-7b)
 //!
-//! The read/write/stat/lseek/ioctl/truncate `*_inner` helpers take a
-//! `&mut VfsFile` now, not a raw pointer: the null-check plus the single
-//! `unsafe { &mut *file }` conversion happen exactly once, at each
-//! `extern "C"` boundary (the outermost frame that genuinely receives a
-//! raw pointer), so the interior plain-field logic (`f_flags`, `ops`,
-//! `inode`) is ordinary safe access. What deliberately stays raw:
+//! Inode-backed read/write/stat/lseek/ioctl/truncate helpers use references
+//! after their ABI boundary checks. Anonymous descriptors bypass those
+//! helpers: stat/ioctl use raw immutable field projections, seek/truncate
+//! reject them directly, and driver-synchronized I/O never forms a whole-file
+//! exclusive borrow. What deliberately stays raw:
 //! * the `pos` union — every union field read/write is `unsafe` in Rust
 //!   regardless of how the container is borrowed;
 //! * the [`FileOps`] trait dispatch (`ops.read`/`write`/`llseek`/
@@ -228,7 +217,7 @@ pub union VfsFilePos {
     pub cdev: *mut cdev_t,
     pub blkdev: *mut blkdev_t,
     pub pipe: *mut pipe,
-    pub sock: *mut crate::bindings::sock,
+    pub sock: *mut Socket,
 }
 
 /// `struct vfs_file` — as of wave P3-10a this layout is NATIVE-OWNED
@@ -252,6 +241,13 @@ pub struct VfsFile {
     pub private_data: *mut c_void,
     pub lock: crate::bindings::mutex_t,
     pub pos: VfsFilePos,
+}
+
+/// Selects the synchronization used for file I/O callbacks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IoSynchronization {
+    FileLock,
+    Driver,
 }
 
 /// The per-filesystem/driver file-operations vtable — wave P3-10a's
@@ -287,6 +283,13 @@ pub struct VfsFile {
 /// `Sync` supertrait: instances are shared crate-wide as `&'static`
 /// references reachable from any CPU.
 pub trait FileOps: Sync {
+    /// Drivers with independent read/write synchronization can run both
+    /// directions concurrently. Such callbacks receive no exclusive file
+    /// borrow and must synchronize every mutable field they access.
+    fn io_synchronization(&self) -> IoSynchronization {
+        IoSynchronization::FileLock
+    }
+
     /// Read up to `count` bytes into `buf` (a user VA when `user`).
     ///
     /// # Safety
@@ -486,14 +489,7 @@ fn kfree(pa: *mut c_void) {
 use crate::dev::cdev::Cdev;
 use crate::dev::blkdev::Blkdev;
 use crate::dev::dev::DeviceInstance;
-// N.B. not `use crate::net::mbufq` -- this file has its own local
-// `struct mbufq` mirror (see below) with the same name; the real type's
-// `init` fn is reached fully-qualified at the one call site instead.
-// Wave P3-8d: `sysnet.rs`'s `sock_lock`/`sockets` (two independently-
-// paired globals) were migrated to a single `SpinLock<*mut sock>` --
-// `SOCKETS` is locked directly below instead of a raw `spinlock_t`
-// handle (see `vfs_sockalloc`'s updated call site and this file's
-// module doc).
+// Socket allocation and endpoint publication share the native socket table.
 use crate::sysnet::SOCKETS;
 
 // P3-1C mesh sweep: vfs/{inode,fs,fdtable,pipe}.rs are in scope for this
@@ -688,9 +684,18 @@ fn vfs_file_slab() -> *mut slab_cache_t {
 /// (now briefly under the lock — a strict improvement; it was a
 /// `spin_init` on a separate `spinlock_t` plus a raw write to a separate
 /// `static mut` before).
-static __VFS_FTABLE: SpinLock<list_node_t> = SpinLock::new(
+struct FileTable {
+    head: list_node_t,
+}
+
+// SAFETY: the links identify kernel-owned files. All link access and
+// mutation is serialized by __VFS_FTABLE, including unlink before free.
+// The head stays in static storage after its self-links are initialized.
+unsafe impl Send for FileTable {}
+
+static __VFS_FTABLE: SpinLock<FileTable> = SpinLock::new(
     c"vfs_file_table_lock",
-    list_node_t { prev: core::ptr::null_mut(), next: core::ptr::null_mut() },
+    FileTable { head: list_node_t { prev: core::ptr::null_mut(), next: core::ptr::null_mut() } },
 );
 static __VFS_OPEN_FILE_COUNT: AtomicI32 = AtomicI32::new(0);
 
@@ -710,13 +715,13 @@ impl VfsFile {
     /// the module doc's lifetime-honesty exclusions).
     fn ftable_attach(file: *mut vfs_file) {
         let mut g = __VFS_FTABLE.lock();
-        // SAFETY: `g` proves the lock is held; `&raw mut *g` is the live
+        // SAFETY: `g` proves the lock is held; `g.head` is the live
         // global open-file list head (initialized once by
         // `VfsFile::vfs_file_init` before any attach/detach can race in);
         // `file->list_entry` is not yet linked anywhere (every caller
         // passes a freshly allocated file).
         unsafe {
-            ln_push_back(&raw mut *g, ptr::addr_of_mut!((*file).list_entry));
+            ln_push_back(&raw mut g.head, ptr::addr_of_mut!((*file).list_entry));
         }
         let count = __VFS_OPEN_FILE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         drop(g);
@@ -806,7 +811,7 @@ impl VfsFile {
         // `vfs_init()` call site).
         {
             let mut head = __VFS_FTABLE.lock();
-            let addr: *mut list_node_t = &raw mut *head;
+            let addr: *mut list_node_t = &raw mut head.head;
             // SAFETY: `addr` is the live, stable address of the list head the
             // guard owns; writing its own address into `next`/`prev` is the
             // `LIST_ENTRY_INITIALIZED` self-reference idiom.
@@ -1180,6 +1185,16 @@ pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_vo
     if file.is_null() {
         return Errno::BadF.neg(); // Same errno the old null check produced.
     }
+    // SAFETY: the caller retains this file; its inode and operation-table
+    // pointers are immutable after publication. Anonymous files may have
+    // concurrent I/O, so their callback must not borrow the whole file mutably.
+    let inode = FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*file).inode) });
+    if inode.is_null() {
+        // SAFETY: file remains live and the callback receives the original
+        // raw file/buffer contract without claiming exclusive ownership.
+        return unsafe { (*file).ops.and_then(|ops| ops.ioctl(file, cmd, arg)) }
+            .unwrap_or_else(|| Errno::NotTy.neg());
+    }
     // SAFETY: non-null (just checked); the caller passes a live, open
     // `vfs_file` it holds a reference to, valid for the call. P3-7b
     // boundary conversion — see the module doc's aliasing note.
@@ -1191,6 +1206,55 @@ pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_vo
 }
 
 impl VfsFile {
+/// Dispatch drivers that synchronize their own I/O before forming any
+/// exclusive borrow of the shared file. The file mutex protects only the
+/// access-mode snapshot, so a sleeping read cannot prevent a concurrent write.
+///
+/// # Safety
+/// `file` must stay live through a caller-owned reference; its operations
+/// pointer is immutable after publication. Kernel buffers obey the callback
+/// contract when `user == 0`; user buffers are checked by the driver.
+unsafe fn concurrent_io(
+    file: *mut vfs_file,
+    buf: *mut c_void,
+    n: usize,
+    user: c_int,
+    write: bool,
+) -> Option<KResult<isize>> {
+    // SAFETY: file is live and its operation table is immutable.
+    let ops = unsafe { (*file).ops }?;
+    if ops.io_synchronization() != IoSynchronization::Driver {
+        return None;
+    }
+    Some((|| {
+        if buf.is_null() {
+            return Err(Errno::Fault);
+        }
+        if n == 0 {
+            return Ok(0);
+        }
+        {
+            // SAFETY: only project the embedded lock; no &mut VfsFile is
+            // formed while another read/write may be using this file.
+            let lock = KMutex::from_ptr(unsafe { ptr::addr_of_mut!((*file).lock) });
+            let _guard = lock.lock();
+            // SAFETY: fcntl and I/O permission reads share this file mutex.
+            let mode = unsafe { (*file).f_flags } & O_ACCMODE;
+            if (write && mode == O_RDONLY) || (!write && mode == O_WRONLY) {
+                return Err(Errno::BadF);
+            }
+        }
+        // SAFETY: this driver opts into concurrent callbacks, the file
+        // reference remains live, and buffers retain their address-space
+        // contract. The driver protects its own mutable I/O state.
+        if write {
+            unsafe { ops.write(file, buf.cast(), n, user != 0) }
+        } else {
+            unsafe { ops.read(file, buf.cast(), n, user != 0) }
+        }
+    })())
+}
+
 /// Core logic behind [`vfs_fileread`], factored out as a private method
 /// returning [`KResult`] (P3-CS6). Every own-failure early return
 /// (`EBADF`/`EOPNOTSUPP`/`EISDIR`/`EINVAL`) is now the matching `Errno`
@@ -1296,6 +1360,10 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
     if file.is_null() {
         return Errno::BadF.neg() as isize; // Same errno the old null check produced.
     }
+    // SAFETY: the caller holds a live file reference for this whole I/O.
+    if let Some(result) = unsafe { Self::concurrent_io(file, buf, n, user, false) } {
+        return result.unwrap_or_else(|error| error.neg() as isize);
+    }
     // SAFETY: non-null (just checked); the caller passes a live, open
     // `vfs_file` it holds a reference to. P3-7b boundary conversion.
     match (unsafe { &mut *file }).read_inner(buf, n, user) {
@@ -1321,17 +1389,8 @@ fn stat_inner(&mut self, out: *mut stat) -> KResult<c_int> {
     // (the `out` writes and the raw-`inode` getattr dispatch stay raw).
     let inode = FsStruct::vfs_inode_deref(&raw mut self.inode);
     if inode.is_null() {
-        // Custom file descriptors (PTY slaves, etc.) have no backing
-        // inode. Return a synthetic stat indicating a character device
-        // so that isatty() works correctly.
-        if self.ops.is_some() {
-            // SAFETY: non-null `out` (checked above).
-            unsafe {
-                ptr::write_bytes(out, 0, 1);
-                (*out).mode = S_IFCHR | 0o666;
-            }
-            return Ok(0);
-        }
+        // Anonymous files are handled before borrowing the file at the ABI
+        // boundary, where shared socket I/O can still be in flight.
         return Err(Errno::BadF);
     }
 
@@ -1369,6 +1428,25 @@ fn stat_inner(&mut self, out: *mut stat) -> KResult<c_int> {
 pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
     if file.is_null() {
         return Errno::BadF.neg(); // Same errno the old null check produced.
+    }
+    if out.is_null() {
+        return Errno::Fault.neg();
+    }
+    // SAFETY: the live file reference pins its immutable inode pointer. Only
+    // project that field, since an anonymous socket can be used concurrently.
+    let inode = FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*file).inode) });
+    if inode.is_null() {
+        // SAFETY: operation-table publication is immutable for this live file.
+        if unsafe { (*file).ops.is_none() } {
+            return Errno::BadF.neg();
+        }
+        // Preserve the existing synthetic stat for anonymous descriptors.
+        // SAFETY: the caller supplies an exclusive, writable stat object.
+        unsafe {
+            ptr::write_bytes(out, 0, 1);
+            (*out).mode = S_IFCHR | 0o666;
+        }
+        return 0;
     }
     // SAFETY: non-null (just checked); live open file. P3-7b boundary.
     match (unsafe { &mut *file }).stat_inner(out) {
@@ -1479,6 +1557,10 @@ pub(crate) extern "C" fn vfs_filewrite(
     if file.is_null() {
         return Errno::BadF.neg() as isize; // Same errno the old null check produced.
     }
+    // SAFETY: the caller holds a live file reference for this whole I/O.
+    if let Some(result) = unsafe { Self::concurrent_io(file, buf.cast_mut(), n, user, true) } {
+        return result.unwrap_or_else(|error| error.neg() as isize);
+    }
     // SAFETY: non-null (just checked); live open file. P3-7b boundary.
     match (unsafe { &mut *file }).write_inner(buf, n, user) {
         Ok(v) => v,
@@ -1533,6 +1615,12 @@ pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, when
     if file.is_null() {
         return Errno::BadF.neg() as loff_t; // Same errno the old null check produced.
     }
+    // SAFETY: the file reference keeps this immutable inode edge live.
+    // Reject anonymous files before creating an exclusive borrow that would
+    // conflict with a concurrent socket read/write/poll.
+    if FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*file).inode) }).is_null() {
+        return Errno::Inval.neg() as loff_t;
+    }
     // SAFETY: non-null (just checked); live open file. P3-7b boundary.
     match (unsafe { &mut *file }).lseek_inner(offset, whence) {
         Ok(v) => v,
@@ -1572,6 +1660,11 @@ fn truncate_inner(&mut self, length: loff_t) -> KResult<c_int> {
 pub(crate) extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
     if file.is_null() {
         return Errno::BadF.neg(); // Same errno the old null check produced.
+    }
+    // SAFETY: the caller's file reference pins its immutable inode edge.
+    // Anonymous sockets have no truncatable inode and may be in concurrent I/O.
+    if FsStruct::vfs_inode_deref(unsafe { ptr::addr_of_mut!((*file).inode) }).is_null() {
+        return Errno::Inval.neg();
     }
     // SAFETY: non-null (just checked); live open file. P3-7b boundary.
     match (unsafe { &mut *file }).truncate_inner(length) {
@@ -1642,27 +1735,60 @@ pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs
 // VFS socket allocation.
 // ===========================================================================
 
-/// Socket structure -- a local mirror of `struct sock` from
-/// `kernel/sysnet.c` (still C). See the module doc for why this
-/// duplication is faithful to the C original rather than a new hazard.
-#[repr(C)]
-struct sock {
-    next: *mut sock,
-    raddr: u32,
-    lport: u16,
-    rport: u16,
-    lock: spinlock_t,
-    rxq: mbufq,
-}
+use crate::sysnet::{Socket, SockInner, SysNet};
 
-/// Mirrors `struct mbufq` (`kernel/inc/dev/net.h`) -- only used here as
-/// an opaque-but-correctly-sized/aligned field of the local `sock`
-/// mirror above; its contents are entirely owned and manipulated by
-/// `mbufq_init` (still C).
-#[repr(C)]
-struct mbufq {
-    head: *mut c_void,
-    tail: *mut c_void,
+/// Native socket operations share the same dispatch and final-reference
+/// cleanup as pipes and device files.
+struct SocketFileOps;
+static SOCKET_FILE_OPS: SocketFileOps = SocketFileOps;
+
+impl FileOps for SocketFileOps {
+    fn io_synchronization(&self) -> IoSynchronization {
+        IoSynchronization::Driver
+    }
+
+    unsafe fn poll(&self, file: *mut VfsFile, events: core::ffi::c_short) -> Option<c_int> {
+        // ABI event bits from uabi/poll.h. Every socket is opened O_RDWR;
+        // fcntl preserves that access mode for the file's entire lifetime.
+        const READ: core::ffi::c_short = 0x0001 | 0x0040; // POLLIN | POLLRDNORM
+        const WRITE: core::ffi::c_short = 0x0004 | 0x0100; // POLLOUT | POLLWRNORM
+        // SAFETY: a live file reference keeps the immutable socket edge live.
+        let socket = unsafe { (*file).pos.sock };
+        // SAFETY: this operation table is only installed on initialized sockets.
+        let inner = unsafe { (*socket).inner.lock() };
+        let readable = if inner.rxq.is_empty() { 0 } else { events & READ };
+        Some(c_int::from(readable | (events & WRITE)))
+    }
+
+    unsafe fn read(&self, file: *mut VfsFile, buf: *mut c_char, count: usize, user: bool)
+        -> KResult<isize>
+    {
+        // SAFETY: this operation table selects the socket union member; the
+        // live file reference keeps it allocated throughout the read.
+        let result = unsafe { SysNet::sockread((*file).pos.sock, buf as u64, count, user) };
+        result.map(|count| count as isize)
+    }
+
+    unsafe fn write(&self, file: *mut VfsFile, buf: *const c_char, count: usize, user: bool)
+        -> KResult<isize>
+    {
+        // SAFETY: the live file owns this socket and buf has the address-space
+        // contract passed to FileOps::write by VFS.
+        let result = unsafe { SysNet::sockwrite((*file).pos.sock, buf as u64, count, user) };
+        result.map(|count| count as isize)
+    }
+
+    unsafe fn release(&self, _inode: *mut vfs_inode, file: *mut VfsFile) -> KResult<()> {
+        // SAFETY: VFS calls release only for the final file reference. Take
+        // the active union member before freeing it; table removal excludes
+        // concurrent packet delivery before socket storage is released.
+        let socket = unsafe { core::mem::replace(&mut (*file).pos.sock, ptr::null_mut()) };
+        if !socket.is_null() {
+            // SAFETY: the file relinquishes its exclusive final socket ownership.
+            unsafe { SysNet::sockclose(socket) };
+        }
+        Ok(())
+    }
 }
 
 // P3-10a: `vfs_custom_fd_alloc`/`vfs_custom_fd_alloc_inner` DELETED.
@@ -1680,16 +1806,9 @@ struct mbufq {
 // when a real caller (e.g. a future sysnet fd path) appears.
 
 impl VfsFile {
-/// Core logic behind [`vfs_sockalloc`], factored out as a private helper
-/// returning [`KResult`] (P3-CS6). The duplicate-tuple check is this
-/// function's only "real" runtime failure mode -- `Err(Errno::AddrInUse)`.
-/// Note the exact original control flow is preserved on that path: `f`
-/// was already `ftable_attach`ed before the duplicate check runs, and
-/// the original never called the matching `ftable_detach`/`vfs_fput`
-/// before `file_free`ing it (a pre-existing quirk, not introduced by
-/// this conversion -- kept byte-for-byte since behavior must stay
-/// identical). N-METH: inherent assoc fn (was the free fn
-/// `vfs_sockalloc_inner`).
+/// Allocate a socket with native operations. Publish the file only after
+/// the endpoint tuple has been reserved, so duplicate rejection never frees
+/// a file that remains linked in the global file table.
 fn vfs_sockalloc_inner(
     out: *mut *mut vfs_file,
     raddr: u32,
@@ -1704,45 +1823,27 @@ fn vfs_sockalloc_inner(
         return Err(Errno::NoMem);
     }
 
-    let si = kalloc() as *mut sock;
+    let si = kalloc() as *mut Socket;
     if si.is_null() {
         VfsFile::file_free(f);
         return Err(Errno::NoMem);
     }
 
-    // SAFETY: `si` is a fresh, exclusively-owned `sock`-sized allocation
-    // (`kalloc()` returns a full page, `sizeof(struct sock)` fits).
+    // SAFETY: kalloc returned aligned, exclusively owned page storage; the
+    // canonical socket type fits in a page. Initialize it as a Rust value.
     unsafe {
-        (*si).raddr = raddr;
-        (*si).lport = lport;
-        (*si).rport = rport;
-        spin_init(ptr::addr_of_mut!((*si).lock), c"sock".as_ptr() as *mut c_char);
-        // `mbufq_init` (`net.rs`) takes the real `crate::net::mbufq`; this
-        // file's `mbufq` is a byte-layout-identical local mirror (see this
-        // struct's own doc comment) -- pointer cast, same precedent as the
-        // `sock`/`crate::bindings::sock` handoff a few lines below.
-        crate::net::mbufq::init(ptr::addr_of_mut!((*si).rxq) as *mut crate::net::mbufq);
+        si.write(Socket {
+            next: ptr::null_mut(), raddr, lport, rport,
+            inner: SpinLock::new(c"sock", SockInner { rxq: crate::net::MbufQueue::new() }),
+        });
     }
-
-    // SAFETY: non-null `f`.
-    unsafe {
-        (*f).f_flags = O_RDWR;
-        (*f).pos.sock = si as *mut crate::bindings::sock;
-        (*f).ops = None; // Sockets use direct socket I/O.
-    }
-    VfsFile::ftable_attach(f);
 
     // Add to the list of sockets (checking for duplicates).
     let dup: bool = {
-        // SAFETY: `SOCKETS` (`sysnet.rs`) is a live `SpinLock<*mut
-        // crate::sysnet::sock>`; this file's local `sock` (above) is a
-        // byte-layout-identical mirror of that type (see the module
-        // doc), so casting the guard's pointer to/from this file's
-        // `sock` type is a plain reinterpretation of the same memory,
-        // not a type-confusion hazard -- same precedent as the `sock`/
-        // `crate::bindings::sock` handoff a few lines above.
+        // All entries use the canonical socket type and remain live under
+        // the socket table lock.
         let mut guard = SOCKETS.lock();
-        let head = *guard as *mut sock;
+        let head = guard.head;
         // N-METH goal #2: the manual `next`-pointer walk over the global
         // socket list is now a `core::iter::successors` chain terminated
         // by `.any(..)` (behavior-identical -- a read-only scan for a
@@ -1766,9 +1867,9 @@ fn vfs_sockalloc_inner(
         if !dup {
             // SAFETY: `si` is a freshly initialized, exclusively-owned node.
             unsafe {
-                (*si).next = *guard as *mut sock;
+                (*si).next = guard.head;
             }
-            *guard = si as *mut crate::sysnet::sock;
+            guard.head = si;
         }
         dup
     };
@@ -1778,6 +1879,15 @@ fn vfs_sockalloc_inner(
         VfsFile::file_free(f);
         return Err(Errno::AddrInUse);
     }
+
+    // SAFETY: f is still exclusively owned and si is now in the socket table.
+    // Installing the operations transfers socket cleanup to the file.
+    unsafe {
+        (*f).f_flags = O_RDWR;
+        (*f).pos.sock = si;
+        (*f).ops = Some(&SOCKET_FILE_OPS);
+    }
+    VfsFile::ftable_attach(f);
 
     // SAFETY: caller-owned out-param.
     unsafe { *out = f };

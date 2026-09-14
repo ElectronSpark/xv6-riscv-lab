@@ -439,10 +439,10 @@ pub(crate) extern "C" fn pci_init() {
             // SAFETY: `dsc` live; volatile MMIO write.
             unsafe { core::ptr::write_volatile(&raw mut (*dsc).type_spec.header_type_0.base_addr[0], e1000_regs as u32) };
 
-            // `e1000_regs` is the physical address just programmed into
+            // SAFETY: `e1000_regs` is the physical address just programmed into
             // BAR0 above, mapped by `vm_pgtab.rs`'s `kvmmake` (see the
             // module doc's "We'll place..." comment).
-            E1000::init(e1000_regs as *mut u32);
+            unsafe { E1000::init(e1000_regs as *mut u32) };
         }
     }
 }

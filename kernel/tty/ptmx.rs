@@ -251,18 +251,34 @@ impl PtyPair {
     }
 }
 
-/// `static spinlock_t ptmx_lock;` + `static struct pty_pair
-/// *pty_table[MAX_PTYS];` in the C original, now a single lock-owns-data
-/// [`crate::sync::SpinLock`] (Wave P3-8b): the lock and the array it
-/// protects are one Rust value instead of a separate lock handle plus a
-/// raw `UnsafeCell` the caller had to trust was only touched under that
-/// lock. `.lock()` returns a guard that `Deref`s/`DerefMut`s straight to
-/// `&[*mut PtyPair; MAX_PTYS]` / `&mut [..]` -- every call site below
-/// indexes it like a plain array, no `unsafe` required for the access
-/// itself (only the pointers *stored* in the array are still raw, same
-/// as before).
-static PTY_TABLE: crate::sync::SpinLock<[*mut PtyPair; MAX_PTYS]> =
-    crate::sync::SpinLock::new(c"ptmx", [core::ptr::null_mut(); MAX_PTYS]);
+/// A PTY slot is either available, reserved by an in-progress open, or
+/// occupied by a live allocation. Reservations never fabricate pointers.
+#[derive(Clone, Copy)]
+enum PtySlot {
+    Vacant,
+    Reserved,
+    Occupied(core::ptr::NonNull<PtyPair>),
+}
+
+struct PtyTable {
+    slots: [PtySlot; MAX_PTYS],
+}
+
+impl PtyTable {
+    fn reserve(&mut self) -> Option<usize> {
+        let index = self.slots.iter().position(|slot| matches!(slot, PtySlot::Vacant))?;
+        self.slots[index] = PtySlot::Reserved;
+        Some(index)
+    }
+}
+
+// SAFETY: all slot access is serialized by PTY_TABLE. The pointers are
+// identities for kernel allocations, never borrowed across a lock handoff;
+// dereferencing a pair still requires its separate lifetime/locking checks.
+unsafe impl Send for PtyTable {}
+
+static PTY_TABLE: crate::sync::SpinLock<PtyTable> =
+    crate::sync::SpinLock::new(c"ptmx", PtyTable { slots: [PtySlot::Vacant; MAX_PTYS] });
 
 static mut PTMX_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
@@ -294,8 +310,8 @@ impl PtyPair {
             // SAFETY: `index` is always in `[0, MAX_PTYS)` (only ever set
             // from the scan loop in `PtyPair::ptmx_open_file`).
             let idx = unsafe { (*pair).index as usize };
-            if table[idx] == pair {
-                table[idx] = core::ptr::null_mut();
+            if matches!(table.slots[idx], PtySlot::Occupied(p) if p.as_ptr() == pair) {
+                table.slots[idx] = PtySlot::Vacant;
             }
         }
 
@@ -682,30 +698,17 @@ impl CdevOps for PtmxCdevOps {
 
 impl PtyPair {
     unsafe fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> c_int {
-        // Allocate a PTY index -- reuse freed slots.
-        let idx: i32;
-        {
-            let mut table = PTY_TABLE.lock();
-            let mut found: i32 = -1;
-            for (i, slot) in table.iter().enumerate() {
-                if slot.is_null() {
-                    found = i as i32;
-                    break;
-                }
-            }
-            if found < 0 {
-                return -ENOSPC;
-            }
-            // Reserve the slot temporarily (non-null sentinel) so
-            // concurrent opens skip it while we finish setting it up.
-            table[found as usize] = core::ptr::without_provenance_mut(1);
-            idx = found;
-        }
+        // Reserve a vacant slot while constructing the pair. Concurrent
+        // opens skip reserved slots, without storing a fabricated pointer.
+        let Some(idx) = PTY_TABLE.lock().reserve() else {
+            return -ENOSPC;
+        };
+        let idx = idx as c_int;
 
         // Allocate the pair structure.
         let pair = unsafe { slab_alloc(PtyPair::cache_ptr()) } as *mut PtyPair;
         if pair.is_null() {
-            PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
+            PTY_TABLE.lock().slots[idx as usize] = PtySlot::Vacant;
             return -ENOMEM;
         }
 
@@ -743,7 +746,7 @@ impl PtyPair {
         let dev_minor = idx + 1; // device framework rejects minor 0
         let ret = unsafe { Pty::alloc(&mut slave, name.as_ptr() as *const c_char, dev_minor) };
         if ret != 0 {
-            PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
+            PTY_TABLE.lock().slots[idx as usize] = PtySlot::Vacant;
             unsafe { slab_free(pair as *mut c_void) };
             return ret;
         }
@@ -766,7 +769,7 @@ impl PtyPair {
         if ret != 0 {
             crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
             unsafe { Tty::unref(slave) };
-            PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
+            PTY_TABLE.lock().slots[idx as usize] = PtySlot::Vacant;
             unsafe { slab_free(pair as *mut c_void) };
             return ret;
         }
@@ -777,7 +780,9 @@ impl PtyPair {
         unsafe { (*pair).inner.lock().cdev_live = 1 };
 
         // Record in global table.
-        PTY_TABLE.lock()[idx as usize] = pair;
+        PTY_TABLE.lock().slots[idx as usize] = PtySlot::Occupied(
+            core::ptr::NonNull::new(pair).expect("allocated PTY pair"),
+        );
 
         // Install master file ops on the opened file.
         unsafe {

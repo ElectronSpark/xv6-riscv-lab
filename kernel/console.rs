@@ -285,8 +285,7 @@ struct ConsInner {
 /// The console's raw-fallback input buffer + lock, as one data-owning
 /// primitive. `SpinLock::new` const-initialises the embedded lock to the
 /// exact post-`spin_init` state (`cons` name, `locked = 0`), so this is
-/// a plain `static`; `consoleinit` still calls `CONS.init()` at the old
-/// `spin_init(&CONS_LOCK)` site to keep the explicit init point.
+/// a plain `static` and needs no runtime reinitialisation.
 static CONS: SpinLock<ConsInner> = SpinLock::new(
     c"cons",
     ConsInner { buf: [0; INPUT_BUF_SIZE], r: 0, w: 0, e: 0 },
@@ -786,13 +785,6 @@ impl Console {
     // =======================================================================
 
     pub(crate) extern "C" fn consoleinit() {
-        // Initialise `CONS`'s embedded lock at the historical
-        // `spin_init(&CONS_LOCK)` site. Runs once, before any other hart or
-        // interrupt handler can touch `CONS`. (`SpinLock::new` already
-        // const-initialised the same fields, so this is belt-and-suspenders,
-        // preserving the explicit init point.)
-        CONS.init();
-
         // Try to initialize UART hardware. Returns 1 if successful (QEMU),
         // 0 if deferred (real hardware uses SBI).
         if crate::uart::Uart::uartinit() != 0 {

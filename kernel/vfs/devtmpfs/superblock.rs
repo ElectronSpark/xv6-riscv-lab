@@ -60,8 +60,8 @@
 //!   the C original) guards the node registry list and the one-time
 //!   registry-list initialisation flag. Wave P3-8d: migrated from a bare
 //!   `spinlock_t` paired with a separate `static mut list_node_t` to a
-//!   `crate::sync::SpinLock<list_node_t>` that owns the list head it
-//!   protects directly (same precedent as `ramdisk.rs`/`bufcache.rs`/
+//!   `crate::sync::SpinLock<NodeRegistry>` that owns the list head and
+//!   initialization flag (same precedent as `ramdisk.rs`/`bufcache.rs`/
 //!   `sysnet.rs`) — see [`__devtmpfs_ensure_init`] for the one place this
 //!   changed the *mechanism* (not the observable behaviour, see below)
 //!   of the list head's self-reference fixup.
@@ -78,23 +78,8 @@
 //!   while removing the data race that the C pointer read/write
 //!   technically was — same upgrade, same rationale, as `console.rs`'s
 //!   `CONSOLE_TTY` (Phase 2 Wave 4).
-//! * [`__devtmpfs_ensure_init`]'s one-time flag-set (`__DEVTMPFS_INITIALIZED`)
-//!   is still a plain non-atomic `static mut` check-then-set, matching
-//!   the C exactly (including its implicit assumption that device
-//!   registration is single-hart at the point any of this runs — true
-//!   for every registrant in-tree today, see `dev_table_init`'s early-boot
-//!   call site). Not upgraded to a CAS-guarded once-init: doing so would
-//!   change observable behaviour under a hypothetical concurrent first
-//!   call, which the C never defined either, so there is no "identical
-//!   behaviour, race removed" upgrade available the way there was for
-//!   `__DEVTMPFS_SB` above. Flagged, not fixed, matching this crate's
-//!   documented-deviation convention. The list-head self-reference fixup
-//!   itself (`next`/`prev` pointing at the head) *does* now briefly take
-//!   `__DEVTMPFS_NODES`'s lock (Wave P3-8d) instead of writing the raw
-//!   static directly — a mechanical consequence of the lock owning the
-//!   data (there is no lock-free raw accessor), and a strict
-//!   improvement (was entirely unlocked before) rather than a new
-//!   hazard, so it doesn't change the "not upgraded" judgment above.
+//! * The one-time initialization flag and list head share the registry
+//!   lock, so concurrent first registrations cannot reinitialize a live list.
 //! * [`devtmpfs_post_mount_populate`]'s walk of the registry list drops
 //!   and reacquires `__DEVTMPFS_NODES`'s lock (`drop(guard)` / re-`lock()`,
 //!   Wave P3-8d) around each (potentially sleeping) `__devtmpfs_mknod_relative`
@@ -254,9 +239,23 @@ struct DevtmpfsNode {
 /// (`next: null, prev: null`) and [`__devtmpfs_ensure_init`] still
 /// completes the one-time fixup, now reached through the guard instead
 /// of a raw pointer to a separate static.
-static __DEVTMPFS_NODES: SpinLock<list_node_t> =
-    SpinLock::new(c"devtmpfs", list_node_t { next: ptr::null_mut(), prev: ptr::null_mut() });
-static mut __DEVTMPFS_INITIALIZED: bool = false;
+struct NodeRegistry {
+    head: list_node_t,
+    initialized: bool,
+}
+
+// SAFETY: the registry contains kernel allocation addresses with no hart
+// affinity. Access to the head and links is serialized by __DEVTMPFS_NODES;
+// node dereferences retain their explicit allocation-lifetime contracts.
+unsafe impl Send for NodeRegistry {}
+
+static __DEVTMPFS_NODES: SpinLock<NodeRegistry> = SpinLock::new(
+    c"devtmpfs",
+    NodeRegistry {
+        head: list_node_t { next: ptr::null_mut(), prev: ptr::null_mut() },
+        initialized: false,
+    },
+);
 
 /// The mounted devtmpfs superblock. Set by [`devtmpfs_mount`], cleared by
 /// [`devtmpfs_umount_free`]. See the module doc's "Locking / concurrency"
@@ -265,23 +264,12 @@ static __DEVTMPFS_SB: AtomicPtr<vfs_superblock> = AtomicPtr::new(ptr::null_mut()
 
 impl Devtmpfs {
     fn ensure_init() {
-        // SAFETY: `__DEVTMPFS_INITIALIZED` is written here under the same
-        // non-atomic check-then-set discipline as the C original (see the
-        // module doc's "Locking / concurrency" section for why this is not
-        // upgraded to a CAS-guarded once-init). The list-head self-reference
-        // fixup itself now goes through `__DEVTMPFS_NODES`'s lock (Wave
-        // P3-8d) rather than a direct write to a separate static, since the
-        // lock owns the data -- this briefly takes the lock where the C/
-        // pre-P3-8d Rust never did, which is a strict improvement (was
-        // entirely unlocked before), not a new hazard.
-        unsafe {
-            if !__DEVTMPFS_INITIALIZED {
-                let mut head = __DEVTMPFS_NODES.lock();
-                let addr: *mut list_node_t = &raw mut *head;
-                (*addr).next = addr;
-                (*addr).prev = addr;
-                __DEVTMPFS_INITIALIZED = true;
-            }
+        let mut registry = __DEVTMPFS_NODES.lock();
+        if !registry.initialized {
+            let head = &raw mut registry.head;
+            registry.head.next = head;
+            registry.head.prev = head;
+            registry.initialized = true;
         }
     }
 }
@@ -589,17 +577,17 @@ pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
     // `drop(guard)` / re-`lock()` -- Wave P3-8d). The "next" pointer is
     // always captured while the lock is held, exactly like the C.
     let mut guard = __DEVTMPFS_NODES.lock();
-    // SAFETY: `guard` proves the lock is held; `*guard` is a live,
+    // SAFETY: `guard` proves the lock is held; its head is a live,
     // initialised list head (`__devtmpfs_ensure_init` always runs before
     // any node can exist to iterate).
-    let mut cur = unsafe { list_first(&raw mut *guard) };
+    let mut cur = unsafe { list_first(&raw mut guard.head) };
     while !cur.is_null() {
         let node = cur as *mut DevtmpfsNode;
         // SAFETY: `node` is a live registry entry; snapshot fields so we
         // can release the lock.
         let (n, nl, m, d) = unsafe { ((*node).name, (*node).name_len, (*node).mode, (*node).dev) };
         // SAFETY: `guard` still held; `cur` still a live linked node.
-        let next = unsafe { list_next(&raw mut *guard, cur) };
+        let next = unsafe { list_next(&raw mut guard.head, cur) };
         drop(guard);
 
         // SAFETY: `root`/`n`/`nl` satisfy `Devtmpfs::mknod_relative`'s
@@ -776,7 +764,7 @@ pub(crate) extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t,
         (*entry).prev = entry;
 
         let mut guard = __DEVTMPFS_NODES.lock();
-        list_push_front(&raw mut *guard, entry);
+        list_push_front(&raw mut guard.head, entry);
     }
 
     // If devtmpfs is already mounted, create the node live using the
@@ -815,7 +803,7 @@ pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
     // lock throughout.
     {
         let mut guard = __DEVTMPFS_NODES.lock();
-        let head = &raw mut *guard;
+        let head = &raw mut guard.head;
         // SAFETY: `guard` proves the lock is held; the ring is unmutated
         // during the read-only `.find()`. `find` stops at the match, so the
         // subsequent `list_detach` is NOT a mutation-during-walk.
@@ -878,7 +866,7 @@ fn __devtmpfs_register_one_device(dev: *mut device_t) -> c_int {
     // throughout; read-only `.any()` walk.
     let found = {
         let mut guard = __DEVTMPFS_NODES.lock();
-        let head = &raw mut *guard;
+        let head = &raw mut guard.head;
         unsafe {
             DevtmpfsNode::iter(head).any(|cur| {
                 let node = cur as *mut DevtmpfsNode;
@@ -914,7 +902,7 @@ pub(crate) extern "C" fn devtmpfs_populate_devices() {
     // throughout; read-only `.count()` walk.
     let count = {
         let mut guard = __DEVTMPFS_NODES.lock();
-        let head = &raw mut *guard;
+        let head = &raw mut guard.head;
         unsafe { DevtmpfsNode::iter(head).count() as c_int }
     };
 

@@ -141,7 +141,7 @@ pub use crate::tty::tty::Tty as tty;
 // imported by its real path.)
 pub use crate::tty::tty::Termios as termios;
 pub use crate::tty::tty::Winsize as winsize;
-pub use crate::sysnet::sock;
+pub use crate::sysnet::Socket as sock;
 // tmpfs / xv6fs privates (P3-N8) + on-disk trio (P3-4a)
 pub use crate::vfs::tmpfs::superblock::TmpfsSbPrivate as tmpfs_sb_private;
 pub use crate::vfs::tmpfs::superblock::TmpfsSuperblock as tmpfs_superblock;
@@ -342,6 +342,7 @@ pub const ENOSYS: u32 = 38;
 pub const ENOTEMPTY: u32 = 39;
 pub const ELOOP: u32 = 40;
 pub const EOVERFLOW: u32 = 75;
+pub const EMSGSIZE: u32 = 90;
 pub const EOPNOTSUPP: u32 = 95;
 pub const EADDRINUSE: u32 = 98;
 pub const ETIMEDOUT: u32 = 110;

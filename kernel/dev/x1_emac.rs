@@ -1101,7 +1101,7 @@ impl X1EmacSoftc {
 
             // Get frame length (includes FCS).
             let mut frame_len = rx_desc_frame_len(word0);
-            if frame_len < 14 || frame_len > X1_EMAC_MAX_FRAME_SIZE + X1_EMAC_FCS_SIZE {
+            if frame_len < 14 + X1_EMAC_FCS_SIZE || frame_len > X1_EMAC_MAX_FRAME_SIZE + X1_EMAC_FCS_SIZE {
                 // Error/oversize frame -- recycle the buffer.
                 // SAFETY: `d`/`sc` live.
                 unsafe { Self::rx_recycle(sc, d, idx) };
@@ -1121,24 +1121,13 @@ impl X1EmacSoftc {
             // SAFETY: `m` live.
             unsafe { (*m).len = frame_len };
 
-            // Deliver to network stack. `m` live, ownership transferred to
-            // `net_rx` (matches the C original's contract -- `net_rx` is
-            // responsible for `m`'s lifetime from here).
-            Net::net_rx(m);
-
-            // Allocate a replacement mbuf. `mbufalloc` returns a fresh mbuf
-            // or null.
-            let mut newm = Mbuf::alloc(0);
+            // Keep ownership of the completed buffer until a replacement
+            // exists. On OOM, drop this frame and reuse its DMA buffer.
+            let newm = Mbuf::alloc(0);
             if newm.is_null() {
-                // SAFETY: caller contract; format string matches its one argument.
-                crate::kprintln!("x1_emac{}: rx mbuf alloc failed", unsafe { (*sc).index });
-                // Reuse the old mbuf (we already gave it to net_rx, so
-                // allocate or we'll have a dangling pointer). In practice
-                // this shouldn't happen on xv6.
-                newm = Mbuf::alloc(0);
-                if newm.is_null() {
-                    panic!("x1_emac: out of mbufs");
-                }
+                // SAFETY: m still belongs exclusively to this ring entry.
+                unsafe { (*m).len = 0; Self::rx_recycle(sc, d, idx) };
+                continue;
             }
             // SAFETY: caller contract; `newm` live.
             unsafe {
@@ -1155,6 +1144,10 @@ impl X1EmacSoftc {
 
                 (*sc).rx_head = (idx as u32 + 1) % X1_EMAC_RX_RING_SIZE as u32;
             }
+            // SAFETY: DMA completed and its cache was invalidated above.
+            // The descriptor now owns newm; transfer the detached m exactly
+            // once to the stack, which frees or queues it.
+            unsafe { Net::net_rx(m) };
         }
 
         // If we hit the budget limit, there may be more packets pending.
