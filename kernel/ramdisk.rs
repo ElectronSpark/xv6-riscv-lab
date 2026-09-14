@@ -142,7 +142,7 @@ impl Ramdisk {
             if let Some(address) = address {
                 let disk_data = address as *mut u8;
                 // RAMDISK's lock serializes access to its validated mapped region.
-                // The part pins an in-bounds page span until its copy completes.
+                // The submitter pins this checked page span until the part completes.
                 // copy permits overlap without constructing aliased byte slices.
                 unsafe {
                     if part.write() {

@@ -1,147 +1,25 @@
-//! Classic xv6 buffer cache -- Rust port of `kernel/bio.c` (Phase 2 Wave
-//! 22; see `docs/rustify/phase2_plan.md` and its §0 "Two distinct bio
-//! concepts" note).
+//! Fixed-size disk-block cache, indexed by device and block number.
 //!
-//! **Not to be confused with [`crate::dev::bio`]** (`kernel/dev/bio.c`
-//! -> `kernel/dev/bio.rs`), the Linux-style ref-counted block-I/O
-//! request descriptor. This file is the *other* "bio": the original
-//! xv6 `struct buf` disk-block cache -- a fixed-size, LRU-ish pool of
-//! `NBUF` cache-line-aligned buffers, keyed by `(dev, blockno)` through
-//! the Wave-1 Rust `hlist`, with a free list (O(1) LRU recycling) and a
-//! dirty list (deferred writeback). Named `bufcache.rs`, not `bio.rs`,
-//! specifically to avoid colliding with the sibling module's file name
-//! -- every C-ABI symbol this file exports keeps its exact original
-//! name (`binit`, `bread`, `bwrite`, `bwrite_async`, `bsync`,
-//! `bdirty_count`, `brelse`, `bpin`, `bunpin`), matching every existing
-//! extern declaration across the tree (`kernel/vfs/xv6fs/*.rs`,
-//! `kernel/inc/defs.h`) unchanged.
+//! The cache owns permanently allocated buffer pages. A lookup takes one
+//! reference and returns its buffer mutex held; release unlocks and drops that
+//! reference. Only clean, unreferenced buffers enter the recycling list. Dirty
+//! buffers retain their identity and data until successful writeback.
 //!
-//! # Locking order (unchanged from the C original)
+//! BCACHE's spinlock protects hash/list membership, dirty state and reference
+//! counts. It is released before acquiring a buffer mutex or waiting for I/O.
+//! Buffer payloads and validity are protected by their individual mutexes.
+//! The permanent buffer array stays outside BCACHE so those mutexes can span
+//! lookups, I/O and release without borrowing through a cache spinlock guard.
 //!
-//! 1. `bcache.lock` (spinlock) -- protects the LRU/dirty lists and the
-//!    hash table. Held only for short, non-sleeping critical sections.
-//!    Wave P3-8c: lock-owns-data [`crate::sync::SpinLock`] (see
-//!    [`BCacheHash`] below) -- a held [`crate::sync::SpinLockGuard`]
-//!    `Deref`s straight to the protected fields, so most critical
-//!    sections need no `unsafe` for the field access itself, and every
-//!    early-return/loop-continue exit path releases the lock for free
-//!    via RAII (`drop(bc)`) instead of a hand-paired `spin_unlock`.
-//! 2. `buf.lock` (mutex) -- protects one buffer's contents; `bread()`
-//!    returns with it held, `brelse()` releases it. This lock crosses
-//!    function-call (often thread) boundaries by design -- the same
-//!    reason `kernel/vfs/inode.rs`'s `vfs_ilock`/`vfs_iunlock` and
-//!    `kernel/mm/vm.rs`'s `vm_rlock`/`vm_runlock` stay thin
-//!    `mutex_lock`/`mutex_unlock` forwards rather than
-//!    `crate::sync::KMutex` RAII: no stack-scoped guard can span two
-//!    separate C-ABI calls. Every acquire/release site below mirrors
-//!    the C original's exact placement.
-//! 3. Disk I/O completion, awaited through the shared [`Bio::wait`] lifecycle.
+//! A sleeping flush gate serializes complete writeback passes across mounts.
+//! Callers release their buffer locks before entering it. A failed pass retains
+//! dirty data, releases its references and gate, and returns an error; journal
+//! callers must stop before publishing or clearing a transaction header.
 //!
-//! `bread()` may block (mutex sleep, then disk I/O wait); callers must
-//! not hold other sleeping locks that the disk interrupt/completion path
-//! could need.
-//!
-//! **Lock-ordering hazard, called out explicitly**: [`BufCache::get`] takes
-//! `bcache.lock`, walks the hash table, and -- whether it finds a cached
-//! buffer or has to recycle a free one -- must release `bcache.lock`
-//! *before* acquiring that buffer's own `buf.lock` (mutex). Holding
-//! `bcache.lock` across a (potentially sleeping) mutex acquire would
-//! both violate the spinlock's own "never sleep while held" rule and
-//! risk a lock-order inversion against any other path that acquires the
-//! two in this order. Both `bget` exit paths (`return`ed a cached hit
-//! or a freshly recycled buffer) call `drop(bc)` -- releasing the
-//! `SpinLockGuard` -- immediately before `mutex_lock`, mirroring the C
-//! original's `spin_unlock(&bcache.lock); RawMutex::lock(&b->lock);`
-//! ordering exactly.
-//!
-//! # Data structures
-//!
-//! `BCacheHash` mirrors the C file-scope anonymous `struct { spinlock_t
-//! lock; struct buf buf[NBUF]; list_node_t free_list, dirty_list; uint
-//! dirty_count; hlist_t cached; hlist_bucket_t buckets[BIO_HASH_BUCKETS];
-//! } bcache;`'s LRU/dirty-list/hash-table fields -- the ones `bcache.lock`
-//! actually protects -- field-for-field, including the `hlist_t` +
-//! immediately-adjacent `buckets` array trick: `hlist_t`'s own `buckets`
-//! member is a zero-sized `__IncompleteArrayField` (bindgen's
-//! flexible-array-member encoding), so laying a real `[list_node_t;
-//! BIO_HASH_BUCKETS]` field directly after `cached: hlist_t` in this
-//! struct reproduces the same layout `kernel/hlist.rs`'s `bucket_at()`
-//! (`buckets.as_mut_ptr()`, i.e. "the address right after the header")
-//! expects -- identical to the precedent already established by
-//! `kernel/proc/proc_shims.rs`'s `ProcTable`. Wave P3-8c: `BCacheHash`
-//! now lives inside a [`crate::sync::SpinLock`] (`BCACHE`, below)
-//! instead of being a plain field-group next to a hand-rolled
-//! `spinlock_t` -- the lock genuinely *owns* exactly the data it
-//! protects, `std::sync::Mutex<T>`-style.
-//!
-//! The `buf` array itself (`BUF_STORAGE`, below) is deliberately kept
-//! *outside* `BCacheHash`/`BCACHE`: each `buf.lock` is a sleeplock held
-//! across function-call boundaries (see locking order item 2 above), so
-//! `buf.data`/`buf.lock` etc. must stay reachable without going through
-//! a `SpinLockGuard` (whose `Deref` is only valid while the spinlock
-//! itself is held -- it cannot model a lock that outlives the critical
-//! section). `bcache.lock` still protects each buffer's
-//! `free_entry`/`dirty_entry`/`refcnt`/`dirty` fields, exactly as in the
-//! C original and unchanged by this refactor -- only reachable via raw
-//! `*mut buf` pointers and per-site `unsafe` (documented at each call
-//! site below), same as before.
-//!
-//! Storage is `static mut BUF_STORAGE: MaybeUninit<[buf; NBUF]> =
-//! MaybeUninit::zeroed()` (same idiom as `kernel/console.rs`'s
-//! `CONSOLE_CDEV` / `kernel/tty/ptmx.rs`'s `PTMX_CDEV`) for the buffers,
-//! and `BCACHE: SpinLock<BCacheHash> = SpinLock::new(name, zeroed)` for
-//! the hash/list header. Unlike those two, the zero *value* is not just
-//! "never read before real init" here -- `bget()`'s buffer-recycling
-//! path genuinely depends on a not-yet-recycled buffer reading back
-//! `dev == 0 && blockno == 0` (the C static's implicit BSS zero-init),
-//! so zeroing (not leaving uninitialised) is required for correctness,
-//! not merely permitted for soundness; likewise `BCacheHash`'s zeroed
-//! placeholder is not yet a meaningful "initialized" state (`free_list`/
-//! `dirty_list`/`cached` need real runtime `list_entry_init`/
-//! `hlist_init` calls in [`BufCache::init`], exactly as before). `buf`/
-//! `list_node_t`/`hlist_t`/`mutex_t` are all plain integers and raw
-//! pointers (no references, no niche types), so the all-zero bit
-//! pattern is a valid value for every field -- sound by construction.
-//!
-//! `NBUF` (`param.h`, `MAXOPBLOCKS * 300` = 24000) and `BIO_HASH_BUCKETS`
-//! (`dev/buf.h`, 24007) are plain `#define`s with no corresponding C
-//! declaration for bindgen to capture; hand-mirrored as local constants,
-//! same established per-file convention as `kernel/vfs/xv6fs/mod.rs`'s
-//! `MAXOPBLOCKS`/`BSIZE`. `BSIZE` (`vfs/xv6fs/ondisk.h`, 1024) is
-//! likewise re-declared locally rather than reached through
-//! `crate::vfs::xv6fs` -- this file is not part of that driver, and the
-//! C original's own `#include "vfs/xv6fs/ondisk.h" // for BSIZE` comment
-//! already signals it's borrowing, not owning, the constant.
-//!
-//! # `hlist.h`/`list.h` `static inline` primitives
-//!
-//! Neither header has external linkage for the primitives this file
-//! needs (`hlist_hash_uint64`, `list_node_push_front/back`,
-//! `list_node_pop_front`, `LIST_NODE_IS_DETACHED`, `LIST_IS_EMPTY`) --
-//! reimplemented locally below, reusing `crate::machine`'s existing
-//! `list_entry_{init,detach,is_detached,insert_after,next,prev}`
-//! primitives (the crate-wide canonical `list_node_t` helpers, already
-//! used by `mm/vm.rs`/`timer/timer_core.rs`) rather than hand-rolling a
-//! third copy of the raw pointer arithmetic. `crate::mm::cffi::
-//! container_of` (the crate-wide generic `container_of`, already used
-//! cross-module by `backtrace.rs`/`vfs/fs.rs`/`tty/ptmx.rs`) recovers a
-//! `*mut buf` from a `*mut list_node_t`/`*mut hlist_entry_t` member
-//! pointer.
-//!
-//! # Panic-message fidelity (deliberate simplification)
-//!
-//! The C original's invariant-violation sites use `panic(fmt, ...)`/
-//! `assert(cond, fmt, ...)` (`kernel/inc/printf.h`), which prints an
-//! `ASSERTION_FAILURE %s:%d: In function '%s':\n` preamble before the
-//! caller's message. This port calls the crate's canonical
-//! `xv6_panic(msg)` entry point instead (`kernel/proc/proc_shims.rs`,
-//! already the standard C-ABI panic path used by ~14 other files
-//! including `kernel/kobject.rs`'s own `kassert!`) -- same
-//! simplification precedent, dropping only the boilerplate file/line/
-//! function header. Every dynamic diagnostic value the C original
-//! printed (buffer dev/blockno, `blkdev_put`'s error code) is still
-//! printed via `printf` immediately before the panic, so no diagnostic
-//! information is lost, only the redundant location preamble.
+//! BIO creation and waiting use the shared dev::bio lifecycle. The cache pins
+//! each buffer page and holds its device/BIO references until all transfers
+//! stop, including when waiting is interrupted. Raw buffer-pointer interfaces
+//! still require the existing caller-side lock and reference discipline.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
@@ -603,13 +481,7 @@ impl BufCache {
 }
 
 // ---------------------------------------------------------------------------
-// Public C ABI -- exact symbol/signature parity with `kernel/inc/defs.h`.
-// Relocated onto `impl BufCache` (whole-cache: init/get/sync/dirty_count)
-// and `impl Buf` (per-buffer: read/write/write_async/release/pin/unpin),
-// redundant `b`-prefix dropped, matching the crate-wide convention. Every
-// name keeps its exact original signature/visibility; only the receiver
-// namespace and name changed (`binit` -> `BufCache::init`, `bread` ->
-// `Buf::read`, ...).
+// Cache initialization, lookup and writeback. Per-buffer operations follow.
 // ---------------------------------------------------------------------------
 
 impl BufCache {

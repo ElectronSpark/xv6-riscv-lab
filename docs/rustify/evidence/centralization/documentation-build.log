@@ -1,0 +1,72 @@
+[  1%] Built target proc
+[  3%] Built target irq
+[  3%] Built target generate_usys
+[  4%] Built target gdbinit
+[  6%] Built target initcode.out
+[  7%] Built target ksymbols_placeholder
+[  8%] Building xv6_rust staticlib (riscv64gc-unknown-none-elf, release, features=[])
+[ 14%] Built target userlib
+[ 19%] Built target _echo
+[ 19%] Built target _cat
+[ 21%] Built target _grep
+[ 25%] Built target _ln
+[ 25%] Built target _init
+[ 28%] Built target _mmaptest
+[ 29%] Built target _kill
+[ 30%] Built target _sh
+   Compiling xv6_rust v0.1.0 (/home/es/xv6/xv6-riscv/kernel)
+[ 33%] Built target _stressfs
+[ 33%] Built target _usertests
+[ 35%] Built target _rm
+[ 37%] Built target _mkdir
+[ 39%] Built target _wc
+[ 40%] Built target _grind
+[ 42%] Built target _sleep
+[ 44%] Built target _sync
+[ 46%] Built target _primes
+[ 48%] Built target _xargs
+[ 52%] Built target _pingpong
+[ 52%] Built target _find
+[ 53%] Built target _zombie
+[ 55%] Built target _free
+[ 57%] Built target _dumprq
+[ 58%] Built target _ps
+[ 60%] Built target _dumpchan
+[ 62%] Built target _dumppcache
+[ 64%] Built target _dumpinode
+[ 65%] Built target _testsig
+[ 66%] Built target _clonetest
+[ 68%] Built target _cowtest
+[ 70%] Built target _vforktest
+[ 71%] Built target _devtest
+[ 75%] Built target _rustvfstest
+[ 74%] Built target _mount
+[ 76%] Built target _rustnettest
+[ 78%] Built target _mknod
+[ 79%] Built target _randtest
+[ 80%] Built target _wallclock
+[ 83%] Built target _umount
+[ 85%] Built target _symlinktest
+[ 85%] Built target _bigfile
+[ 87%] Building all user programs
+[ 87%] Creating file system images
+[ 87%] Built target user_programs
+[ 91%] Built target fs_img
+    Finished `release` profile [optimized] target(s) in 5.80s
+[ 91%] Built target xv6_rust
+[ 92%] Linking C executable kernel_with_symbols_elf
+[ 92%] Linking C executable kernel
+[ 93%] Built target kernel
+[ 93%] Built target kernel_with_symbols_elf
+[ 94%] Decompiling kernel binary
+[ 95%] Generating symbols from kernel with placeholder
+[ 96%] Embedding symbols into kernel ELF
+Embedded 32718 bytes into .ksymbols section (offset: 0xad000, size: 2097152, addr: 0x802ad000)
+[ 96%] Built target kernel_with_symbols
+[ 96%] Built target kernel.asm
+[ 98%] Generating xv6.bin (qemu)
+[ 98%] Generating symbols from kernel with placeholder
+Patched image_size=2805760 (0x2ad000) at offset 0x10 in xv6.bin
+[ 98%] Generating xv6.sym
+[100%] Compressing xv6.bin -> xv6.bin.gz
+[100%] Built target kernel_all

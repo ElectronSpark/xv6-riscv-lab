@@ -1,0 +1,618 @@
+
+OpenSBI v1.4
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 2
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 333 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 77 KB
+Firmware Heap Offset      : 0x4a000
+Firmware Heap Size        : 37 KB (total), 2 KB (reserved), 9 KB (used), 25 KB (free)
+Firmware Scratch Size     : 4096 B (total), 328 B (used), 3768 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 1
+Domain0 HARTs             : 0*,1*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 1
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[525768] hart 1 mycpu_init: setting tp to 0x0000000080233040 - 0x0000000080233080
+
+[586308]
+
+xv6 kernel booting (hart 1)
+
+
+
+[597362] fdt: checking DTB at 0x00000000bfe00000
+
+[696808] fdt: using DTB at 0x00000000bfe00000 (size 6692 bytes)
+
+[706727] fdt: parsed 181 nodes
+
+[712012] fdt: found UART at 0x10000000, IRQ 10, clock 3686400 Hz, baud 0, reg-shift 0, io-width 1
+
+[726702] fdt: probed platform info:
+
+[731813]   Memory regions: 1 (total 1024 MB)
+
+[736116]     [0] 0x80000000 - 0xc0000000 (1024 MB)
+
+[745921]   Reserved regions: 2
+
+[750757]     [0] 0x80040000 - 0x80060000 (128 KB)
+
+[758384]     [1] 0x80000000 - 0x80040000 (256 KB)
+
+[766706]   Ramdisk: 0xa0200000 - 0xac550000 (200000 KB)
+
+[784576]   UART: 0x10000000, IRQ 10, clock 3686400 Hz, baud 115200
+
+[795487]   PLIC: 0xc000000 (size 0x600000)
+
+[802732]   PCIe regions: 1
+
+[807552]     [0] 0x30000000 (size 0x10000000)
+
+[813509]   CPUs: 2, timebase: 10000000 Hz
+
+[821018]   VirtIO devices: 8
+
+[826497]     [0] 0x10001000, IRQ 1
+
+[832009]     [1] 0x10002000, IRQ 2
+
+[837077]     [2] 0x10003000, IRQ 3
+
+[842396]     [3] 0x10004000, IRQ 4
+
+[848621]     [4] 0x10005000, IRQ 5
+
+[853006]     [5] 0x10006000, IRQ 6
+
+[858895]     [6] 0x10007000, IRQ 7
+
+[863580]     [7] 0x10008000, IRQ 8
+
+[870362] SBI extensions:
+
+[875973]   BASE: AVAILABLE
+
+[887723]   TIMER: AVAILABLE (OPTIONAL)
+
+[894429]   IPI: AVAILABLE
+
+[898073]   RFENCE: AVAILABLE
+
+[902301]   HSM: AVAILABLE
+
+[906341]   SRST: AVAILABLE (OPTIONAL)
+
+[912987]   PMU: AVAILABLE (OPTIONAL)
+
+[919462]   DBCN: AVAILABLE (OPTIONAL)
+
+[926795]   SUSP: UNSUPPORTED (OPTIONAL)
+
+[933573]   CPPC: UNSUPPORTED (OPTIONAL)
+
+[938510]   NACL: UNSUPPORTED (OPTIONAL)
+
+[945729]   STA: UNSUPPORTED (OPTIONAL)
+
+[953179] ksymbols: loading embedded symbols from 0x802ad000-0x804ad000 (2097152 bytes)
+
+[985521] Kernel symbols initialized: 1023 entries
+
+[995124] page_buddy_init(): page array at 0x80fb5000, size 0x2000000
+
+[1006145] __managed_start: 0x82fb5000, __managed_end: 0xc0000000
+
+[1017527] init pages from 0x80000000 to 0x82fb5000 with flags 0x4000000
+
+[1060382] init pages from 0x82fb5000 to 0xc0000000 with flags 0x0
+
+[1648414] reserving pages from 0xa0200000 to 0xac550000
+
+[1673255] reserved mem out of range: 0x80040000 to 0x80060000
+
+[1676382] reserved mem out of range: 0x80000000 to 0x80040000
+
+[1890248] buddy init range: 0x82fb5000 - 0xa0200000
+
+[2051255] buddy init range: 0xac550000 - 0xc0000000
+
+[2065903] Buddy System Statistics:
+
+[2069705] ========================
+
+[2077361] order(0): 1 blocks (4K)
+
+[2084226] order(1): 1 blocks (8K)
+
+[2085140] order(2): 0 blocks (0B)
+
+[2087504] order(3): 1 blocks (32K)
+
+[2089507] order(4): 1 blocks (64K)
+
+[2096602] order(5): 1 blocks (128K)
+
+[2101377] order(6): 1 blocks (256K)
+
+[2103481] order(7): 1 blocks (512K)
+
+[2105271] order(8): 0 blocks (0B)
+
+[2107112] order(9): 2 blocks (4.0M)
+
+[2110475] order(10): 194 blocks (776.0M)
+
+[2118487] ------------------------
+
+[2125382] Buddy: 199931 free + 0 cached = 199931 pages (780.9M)
+
+[2362311] trampoline 0x3ffffff000 -> 0x0000000080235000
+
+[2365796] trampoline data 0x3fffffe000 -> 0x0000000080234000
+
+[2369816] trampoline cpu local 0x3fffffd000 -> 0x0000000080233000
+
+[2374370] signal trampoline 0x3fffffc000 -> 0x0000000080232000
+
+[2655248] kernel symbols 0x802ad000 - 0x804ad000 (size: 2097152)
+
+[2658678] kernel symbols index 0x80cb2000 - 0x80fb2000 (size: 3145728)
+
+[2663492] page table initialized
+
+[2667906] hart 1 switched to kernel page table, satp: 800000000008024d
+
+[2677930] paging enabled
+
+[2682528] hart 1 mycpu_init: setting tp to 0x0000003fffffd040 - 0x0000003fffffd080
+
+[2689332] mycpu initialized
+
+[2703462] workqueue subsystem initialized
+
+[2708759] trapinit: trampoline_userret at 0x0000003ffffff0e6
+
+[2716845] trapinit: trampoline_uservec at 0x0000003ffffff000
+
+[2727274] trapinit: CPU 0 intr_stack at 3ffffb8000 -> 0x00000000ac794000
+
+[2735941] trapinit: CPU 1 intr_stack at 3ffffb0000 -> 0x00000000ac7c0000
+
+[2744421] trapinit: CPU 2 intr_stack at 3ffffa8000 -> 0x00000000ac7c4000
+
+[2753091] trapinit: CPU 3 intr_stack at 3ffffa0000 -> 0x00000000ac7c8000
+
+[2763719] trapinit: CPU 4 intr_stack at 3ffff98000 -> 0x00000000ac7cc000
+
+[2771646] trapinit: CPU 5 intr_stack at 3ffff90000 -> 0x00000000ac7d0000
+
+[2784095] trapinit: CPU 6 intr_stack at 3ffff88000 -> 0x00000000ac7d4000
+
+[2794374] trapinit: CPU 7 intr_stack at 3ffff80000 -> 0x00000000ac7d8000
+
+[2807505] ipi_init: IPI subsystem initialized (IRQ 1)
+
+[2823627] PCI device 0:0:0 - vendor ID: 0x1b36, device ID: 0x8
+[2829219] PCI device 0:1:0 - vendor ID: 0xffff, device ID: 0xffff
+[2834696] PCI device 0:2:0 - vendor ID: 0xffff, device ID: 0xffff
+[2838502] PCI device 0:3:0 - vendor ID: 0xffff, device ID: 0xffff
+[2843790] PCI device 0:4:0 - vendor ID: 0x8086, device ID: 0x100e
+[2848599] E1000 Ethernet Controller detected.
+[2871342] netdev: registered e1000 (MAC 52:54:0:12:34:56) idx 0
+[2878864] PCI device 0:5:0 - vendor ID: 0xffff, device ID: 0xffff
+[2886055] PCI device 0:6:0 - vendor ID: 0xffff, device ID: 0xffff
+[2891038] PCI device 0:7:0 - vendor ID: 0xffff, device ID: 0xffff
+[3421331] Init process kernel stack size order: 2
+[3433864] CPU 1 idle process initialized at kstack 0x80c94000
+[3441874] hart 1 initialized. intr_sp: 0x0000003ffffb4000
+[3463257] ptmx: /dev/ptmx registered (major 5, minor 2)
+[3472840] ramdisk: initialized 200000 KB ramdisk (400000 sectors) at 0xa0200000
+[3476536] Page cache subsystem initialized
+[3484301] sizeof(tmpfs_inode)=1408, TMPFS_INODE_EMBEDDED_DATA_LEN=312
+[3485453] tmpfs max file size=1073741824 bytes
+[3488863] xv6fs: filesystem type registered
+[3490218] devtmpfs: filesystem type registered
+[3493028] devtmpfs: populated 9 device nodes from device table
+[3553541] xv6fs: block cache initialized: 199720 data blocks, 197224 free in 1 extents
+[3558587] xv6fs: mounted at /root
+[3560102] xv6fs: chroot to /root successful
+[3574560] tmpfs: mounted at /tmp
+[3581931] devtmpfs: mounted at /dev
+[3588387] Releasing secondary harts...
+[3591399] Starting secondary harts...
+[3601979] hart 0 mycpu_init: setting tp to 0x0000000080233000 - 0x0000000080233040
+[3603281] hart 0 switched to kernel page table, satp: 800000000008024d
+[3604131] hart 0 mycpu_init: setting tp to 0x0000003fffffd000 - 0x0000003fffffd040
+[3605277] CPU 0 idle process initialized at kstack 0x80c90000
+[3608211] hart 0 initialized. intr_sp: 0x0000003ffffbc000
+[3612971] RCU callback kthread started on CPU 1
+[3614430] RCU callback kthread started on CPU 0
+[3629709] pcache flusher thread started
+init: starting sh
+/ $ rustvfstest
+
+[4870996] VfsInode::vfs_mount: filesystem type 'tmp' not found
+rustvfstest: ALL TESTS PASSED
+/ $ rustnettest 48269
+
+rustnettest: ALL TESTS PASSED (64 UDP echoes)
+/ $ mmaptest
+
+mmaptest starting
+test_mmap_anonymous: OK
+test_mmap_read: OK
+test_mmap_private_write: OK
+test_mmap_fork: OK
+test_mmap_file_multipage: OK
+test_mmap_file_offset: OK
+test_mmap_file_read_after_close: OK
+test_mmap_file_two_mappings: OK
+test_mmap_file_boundary: OK
+test_mprotect_read_write: OK
+test_mprotect_none: OK
+test_mremap_grow: OK
+test_mremap_shrink: OK
+test_mincore: OK
+test_madvise_dontneed: OK
+test_msync_basic: OK
+mmaptest: all tests passed
+/ $ testsig
+
+Comprehensive signal tests (pid=37) start
+
+[Test 1] SA_SIGINFO queue cap / blocking accumulation
+Sent 12 SIGALRM while blocked; now unblocking (cap expected 8 deliveries)
+SIGINFO handler signo=14 count=1 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=2 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=3 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=4 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=5 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=6 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=7 [si_code=0 sival_int=0 pid=37]
+SIGINFO handler signo=14 count=8 [si_code=0 sival_int=0 pid=37]
+Delivered 8 SIGALRM (should be 8 due to cap)
+[Test 1] PASS
+
+[Test 2] SA_RESETHAND behavior
+SA_RESETHAND first delivery signo=10 rese_count=1 (will reset to default)
+SA_RESETHAND rese_count=1 (expected 1), handler_reset=1
+[Test 2] PASS
+
+[Test 3] SA_NODEFER reentrancy
+SA_NODEFER handler depth=1 signo=12
+SA_NODEFER handler depth=2 signo=12
+SA_NODEFER max recursion depth observed=2 (expected 2)
+[Test 3] PASS
+
+[Test 4] Stop / Continue semantics with SIGCONT handler
+Child 40 ready, entering pause loop...
+Parent: sending SIGSTOP to child 40
+Parent: sending SIGCONT to resume child
+SIGCONT handler invoked count=1 signo=18
+Child: woke from pause, cont_handler_count=1
+Parent: sending second SIGSTOP
+Parent: sending second SIGCONT
+SIGCONT handler invoked count=2 signo=18
+Child: woke from pause, cont_handler_count=2
+Child 40 exiting (cont_handler_count=2)
+Parent: waiting for child to exit
+[Test 4] PASS
+
+[Test 5] Changing handler preserves pending non-ignored instances
+Post-change handler delivered signo=14 change_handler_count=1 (old pending should be gone)
+Post-change handler delivered signo=14 change_handler_count=2 (old pending should be gone)
+Post-change handler count=2 (expected 2)
+[Test 5] PASS
+
+[Test 6] sigsuspend: atomically replace mask and wait
+sigsuspend_handler signo=10 caught=1
+sigsuspend returned -4, sigsuspend_caught=1
+SIGUSR1 still blocked after sigsuspend=1 (expected 1)
+[Test 6] PASS
+
+[Test 7] sigwait: dequeue signal without handler
+sigwait returned 0, sig=12 (expected SIGUSR2=12)
+SIGUSR2 still pending=0 (expected 0)
+[Test 7] PASS
+
+[Test 8] tkill: send signal to specific thread by TID
+sigsuspend_handler signo=10 caught=1
+tkill returned 0, caught=1
+tkill(-1, SIGUSR1) returned -22 (expected negative)
+[Test 8] PASS
+
+[Test 9] tgkill: signal specific thread in thread group
+Leader tid=43, child thread tid=44, tgid=43
+tgkill(43, 44, SIGUSR1) returned 0
+Child thread caught=1 signo=10
+tgkill(9999, 44, SIGUSR1) returned -3 (expected -ESRCH)
+[Test 9] PASS
+
+[Test 10] kill: process-directed signal to thread group
+Leader tid=45, child thread tid=46 (blocks SIGUSR1), tgid=45
+Leader caught=1 signo=10
+[Test 10] PASS
+
+[Test 11] SIGKILL: kills entire thread group
+Thread group: leader=47 child_thread=48
+Parent: sending SIGKILL to child process 47 (thread group)
+Child exited with status 9
+[Test 11] PASS
+
+[Test 12] sigsuspend: in child thread of thread group
+Leader=49, child thread=50 in sigsuspend
+Child thread sigsuspend: caught=1 done=1
+[Test 12] PASS
+
+[Test 13] sigwait: in child thread of thread group
+Leader=51, child thread=52 in sigwait
+Child thread sigwait: caught=1 signo=12 done=1
+[Test 13] PASS
+
+[Test 14] getpgid/setpgid: basic process group operations
+pid=37 pgid=37
+Child: pid=53 inherited pgid=37 (parent pgid=37)
+Child: after setpgid(0,0): ret=0 pgid=53 (expected 53)
+Parent: getpgid(53) = 53 (expected 53)
+[Test 14] PASS
+
+[Test 15] setsid/getsid: basic session operations
+Parent: sid=1 pid=37
+Child before setsid: pid=54 sid=1 pgid=37
+Child after setsid: returned=54 sid=54 pgid=54 (expected all=54)
+Grandchild: pid=55 sid=54 pgid=54 (expected sid=54 pgid=54)
+Parent: getsid(54) = 54 (expected 54)
+[Test 15] PASS
+
+[Test 16] Process group and session constraints
+setsid() first: returned 56 (expected 56)
+setsid() second: returned -1 (expected negative EPERM)
+setpgid on session leader: returned -1 (expected negative EPERM)
+getpgid(99999): returned -3 (expected negative ESRCH)
+getsid(99999): returned -3 (expected negative ESRCH)
+[Test 16] PASS
+
+[Test 17] kill(-pgid): signal entire process group
+setpgid(57, 57) = 0
+setpgid(58, 57) = 0
+setpgid(59, 57) = 0
+child 57 pgid=57 (expected 57)
+child 58 pgid=57 (expected 57)
+child 59 pgid=57 (expected 57)
+Sending kill(-57, SIGKILL) to process group
+kill(-57, SIGKILL) returned 0
+reaped child 57 status=9
+reaped child 58 status=9
+reaped child 59 status=9
+Reaped 3 children (expected 3)
+[Test 17] PASS
+
+[Test 18] SA_NOCLDSTOP: no SIGCHLD on child stop
+waitpid stopped: w=60 status=4991 stopped=1 sigchld_count=0
+sigchld_handler signo=17 count=1
+[Test 18] PASS
+
+[Test 19] wait: interrupted by signal returns -EINTR
+wait_intr_handler signo=10 count=1
+wait returned -4 (expected -EINTR=-4), handler_count=1
+sigchld_handler signo=17 count=2
+sigchld_handler signo=17 count=3
+[Test 19] PASS
+
+[Test 20] waitpid: interrupted by signal returns -EINTR
+wait_intr_handler signo=10 count=1
+waitpid returned -4 (expected -EINTR=-4), handler_count=1
+sigchld_handler signo=17 count=4
+sigchld_handler signo=17 count=5
+[Test 20] PASS
+
+[Test 21] sigpending: blocked pending semantics
+SIGUSR1 pending while blocked=1 (expected 1)
+usr1_count_handler signo=10 count=1
+[Test 21] PASS
+
+========================================
+ALL TESTS PASSED (21/21)
+========================================
+/ $ cowtest
+
+simple: ok
+simple: ok
+three: ok
+three: ok
+three: ok
+file: ok
+forkfork: ok
+ALL COW TESTS PASSED
+/ $ symlinktest
+
+Start: test symlinks
+test symlinks: ok
+Start: test concurrent symlinks
+test concurrent symlinks: ok
+/ $ vforktest
+
+vforktest: starting
+
+=== Test 1: vfork with exit ===
+Before vfork: shared_var = 0
+Child: modifying shared_var
+Child: shared_var = 42, calling exit
+Parent resumed: shared_var = 42
+PASS: Parent sees child's modification
+Child exited with status 0
+Test 1 passed!
+
+=== Test 2: vfork with exec ===
+Before vfork: shared_var = 100
+Child: shared_var = 200, calling exec echo
+Child exec'd successfully
+Parent resumed: shared_var = 200
+PASS: Parent sees child's modification before exec
+Child exited with status 0
+Test 2 passed!
+
+=== Test 3: vfork parent blocks until child finishes ===
+Child: set sequence = 1
+Parent: sequence = 1
+PASS: Parent correctly blocked until child finished
+Test 3 passed!
+
+All vfork tests passed!
+/ $ clonetest
+
+clonetest: starting clone tests
+
+=== Test 1: fork() (no sharing) ===
+clonetest: child set counter to 42
+clonetest: parent sees counter = 0 (should be 0, not 42)
+clonetest: PASSED - memory not shared in fork
+
+=== Test 2: clone() with CLONE_VM ===
+clonetest: calling clone with CLONE_VM
+clonetest: stack=0x0000000000027000 entry=0x0000000000003596
+clonetest: parent waiting for child 1287
+CHILD
+clonetest: child started, pid=1287
+clonetest: child incremented counter to 100
+clonetest: parent sees counter = 100 (should be 100)
+clonetest: PASSED - memory shared via CLONE_VM
+
+=== Test 3: clone() with thread flags ===
+clonetest: calling clone with thread flags
+CHILD
+clonetest: child started, pid=1288
+clonetest: child incremented counter to 100
+clonetest: parent sees counter = 100
+clonetest: PASSED - thread-like clone works
+
+=== All clone tests passed! ===
+/ $ devtest
+
+devtest starting
+devtest: concurrent_open_close... ....................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................ok
+devtest: fork_with_device_fd... pcpcpcpcpcpccppcpcpcpcpcpcpcpcpcpccppcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcpcok
+devtest: parallel_fork_device... xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxok
+devtest: nested_fork_device... Lok
+devtest: stress_fork_exit... ok
+
+devtest: all tests passed!
+/ $ stressfs
+
+stressfs starting
+write 0
+write 1write
+2write
+write 3write
+5write
+64
+
+write 7
+write 8write
+9write
+write 10
+11write
+12write
+13write
+14
+write 15
+write write 16
+read
+17
+write write 19
+18
+write write 20
+write 21
+read
+22write read
+
+23write
+24
+read
+write 25write
+26
+write 27write
+28write
+29write
+write 32
+30write
+read
+31
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+read
+stressfs: ALL TESTS PASSED (33 workers)
+/ $

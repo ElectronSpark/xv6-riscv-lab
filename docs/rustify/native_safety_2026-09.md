@@ -1,5 +1,8 @@
 # Native Rust ownership and safety, September 2026
 
+The [unsafe boundary centralization continuation](centralization_2026-09.md)
+records the subsequent allocator, FDT, BIO, DMA and writeback changes.
+
 This wave replaces selected C-shaped Rust internals with owned values, checked
 byte slices, enums, traits, and scoped guards. It also fixes kernel bugs exposed
 by those changes. The comparison baseline is **`cd4a7e77`**. This is an account

@@ -1,7 +1,7 @@
 //! SpacemiT X1 SDHCI driver for SD cards and eMMC; SDIO/WiFi is skipped.
 //!
-//! Shared `BioRequest`/`BioPart` ownership pins each page through synchronous
-//! SDMA or PIO completion. SDMA uses checked 32-bit, cache-aligned buffer ranges;
+//! Shared `BioRequest`/`BioPart` completion keeps caller-owned pages in flight
+//! until synchronous SDMA or PIO finishes. SDMA uses checked 32-bit, cache-aligned buffer ranges;
 //! other buffers use PIO. Failed DMA must stop the command/data engines before
 //! its BIO token can complete. A reset that cannot stop DMA is fatal.
 //!

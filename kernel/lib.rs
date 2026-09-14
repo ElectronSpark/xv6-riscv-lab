@@ -24,7 +24,8 @@
 //! Run `cargo test --manifest-path kernel/Cargo.toml --target
 //! x86_64-unknown-linux-gnu` from the repository root. The host build uses
 //! `std` and compiles the production list, bit, allocator, string, path,
-//! packet, wire-format, frame-bound, and typed-lock algorithms. Typed locks
+//! packet, FDT, BIO, descriptor, SDHCI arithmetic, frame-bound, and typed-lock
+//! algorithms. Scratch/slab/page owners use host allocation backends. Typed locks
 //! use a host raw-lock backend; packet allocations use a host allocator.
 //! Hardware modules and their native-type binding facade are
 //! excluded; the host binding seam only aliases the production list node.

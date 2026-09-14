@@ -1,0 +1,365 @@
+
+OpenSBI v1.4
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 2
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 333 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 77 KB
+Firmware Heap Offset      : 0x4a000
+Firmware Heap Size        : 37 KB (total), 2 KB (reserved), 9 KB (used), 25 KB (free)
+Firmware Scratch Size     : 4096 B (total), 328 B (used), 3768 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 1
+Domain0 HARTs             : 0*,1*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 1
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[352025] hart 1 mycpu_init: setting tp to 0x0000000080236040 - 0x0000000080236080
+
+[401777]
+
+xv6 kernel booting (hart 1)
+
+
+
+[409016] fdt: checking DTB at 0x00000000bfe00000
+
+[489127] fdt: using DTB at 0x00000000bfe00000 (size 6692 bytes)
+
+[493485] fdt: parsed 181 nodes
+
+[497009] fdt: found UART at 0x10000000, IRQ 10, clock 3686400 Hz, baud 0, reg-shift 0, io-width 1
+
+[507281] fdt: probed platform info:
+
+[513322]   Memory regions: 1 (total 1024 MB)
+
+[516732]     [0] 0x80000000 - 0xc0000000 (1024 MB)
+
+[520956]   Reserved regions: 2
+
+[526409]     [0] 0x80040000 - 0x80060000 (128 KB)
+
+[533785]     [1] 0x80000000 - 0x80040000 (256 KB)
+
+[541494]   Ramdisk: 0xa0200000 - 0xac550000 (200000 KB)
+
+[550760]   UART: 0x10000000, IRQ 10, clock 3686400 Hz, baud 115200
+
+[561922]   PLIC: 0xc000000 (size 0x600000)
+
+[568727]   PCIe regions: 1
+
+[572177]     [0] 0x30000000 (size 0x10000000)
+
+[573499]   CPUs: 2, timebase: 10000000 Hz
+
+[574827]   VirtIO devices: 8
+
+[575768]     [0] 0x10001000, IRQ 1
+
+[576663]     [1] 0x10002000, IRQ 2
+
+[578174]     [2] 0x10003000, IRQ 3
+
+[579865]     [3] 0x10004000, IRQ 4
+
+[581567]     [4] 0x10005000, IRQ 5
+
+[583552]     [5] 0x10006000, IRQ 6
+
+[588604]     [6] 0x10007000, IRQ 7
+
+[593938]     [7] 0x10008000, IRQ 8
+
+[600335] SBI extensions:
+
+[605359]   BASE: AVAILABLE
+
+[616033]   TIMER: AVAILABLE (OPTIONAL)
+
+[621937]   IPI: AVAILABLE
+
+[625755]   RFENCE: AVAILABLE
+
+[630033]   HSM: AVAILABLE
+
+[633688]   SRST: AVAILABLE (OPTIONAL)
+
+[638120]   PMU: AVAILABLE (OPTIONAL)
+
+[643515]   DBCN: AVAILABLE (OPTIONAL)
+
+[649662]   SUSP: UNSUPPORTED (OPTIONAL)
+
+[655384]   CPPC: UNSUPPORTED (OPTIONAL)
+
+[661448]   NACL: UNSUPPORTED (OPTIONAL)
+
+[666610]   STA: UNSUPPORTED (OPTIONAL)
+
+[672014] ksymbols: loading embedded symbols from 0x802b2000-0x804b2000 (2097152 bytes)
+
+[704159] Kernel symbols initialized: 1180 entries
+
+[711328] page_buddy_init(): page array at 0x80fb9000, size 0x2000000
+
+[723466] __managed_start: 0x82fb9000, __managed_end: 0xc0000000
+
+[732671] init pages from 0x80000000 to 0x82fb9000 with flags 0x4000000
+
+[772568] init pages from 0x82fb9000 to 0xc0000000 with flags 0x0
+
+[1300644] reserving pages from 0xa0200000 to 0xac550000
+
+[1328863] reserved mem out of range: 0x80040000 to 0x80060000
+
+[1335337] reserved mem out of range: 0x80000000 to 0x80040000
+
+[1517175] buddy init range: 0x82fb9000 - 0xa0200000
+
+[1663790] buddy init range: 0xac550000 - 0xc0000000
+
+[1670741] Buddy System Statistics:
+
+[1675057] ========================
+
+[1677238] order(0): 1 blocks (4K)
+
+[1680765] order(1): 1 blocks (8K)
+
+[1682929] order(2): 1 blocks (16K)
+
+[1689150] order(3): 0 blocks (0B)
+
+[1691151] order(4): 1 blocks (64K)
+
+[1693199] order(5): 1 blocks (128K)
+
+[1695543] order(6): 1 blocks (256K)
+
+[1700638] order(7): 1 blocks (512K)
+
+[1707626] order(8): 0 blocks (0B)
+
+[1712930] order(9): 2 blocks (4.0M)
+
+[1720516] order(10): 194 blocks (776.0M)
+
+[1727308] ------------------------
+
+[1732717] Buddy: 199927 free + 0 cached = 199927 pages (780.9M)
+
+[1938286] trampoline 0x3ffffff000 -> 0x0000000080238000
+
+[1942012] trampoline data 0x3fffffe000 -> 0x0000000080237000
+
+[1945411] trampoline cpu local 0x3fffffd000 -> 0x0000000080236000
+
+[1952151] signal trampoline 0x3fffffc000 -> 0x0000000080235000
+
+[2221917] kernel symbols 0x802b2000 - 0x804b2000 (size: 2097152)
+
+[2226893] kernel symbols index 0x80cb6000 - 0x80fb6000 (size: 3145728)
+
+[2231203] page table initialized
+
+[2233904] hart 1 switched to kernel page table, satp: 8000000000080252
+
+[2245285] paging enabled
+
+[2249605] hart 1 mycpu_init: setting tp to 0x0000003fffffd040 - 0x0000003fffffd080
+
+[2262200] mycpu initialized
+
+[2274896] workqueue subsystem initialized
+
+[2281961] trapinit: trampoline_userret at 0x0000003ffffff0e6
+
+[2289509] trapinit: trampoline_uservec at 0x0000003ffffff000
+
+[2295061] trapinit: CPU 0 intr_stack at 3ffffb8000 -> 0x00000000ac7c0000
+
+[2301847] trapinit: CPU 1 intr_stack at 3ffffb0000 -> 0x00000000ac7c4000
+
+[2305526] trapinit: CPU 2 intr_stack at 3ffffa8000 -> 0x00000000ac7c8000
+
+[2309163] trapinit: CPU 3 intr_stack at 3ffffa0000 -> 0x00000000ac7cc000
+
+[2315265] trapinit: CPU 4 intr_stack at 3ffff98000 -> 0x00000000ac7d0000
+
+[2320257] trapinit: CPU 5 intr_stack at 3ffff90000 -> 0x00000000ac7d4000
+
+[2328058] trapinit: CPU 6 intr_stack at 3ffff88000 -> 0x00000000ac7d8000
+
+[2339772] trapinit: CPU 7 intr_stack at 3ffff80000 -> 0x00000000ac7dc000
+
+[2352469] ipi_init: IPI subsystem initialized (IRQ 1)
+
+[2366266] PCI device 0:0:0 - vendor ID: 0x1b36, device ID: 0x8
+[2370852] PCI device 0:1:0 - vendor ID: 0xffff, device ID: 0xffff
+[2372379] PCI device 0:2:0 - vendor ID: 0xffff, device ID: 0xffff
+[2374460] PCI device 0:3:0 - vendor ID: 0xffff, device ID: 0xffff
+[2376646] PCI device 0:4:0 - vendor ID: 0x8086, device ID: 0x100e
+[2378919] E1000 Ethernet Controller detected.
+[2398203] netdev: registered e1000 (MAC 52:54:0:12:34:56) idx 0
+[2402033] PCI device 0:5:0 - vendor ID: 0xffff, device ID: 0xffff
+[2406882] PCI device 0:6:0 - vendor ID: 0xffff, device ID: 0xffff
+[2411097] PCI device 0:7:0 - vendor ID: 0xffff, device ID: 0xffff
+[2894781] Init process kernel stack size order: 2
+[2906500] CPU 1 idle process initialized at kstack 0x80c98000
+[2914926] hart 1 initialized. intr_sp: 0x0000003ffffb4000
+[2933291] ptmx: /dev/ptmx registered (major 5, minor 2)
+[2952986] ramdisk: initialized 200000 KB ramdisk (400000 sectors) at 0xa0200000
+[2958928] Page cache subsystem initialized
+[2968382] sizeof(tmpfs_inode)=1408, TMPFS_INODE_EMBEDDED_DATA_LEN=312
+[2969866] tmpfs max file size=1073741824 bytes
+[2971579] xv6fs: filesystem type registered
+[2972485] devtmpfs: filesystem type registered
+[2975781] devtmpfs: populated 9 device nodes from device table
+[3034900] xv6fs: block cache initialized: 199720 data blocks, 197224 free in 1 extents
+[3047161] xv6fs: mounted at /root
+[3049974] xv6fs: chroot to /root successful
+[3063375] tmpfs: mounted at /tmp
+[3069267] devtmpfs: mounted at /dev
+[3076667] Releasing secondary harts...
+[3079081] Starting secondary harts...
+[3090012] hart 0 mycpu_init: setting tp to 0x0000000080236000 - 0x0000000080236040
+[3091158] hart 0 switched to kernel page table, satp: 8000000000080252
+[3092307] hart 0 mycpu_init: setting tp to 0x0000003fffffd000 - 0x0000003fffffd040
+[3094027] CPU 0 idle process initialized at kstack 0x80c94000
+[3097735] hart 0 initialized. intr_sp: 0x0000003ffffbc000
+[3102203] RCU callback kthread started on CPU 1
+[3103220] RCU callback kthread started on CPU 0
+[3120816] pcache flusher thread started
+[4108471] RCU synchronization smoke tests starting
+[4109604] TEST: RCU Read Lock/Unlock
+[4112272]   PASS: Nested RCU read locks work correctly
+[4112981] TEST: RCU Pointer Operations
+[4114715]   PASS: RCU pointer operations work correctly
+[4115466] TEST: synchronize_rcu()
+[4115994]   Waiting for grace period...
+[4121639]   Grace period completed
+[4122279]   PASS: synchronize_rcu() allows safe reclamation
+[4124483] TEST: call_rcu() Callbacks
+[4129154]   Callback registered
+[4131852] [bio] unequal segments and one completion: OK
+[4134393] [bio] device EIO drains all segments: OK
+[4136942] [bio] valid read after EIO: OK
+[4139400] [bio] segment validation preserves metadata: OK
+[4141825]   Callback invoked with value: 42
+[4143911]   PASS: call_rcu() callback executed successfully
+[4144616] TEST: Grace Period Detection
+[4149810] BUFCACHE TESTS: 1/1 PASSED (rejected write retained dirty data)
+[4152161] BIO TESTS: 5/5 PASSED
+[4204639]   PASS: Grace period detection through context switches
+[4205695] TEST: Concurrent Readers
+[4208549]   Waiting for readers to complete...
+[4209525]   Reader 0 starting (50 iterations)
+[4210349]   Reader 2 starting (50 iterations)
+[4210798]   Reader 1 starting (50 iterations)
+[4211496]   Reader 3 starting (50 iterations)
+[4211948]   Reader 0 completed
+[4215992]   Reader 2 completed
+init: starting sh
+[4240516]   Reader 1 completed
+[4243752]   Reader 3 completed
+[4244576]   PASS: Concurrent readers completed successfully
+[4261130] TEST: Basic List RCU Operations
+/ $ [4315202]   Callbacks invoked: 10/10
+[4315950]   PASS: Basic list RCU add/delete works correctly
+[4316509] TEST: List RCU Concurrent Read While Write
+[5415753]   Completed concurrent read/write with 0 errors
+[5416836]   PASS: List RCU concurrent read/write works correctly
+[5417498] NEGATIVE TEST: Multiple Concurrent Grace Periods
+[5434277]   Successfully completed multiple grace periods without deadlock
+[5435472]   PASS: Multiple concurrent grace periods handled correctly
+[5872409]   PASS: normal and expedited waits block until remote reader exits
+[5873693] RCU synchronization smoke tests: ALL TESTS PASSED
+[5915586] [workqueue] starting workqueue tests
+[5916592] [workqueue][T1 ctor_invoked_on_create] OK
+[5922395] [workqueue][T2 dtor_invoked_once_on_kill] OK
+[5924192] [workqueue][T3 work_struct_field_integrity] OK
+[5925120] [workqueue][T4 queue_work_runs_async] OK
+[5981800] [workqueue][T5 queue_work_fails_when_killed] OK
+[5985306] [workqueue][T6 multi_worker_concurrency] OK
+[6045979] [workqueue][T7 free_after_run_stress] OK
+[6104809] [workqueue][T8 callback_owned_work] OK
+[6163872] WORKQUEUE TESTS: 8/8 PASSED
+rustvfstest
+
+[6291199] VfsInode::vfs_mount: filesystem type 'tmp' not found
+rustvfstest: ALL TESTS PASSED
+/ $ clonetest
+
+clonetest: starting clone tests
+
+=== Test 1: fork() (no sharing) ===
+clonetest: child set counter to 42
+clonetest: parent sees counter = 0 (should be 0, not 42)
+clonetest: PASSED - memory not shared in fork
+
+=== Test 2: clone() with CLONE_VM ===
+clonetest: calling clone with CLONE_VM
+clonetest: stack=0x0000000000027000 entry=0x0000000000003596
+clonetest: parent waiting for child CHILD
+68
+clonetest: child started, pid=68
+clonetest: child incremented counter to 100
+clonetest: parent sees counter = 100 (should be 100)
+clonetest: PASSED - memory shared via CLONE_VM
+
+=== Test 3: clone() with thread flags ===
+clonetest: calling clone with thread flags
+CHILD
+clonetest: child started, pid=69
+clonetest: child incremented counter to 100
+clonetest: parent sees counter = 100
+clonetest: PASSED - thread-like clone works
+
+=== All clone tests passed! ===
+/ $
