@@ -19,69 +19,19 @@
 //! `machine`, `sync`, `lock`, and `mm` are sibling modules of this
 //! crate root — none of them is a submodule of another.
 //!
-//! ## Host-test seam (`cargo test`)
+//! ## Host tests
 //!
-//! `cargo build`/the CMake kernel build always compile this crate for
-//! `riscv64gc-unknown-none-elf` as a `#![no_std]` staticlib (see
-//! `.cargo/config.toml`'s pinned `[build] target` and `kernel/CMakeLists.txt`'s
-//! `cargo build --target riscv64gc-unknown-none-elf` invocation). That build
-//! is **entirely unaffected** by anything below: every item in this section
-//! is behind `#[cfg(test)]`/`#[cfg(not(test))]`, and `cfg(test)` is never
-//! true for an ordinary `cargo build` or the CMake custom command — only for
-//! `cargo test`.
+//! Run `cargo test --manifest-path kernel/Cargo.toml --target
+//! x86_64-unknown-linux-gnu` from the repository root. The host build uses
+//! `std` and compiles the production list, bit, allocator, and string
+//! algorithms. Hardware modules and their native-type binding facade are
+//! excluded; the host binding seam only aliases the production list node.
+//! The early allocator uses a small list/panic backend below.
 //!
-//! `cargo test` needs a *host* binary (`cargo test --target
-//! x86_64-unknown-linux-gnu`, since `.cargo/config.toml` otherwise pins the
-//! bare riscv target — see that file's comment). Two things stand in the
-//! way of that:
-//!
-//! 1. `#![no_std]` — lifted under `cfg(test)` via `#![cfg_attr(not(test),
-//!    no_std)]` below, so `cargo test` gets an ordinary `std` build (test
-//!    harness, `Vec`/`Box`/`vec!` available to test code) while the real
-//!    kernel build is untouched.
-//! 2. Riscv-only `core::arch::asm!` bodies scattered through the crate.
-//!    Most of the crate (proc/irq/vfs/dev/tty/timer/ipi/the block+network
-//!    drivers/…) calls into these, directly or transitively, and none of it
-//!    has ever been built for any target other than riscv64 — porting all of
-//!    it to be host-buildable is a much larger undertaking than this seam
-//!    (see `docs/rustify/test_port_plan.md`'s Phase 3/4). This crate instead
-//!    takes the smallest change that unblocks real host-test coverage today:
-//!    * [`machine`] (this crate's *only* concentrated point of raw
-//!      arch-specific asm primitives) gets a `#[cfg(target_arch =
-//!      "riscv64")]` real body / `#[cfg(not(target_arch = "riscv64"))]`
-//!      host-mock sibling for each of its asm-backed primitives (documented
-//!      per-function in that file). Everything else in `machine` (the typed
-//!      `CpuLocal`/`ThreadRef`/list-entry helpers, which are plain pointer
-//!      code, no asm) is unconditionally portable and needs no gating.
-//!    * The module tree actually compiled under `cfg(test)` is a *reduced*
-//!      set: [`bindings`], [`machine`], [`list`], and a `cfg(test)`-only
-//!      inline `mm` shim (declared further down) that exposes exactly
-//!      `mm::bits` and `mm::early_allocator` — the three suites covered by
-//!      this phase (see `docs/rustify/test_port_plan.md` Phase 2) — plus a
-//!      small hand-written mock of the *pure* (non-asm) subset of
-//!      `mm::cffi` that `early_allocator.rs` needs (`ListNode` +
-//!      `xv6_list_{init,is_empty,push_front,pop_front}` + `panic_bytes`).
-//!      The real `mm/cffi.rs` is never touched or compiled for host tests —
-//!      it also contains a few `core::arch::asm!`-backed primitives
-//!      (`xv6_cpuid`/`xv6_push_off`/`xv6_pop_off`, unrelated to
-//!      `early_allocator.rs`) that would otherwise block a host build of
-//!      that file; reimplementing the four pure list primitives (identical
-//!      logic, no asm) sidesteps that without editing the real module.
-//!      Every other module (proc, irq, vfs, dev, tty, timer, ipi, the block
-//!      + network drivers, sync, lock, mm's other submodules, …) is
-//!      `#[cfg(not(test))]`-gated out of the `cargo test` build entirely —
-//!      each has its own local riscv asm and/or deep transitive
-//!      dependencies on `machine`'s per-CPU state, and bringing all of that
-//!      to a host target is out of this phase's scope (would require
-//!      touching dozens of already-ported files well beyond this task's
-//!      touch-list). This is a deliberate, documented scope decision, not an
-//!      oversight — see the worker report for the phase that introduced this
-//!      seam.
-//!
-//! `bindings` needs **no build-time step** for this: since wave P3-6 it is
-//! the hand-written `kernel/bindings.rs` (facades onto native Rust types +
-//! consts/typedefs — bindgen, `build.rs`, and `wrapper.h` are gone), so the
-//! same source compiles for either target.
+//! C library exports are mangled in host tests so the kernel's implementations
+//! do not interpose on the test runner. Kernel-only allocation entry points
+//! remain excluded. Hardware behavior is tested by booting the complete
+//! RISC-V kernel in QEMU, not by these host suites.
 
 #![cfg_attr(not(test), no_std)]
 #![allow(non_upper_case_globals)]
@@ -169,14 +119,21 @@ macro_rules! u {
     clippy::all
 )]
 #[path = "bindings.rs"]
+#[cfg(not(test))]
 pub mod bindings;
 
-// `machine` and `list` are the only two "real" (`#[path = ...]` onto the
-// actual production file) modules kept unconditional -- both are made fully
-// host-portable (see `machine.rs`'s own doc for its `cfg(target_arch)` seam;
-// `list.rs` has no arch-specific code at all, only a dependency on
-// `bindings`, which is itself host-portable -- see the crate doc above).
+// Host suites compile the production algorithms without importing the
+// kernel-wide facade: those aliases depend on hardware-only modules.
+#[cfg(test)]
+pub mod bindings {
+    #[allow(non_camel_case_types)]
+    pub type list_node_t = crate::list::ListNode;
+}
+
+// Hardware and per-CPU types are kernel-only. List algorithms below are
+// portable and compile unchanged in the host suite.
 #[path = "machine/machine.rs"]
+#[cfg(not(test))]
 mod machine;
 
 #[path = "list.rs"]
@@ -216,7 +173,6 @@ pub mod kobject;
 
 // kernel/{string,sbi}.rs (Phase 2 Wave 2 — leaf modules, ported from the
 // .c files of the same name).
-#[cfg(not(test))]
 #[path = "string.rs"]
 pub mod string;
 

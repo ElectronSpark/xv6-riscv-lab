@@ -25,7 +25,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 
 use crate::bindings;
 // P3-1D mesh sweep: dev/nullrand.rs is in scope for this wave; real
@@ -105,17 +105,12 @@ struct CloneArgs {
 // (`timer/timer_core.rs`) and the KERNBASE physical address
 // (`start_kernel.rs`) are plain crate-path imports now that their
 // `#[no_mangle]` exports are gone (the extern block that used to sit
-// here is deleted; `safestrcpy` moved to its own block below --
-// string.rs's libc-shaped exports are a mandated keep).
+// here is deleted). Bounded string copies use the safe slice API.
 use crate::irq::syscall::Syscall;
 use crate::start_kernel::__physical_memory_start;
 use crate::timer::timer_core::TimerCore;
 
-unsafe extern "C" {
-    // Strings.
-    pub safe fn safestrcpy(s: *mut c_char, t: *const c_char,
-                           n: c_int) -> *mut c_char;
-}
+use crate::string::copy_cstr;
 // P3-D3c: `proc/exit.rs`'s `exit` is a plain (safe) Rust fn now that its
 // `#[no_mangle]` export is gone -- imported via its private sibling module
 // path (the `crate::proc` glob would work too, but the direct path is
@@ -436,11 +431,11 @@ pub(crate) extern "C" fn sys_uname() -> u64 {
     }
 
     let mut u = Utsname::zeroed();
-    safestrcpy(u.sysname.as_mut_ptr()  as *mut c_char, b"xv6\0".as_ptr()      as *const c_char, 65);
-    safestrcpy(u.nodename.as_mut_ptr() as *mut c_char, b"xv6\0".as_ptr()      as *const c_char, 65);
-    safestrcpy(u.release.as_mut_ptr()  as *mut c_char, b"0.1\0".as_ptr()      as *const c_char, 65);
-    safestrcpy(u.version.as_mut_ptr()  as *mut c_char, b"xv6-tmp\0".as_ptr()  as *const c_char, 65);
-    safestrcpy(u.machine.as_mut_ptr()  as *mut c_char, b"riscv64\0".as_ptr()  as *const c_char, 65);
+    copy_cstr(&mut u.sysname, c"xv6");
+    copy_cstr(&mut u.nodename, c"xv6");
+    copy_cstr(&mut u.release, c"0.1");
+    copy_cstr(&mut u.version, c"xv6-tmp");
+    copy_cstr(&mut u.machine, c"riscv64");
 
     if either_copyout(1, addr, &u as *const _ as *const c_void,
                       core::mem::size_of::<Utsname>() as u64) < 0 {
