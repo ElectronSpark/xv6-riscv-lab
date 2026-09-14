@@ -27,15 +27,17 @@ CASES = {
     "cowtest": ("cowtest", r"ALL COW TESTS PASSED"),
     "symlinktest": ("symlinktest", r"test concurrent symlinks: ok"),
     "vforktest": ("vforktest", r"All vfork tests passed!"),
+    "clonetest": ("clonetest", r"All clone tests passed!"),
     "devtest": ("devtest", r"devtest: all tests passed!"),
     "usertests": ("usertests -q", r"ALL TESTS PASSED"),
     "usermem": ("usertests mem", r"ALL TESTS PASSED"),
+    "forkstress": ("usertests forkforkfork", r"ALL TESTS PASSED"),
     "stressfs": ("stressfs", r"stressfs: ALL TESTS PASSED \(33 workers\)"),
 }
 PROMPT = re.compile(rb"(?:^|\n)/ \$ ")
-FAILURE = re.compile(r"(?:\bFAIL(?:ED)?\b|TESTS FAILED|kernel panic|panic:|: failed|"
-                     r"ASSERTION_FAILURE|IPI_REASON_CRASH|spin_lock reentry|deadlock detected|exception preempted interrupt)",
-                     re.IGNORECASE)
+FAILURE = re.compile(r"(?:\bFAIL(?:ED)?\b|TESTS FAILED|ASSERTION_FAILURE|IPI_REASON_CRASH|"
+                     r"\[Core: \d+\] (?:In thread|No thread context)|"
+                     r"(?i:kernel panic|panic:|spin_lock reentry|deadlock detected|exception preempted interrupt))")
 
 
 def main():
@@ -47,7 +49,7 @@ def main():
     parser.add_argument("--memory", default="1024M", help="QEMU guest RAM")
     parser.add_argument("--log", type=Path, default=Path("build/rustify-regressions.log"))
     args = parser.parse_args()
-    selected = args.cases or [case for case in CASES if case != "usermem"]
+    selected = args.cases or [case for case in CASES if case not in ("usermem", "forkstress")]
     build = args.build_dir.resolve()
     kernel = (args.kernel or build / "kernel/xv6.bin").resolve()
     # -snapshot isolates guest writes, but its backing files still reflect
@@ -98,6 +100,7 @@ def run(args, selected, images):
         def until_prompt(timeout):
             output = bytearray()
             deadline = time.monotonic() + timeout
+            failure_at = None
             while time.monotonic() < deadline:
                 for key, _ in selector.select(min(1, max(0, deadline - time.monotonic()))):
                     chunk = os.read(key.fd, 65536)
@@ -110,8 +113,14 @@ def run(args, selected, images):
                 decoded = clean.decode(errors="replace")
                 failure = FAILURE.search(decoded)
                 if failure and "\n" in decoded[failure.start():]:
-                    raise RuntimeError(f"kernel/test failure:\n{clean[-5000:].decode(errors='replace')}")
-                if PROMPT.search(clean):
+                    # Panic prints its context/backtrace before the reason.
+                    # Keep collecting briefly so the first line cannot hide
+                    # the diagnostic that identifies the actual kernel bug.
+                    if failure_at is None:
+                        failure_at = time.monotonic()
+                    if time.monotonic() - failure_at >= 0.5:
+                        raise RuntimeError(f"kernel/test failure:\n{clean[-5000:].decode(errors='replace')}")
+                if failure_at is None and PROMPT.search(clean):
                     return clean.decode(errors="replace")
             raise RuntimeError(f"shell timed out after {timeout:g}s")
 

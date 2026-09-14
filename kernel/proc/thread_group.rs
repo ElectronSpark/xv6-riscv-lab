@@ -420,8 +420,7 @@ impl ThreadGroup {
                 core::mem::size_of::<thread_group>(),
                 SLAB_FLAG_STATIC as _,
             );
-            let ret = Self::alloc(initproc);
-            if ret != 0 {
+            if Self::alloc(initproc).is_err() {
                 xv6_panic(c"thread_group_init: thread_group_alloc failed".as_ptr());
             }
         }
@@ -429,7 +428,7 @@ impl ThreadGroup {
 
     /// Allocate a user thread_group with `leader` as its group leader.
     /// (Former free fn `thread_group_alloc`.)
-    pub(super) fn alloc(leader: *mut thread) -> c_int {
+    pub(super) fn alloc(leader: *mut thread) -> crate::kstd::KResult<()> {
         if leader.is_null() {
             xv6_panic(c"thread_group_alloc: NULL leader".as_ptr());
         }
@@ -442,7 +441,7 @@ impl ThreadGroup {
         u! {
             let tg = crate::mm::slab_alloc(Self::pool() as *mut crate::mm::slab::SlabCache)
                 as *mut thread_group;
-            if tg.is_null() { return -ENOMEM; }
+            if tg.is_null() { return Err(crate::kstd::Errno::NoMem); }
             memset(tg as *mut c_void, 0, core::mem::size_of::<thread_group>());
             let lta = ThreadAccess::assume(leader);
             let tga = ThreadGroupAccess::assume(tg);
@@ -467,7 +466,7 @@ impl ThreadGroup {
             lta.set_tgid(lta.pid());
             lta.tg_entry_ref().init();
             lta.tg_entry_ref().push_back(tga.thread_list_ptr());
-            0
+            Ok(())
         }
     }
 

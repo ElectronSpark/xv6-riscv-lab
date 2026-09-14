@@ -1,5 +1,7 @@
 //! Data-owning spinlock: safe access is tied to a borrowed guard.
 
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};

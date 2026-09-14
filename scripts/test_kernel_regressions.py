@@ -8,6 +8,7 @@ from scripts.run_kernel_regressions import FAILURE
 class ConsoleFailureTests(unittest.TestCase):
     def test_panics_are_detected_without_waiting_for_a_shell_timeout(self):
         for line in (
+            "[500763138] [Core: 0] In thread 6267 (usertests) at 0x80cac000\n"
             "[500768929] clone: thread_group_alloc failed",
             "[500775485] [Core: 0] Received IPI_REASON_CRASH, crashing...",
             "KERNEL PANIC: bad state",
@@ -23,6 +24,7 @@ class ConsoleFailureTests(unittest.TestCase):
             "test sbrkfail: OK",
             "test forkforkfork: OK",
             "rustnettest: ALL TESTS PASSED (64 UDP echoes)",
+            "__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput",
         ):
             with self.subTest(line=line):
                 self.assertIsNone(FAILURE.search(line))

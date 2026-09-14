@@ -125,11 +125,17 @@ impl ProcTable {
     // -----------------------------------------------------------------------
     // P3-1B: callers are `proc/thread.rs` and `proc/clone.rs`.
     pub(crate) fn proc_add(p: *mut Thread) {
-        if xv6_pid_wholding() == 0 {
-            panic_pid("pid lock not held");
-        }
+        Self::assign_pid(p);
+        Self::publish(p);
+    }
+
+    /// Assign a numeric PID while the caller holds pid_lock for writing.
+    /// The caller must keep that same lock until `publish` finishes, so an
+    /// unpublished number cannot be reused after counter wraparound.
+    pub(super) fn assign_pid(p: *mut Thread) -> i32 {
+        Self::assert_wholding();
         if p.is_null() {
-            panic_pid("NULL proc passed to proctab_proc_add");
+            panic_pid("NULL proc passed to assign_pid");
         }
         if t_dmp_list_entry_is_detached(p) == 0 {
             panic_pid("Process is already in the dump list");
@@ -148,7 +154,20 @@ impl ProcTable {
         .unwrap_or_else(|| panic_pid("proctab_proc_add: no free PID (should not happen)"));
         t_set_pid(p, newpid);
         nextpid_advance(newpid);
+        newpid
+    }
 
+    /// Publish an initialized thread with an already assigned numeric PID.
+    /// Caller holds the same pid write lock used by `assign_pid`. This phase
+    /// only links preallocated nodes; failures indicate broken invariants.
+    pub(super) fn publish(p: *mut Thread) {
+        Self::assert_wholding();
+        if p.is_null() || t_pid(p) < 1 {
+            panic_pid("publish: thread has no assigned PID");
+        }
+        if t_dmp_list_entry_is_detached(p) == 0 {
+            panic_pid("publish: thread is already registered");
+        }
         let existing = xv6_proctab_put_rcu(p);
         if existing == p {
             panic_pid("Failed to add process");

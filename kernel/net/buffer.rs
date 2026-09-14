@@ -1,5 +1,7 @@
 //! Stable packet allocation, checked payload bounds and owning queues.
 
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use core::ffi::{c_char, c_uint, c_void};
 use core::ops::Range;
 use core::ptr::{self, NonNull};

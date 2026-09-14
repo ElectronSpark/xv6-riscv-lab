@@ -1657,18 +1657,15 @@ pub(super) fn xv6_proctab_free_pid_slot() {
     }
 }
 pub(super) fn xv6_proctab_allocated_cnt() -> i64 {
-    // SAFETY: see `pt()`. This is a plain (non-atomic) read of a counter
-    // that `xv6_proctab_alloc_pid_slot`/`_free_pid_slot` mutate atomically;
-    // it mirrors the original C code's informational/best-effort read of
-    // this counter (e.g. for diagnostics) rather than a correctness-
-    // critical decision, so the benign race is intentional, pre-existing
-    // behaviour and out of scope for this pass to change.
-    u! { (*pt()).allocated_cnt }
+    use core::sync::atomic::{AtomicI64, Ordering};
+    // SAFETY: the live static counter is aligned for AtomicI64 and all its
+    // concurrent updates already use the same atomic representation.
+    unsafe { AtomicI64::from_ptr(&raw mut (*pt()).allocated_cnt).load(Ordering::Relaxed) }
 }
 
 pub(super) fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
-    // Pass a `struct thread` lookup key. Bindgen-generated `thread` is `Copy`
-    // and large; using `MaybeUninit::zeroed()` keeps the discriminator fields
+    // Pass a stack-resident thread lookup key. `MaybeUninit::zeroed()` keeps
+    // the discriminator fields
     // (only `pid`) deterministic and matches the C side's stack-allocated
     // `struct thread dummy = { .pid = pid };`.
     // SAFETY: see `pt()`. `dummy` is a local, fully-owned stack value used

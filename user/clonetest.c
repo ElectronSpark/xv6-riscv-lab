@@ -1,5 +1,6 @@
 // Test program for clone() syscall with shared resources (thread-like behavior)
 #include "uabi/clone_flags.h"
+#include "errno.h"
 #include "user/user.h"
 
 #define STACK_SIZE (4096 * 4) // 16KB - must be >= USERSTACK_MINSZ
@@ -7,6 +8,14 @@
 // Shared variable to verify CLONE_VM works
 volatile int shared_counter = 0;
 volatile int child_done = 0;
+
+static void wait_for_child(int expected) {
+    int status = -1;
+    if (wait(&status) != expected || status != 0) {
+        printf("clonetest: FAILED - child status %d\n", status);
+        exit(1);
+    }
+}
 
 // Child thread entry point
 void child_func(void) {
@@ -48,7 +57,7 @@ void test_fork(void) {
         exit(0);
     } else {
         // Parent
-        wait(0);
+        wait_for_child(pid);
         printf("clonetest: parent sees counter = %d (should be 0, not 42)\n",
                shared_counter);
         if (shared_counter == 0) {
@@ -107,7 +116,7 @@ void test_clone_vm(void) {
             // busy wait
         }
 
-        wait(0);
+        wait_for_child(pid);
 
         printf("clonetest: parent sees counter = %d (should be 100)\n",
                shared_counter);
@@ -160,7 +169,7 @@ void test_clone_thread(void) {
             // busy wait
         }
 
-        wait(0);
+        wait_for_child(pid);
 
         printf("clonetest: parent sees counter = %d\n", shared_counter);
         if (shared_counter == 100) {
@@ -174,6 +183,17 @@ void test_clone_thread(void) {
 
 int main(int argc, char *argv[]) {
     printf("clonetest: starting clone tests\n");
+
+    struct clone_args overflowing = {
+        .flags = CLONE_VM | SIGCHLD,
+        .stack = ~(uint64)0 - STACK_SIZE + 1,
+        .stack_size = STACK_SIZE,
+        .entry = (uint64)child_func,
+    };
+    if (clone(&overflowing) != -EINVAL) {
+        printf("clonetest: FAILED - overflowing stack accepted\n");
+        exit(1);
+    }
 
     // Test basic fork (should not share memory)
     test_fork();
