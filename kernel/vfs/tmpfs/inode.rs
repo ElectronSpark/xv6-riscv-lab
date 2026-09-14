@@ -588,6 +588,28 @@ impl HlistOps for TmpfsDirHlistOps {
 static __TMPFS_DIR_HLIST_OPS: TmpfsDirHlistOps = TmpfsDirHlistOps;
 
 impl TmpfsInode {
+    /// Release directory entry allocations when the inode itself is freed.
+    /// Entry names are stored in the same allocation; their child inode
+    /// numbers are non-owning and must not trigger recursive inode cleanup.
+    ///
+    /// # Safety
+    /// `directory` must be an initialized tmpfs directory with no concurrent
+    /// readers. VFS has removed its inode from lookup or committed unmount.
+    pub(crate) unsafe fn free_directory_entries(directory: *mut tmpfs_inode) {
+        // SAFETY: the caller provides an exclusively owned directory arm.
+        let children = unsafe { Self::dir_hlist(directory) };
+        loop {
+            // SAFETY: the directory hash remains initialized until inode free.
+            let entry = unsafe { hlist_first_entry(children) } as *mut tmpfs_dentry;
+            if entry.is_null() {
+                break;
+            }
+            let removed = hlist_pop(children, entry.cast()) as *mut tmpfs_dentry;
+            kassert!(removed == entry, "tmpfs cleanup: directory entry missing");
+            TmpfsDentry::free(removed);
+        }
+    }
+
     /// Mirrors `tmpfs_make_directory()`. Kept `#[no_mangle]`/exported per
     /// `tmpfs_private.h`'s `extern` declaration -- `kernel/vfs/devtmpfs/
     /// superblock.c` (still C) calls this directly on its own root inode.

@@ -85,7 +85,7 @@ use crate::bindings::{
     ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTTY, EOPNOTSUPP, EPERM, ERANGE,
 };
 use crate::proc::proc_shims::xv6_current_thread;
-use crate::sync::KSpinlock;
+use crate::sync::{KMutex, KSpinlock};
 
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
@@ -561,12 +561,13 @@ pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
 /// `ret as u64`.
 impl Sys {
     fn read_inner(fd: c_int, p: u64, n: c_int) -> KResult<isize> {
+        let count = usize::try_from(n).map_err(|_| Errno::Inval)?;
         let f = Sys::vfs_argfd(fd);
         if f.is_null() {
             return Err(Errno::BadF);
         }
 
-        let ret = VfsFile::vfs_fileread(f, p as *mut c_void, n as usize, 1);
+        let ret = VfsFile::vfs_fileread(f, p as *mut c_void, count, 1);
         VfsFile::vfs_fput(f);
         Ok(ret)
     }
@@ -592,12 +593,13 @@ pub(crate) extern "C" fn sys_vfs_read() -> u64 {
 /// [`read_inner`].
 impl Sys {
     fn write_inner(fd: c_int, p: u64, n: c_int) -> KResult<isize> {
+        let count = usize::try_from(n).map_err(|_| Errno::Inval)?;
         let f = Sys::vfs_argfd(fd);
         if f.is_null() {
             return Err(Errno::BadF);
         }
 
-        let ret = VfsFile::vfs_filewrite(f, p as *const c_void, n as usize, 1);
+        let ret = VfsFile::vfs_filewrite(f, p as *const c_void, count, 1);
         VfsFile::vfs_fput(f);
         Ok(ret)
     }
@@ -792,10 +794,15 @@ impl Sys {
         let mut ret = neg(EINVAL);
         match cmd {
             F_GETFL => {
+                // SAFETY: vfs_argfd holds a live file reference. This mutex
+                // serializes the flag snapshot with F_SETFL and I/O setup.
+                let _guard = KMutex::from_ptr(unsafe { &raw mut (*f).lock }).lock();
                 // SAFETY: non-null `f`.
                 ret = unsafe { (*f).f_flags } & !O_CLOEXEC;
             }
             F_SETFL => {
+                // SAFETY: the held file reference keeps its mutex alive.
+                let _guard = KMutex::from_ptr(unsafe { &raw mut (*f).lock }).lock();
                 // SAFETY: non-null `f`.
                 unsafe {
                     (*f).f_flags = ((*f).f_flags & O_ACCMODE) | (arg & !(O_ACCMODE | O_CLOEXEC));
@@ -1965,16 +1972,15 @@ impl Sys {
             return Err(Errno::Raw(ret));
         }
 
-        let fd;
-        {
-            let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*Sys::current_fdtable()).lock) }).lock();
-            fd = Sys::vfs_fdalloc(f);
-        }
+        let fd = {
+            let _guard = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*Sys::current_fdtable()).lock) }).lock();
+            Sys::vfs_fdalloc(f)
+        };
 
         // When success, the refcount of f will be increased by fdtable, thus we do
         // not put f here. When failure, we need to put f anyway.
         VfsFile::vfs_fput(f);
-        Ok(fd)
+        Errno::cint_result(fd)
     }
 }
 
@@ -2351,10 +2357,9 @@ impl Vfs {
             return ret;
         }
 
-        // On success, VfsInode::vfs_unmount() has already unlocked and freed
-        // mounted_root/child_sb; only release what's left.
-        VfsInode::vfs_iunlock(target_dir);
-        VfsSuperblock::vfs_superblock_unlock(parent_sb);
+        // Success already unlocked both inodes and both superblocks, and
+        // freed the mounted root/child superblock. Only the mount mutex
+        // remains ours; unlocking the other locks twice corrupts them.
         Vfs::vfs_mount_unlock();
 
         0
@@ -2405,6 +2410,9 @@ impl Sys {
         }
 
         let inode = VfsInode::vfs_namei(path.as_ptr(), n as usize);
+        if is_err(inode) {
+            return Err(Errno::Raw(ptr_err(inode)));
+        }
         if inode.is_null() {
             crate::kprintln!("dumpinode: cannot find path '{}'", crate::printf::Cs(path.as_ptr()));
             return Err(Errno::NoEnt);
@@ -2412,14 +2420,17 @@ impl Sys {
 
         // SAFETY: non-null `inode`.
         let sb = unsafe { (*inode).sb };
-        VfsInode::vfs_iput(inode);
 
         if sb.is_null() {
+            VfsInode::vfs_iput(inode);
             crate::kprintln!("dumpinode: inode has no superblock");
             return Err(Errno::Inval);
         }
 
+        // Hold the lookup reference until the dump releases the sb lock;
+        // concurrent unmount must not free the superblock while it is used.
         VfsSuperblock::vfs_dump_sb_inodes(sb);
+        VfsInode::vfs_iput(inode);
         Ok(())
     }
 }

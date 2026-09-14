@@ -308,12 +308,21 @@ impl TmpfsSuperblock {
 
     /// Mirrors `tmpfs_free_inode()`.
     ///
-    /// VFS guarantees inodes are truncated to zero (regular files) or empty
-    /// (directories) before this is called. `inode` must be a live
+    /// VFS guarantees regular file data is released before this is called.
+    /// Directories may still contain cached names during whole-filesystem
+    /// teardown, including the mounted root. `inode` must be a live
     /// `vfs_inode` embedded in a `tmpfs_inode` allocated by
     /// [`tmpfs_alloc_inode`] (`vfs_inode` is its first field, offset 0).
     pub(crate) fn free_inode(inode: *mut vfs_inode) {
         let ti = inode as *mut tmpfs_inode;
+        // SAFETY: VFS gives final ownership of this initialized inode to the
+        // backend after removing it from lookup. Whole-filesystem unmount
+        // preflight has excluded every external owner before reaching here.
+        if unsafe { super::Tmpfs::s_isdir((*inode).mode) } {
+            // SAFETY: the mode selects the initialized directory union arm;
+            // no iterator or lookup can still access its entries.
+            unsafe { super::inode::TmpfsInode::free_directory_entries(ti) };
+        }
         slab_free(ti as *mut c_void);
     }
 

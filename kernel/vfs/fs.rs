@@ -75,7 +75,7 @@
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void, CStr};
 use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -725,9 +725,7 @@ unsafe extern "C" {
     // printf.rs — C-variadic.
 
     // string.rs.
-    safe fn strlen(s: *const c_char) -> usize;
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
-    safe fn strncmp(p: *const c_char, q: *const c_char, n: usize) -> c_int;
 
 }
 
@@ -1203,8 +1201,8 @@ impl VfsFsType {
     /// struct's first field (offset 0), so the walk casts `list_node_t`
     /// pointers to `*mut vfs_fs_type` directly.
     unsafe fn get_fs_type_locked(name: *const c_char) -> *mut vfs_fs_type {
-        // SAFETY: `name` is a caller-provided C string; `strlen` reads it.
-        let name_len = unsafe { strlen(name) };
+        // SAFETY: callers provide a live NUL-terminated filesystem name.
+        let name = unsafe { CStr::from_ptr(name) };
         let head = &raw mut VFS_FS_TYPES;
         // N-I1: the raw `(*pos).next` chase is replaced by the safe
         // `ListIterator` (via `list_for_each!`). `vfs_fs_type.list_entry` is at
@@ -1216,8 +1214,11 @@ impl VfsFsType {
             let fs_type: *mut vfs_fs_type = node;
             // SAFETY: `fs_type` is a live `vfs_fs_type` linked on `VFS_FS_TYPES`
             // via its offset-0 `list_entry`; `(*fs_type).name` is a stable C
-            // string set at registration. `strncmp` reads both C strings.
-            if unsafe { strncmp((*fs_type).name, name, name_len) } == 0 {
+            // string set at registration and protected by the registry lock.
+            let registered_name = unsafe { CStr::from_ptr((*fs_type).name) };
+            // Filesystem names must match completely: prefix matching made
+            // an empty name select the first filesystem and "tmp" select "tmpfs".
+            if registered_name == name {
                 return fs_type;
             }
         });
@@ -1708,6 +1709,65 @@ impl VfsSuperblock {
         }
     }
 
+    /// Check all external inode owners before any destructive unmount work.
+    /// On success, release directory-to-parent references and cached names;
+    /// only the mounted root's creation and unmount-lookup references remain.
+    ///
+    /// # Safety
+    /// The caller holds the mount mutex, this superblock's write lock, and
+    /// the mountpoint and mounted-root inode locks. `sb` is live/attached.
+    unsafe fn prepare_inode_unmount(sb: *mut vfs_superblock) -> bool {
+        // SAFETY: the write lock keeps the hash and parent links stable;
+        // the mountpoint lock blocks new mounted-root reference acquisition.
+        let root = unsafe { (*sb).root_inode };
+        for inode in unsafe { Self::sb_inodes_iter(sb) } {
+            // SAFETY: every iterator item is a live inode under the sb lock.
+            if unsafe { (*inode).flags.destroying() != 0 } {
+                return false;
+            }
+            // Each non-root directory owns one reference to its parent.
+            // Those references are internal to the tree, so they must not
+            // make an otherwise idle, nonempty filesystem appear busy.
+            let parent_refs = unsafe { Self::sb_inodes_iter(sb) }
+                .filter(|&child| {
+                    // SAFETY: both inodes remain in the locked hash.
+                    unsafe {
+                        child != inode && is_dir((*child).mode) && (*child).parent == inode
+                    }
+                })
+                .count();
+            let expected = parent_refs + if inode == root { 2 } else { 0 };
+            // SAFETY: the inode is live; refcount access is atomic because
+            // external owners may concurrently drop their references.
+            let actual = unsafe { VfsInode::inode_refcount(inode) };
+            if actual as usize != expected {
+                return false;
+            }
+        }
+
+        // All fallible busy checks completed. No external owner can access
+        // these names or links; clearing them now avoids leaked parent refs
+        // when backend-specific cleanup frees the cached inode structures.
+        for inode in unsafe { Self::sb_inodes_iter(sb) } {
+            // SAFETY: the write lock excludes hash changes and the preflight
+            // proved that only internal tree references remain.
+            unsafe {
+                let parent = (*inode).parent;
+                if is_dir((*inode).mode) && !parent.is_null() && parent != inode {
+                    (*inode).parent = ptr::null_mut();
+                    let previous = VfsInode::inode_refcount_atomic(parent)
+                        .fetch_sub(1, Ordering::SeqCst);
+                    kassert!(previous > 0, "unmount: parent reference underflow");
+                }
+                if !(*inode).name.is_null() {
+                    kmm_free((*inode).name as *mut c_void);
+                    (*inode).name = ptr::null_mut();
+                }
+            }
+        }
+        true
+    }
+
     /// Mirrors `__vfs_evict_unused_inodes()`.
     ///
     /// Locking: caller must hold the superblock write lock.
@@ -1725,7 +1785,9 @@ impl VfsSuperblock {
                 let inode = pos;
 
                 'skip: {
-                    if (*inode).ref_count > 1 {
+                    // Cached backendless inodes have zero held references. A
+                    // single reference belongs to a real open file/lookup.
+                    if VfsInode::inode_refcount(inode) != 0 {
                         break 'skip;
                     }
                     if (*inode).flags.destroying() != 0 {
@@ -1740,7 +1802,7 @@ impl VfsSuperblock {
 
                     VfsInode::vfs_ilock(inode);
 
-                    if (*inode).ref_count > 1
+                    if VfsInode::inode_refcount(inode) != 0
                         || (*inode).flags.destroying() != 0
                         || (*inode).flags.valid() == 0
                         || (*inode).flags.mount() != 0
@@ -1756,9 +1818,6 @@ impl VfsSuperblock {
                         let _ = inode_ops(inode).sync_inode(inode);
                     }
 
-                    if (*inode).ref_count == 1 {
-                        VfsInode::inode_refcount_atomic(inode).fetch_sub(1, Ordering::SeqCst);
-                    }
                     (*inode).flags.set_valid(0);
                     VfsSuperblock::vfs_remove_inode(sb, inode);
                     VfsInode::vfs_iunlock(inode);
@@ -2582,6 +2641,13 @@ impl VfsInode {
                 return neg(EBUSY);
             }
 
+            // Detect busy files/directories before the backend can destroy
+            // cached contents. A rejected unmount must leave the filesystem
+            // intact, including closed siblings of an open file.
+            if !VfsSuperblock::prepare_inode_unmount(sb) {
+                return neg(EBUSY);
+            }
+
             // Begin unmounting. (Required trait method as of P3-10b; the
             // old `None`-slot skip had no live instance -- mount-time
             // validation always required the slot.)
@@ -2610,6 +2676,15 @@ impl VfsInode {
                 }
             }
 
+            // The creation/cache reference and this unmount caller's path
+            // lookup are the only references that may remain. A cwd, chroot,
+            // open root directory, or concurrent lookup must keep it alive.
+            // The mountpoint mutex prevents new mount traversals from
+            // acquiring references between this check and clearing linkage.
+            if VfsInode::inode_refcount(mounted_inode) != 2 {
+                return neg(EBUSY);
+            }
+
             // Do NOT call destroy_inode on the root inode during unmount --
             // that would corrupt the on-disk filesystem. Just tear down the
             // in-memory state.
@@ -2620,9 +2695,8 @@ impl VfsInode {
             VfsInode::clear_mountpoint(mountpoint);
 
             VfsInode::vfs_iunlock(mounted_inode);
-            // Free the root inode (one ref from `VfsSuperblock::set_mountpoint`'s `vfs_idup`
-            // plus the creation ref -- freed directly since already removed
-            // from cache).
+            // Consume the creation/cache reference and the unmount caller's
+            // lookup reference together, after proving no other owners exist.
             inode_ops(mounted_inode).free_inode(mounted_inode);
             (*sb).root_inode = ptr::null_mut();
 
@@ -3467,4 +3541,3 @@ fn inode_mode_str(mode: u32) -> *const c_char {
     }
     c"???".as_ptr()
 }
-

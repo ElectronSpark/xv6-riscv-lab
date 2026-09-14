@@ -83,8 +83,8 @@
 //! never through the P3-7c boundary reference (bitfield/union access
 //! stays on the raw place expression; see the Reference-ification note
 //! below). Deliberate deviations from a byte-for-byte C
-//! transliteration are called out inline (see `vfs_chroot`'s discarded
-//! `vfs_chdir` return value, and the `panic!`-free tail-call use of
+//! transliteration are called out inline (see `vfs_chroot`'s validation
+//! and reference ownership, and the `panic!`-free tail-call use of
 //! `xv6_panic`'s `-> !` return type replacing the C's dead
 //! `return -EINVAL;`).
 //!
@@ -165,7 +165,7 @@ use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 /// `struct vfs_dentry` (`kernel/inc/vfs/vfs_types.h`). No dentry cache
 /// right now; `name` is managed by the slab allocator.
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct VfsDentry {
     pub sb: *mut vfs_superblock,
     pub parent: *mut vfs_inode,
@@ -848,8 +848,6 @@ unsafe extern "C" {
 
     // string.rs
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
-    safe fn strtok_r(s: *mut c_char, delim: *const c_char, saveptr: *mut *mut c_char) -> *mut c_char;
-    safe fn strlen(s: *const c_char) -> usize;
 }
 
 // P3-D3a: `kmm_alloc`/`kmm_free` are genuinely `unsafe fn` in
@@ -866,6 +864,7 @@ use crate::mm::cffi::raw::{kmm_alloc, kmm_free};
 // `vfs_inode` instance (no superblock; see `vfs_private.h`) -- only its
 // address is ever used here (pointer identity checks), never its
 // contents.
+use super::path::{KernelPath, ParentPath, PathError};
 use crate::vfs::fs::{vfs_release_dentry, vfs_root_inode, FsStruct, Vfs, VfsSuperblock};
 
 // `kassert!`'s canonical home is crate root / `crate::kstd` (P3-CS2
@@ -892,8 +891,7 @@ const fn neg(e: u32) -> c_int {
 // a no-op change (see `is_eagain_ptr`, whose `as isize` comparison cast
 // is dropped accordingly).
 use crate::kstd::{
-    errptr_to_result, is_err, is_err_or_null, ptr_err, result_to_errptr,
-    result_to_neg_errno, Errno, KResult,
+    is_err, is_err_or_null, ptr_err, result_to_errptr, result_to_neg_errno, Errno, KResult,
 };
 
 /// P3-10b: the `KResult` spelling of the old `is_eagain_ptr` retry
@@ -926,7 +924,7 @@ const VFS_DITER_INDEX_END: i64 = -1;
 const VFS_DITER_INDEX_START: i64 = 0;
 const VFS_DITER_INDEX_CURRENT: i64 = 1;
 const VFS_DITER_INDEX_PARENT: i64 = 2;
-const VFS_PATH_MAX: usize = 65535;
+const VFS_PATH_MAX: usize = KernelPath::MAX_LEN;
 const VFS_INODE_MAX_REFCOUNT: i32 = 0x7FFF0000;
 const VFS_NAMEI_MAX_RETRIES: i32 = 10;
 
@@ -1468,6 +1466,34 @@ impl IRef {
         }
     }
 
+    /// Acquire a mounted root while its mountpoint linkage is locked.
+    /// This guard remains the owner of the mountpoint until after unlock.
+    fn mounted_root(&self) -> KResult<Option<Self>> {
+        let inode = Self::as_ptr(self);
+        VfsInode::vfs_ilock(inode);
+        // SAFETY: this owned reference keeps the inode alive; its mutex
+        // serializes mount flag/linkage reads with mount and unmount.
+        let mounted = unsafe {
+            if (*inode).flags.mount() != 0 {
+                Some((*inode).dev_mnt.mnt.mnt_rooti)
+            } else {
+                None
+            }
+        };
+        let result = match mounted {
+            None => Ok(None),
+            Some(root) if root.is_null() => Err(Errno::Again),
+            Some(root) => {
+                // SAFETY: unmount must hold this same mountpoint mutex
+                // before unlinking/freeing the root. Upgrade under the lock;
+                // unmount then observes the new reference and returns busy.
+                unsafe { Self::try_from_raw(root) }.map(Some).ok_or(Errno::Again)
+            }
+        };
+        VfsInode::vfs_iunlock(inode);
+        result
+    }
+
     /// Give up the owned reference without decrementing the refcount,
     /// returning the raw pointer -- the flip side of [`IRef::from_raw`],
     /// for a C-ABI boundary that expects to receive one held reference as
@@ -1504,12 +1530,10 @@ impl Drop for IRef {
     fn drop(&mut self) {
         // Struct invariant: `self` owns exactly one held reference, which
         // this call gives up; `vfs_iput` runs its own retry/destroy path
-        // if this was the last one (untouched by this wrapper -- see the
-        // module section doc above). Every current `IRef` call site
-        // upholds `vfs_iput`'s precondition (neither the inode lock nor
-        // the superblock write lock held here): none call `into_raw`
-        // while holding either, and none hold an `IRef` across a
-        // `vfs_ilock`/`vfs_superblock_wlock` acquisition.
+        // if this was the last one (see the module section doc above).
+        // Every call site releases inode/superblock locks before dropping
+        // the corresponding IRef; mounted_root only borrows the guard and
+        // releases the mountpoint lock before returning its new reference.
         VfsInode::vfs_iput(self.ptr.as_ptr());
     }
 }
@@ -1935,7 +1959,7 @@ impl VfsInode {
             return 0;
         }
         let mut iter: vfs_dir_iter = unsafe { core::mem::zeroed() };
-        let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
+        let mut dentry = VfsDentry::default();
         iter.index = VFS_DITER_INDEX_PARENT; // Skip "." and ".."
         iter.cookies = 0;
 
@@ -2249,7 +2273,7 @@ impl VfsInode {
             return Err(Errno::Inval); // Cannot unlink "." or ".."
         }
 
-        let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
+        let mut dentry = VfsDentry::default();
         let lret = VfsInode::vfs_ilookup(&raw mut *dir, &mut dentry, name, name_len);
         if lret != 0 {
             return Err(Errno::Raw(lret));
@@ -2767,11 +2791,8 @@ impl VfsInode {
     }
 
     fn vfs_chroot_inner(new_root: *mut vfs_inode) -> KResult<()> {
-        // NOTE (preserved 1:1 from the C original): `vfs_chdir`'s return
-        // value is discarded here — if it fails (e.g. `new_root` is not a
-        // directory or is invalid), `vfs_chroot` still proceeds to change
-        // the root. Flagged, not fixed, per port fidelity.
-        let _ = VfsInode::vfs_chdir(new_root);
+        // Do not install a root that failed directory/liveness validation.
+        VfsInode::vfs_chdir_inner(new_root)?;
 
         if core::ptr::eq(new_root, Vfs::root_inode_ptr()) {
             return Err(Errno::Inval); // not allowed to change to the dummy root
@@ -2786,7 +2807,8 @@ impl VfsInode {
         if r != 0 {
             return Err(Errno::Raw(r));
         }
-        VfsInode::vfs_idup(new_root);
+        // vfs_inode_get_ref already acquired the inode and superblock
+        // references transferred into rooti; an extra idup would leak one.
 
         let mut old: vfs_inode_ref;
         {
@@ -2833,154 +2855,84 @@ impl VfsInode {
     /// Internal path lookup implementation. Returns `Err(Errno::Again)` on a
     /// transient race (e.g. inode freed during mount traversal); the caller
     /// ([`vfs_namei_inner`]) retries.
-    fn vfs_namei_once(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inode> {
+    fn vfs_namei_once(path: KernelPath<'_>) -> KResult<*mut vfs_inode> {
+        let root = Vfs::vfs_curroot();
+        if is_err_or_null(root) {
+            return Err(if root.is_null() {
+                Errno::Inval
+            } else {
+                Errno::Raw(ptr_err(root))
+            });
+        }
+        // SAFETY: vfs_curroot returned one live, owned inode reference.
+        let mut root = unsafe { IRef::from_raw(root) };
+        if let Some(mounted) = root.mounted_root()? {
+            root = mounted;
+        }
+
+        let mut pos = if path.is_absolute() {
+            root.clone()
+        } else {
+            let cwd = Vfs::vfs_curdir();
+            if is_err_or_null(cwd) {
+                return Err(if cwd.is_null() {
+                    Errno::Inval
+                } else {
+                    Errno::Raw(ptr_err(cwd))
+                });
+            }
+            // SAFETY: vfs_curdir returned one live, owned inode reference.
+            unsafe { IRef::from_raw(cwd) }
+        };
+
+        for component in path.components() {
+            let mut dentry = VfsDentry::default();
+            let next = VfsInode::vfs_ilookup_inner(
+                IRef::as_ptr(&pos),
+                &mut dentry,
+                component.as_ptr().cast(),
+                component.len(),
+            )
+            .and_then(|()| VfsInode::vfs_get_dentry_inode_inner(&mut dentry));
+            // A driver may allocate a name before a later lookup failure.
+            // Release it on both outcomes before propagating the error.
+            vfs_release_dentry(&mut dentry);
+            let next = next?;
+            // SAFETY: successful dentry resolution returns one live inode
+            // reference, transferred to `pos` while its old reference drops.
+            pos = unsafe { IRef::from_raw(next) };
+
+            while let Some(mounted) = pos.mounted_root()? {
+                pos = mounted;
+            }
+        }
+
+        Ok(IRef::into_raw(pos))
+    }
+
+    /// Resolve a path to an inode, handling retry logic for transient race
+    /// conditions (e.g. inode freed during mount traversal).
+    fn vfs_namei_inner(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inode> {
         if path.is_null() || path_len == 0 {
             return Err(Errno::Inval);
         }
         if path_len > VFS_PATH_MAX {
             return Err(Errno::NameTooLong);
         }
-
-        let pathbuf = kmm_alloc(path_len + 1) as *mut c_char;
-        if pathbuf.is_null() {
-            return Err(Errno::NoMem);
-        }
-
-        // Get current root for ".." at root handling.
-        let mut rooti = Vfs::vfs_curroot();
-        if is_err_or_null(rooti) {
-            kmm_free(pathbuf as *mut c_void);
-            if rooti.is_null() {
-                return Err(Errno::Inval);
-            }
-            // `vfs_curroot` is a cross-module-callable C-ABI fn (not owned by
-            // this cluster); its `ERR_PTR` encoding is preserved verbatim via
-            // `Errno::Raw`.
-            return Err(Errno::Raw(ptr_err(rooti)));
-        }
-
-        if unsafe { (*rooti).flags.mount() != 0 } {
-            // SAFETY: `rooti` is a mountpoint inode; the mount union arm is
-            // the live one.
-            let mnt_rooti = unsafe { (*rooti).dev_mnt.mnt.mnt_rooti };
-            if mnt_rooti.is_null() {
-                VfsInode::vfs_iput(rooti);
-                kmm_free(pathbuf as *mut c_void);
-                return Err(Errno::Inval); // Mounted root inode has no mounted root
-            }
-            if !atomic_inc_in_range(VfsInode::refcount_atomic(mnt_rooti), 0, VFS_INODE_MAX_REFCOUNT) {
-                VfsInode::vfs_iput(rooti);
-                kmm_free(pathbuf as *mut c_void);
-                return Err(Errno::Again); // Mounted root is dying, retry
-            }
-            VfsInode::vfs_iput(rooti);
-            rooti = mnt_rooti;
-        }
-
-        let mut path = path;
-        let mut path_len = path_len;
-        let mut pos: *mut vfs_inode;
-        if unsafe { *path } == b'/' as c_char {
-            // Absolute path, start from root.
-            pos = rooti;
-            VfsInode::vfs_idup(pos);
-            path = unsafe { path.add(1) }; // skip leading '/'
-            path_len -= 1;
-        } else {
-            // Relative path, start from cwd.
-            pos = Vfs::vfs_curdir();
-            if is_err(pos) {
-                let e = Errno::Raw(ptr_err(pos));
-                VfsInode::vfs_iput(rooti);
-                kmm_free(pathbuf as *mut c_void);
-                return Err(e);
-            }
-        }
-
-        // Copy the path since strtok_r modifies the string.
-        if path_len > 0 {
-            // SAFETY: `pathbuf` was allocated with `path_len + 1` bytes;
-            // `path`/`path_len` describe a valid, disjoint byte range.
-            unsafe { core::ptr::copy(path as *const u8, pathbuf as *mut u8, path_len) };
-        }
-        unsafe { *pathbuf.add(path_len) = 0 };
-
-        let mut saveptr: *mut c_char = ptr::null_mut();
-        let mut token = strtok_r(pathbuf, c"/".as_ptr(), &mut saveptr);
-        // Mirrors the C original's `ret_inode`/`errored` pair: `result` tracks
-        // both the in-flight success pointer and any error, set immediately
-        // before each `break` exactly where the original set `ret_inode` +
-        // `errored = true`.
-        let mut result: KResult<*mut vfs_inode> = Ok(pos);
-
-        while !token.is_null() {
-            let token_len = strlen(token);
-
-            let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
-            let lret = VfsInode::vfs_ilookup(pos, &mut dentry, token, token_len);
-            if lret != 0 {
-                VfsInode::vfs_iput(pos);
-                pos = ptr::null_mut();
-                result = Err(Errno::Raw(lret));
-                break;
-            }
-
-            // P3-10b: `KResult`-native lookup (no ERR_PTR decode).
-            let next = VfsInode::vfs_get_dentry_inode_inner(&mut dentry);
-            vfs_release_dentry(&mut dentry);
-            let next = match next {
-                Ok(n) => n,
-                Err(e) => {
-                    VfsInode::vfs_iput(pos);
-                    pos = ptr::null_mut();
-                    result = Err(e);
-                    break;
-                }
-            };
-
-            VfsInode::vfs_iput(pos);
-            pos = next;
-
-            let mut mount_race = false;
-            loop {
-                let is_mount = unsafe { (*pos).flags.mount() != 0 };
-                let mnt_rooti = unsafe { (*pos).dev_mnt.mnt.mnt_rooti };
-                if !(is_mount && !mnt_rooti.is_null()) {
-                    break;
-                }
-                if !atomic_inc_in_range(VfsInode::refcount_atomic(mnt_rooti), 0, VFS_INODE_MAX_REFCOUNT) {
-                    // Mount root is dying, need to retry the entire lookup.
-                    VfsInode::vfs_iput(pos);
-                    pos = ptr::null_mut();
-                    result = Err(Errno::Again);
-                    mount_race = true;
-                    break;
-                }
-                VfsInode::vfs_iput(pos);
-                pos = mnt_rooti;
-            }
-            if mount_race {
-                break;
-            }
-
-            result = Ok(pos);
-            token = strtok_r(ptr::null_mut(), c"/".as_ptr(), &mut saveptr);
-        }
-
-        VfsInode::vfs_iput(rooti);
-        kmm_free(pathbuf as *mut c_void);
-        match result {
-            Ok(p) if p.is_null() => Err(Errno::NoEnt),
-            other => other,
-        }
+        // SAFETY: callers supply a readable, immutable kernel buffer for
+        // `path_len` bytes, kept alive throughout this lookup and retries.
+        let bytes = unsafe { core::slice::from_raw_parts(path.cast(), path_len) };
+        let path = KernelPath::new(bytes).map_err(|error| match error {
+            PathError::TooLong => Errno::NameTooLong,
+            PathError::Empty | PathError::EmbeddedNul => Errno::Inval,
+        })?;
+        VfsInode::lookup_path(path)
     }
 
-    /// Resolve a path to an inode, handling retry logic for transient race
-    /// conditions (e.g. inode freed during mount traversal).
-    fn vfs_namei_inner(path: *const c_char, path_len: usize) -> KResult<*mut vfs_inode> {
+    fn lookup_path(path: KernelPath<'_>) -> KResult<*mut vfs_inode> {
         let mut retries = 0;
         loop {
-            match VfsInode::vfs_namei_once(path, path_len) {
+            match VfsInode::vfs_namei_once(path) {
                 Err(Errno::Again) => {
                     // Transient race condition, yield and retry.
                     Scheduler::yield_now();
@@ -3020,60 +2972,35 @@ impl VfsInode {
             return Err(Errno::NameTooLong);
         }
 
-        // Find the last path component.
-        let mut end = path_len;
-        // SAFETY: `path`/`path_len` describe a valid byte range.
-        while end > 0 && unsafe { *path.add(end - 1) } == b'/' as c_char {
-            end -= 1;
-        }
-        if end == 0 {
-            // Path is just "/" or empty after trimming.
-            return Err(Errno::Inval);
-        }
+        // SAFETY: the caller supplies `path_len` readable kernel bytes,
+        // disjoint from the output name buffer and live during lookup.
+        let bytes = unsafe { core::slice::from_raw_parts(path.cast(), path_len) };
+        let path = KernelPath::new(bytes).map_err(|error| match error {
+            PathError::TooLong => Errno::NameTooLong,
+            PathError::Empty | PathError::EmbeddedNul => Errno::Inval,
+        })?;
+        let (parent, final_name) = path.parent_and_name().ok_or(Errno::Inval)?;
 
-        // Find the start of the last component.
-        let mut name_start = end;
-        while name_start > 0 && unsafe { *path.add(name_start - 1) } != b'/' as c_char {
-            name_start -= 1;
-        }
+        // Preserve xv6's final-component truncation at this raw interface.
+        let final_name = &final_name[..final_name.len().min(name_size - 1)];
+        // SAFETY: the caller provides `name_size` writable bytes, disjoint
+        // from `path`. The copy plus terminator fits the checked capacity.
+        let output = unsafe { core::slice::from_raw_parts_mut(name.cast::<u8>(), name_size) };
+        output[..final_name.len()].copy_from_slice(final_name);
+        output[final_name.len()] = 0;
 
-        // Extract the name component, truncating to fit the buffer (xv6
-        // compatibility).
-        let mut final_name_len = end - name_start;
-        if final_name_len >= name_size {
-            final_name_len = name_size - 1;
+        let inode = match parent {
+            ParentPath::Root => Vfs::vfs_curroot(),
+            ParentPath::Current => Vfs::vfs_curdir(),
+            ParentPath::Path(path) => return VfsInode::lookup_path(path),
+        };
+        if inode.is_null() {
+            Err(Errno::Inval)
+        } else if is_err(inode) {
+            Err(Errno::Raw(ptr_err(inode)))
+        } else {
+            Ok(inode)
         }
-        // SAFETY: `name` has room for `name_size` bytes (caller contract);
-        // `path[name_start..name_start+final_name_len]` is in-bounds.
-        unsafe {
-            core::ptr::copy(
-                path.add(name_start) as *const u8,
-                name as *mut u8,
-                final_name_len,
-            );
-            *name.add(final_name_len) = 0;
-        }
-
-        // Now get the parent path.
-        let mut parent_len = name_start;
-        while parent_len > 0 && unsafe { *path.add(parent_len - 1) } == b'/' as c_char {
-            parent_len -= 1;
-        }
-
-        if parent_len == 0 {
-            // Parent is root.
-            return Ok(if unsafe { *path } == b'/' as c_char {
-                Vfs::vfs_curroot()
-            } else {
-                // Relative path with just one component, parent is cwd.
-                Vfs::vfs_curdir()
-            });
-        }
-
-        // Resolve the parent path. `vfs_namei` is this same file's public
-        // C-ABI wrapper (still `ERR_PTR`-encoded, unchanged); bridge back to
-        // `KResult` at this internal call site via `errptr_to_result`.
-        errptr_to_result(VfsInode::vfs_namei(path, parent_len)).map_err(Errno::Raw)
     }
 
     /// Resolve the parent directory of a path and copy the final name

@@ -34,6 +34,7 @@ pub mod fdtable;
 pub mod file;
 pub mod fs;
 pub mod inode;
+mod path;
 pub mod pipe;
 pub mod tmpfs;
 pub mod vfs_syscall;
