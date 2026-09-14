@@ -2158,6 +2158,22 @@ uint64 sys_vfs_rename(void) {
  * File System Namespace Syscalls
  ******************************************************************************/
 
+/* O_NOFOLLOW suppresses symlink resolution, not mounted-filesystem traversal.
+ * Consume the lookup reference and return the mounted inode reference, using
+ * the same reference transfer and EAGAIN behavior as the normal namei walk. */
+static struct vfs_inode *vfs_open_follow_final_mounts(struct vfs_inode *inode) {
+    while (inode->mount && inode->mnt_rooti != NULL) {
+        struct vfs_inode *mnt_root = inode->mnt_rooti;
+        if (!vfs_idup_not_zero(mnt_root)) {
+            vfs_iput(inode);
+            return ERR_PTR(-EAGAIN);
+        }
+        vfs_iput(inode);
+        inode = mnt_root;
+    }
+    return inode;
+}
+
 uint64 sys_vfs_open(void) {
     SYSCALL_PROFILE_BEGIN(g_sys_open_calls);
     char *path;
@@ -2297,6 +2313,9 @@ uint64 sys_vfs_open(void) {
                 vfs_iput(inode);
                 SYS_VFS_OPEN_RETURN(-ELOOP);
             }
+            inode = vfs_open_follow_final_mounts(inode);
+            if (IS_ERR(inode))
+                SYS_VFS_OPEN_RETURN(PTR_ERR(inode));
         } else {
             inode = vfs_namei(path, strlen(path));
             if (IS_ERR(inode)) {
@@ -6554,6 +6573,9 @@ uint64 sys_vfs_openat(void) {
                 vfs_iput(inode);
                 SYS_VFS_OPENAT_RETURN(-ELOOP);
             }
+            inode = vfs_open_follow_final_mounts(inode);
+            if (IS_ERR(inode))
+                SYS_VFS_OPENAT_RETURN(PTR_ERR(inode));
         } else {
             WEBKIT_VFS_TRACE("openat lookup pid=%d path=%s flags=0x%x\n",
                              current->pid, path, omode);
