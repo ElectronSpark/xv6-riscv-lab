@@ -1,0 +1,191 @@
+
+OpenSBI v1.4
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 2
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 333 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 77 KB
+Firmware Heap Offset      : 0x4a000
+Firmware Heap Size        : 37 KB (total), 2 KB (reserved), 9 KB (used), 25 KB (free)
+Firmware Scratch Size     : 4096 B (total), 328 B (used), 3768 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*,1*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x00000000bfe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[517567] hart 0 mycpu_init: setting tp to 0x0000000080230000 - 0x0000000080230040
+[554773]
+xv6 kernel booting (hart 0)
+
+[562402] fdt: checking DTB at 0x00000000bfe00000
+[573153] fdt: using DTB at 0x00000000bfe00000 (size 6692 bytes)
+[613335] fdt: parsed 175 nodes
+[637383] fdt: found UART at 0x10000000, IRQ 10, clock 3686400 Hz, baud 0, reg-shift 0, io-width 1
+[658338] fdt: probed platform info:
+[665576]   Memory regions: 1 (total 1024 MB)
+[673903]     [0] 0x80000000 - 0xc0000000 (1024 MB)
+[681405]   Reserved regions: 2
+[686662]     [0] 0x80040000 - 0x80060000 (128 KB)
+[695538]     [1] 0x80000000 - 0x80040000 (256 KB)
+[704419]   Ramdisk: 0xa0200000 - 0xac550000 (200000 KB)
+[714009]   UART: 0x10000000, IRQ 10, clock 3686400 Hz, baud 115200
+[722136]   PLIC: 0xc000000 (size 0x600000)
+[727784]   PCIe regions: 1
+[730669]     [0] 0x30000000 (size 0x10000000)
+[738950]   CPUs: 2, timebase: 10000000 Hz
+[746417]   VirtIO devices: 8
+[751705]     [0] 0x10001000, IRQ 1
+[755276]     [1] 0x10002000, IRQ 2
+[761597]     [2] 0x10003000, IRQ 3
+[766513]     [3] 0x10004000, IRQ 4
+[771845]     [4] 0x10005000, IRQ 5
+[774939]     [5] 0x10006000, IRQ 6
+[778727]     [6] 0x10007000, IRQ 7
+[784367]     [7] 0x10008000, IRQ 8
+[791781] SBI extensions:
+[798789]   BASE: AVAILABLE
+[805538]   TIMER: AVAILABLE (OPTIONAL)
+[812379]   IPI: AVAILABLE
+[816802]   RFENCE: AVAILABLE
+[821721]   HSM: AVAILABLE
+[826240]   SRST: AVAILABLE (OPTIONAL)
+[831286]   PMU: AVAILABLE (OPTIONAL)
+[837160]   DBCN: AVAILABLE (OPTIONAL)
+[843796]   SUSP: UNSUPPORTED (OPTIONAL)
+[849717]   CPPC: UNSUPPORTED (OPTIONAL)
+[856028]   NACL: UNSUPPORTED (OPTIONAL)
+[862218]   STA: UNSUPPORTED (OPTIONAL)
+[864583] ksymbols: loading embedded symbols from 0x802a9000-0x804a9000 (2097152 bytes)
+[882581] Kernel symbols initialized: 867 entries
+[891179] page_buddy_init(): page array at 0x80fb8000, size 0x2000000
+[900041] __managed_start: 0x82fb8000, __managed_end: 0xc0000000
+[911170] init pages from 0x80000000 to 0x82fb8000 with flags 0x4000000
+[953646] init pages from 0x82fb8000 to 0xc0000000 with flags 0x0
+[1527477] reserving pages from 0xa0200000 to 0xac550000
+[1553019] reserved mem out of range: 0x80040000 to 0x80060000
+[1562397] reserved mem out of range: 0x80000000 to 0x80040000
+[1751788] buddy init range: 0x82fb8000 - 0xa0200000
+[1905030] buddy init range: 0xac550000 - 0xc0000000
+[1910808] Buddy System Statistics:
+[1913105] ========================
+[1915277] order(0): 0 blocks (0B)
+[1918671] order(1): 0 blocks (0B)
+[1920292] order(2): 0 blocks (0B)
+[1924513] order(3): 1 blocks (32K)
+[1931075] order(4): 1 blocks (64K)
+[1936120] order(5): 1 blocks (128K)
+[1941140] order(6): 1 blocks (256K)
+[1948415] order(7): 1 blocks (512K)
+[1954134] order(8): 0 blocks (0B)
+[1959532] order(9): 2 blocks (4.0M)
+[1964765] order(10): 194 blocks (776.0M)
+[1970940] ------------------------
+[1976368] Buddy: 199928 free + 0 cached = 199928 pages (780.9M)
+[2221020] trampoline 0x3ffffff000 -> 0x0000000080232000
+[2227502] trampoline data 0x3fffffe000 -> 0x0000000080231000
+[2230800] trampoline cpu local 0x3fffffd000 -> 0x0000000080230000
+[2238871] signal trampoline 0x3fffffc000 -> 0x000000008022f000
+[2532354] kernel symbols 0x802a9000 - 0x804a9000 (size: 2097152)
+[2536211] kernel symbols index 0x80cae000 - 0x80fae000 (size: 3145728)
+[2539767] page table initialized
+[2543896] hart 0 switched to kernel page table, satp: 8000000000080249
+[2551997] paging enabled
+[2556497] hart 0 mycpu_init: setting tp to 0x0000003fffffd000 - 0x0000003fffffd040
+[2568719] mycpu initialized
+[2585385] workqueue subsystem initialized
+[2588156] trapinit: trampoline_userret at 0x0000003ffffff0e6
+[2594865] trapinit: trampoline_uservec at 0x0000003ffffff000
+[2602753] trapinit: CPU 0 intr_stack at 3ffffb8000 -> 0x00000000ac7c0000
+[2608448] trapinit: CPU 1 intr_stack at 3ffffb0000 -> 0x00000000ac7c4000
+[2617837] trapinit: CPU 2 intr_stack at 3ffffa8000 -> 0x00000000ac7c8000
+[2623722] trapinit: CPU 3 intr_stack at 3ffffa0000 -> 0x00000000ac7cc000
+[2630267] trapinit: CPU 4 intr_stack at 3ffff98000 -> 0x00000000ac7d0000
+[2640058] trapinit: CPU 5 intr_stack at 3ffff90000 -> 0x00000000ac7d4000
+[2648289] trapinit: CPU 6 intr_stack at 3ffff88000 -> 0x00000000ac7d8000
+[2660003] trapinit: CPU 7 intr_stack at 3ffff80000 -> 0x00000000ac7dc000
+[2671097] ipi_init: IPI subsystem initialized (IRQ 1)
+[2686556] PCI device 0:0:0 - vendor ID: 0x1b36, device ID: 0x8
+[2690384] PCI device 0:1:0 - vendor ID: 0xffff, device ID: 0xffff
+[2691609] PCI device 0:2:0 - vendor ID: 0xffff, device ID: 0xffff
+[2693234] PCI device 0:3:0 - vendor ID: 0xffff, device ID: 0xffff
+[2694598] PCI device 0:4:0 - vendor ID: 0x8086, device ID: 0x100e
+[2696158] E1000 Ethernet Controller detected.
+[2719486] netdev: registered e1000 (MAC 52:54:0:12:34:56) idx 0
+[2725034] PCI device 0:5:0 - vendor ID: 0xffff, device ID: 0xffff
+[2727246] PCI device 0:6:0 - vendor ID: 0xffff, device ID: 0xffff
+[2732323] PCI device 0:7:0 - vendor ID: 0xffff, device ID: 0xffff
+[3243531] Init process kernel stack size order: 2
+[3256293] CPU 0 idle process initialized at kstack 0x80c8c000
+[3264387] hart 0 initialized. intr_sp: 0x0000003ffffbc000
+[3287067] ptmx: /dev/ptmx registered (major 5, minor 2)
+[3297949] ramdisk: initialized 200000 KB ramdisk (400000 sectors) at 0xa0200000
+[3300839] Page cache subsystem initialized
+[3310452] sizeof(tmpfs_inode)=1408, TMPFS_INODE_EMBEDDED_DATA_LEN=312
+[3312139] tmpfs max file size=1073741824 bytes
+[3316149] xv6fs: filesystem type registered
+[3319722] devtmpfs: filesystem type registered
+[3324651] devtmpfs: populated 9 device nodes from device table
+[3380522] xv6fs: block cache initialized: 199720 data blocks, 197231 free in 1 extents
+[3387224] xv6fs: mounted at /root
+[3390628] xv6fs: chroot to /root successful
+[3403017] tmpfs: mounted at /tmp
+[3409463] devtmpfs: mounted at /dev
+[3415243] Releasing secondary harts...
+[3416071] Starting secondary harts...
+[3433685] RCU callback kthread started on CPU 0
+[3437806] hart 1 mycpu_init: setting tp to 0x0000000080230040 - 0x0000000080230080
+[3439112] hart 1 switched to kernel page table, satp: 8000000000080249
+[3440332] hart 1 mycpu_init: setting tp to 0x0000003fffffd040 - 0x0000003fffffd080
+[3441603] CPU 1 idle process initialized at kstack 0x80c90000
+[3442409] hart 1 initialized. intr_sp: 0x0000003ffffb4000
+[3451625] RCU callback kthread started on CPU 1
+[3453594] pcache flusher thread started
+init: starting sh
+/ $ usertests mem
+usertests starting
+test mem: FAILED

@@ -1,0 +1,490 @@
+
+OpenSBI v1.4
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : medeleg
+Platform HART Count       : 2
+Platform IPI Device       : aclint-mswi
+Platform Timer Device     : aclint-mtimer @ 10000000Hz
+Platform Console Device   : uart8250
+Platform HSM Device       : ---
+Platform PMU Device       : ---
+Platform Reboot Device    : syscon-reboot
+Platform Shutdown Device  : syscon-poweroff
+Platform Suspend Device   : ---
+Platform CPPC Device      : ---
+Firmware Base             : 0x80000000
+Firmware Size             : 333 KB
+Firmware RW Offset        : 0x40000
+Firmware RW Size          : 77 KB
+Firmware Heap Offset      : 0x4a000
+Firmware Heap Size        : 37 KB (total), 2 KB (reserved), 9 KB (used), 25 KB (free)
+Firmware Scratch Size     : 4096 B (total), 328 B (used), 3768 B (free)
+Runtime SBI Version       : 2.0
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*,1*
+Domain0 Region00          : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01          : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02          : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03          : 0x0000000080040000-0x000000008005ffff M: (R,W) S/U: ()
+Domain0 Region04          : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05          : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06          : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07          : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x000000009fe00000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+Domain0 SysSuspend        : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART Priv Version    : v1.12
+Boot HART Base ISA        : rv64imafdch
+Boot HART ISA Extensions  : sstc,zicntr,zihpm,zicboz,zicbom
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 2 bits
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Info       : 16 (0x0007fff8)
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+[390608] hart 0 mycpu_init: setting tp to 0x0000000080231000 - 0x0000000080231040
+[416710]
+xv6 kernel booting (hart 0)
+
+[424804] fdt: checking DTB at 0x000000009fe00000
+[429280] fdt: using DTB at 0x000000009fe00000 (size 6692 bytes)
+[457044] fdt: parsed 175 nodes
+[474705] fdt: found UART at 0x10000000, IRQ 10, clock 3686400 Hz, baud 0, reg-shift 0, io-width 1
+[497808] fdt: probed platform info:
+[500836]   Memory regions: 1 (total 512 MB)
+[504703]     [0] 0x80000000 - 0xa0000000 (512 MB)
+[509731]   Reserved regions: 2
+[516396]     [0] 0x80040000 - 0x80060000 (128 KB)
+[525132]     [1] 0x80000000 - 0x80040000 (256 KB)
+[532356]   Ramdisk: 0x90200000 - 0x9c550000 (200000 KB)
+[541097]   UART: 0x10000000, IRQ 10, clock 3686400 Hz, baud 115200
+[551702]   PLIC: 0xc000000 (size 0x600000)
+[558533]   PCIe regions: 1
+[563020]     [0] 0x30000000 (size 0x10000000)
+[571501]   CPUs: 2, timebase: 10000000 Hz
+[577311]   VirtIO devices: 8
+[584487]     [0] 0x10001000, IRQ 1
+[587223]     [1] 0x10002000, IRQ 2
+[590390]     [2] 0x10003000, IRQ 3
+[592335]     [3] 0x10004000, IRQ 4
+[597527]     [4] 0x10005000, IRQ 5
+[604761]     [5] 0x10006000, IRQ 6
+[608979]     [6] 0x10007000, IRQ 7
+[610153]     [7] 0x10008000, IRQ 8
+[614812] SBI extensions:
+[621347]   BASE: AVAILABLE
+[626266]   TIMER: AVAILABLE (OPTIONAL)
+[632949]   IPI: AVAILABLE
+[637421]   RFENCE: AVAILABLE
+[642503]   HSM: AVAILABLE
+[643475]   SRST: AVAILABLE (OPTIONAL)
+[648142]   PMU: AVAILABLE (OPTIONAL)
+[654232]   DBCN: AVAILABLE (OPTIONAL)
+[661181]   SUSP: UNSUPPORTED (OPTIONAL)
+[663246]   CPPC: UNSUPPORTED (OPTIONAL)
+[669680]   NACL: UNSUPPORTED (OPTIONAL)
+[675924]   STA: UNSUPPORTED (OPTIONAL)
+[682928] ksymbols: loading embedded symbols from 0x802aa000-0x804aa000 (2097152 bytes)
+[711356] Kernel symbols initialized: 948 entries
+[718448] page_buddy_init(): page array at 0x80fb8000, size 0x1000000
+[731869] __managed_start: 0x81fb8000, __managed_end: 0xa0000000
+[742546] init pages from 0x80000000 to 0x81fb8000 with flags 0x4000000
+[773998] init pages from 0x81fb8000 to 0xa0000000 with flags 0x0
+[1052303] reserving pages from 0x90200000 to 0x9c550000
+[1079291] reserved mem out of range: 0x80040000 to 0x80060000
+[1082451] reserved mem out of range: 0x80000000 to 0x80040000
+[1183026] buddy init range: 0x81fb8000 - 0x90200000
+[1231350] buddy init range: 0x9c550000 - 0xa0000000
+[1236240] Buddy System Statistics:
+[1242012] ========================
+[1247842] order(0): 0 blocks (0B)
+[1250730] order(1): 0 blocks (0B)
+[1256092] order(2): 0 blocks (0B)
+[1258501] order(3): 1 blocks (32K)
+[1261289] order(4): 1 blocks (64K)
+[1266746] order(5): 1 blocks (128K)
+[1272539] order(6): 1 blocks (256K)
+[1278142] order(7): 1 blocks (512K)
+[1284728] order(8): 0 blocks (0B)
+[1286982] order(9): 2 blocks (4.0M)
+[1290730] order(10): 70 blocks (280.0M)
+[1296908] ------------------------
+[1305034] Buddy: 72952 free + 0 cached = 72952 pages (284.9M)
+[1526737] trampoline 0x3ffffff000 -> 0x0000000080233000
+[1530972] trampoline data 0x3fffffe000 -> 0x0000000080232000
+[1535617] trampoline cpu local 0x3fffffd000 -> 0x0000000080231000
+[1541023] signal trampoline 0x3fffffc000 -> 0x0000000080230000
+[1698449] kernel symbols 0x802aa000 - 0x804aa000 (size: 2097152)
+[1711738] kernel symbols index 0x80cae000 - 0x80fae000 (size: 3145728)
+[1721195] page table initialized
+[1723838] hart 0 switched to kernel page table, satp: 800000000008024a
+[1731835] paging enabled
+[1736207] hart 0 mycpu_init: setting tp to 0x0000003fffffd000 - 0x0000003fffffd040
+[1748425] mycpu initialized
+[1760281] workqueue subsystem initialized
+[1762867] trapinit: trampoline_userret at 0x0000003ffffff0e6
+[1766280] trapinit: trampoline_uservec at 0x0000003ffffff000
+[1774308] trapinit: CPU 0 intr_stack at 3ffffb8000 -> 0x000000009c6c0000
+[1782627] trapinit: CPU 1 intr_stack at 3ffffb0000 -> 0x000000009c6c4000
+[1789459] trapinit: CPU 2 intr_stack at 3ffffa8000 -> 0x000000009c6c8000
+[1794879] trapinit: CPU 3 intr_stack at 3ffffa0000 -> 0x000000009c6cc000
+[1808586] trapinit: CPU 4 intr_stack at 3ffff98000 -> 0x000000009c6d0000
+[1820805] trapinit: CPU 5 intr_stack at 3ffff90000 -> 0x000000009c6d4000
+[1832542] trapinit: CPU 6 intr_stack at 3ffff88000 -> 0x000000009c6d8000
+[1844494] trapinit: CPU 7 intr_stack at 3ffff80000 -> 0x000000009c6dc000
+[1856537] ipi_init: IPI subsystem initialized (IRQ 1)
+[1870173] PCI device 0:0:0 - vendor ID: 0x1b36, device ID: 0x8
+[1877059] PCI device 0:1:0 - vendor ID: 0xffff, device ID: 0xffff
+[1882237] PCI device 0:2:0 - vendor ID: 0xffff, device ID: 0xffff
+[1886665] PCI device 0:3:0 - vendor ID: 0xffff, device ID: 0xffff
+[1891774] PCI device 0:4:0 - vendor ID: 0x8086, device ID: 0x100e
+[1897112] E1000 Ethernet Controller detected.
+[1920271] netdev: registered e1000 (MAC 52:54:0:12:34:56) idx 0
+[1922975] PCI device 0:5:0 - vendor ID: 0xffff, device ID: 0xffff
+[1923951] PCI device 0:6:0 - vendor ID: 0xffff, device ID: 0xffff
+[1925534] PCI device 0:7:0 - vendor ID: 0xffff, device ID: 0xffff
+[2448560] Init process kernel stack size order: 2
+[2461175] CPU 0 idle process initialized at kstack 0x80c8c000
+[2471938] hart 0 initialized. intr_sp: 0x0000003ffffbc000
+[2494940] ptmx: /dev/ptmx registered (major 5, minor 2)
+[2509734] ramdisk: initialized 200000 KB ramdisk (400000 sectors) at 0x90200000
+[2512047] Page cache subsystem initialized
+[2519450] sizeof(tmpfs_inode)=1408, TMPFS_INODE_EMBEDDED_DATA_LEN=312
+[2520543] tmpfs max file size=1073741824 bytes
+[2522644] xv6fs: filesystem type registered
+[2523602] devtmpfs: filesystem type registered
+[2526180] devtmpfs: populated 9 device nodes from device table
+[2578154] xv6fs: block cache initialized: 199720 data blocks, 197224 free in 1 extents
+[2587593] xv6fs: mounted at /root
+[2590894] xv6fs: chroot to /root successful
+[2614206] tmpfs: mounted at /tmp
+[2623740] devtmpfs: mounted at /dev
+[2630547] Releasing secondary harts...
+[2632730] Starting secondary harts...
+[2648778] hart 1 mycpu_init: setting tp to 0x0000000080231040 - 0x0000000080231080
+[2650134] RCU callback kthread started on CPU 0
+[2650719] hart 1 switched to kernel page table, satp: 800000000008024a
+[2651559] hart 1 mycpu_init: setting tp to 0x0000003fffffd040 - 0x0000003fffffd080
+[2654348] CPU 1 idle process initialized at kstack 0x80c90000
+[2655222] hart 1 initialized. intr_sp: 0x0000003ffffb4000
+[2659392] pcache flusher thread started
+[2661294] RCU callback kthread started on CPU 1
+init: starting sh
+/ $ usertests forkforkfork
+usertests starting
+memcheck warmup: free=66062 delta=0 waited=0ms
+[4020088]
+=== SLAB CACHE STATISTICS ===
+[4022070] NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES
+[4023427] slab_t_pool: objsz=80 total=2 active=22 free=0 pages=2
+[4024488] slab_cache_t_pool: objsz=1280 total=0 active=0 free=0 pages=0
+[4025263] 32: objsz=32 total=2 active=20 free=0 pages=2
+[4025867] 64: objsz=64 total=1 active=9 free=0 pages=1
+[4026453] 128: objsz=128 total=1 active=12 free=0 pages=1
+[4027069] 256: objsz=256 total=0 active=0 free=0 pages=0
+[4028525] 512: objsz=512 total=0 active=0 free=0 pages=0
+[4029181] 1024: objsz=1024 total=1 active=1 free=0 pages=4
+[4029810] 2048: objsz=2048 total=5 active=62 free=0 pages=40
+[4030452] 4096: objsz=4096 total=0 active=0 free=0 pages=0
+[4031217] vm area: objsz=104 total=2 active=21 free=0 pages=2
+[4031869] vm: objsz=384 total=2 active=3 free=0 pages=4
+[4036143] pipe_cache: objsz=192 total=1 active=2 free=0 pages=2
+[4036888] rcu_head_cache: objsz=48 total=1 active=1 free=0 pages=1
+[4037685] dev_type_cache: objsz=64 total=1 active=4 free=0 pages=1
+[4038486] tty_cache: objsz=512 total=1 active=1 free=0 pages=2
+[4039237] workqueue: objsz=192 total=1 active=3 free=0 pages=2
+[4039983] work_struct: objsz=48 total=0 active=0 free=0 pages=0
+[4040720] irq_desc: objsz=96 total=1 active=6 free=0 pages=1
+[4041390] sigacts: objsz=896 total=2 active=3 free=0 pages=8
+[4042062] ksiginfo: objsz=80 total=0 active=0 free=0 pages=0
+[4042786] thread_group: objsz=616 total=2 active=4 free=0 pages=8
+[4043563] pgroup_cache: objsz=104 total=2 active=3 free=0 pages=2
+[4044340] session_cache: objsz=104 total=1 active=2 free=0 pages=1
+[4046333] sched_timer_work_slab: objsz=160 total=0 active=0 free=0 pages=0
+[4047556] pty_pair: objsz=176 total=0 active=0 free=0 pages=0
+[4048288] pcache_node: objsz=160 total=2 active=31 free=0 pages=4
+[4049066] vfs_fdtable_cache: objsz=576 total=2 active=3 free=0 pages=8
+[4049998] vfs_superblock_cache: objsz=1472 total=0 active=0 free=0 pages=0
+[4050882] vfs_fs_type_cache: objsz=120 total=1 active=3 free=0 pages=1
+[4051721] vfs_struct_cache: objsz=64 total=2 active=22 free=0 pages=2
+[4052549] vfs_file_cache: objsz=256 total=2 active=5 free=0 pages=4
+[4053295] tmpfs_inode_cache: objsz=1408 total=1 active=15 free=0 pages=8
+[4054103] tmpfs_superblock_cache: objsz=1536 total=1 active=3 free=0 pages=8
+[4055009] xv6fs_inode: objsz=1152 total=2 active=6 free=0 pages=16
+[4055793] xv6fs_sb: objsz=4096 total=1 active=1 free=0 pages=16
+[4058709] bcache_extent: objsz=32 total=1 active=1 free=0 pages=1
+[4060110] -----------------------------
+[4061952] Slab:  152 pages (608KB)
+[4062690] =============================
+[4063563] Free: 258.0M
+[4064952] Dumping all pcache stats:
+[4065585] Total pcaches: 3
+[4066615] Pcache 0x000000009e8d6440 stats:
+[4067639]   Active: 1
+[4068647]   Block count: 131608
+[4069115]   Dirty count: 0
+[4069515]   LRU count: 15
+[4069900]   Page count / Max pages: 15/4096
+[4070776]   Dirty rate: 15%
+[4071216]   Flush requested: 0
+[4071720]   Flush error: 0
+[4072283] Pcache 0x000000009e8d68c0 stats:
+[4072860]   Active: 1
+[4073157]   Block count: 131608
+[4073576]   Dirty count: 0
+[4073901]   LRU count: 10
+[4074211]   Page count / Max pages: 10/4096
+[4074724]   Dirty rate: 15%
+[4075069]   Flush requested: 0
+[4075437]   Flush error: 0
+[4075794] Pcache 0x000000009e927640 stats:
+[4076315]   Active: 1
+[4076584]   Block count: 131608
+[4076974]   Dirty count: 0
+[4077304]   LRU count: 6
+[4077605]   Page count / Max pages: 6/4096
+[4078108]   Dirty rate: 15%
+[4078444]   Flush requested: 0
+[4078811]   Flush error: 0
+memcheck initial: free=66062 delta=0 waited=0ms
+[4092336]
+=== SLAB CACHE STATISTICS ===
+[4093291] NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES
+[4094016] slab_t_pool: objsz=80 total=2 active=22 free=0 pages=2
+[4094750] slab_cache_t_pool: objsz=1280 total=0 active=0 free=0 pages=0
+[4095499] 32: objsz=32 total=2 active=20 free=0 pages=2
+[4096091] 64: objsz=64 total=1 active=9 free=0 pages=1
+[4096667] 128: objsz=128 total=1 active=12 free=0 pages=1
+[4097269] 256: objsz=256 total=0 active=0 free=0 pages=0
+[4097866] 512: objsz=512 total=0 active=0 free=0 pages=0
+[4098463] 1024: objsz=1024 total=1 active=1 free=0 pages=4
+[4099077] 2048: objsz=2048 total=5 active=62 free=0 pages=40
+[4099710] 4096: objsz=4096 total=0 active=0 free=0 pages=0
+[4100699] vm area: objsz=104 total=2 active=21 free=0 pages=2
+[4101368] vm: objsz=384 total=2 active=3 free=0 pages=4
+[4101960] pipe_cache: objsz=192 total=1 active=2 free=0 pages=2
+[4102636] rcu_head_cache: objsz=48 total=1 active=1 free=0 pages=1
+[4104312] dev_type_cache: objsz=64 total=1 active=4 free=0 pages=1
+[4105112] tty_cache: objsz=512 total=1 active=1 free=0 pages=2
+[4105864] workqueue: objsz=192 total=1 active=3 free=0 pages=2
+[4106610] work_struct: objsz=48 total=0 active=0 free=0 pages=0
+[4108732] irq_desc: objsz=96 total=1 active=6 free=0 pages=1
+[4109477] sigacts: objsz=896 total=2 active=3 free=0 pages=8
+[4110212] ksiginfo: objsz=80 total=0 active=0 free=0 pages=0
+[4110930] thread_group: objsz=616 total=2 active=4 free=0 pages=8
+[4111709] pgroup_cache: objsz=104 total=2 active=3 free=0 pages=2
+[4112480] session_cache: objsz=104 total=1 active=2 free=0 pages=1
+[4113269] sched_timer_work_slab: objsz=160 total=0 active=0 free=0 pages=0
+[4114637] pty_pair: objsz=176 total=0 active=0 free=0 pages=0
+[4116394] pcache_node: objsz=160 total=2 active=31 free=0 pages=4
+[4117177] vfs_fdtable_cache: objsz=576 total=2 active=3 free=0 pages=8
+[4118027] vfs_superblock_cache: objsz=1472 total=0 active=0 free=0 pages=0
+[4118902] vfs_fs_type_cache: objsz=120 total=1 active=3 free=0 pages=1
+[4119736] vfs_struct_cache: objsz=64 total=2 active=22 free=0 pages=2
+[4120554] vfs_file_cache: objsz=256 total=2 active=5 free=0 pages=4
+[4121346] tmpfs_inode_cache: objsz=1408 total=1 active=15 free=0 pages=8
+[4122195] tmpfs_superblock_cache: objsz=1536 total=1 active=3 free=0 pages=8
+[4123096] xv6fs_inode: objsz=1152 total=2 active=6 free=0 pages=16
+[4123876] xv6fs_sb: objsz=4096 total=1 active=1 free=0 pages=16
+[4124629] bcache_extent: objsz=32 total=1 active=1 free=0 pages=1
+[4125510] -----------------------------
+[4126653] Slab:  152 pages (608KB)
+[4127060] =============================
+[4127618] Free: 258.0M
+[4128292] Dumping all pcache stats:
+[4128722] Total pcaches: 3
+[4129039] Pcache 0x000000009e8d6440 stats:
+[4129521]   Active: 1
+[4129765]   Block count: 131608
+[4130105]   Dirty count: 0
+[4130398]   LRU count: 15
+[4130678]   Page count / Max pages: 15/4096
+[4131133]   Dirty rate: 15%
+[4131435]   Flush requested: 0
+[4131760]   Flush error: 0
+[4132050] Pcache 0x000000009e8d68c0 stats:
+[4132510]   Active: 1
+[4132749]   Block count: 131608
+[4133082]   Dirty count: 0
+[4133368]   LRU count: 10
+[4133643]   Page count / Max pages: 10/4096
+[4134097]   Dirty rate: 15%
+[4134393]   Flush requested: 0
+[4134729]   Flush error: 0
+[4135022] Pcache 0x000000009e927640 stats:
+[4135480]   Active: 1
+[4135716]   Block count: 131608
+[4136755]   Dirty count: 0
+[4138145]   LRU count: 6
+[4138456]   Page count / Max pages: 6/4096
+[4138965]   Dirty rate: 15%
+[4139300]   Flush requested: 0
+[4139667]   Flush error: 0
+test forkforkfork: OK
+memcheck forkforkfork: before=66062 after=65988 delta=-74
+memcheck final immediate: free=66055 delta=-7 waited=0ms
+[307820180]
+=== SLAB CACHE STATISTICS ===
+[307820862] NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES
+[307821606] slab_t_pool: objsz=80 total=2 active=21 free=0 pages=2
+[307822370] slab_cache_t_pool: objsz=1280 total=0 active=0 free=0 pages=0
+[307823147] 32: objsz=32 total=2 active=19 free=0 pages=2
+[307823763] 64: objsz=64 total=1 active=9 free=0 pages=1
+[307824366] 128: objsz=128 total=1 active=12 free=0 pages=1
+[307824994] 256: objsz=256 total=0 active=0 free=0 pages=0
+[307825618] 512: objsz=512 total=0 active=0 free=0 pages=0
+[307826235] 1024: objsz=1024 total=1 active=1 free=0 pages=4
+[307827740] 2048: objsz=2048 total=5 active=62 free=0 pages=40
+[307828504] 4096: objsz=4096 total=0 active=0 free=0 pages=0
+[307829243] vm area: objsz=104 total=2 active=21 free=0 pages=2
+[307830002] vm: objsz=384 total=2 active=3 free=0 pages=4
+[307830703] pipe_cache: objsz=192 total=1 active=2 free=0 pages=2
+[307831489] rcu_head_cache: objsz=48 total=0 active=0 free=0 pages=0
+[307832303] dev_type_cache: objsz=64 total=1 active=4 free=0 pages=1
+[307833119] tty_cache: objsz=512 total=1 active=1 free=0 pages=2
+[307833891] workqueue: objsz=192 total=1 active=3 free=0 pages=2
+[307834655] work_struct: objsz=48 total=0 active=0 free=0 pages=0
+[307835436] irq_desc: objsz=96 total=1 active=6 free=0 pages=1
+[307836184] sigacts: objsz=896 total=2 active=3 free=0 pages=8
+[307836930] ksiginfo: objsz=80 total=0 active=0 free=0 pages=0
+[307837670] thread_group: objsz=616 total=2 active=4 free=0 pages=8
+[307839577] pgroup_cache: objsz=104 total=2 active=3 free=0 pages=2
+[307840386] session_cache: objsz=104 total=1 active=2 free=0 pages=1
+[307841208] sched_timer_work_slab: objsz=160 total=0 active=0 free=0 pages=0
+[307842108] pty_pair: objsz=176 total=0 active=0 free=0 pages=0
+[307842859] pcache_node: objsz=160 total=2 active=31 free=0 pages=4
+[307843654] vfs_fdtable_cache: objsz=576 total=2 active=3 free=0 pages=8
+[307844505] vfs_superblock_cache: objsz=1472 total=0 active=0 free=0 pages=0
+[307845399] vfs_fs_type_cache: objsz=120 total=1 active=3 free=0 pages=1
+[307846251] vfs_struct_cache: objsz=64 total=2 active=22 free=0 pages=2
+[307847087] vfs_file_cache: objsz=256 total=2 active=4 free=0 pages=4
+[307847901] tmpfs_inode_cache: objsz=1408 total=1 active=15 free=0 pages=8
+[307848774] tmpfs_superblock_cache: objsz=1536 total=1 active=3 free=0 pages=8
+[307850446] xv6fs_inode: objsz=1152 total=2 active=6 free=0 pages=16
+[307851269] xv6fs_sb: objsz=4096 total=1 active=1 free=0 pages=16
+[307852212] bcache_extent: objsz=32 total=1 active=1 free=0 pages=1
+[307853858] -----------------------------
+[307854309] Slab:  151 pages (604KB)
+[307854714] =============================
+[307855221] Free: 258.0M
+[307855894] Dumping all pcache stats:
+[307856312] Total pcaches: 3
+[307856631] Pcache 0x000000009e8d6440 stats:
+[307857106]   Active: 1
+[307857353]   Block count: 131608
+[307857689]   Dirty count: 0
+[307857980]   LRU count: 15
+[307858260]   Page count / Max pages: 15/4096
+[307858706]   Dirty rate: 15%
+[307859004]   Flush requested: 0
+[307859327]   Flush error: 0
+[307859619] Pcache 0x000000009e8d68c0 stats:
+[307860694]   Active: 1
+[307861777]   Block count: 131608
+[307862183]   Dirty count: 0
+[307862833]   LRU count: 10
+[307863159]   Page count / Max pages: 10/4096
+[307863632]   Dirty rate: 15%
+[307863929]   Flush requested: 0
+[307864480]   Flush error: 0
+[307864826] Pcache 0x000000009e927640 stats:
+[307865335]   Active: 1
+[307865608]   Block count: 131608
+[307865983]   Dirty count: 0
+[307866308]   LRU count: 6
+[307866609]   Page count / Max pages: 6/4096
+[307867099]   Dirty rate: 15%
+[307867432]   Flush requested: 0
+[307867795]   Flush error: 0
+memcheck final after retries: free=66063 delta=1 waited=40ms
+[308310209]
+=== SLAB CACHE STATISTICS ===
+[308310758] NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES
+[308311439] slab_t_pool: objsz=80 total=2 active=21 free=0 pages=2
+[308312147] slab_cache_t_pool: objsz=1280 total=0 active=0 free=0 pages=0
+[308312875] 32: objsz=32 total=2 active=19 free=0 pages=2
+[308313448] 64: objsz=64 total=1 active=9 free=0 pages=1
+[308314010] 128: objsz=128 total=1 active=12 free=0 pages=1
+[308314597] 256: objsz=256 total=0 active=0 free=0 pages=0
+[308315179] 512: objsz=512 total=0 active=0 free=0 pages=0
+[308315758] 1024: objsz=1024 total=1 active=1 free=0 pages=4
+[308316357] 2048: objsz=2048 total=5 active=62 free=0 pages=40
+[308316987] 4096: objsz=4096 total=0 active=0 free=0 pages=0
+[308317629] vm area: objsz=104 total=2 active=21 free=0 pages=2
+[308319517] vm: objsz=384 total=2 active=3 free=0 pages=4
+[308320229] pipe_cache: objsz=192 total=1 active=2 free=0 pages=2
+[308320967] rcu_head_cache: objsz=48 total=0 active=0 free=0 pages=0
+[308321727] dev_type_cache: objsz=64 total=1 active=4 free=0 pages=1
+[308322598] tty_cache: objsz=512 total=1 active=1 free=0 pages=2
+[308323325] workqueue: objsz=192 total=1 active=3 free=0 pages=2
+[308324038] work_struct: objsz=48 total=0 active=0 free=0 pages=0
+[308324761] irq_desc: objsz=96 total=1 active=6 free=0 pages=1
+[308325455] sigacts: objsz=896 total=2 active=3 free=0 pages=8
+[308326146] ksiginfo: objsz=80 total=0 active=0 free=0 pages=0
+[308326850] thread_group: objsz=616 total=2 active=4 free=0 pages=8
+[308327597] pgroup_cache: objsz=104 total=2 active=3 free=0 pages=2
+[308328335] session_cache: objsz=104 total=1 active=2 free=0 pages=1
+[308329943] sched_timer_work_slab: objsz=160 total=0 active=0 free=0 pages=0
+[308330819] pty_pair: objsz=176 total=0 active=0 free=0 pages=0
+[308331519] pcache_node: objsz=160 total=2 active=31 free=0 pages=4
+[308332257] vfs_fdtable_cache: objsz=576 total=2 active=3 free=0 pages=8
+[308333054] vfs_superblock_cache: objsz=1472 total=0 active=0 free=0 pages=0
+[308333893] vfs_fs_type_cache: objsz=120 total=1 active=3 free=0 pages=1
+[308334686] vfs_struct_cache: objsz=64 total=2 active=22 free=0 pages=2
+[308335465] vfs_file_cache: objsz=256 total=2 active=4 free=0 pages=4
+[308336223] tmpfs_inode_cache: objsz=1408 total=1 active=15 free=0 pages=8
+[308337035] tmpfs_superblock_cache: objsz=1536 total=1 active=3 free=0 pages=8
+[308337882] xv6fs_inode: objsz=1152 total=2 active=6 free=0 pages=16
+[308338630] xv6fs_sb: objsz=4096 total=1 active=1 free=0 pages=16
+[308339349] bcache_extent: objsz=32 total=1 active=1 free=0 pages=1
+[308341633] -----------------------------
+[308342055] Slab:  151 pages (604KB)
+[308342439] =============================
+[308342959] Free: 258.0M
+[308343644] Dumping all pcache stats:
+[308344063] Total pcaches: 3
+[308344390] Pcache 0x000000009e8d6440 stats:
+[308344871]   Active: 1
+[308345119]   Block count: 131608
+[308345456]   Dirty count: 0
+[308345756]   LRU count: 15
+[308346041]   Page count / Max pages: 15/4096
+[308346493]   Dirty rate: 15%
+[308346796]   Flush requested: 0
+[308347126]   Flush error: 0
+[308347423] Pcache 0x000000009e8d68c0 stats:
+[308347876]   Active: 1
+[308348118]   Block count: 131608
+[308348449]   Dirty count: 0
+[308348734]   LRU count: 10
+[308349010]   Page count / Max pages: 10/4096
+[308349451]   Dirty rate: 15%
+[308349745]   Flush requested: 0
+[308350067]   Flush error: 0
+[308350358] Pcache 0x000000009e927640 stats:
+[308350803]   Active: 1
+[308351042]   Block count: 131608
+[308351392]   Dirty count: 0
+[308351697]   LRU count: 6
+[308351983]   Page count / Max pages: 6/4096
+[308353645]   Dirty rate: 15%
+[308354013]   Flush requested: 0
+[308354395]   Flush error: 0
+ALL TESTS PASSED
+/ $

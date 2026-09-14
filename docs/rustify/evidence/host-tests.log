@@ -1,0 +1,102 @@
+warning: unused import: `core::ffi::c_void`
+ --> list.rs:6:5
+  |
+6 | use core::ffi::c_void;
+  |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `c_char` and `c_int`
+  --> mm/early_allocator.rs:22:17
+   |
+22 | use core::ffi::{c_char, c_int, c_void};
+   |                 ^^^^^^  ^^^^^
+
+warning: method `data_ptr` is never used
+   --> sync/spinlock.rs:124:12
+    |
+ 53 | impl<T> SpinLock<T> {
+    | ------------------- method in this implementation
+...
+124 |     pub fn data_ptr(&self) -> *mut T {
+    |            ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `early_allocator_init` is never used
+   --> mm/early_allocator.rs:344:22
+    |
+344 | pub(crate) unsafe fn early_allocator_init(
+    |                      ^^^^^^^^^^^^^^^^^^^^
+
+warning: `xv6_rust` (lib test) generated 4 warnings (run `cargo fix --lib -p xv6_rust --tests` to apply 2 suggestions)
+    Finished `test` profile [optimized] target(s) in 0.00s
+     Running unittests lib.rs (kernel/target/x86_64-unknown-linux-gnu/debug/deps/xv6_rust-9516193607e2bcf8)
+
+running 64 tests
+test backtrace_frame::tests::both_record_words_must_fit_and_top_boundary_is_valid ... ok
+test backtrace_frame::tests::corrupt_initial_frame_pointer_never_yields_read_addresses ... ok
+test list::tests::container_of_style_offset_recovers_the_exact_payload ... ok
+test list::tests::iterator_over_empty_list_yields_nothing ... ok
+test backtrace_frame::tests::invalid_stack_bounds_and_corrupt_orders_are_rejected ... ok
+test list::tests::iterator_terminates_at_head_instead_of_looping_forever ... ok
+test list::tests::iterator_over_null_head_yields_nothing ... ok
+test list::tests::iterator_visits_elements_in_link_order_head_next_to_head_prev ... ok
+test list::tests::iterator_visits_the_single_element_in_a_one_item_list ... ok
+test list::tests::list_for_each_macro_visits_every_element_exactly_once ... ok
+test mm::bits::tests::build_functions_reproduce_the_static_tables_exactly ... ok
+test mm::bits::tests::inverse_table_matches_naive_bit_reversal_for_every_byte_value ... ok
+test mm::bits::tests::leading_zeros_table_matches_naive_clz_for_every_byte_value ... ok
+test mm::bits::tests::popcount_table_matches_naive_popcount_for_every_byte_value ... ok
+test mm::bits::tests::trailing_zeros_table_matches_naive_ctz_for_every_byte_value ... ok
+test mm::bits::tests::zero_is_the_documented_sentinel_for_ctz_and_clz_tables ... ok
+test mm::early_allocator::tests::a_large_aligned_allocation_recycles_its_leading_gap_into_the_freelists ... ok
+test mm::early_allocator::tests::allocations_after_freeing_a_gap_are_served_from_the_freelist_and_do_not_overlap ... ok
+test mm::early_allocator::tests::zero_size_allocation_returns_null_without_touching_the_freelists ... ok
+test mm::early_allocator::tests::init_aligns_current_and_records_the_full_range_with_empty_freelists ... ok
+test mm::early_allocator::tests::the_current_pointer_advances_past_every_allocation_made_so_far ... ok
+test mm::early_allocator::tests::allocating_past_the_end_of_the_arena_panics - should panic ... ok
+test mm::early_allocator::tests::allocation_sizes_round_up_to_the_next_power_of_two_chunk ... ok
+test mm::early_allocator::tests::every_free_chunk_is_aligned_to_its_own_power_of_two_size ... ok
+test mm::early_allocator::tests::freed_chunks_carry_the_documented_magic_number ... ok
+test net_buffer::tests::append_accounts_for_headroom_and_preserves_state_on_failure ... ok
+test net_buffer::tests::dropping_queue_releases_pending_packets ... ok
+test net_buffer::tests::invalid_driver_lengths_are_rejected_before_slice_creation ... ok
+test mm::early_allocator::tests::one_hundred_mixed_size_allocations_all_stay_within_the_arena_and_are_aligned ... ok
+test net_buffer::tests::packet_handoff_preserves_bytes_and_pinned_storage ... ok
+test net_buffer::tests::retain_rejects_reversed_or_out_of_bounds_payloads ... ok
+test net_buffer::tests::queue_transfers_packets_and_resets_both_links ... ok
+test net_wire::tests::allows_dont_fragment_but_rejects_fragments ... ok
+test net_wire::tests::arp_requests_are_validated_before_dispatch ... ok
+test mm::early_allocator::tests::alloc_with_a_non_power_of_two_alignment_panics - should panic ... ok
+test mm::early_allocator::tests::init_with_end_at_or_before_start_panics - should panic ... ok
+test mm::early_allocator::tests::small_allocations_ignore_the_caller_supplied_alignment_and_use_chunk_size_instead ... ok
+test mm::early_allocator::tests::small_allocations_are_self_aligned_and_do_not_overlap ... ok
+test mm::early_allocator::tests::many_small_allocations_from_a_freed_region_are_all_unique_and_aligned ... ok
+test sync::tests::unwinding_drops_the_guard ... ok
+test net_wire::tests::receives_udp_and_excludes_ethernet_padding ... ok
+test net_wire::tests::rejects_bad_checksum_protocol_and_destination ... ok
+test net_wire::tests::rejects_every_truncated_header_and_payload ... ok
+test net_wire::tests::checksum_handles_odd_lengths_and_known_header ... ok
+test string::tests::bounded_copy_never_overwrites_canaries ... ok
+test net_wire::tests::rejects_underflowing_and_inconsistent_lengths ... ok
+test string::tests::c_layout_names_are_initialized_and_terminated ... ok
+test string::tests::comparisons_use_unsigned_bytes_on_every_target ... ok
+test string::tests::safe_copy_handles_empty_full_and_truncated_buffers ... ok
+test string::tests::memory_primitives_cover_overlap_and_zero_length ... ok
+test string::tests::terminating_copy_writes_exactly_one_terminator ... ok
+test sync::tests::handoff_requires_send_data_and_guards_stay_local ... ok
+test sync::tests::try_lock_and_drop_preserve_exclusivity ... ok
+test mm::early_allocator::tests::large_allocations_respect_the_caller_supplied_alignment ... ok
+test thread_name::tests::formatting_handles_utf8_and_arbitrary_name_bytes ... ok
+test thread_name::tests::layout_and_shared_access_match_the_thread_field_contract ... ok
+test sync::tests::serializes_concurrent_mutations ... ok
+test vfs_path::tests::components_skip_slashes_without_normalizing_dot_names ... ok
+test thread_name::tests::names_truncate_terminate_and_snapshots_outlive_renames ... ok
+test vfs_path::tests::nul_cannot_select_a_different_parent_and_child ... ok
+test vfs_path::tests::maximum_length_is_inclusive ... ok
+test vfs_path::tests::parent_classifies_root_current_and_nested_paths ... ok
+test vfs_path::tests::parsing_is_bounded_and_accepts_non_utf8 ... ok
+test thread_name::tests::concurrent_renames_keep_every_snapshot_bounded_and_owned ... ok
+
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

@@ -1,0 +1,161 @@
+[  1%] Built target proc
+[  1%] Built target generate_usys
+[  2%] Building xv6_rust staticlib (riscv64gc-unknown-none-elf, release, features=[])
+[  6%] Built target initcode.out
+[  6%] Built target ksymbols_placeholder
+[  6%] Built target gdbinit
+[  8%] Built target irq
+[ 10%] Building C object user/CMakeFiles/userlib.dir/ulib.c.o
+[ 11%] Building C object user/CMakeFiles/userlib.dir/umalloc.c.o
+[ 11%] Building C object user/CMakeFiles/userlib.dir/printf.c.o
+   Compiling xv6_rust v0.1.0 (/home/es/xv6/xv6-riscv/kernel)
+[ 12%] Linking C static library libuserlib.a
+[ 14%] Built target userlib
+[ 15%] Building C object user/CMakeFiles/_kill.dir/kill.c.o
+[ 16%] Building C object user/CMakeFiles/_echo.dir/echo.c.o
+[ 17%] Building C object user/CMakeFiles/_ln.dir/ln.c.o
+[ 20%] Building C object user/CMakeFiles/_cat.dir/cat.c.o
+[ 20%] Building C object user/CMakeFiles/_init.dir/init.c.o
+[ 21%] Building C object user/CMakeFiles/_mmaptest.dir/mmaptest.c.o
+[ 22%] Building C object user/CMakeFiles/_grep.dir/grep.c.o
+[ 24%] Linking C executable _ln
+[ 24%] Linking C executable _echo
+[ 25%] Linking C executable _init
+[ 26%] Linking C executable _cat
+[ 26%] Linking C executable _kill
+[ 28%] Linking C executable _grep
+[ 28%] Built target _init
+[ 28%] Built target _ln
+[ 28%] Built target _echo
+[ 28%] Built target _kill
+[ 28%] Built target _cat
+[ 28%] Built target _grep
+[ 29%] Building C object user/CMakeFiles/_mkdir.dir/mkdir.c.o
+[ 30%] Building C object user/CMakeFiles/_rm.dir/rm.c.o
+[ 31%] Building C object user/CMakeFiles/_stressfs.dir/stressfs.c.o
+[ 32%] Linking C executable _mmaptest
+[ 33%] Building C object user/CMakeFiles/_sh.dir/sh.c.o
+[ 34%] Building C object user/CMakeFiles/_usertests.dir/usertests.c.o
+[ 34%] Building C object user/CMakeFiles/_grind.dir/grind.c.o
+[ 34%] Built target _mmaptest
+[ 34%] Linking C executable _mkdir
+[ 35%] Linking C executable _rm
+[ 37%] Linking C executable _stressfs
+[ 38%] Building C object user/CMakeFiles/_wc.dir/wc.c.o
+[ 38%] Built target _mkdir
+[ 38%] Built target _rm
+[ 38%] Built target _stressfs
+[ 38%] Building C object user/CMakeFiles/_zombie.dir/zombie.c.o
+[ 39%] Building C object user/CMakeFiles/_sleep.dir/sleep.c.o
+[ 40%] Linking C executable _grind
+[ 41%] Building C object user/CMakeFiles/_sync.dir/sync.c.o
+[ 42%] Linking C executable _wc
+[ 42%] Built target _grind
+[ 42%] Built target _wc
+[ 43%] Linking C executable _zombie
+[ 44%] Linking C executable _sleep
+[ 46%] Linking C executable _sync
+[ 47%] Building C object user/CMakeFiles/_pingpong.dir/pingpong.c.o
+[ 47%] Building C object user/CMakeFiles/_primes.dir/primes.c.o
+[ 47%] Built target _zombie
+[ 47%] Built target _sleep
+[ 47%] Built target _sync
+[ 47%] Linking C executable _sh
+[ 48%] Building C object user/CMakeFiles/_xargs.dir/xargs.c.o
+[ 49%] Building C object user/CMakeFiles/_find.dir/find.c.o
+[ 49%] Building C object user/CMakeFiles/_free.dir/free.c.o
+[ 50%] Linking C executable _pingpong
+[ 51%] Linking C executable _primes
+[ 51%] Built target _sh
+[ 51%] Built target _pingpong
+[ 52%] Building C object user/CMakeFiles/_ps.dir/ps.c.o
+[ 53%] Linking C executable _free
+[ 53%] Built target _primes
+[ 55%] Linking C executable _xargs
+[ 56%] Building C object user/CMakeFiles/_dumpchan.dir/dumpchan.c.o
+[ 57%] Linking C executable _find
+[ 58%] Building C object user/CMakeFiles/_dumppcache.dir/dumppcache.c.o
+[ 58%] Built target _free
+[ 58%] Built target _xargs
+[ 58%] Built target _find
+[ 59%] Linking C executable _ps
+[ 60%] Building C object user/CMakeFiles/_dumpinode.dir/dumpinode.c.o
+[ 61%] Building C object user/CMakeFiles/_dumprq.dir/dumprq.c.o
+[ 61%] Linking C executable _usertests
+[ 62%] Linking C executable _dumpchan
+[ 62%] Building C object user/CMakeFiles/_testsig.dir/testsig.c.o
+[ 64%] Linking C executable _dumppcache
+[ 64%] Built target _ps
+[ 64%] Built target _dumpchan
+[ 64%] Linking C executable _dumprq
+[ 64%] Built target _dumppcache
+[ 64%] Linking C executable _dumpinode
+[ 64%] Built target _usertests
+[ 65%] Building C object user/CMakeFiles/_cowtest.dir/cowtest.c.o
+[ 65%] Building C object user/CMakeFiles/_clonetest.dir/clonetest.c.o
+[ 66%] Building C object user/CMakeFiles/_vforktest.dir/vforktest.c.o
+[ 66%] Built target _dumpinode
+[ 66%] Built target _dumprq
+[ 66%] Building C object user/CMakeFiles/_devtest.dir/devtest.c.o
+[ 67%] Building C object user/CMakeFiles/_rustvfstest.dir/rustvfstest.c.o
+[ 68%] Building C object user/CMakeFiles/_rustnettest.dir/rustnettest.c.o
+[ 69%] Linking C executable _cowtest
+[ 70%] Linking C executable _vforktest
+[ 71%] Linking C executable _clonetest
+[ 71%] Built target _cowtest
+[ 73%] Linking C executable _devtest
+[ 73%] Built target _vforktest
+[ 73%] Built target _clonetest
+[ 74%] Linking C executable _testsig
+[ 75%] Linking C executable _rustvfstest
+[ 75%] Building C object user/CMakeFiles/_mount.dir/mount.c.o
+[ 75%] Linking C executable _rustnettest
+[ 76%] Building C object user/CMakeFiles/_umount.dir/umount.c.o
+[ 76%] Built target _devtest
+[ 77%] Building C object user/CMakeFiles/_mknod.dir/mknod.c.o
+[ 77%] Built target _rustvfstest
+[ 77%] Built target _testsig
+[ 77%] Built target _rustnettest
+[ 78%] Building C object user/CMakeFiles/_wallclock.dir/wallclock.c.o
+[ 78%] Building C object user/CMakeFiles/_bigfile.dir/bigfile.c.o
+[ 78%] Building C object user/CMakeFiles/_randtest.dir/randtest.c.o
+[ 79%] Linking C executable _mount
+[ 79%] Building C object user/CMakeFiles/_symlinktest.dir/symlinktest.c.o
+[ 80%] Linking C executable _umount
+[ 82%] Linking C executable _mknod
+[ 82%] Built target _mount
+[ 82%] Linking C executable _wallclock
+[ 82%] Built target _mknod
+[ 82%] Built target _umount
+[ 83%] Linking C executable _randtest
+[ 84%] Linking C executable _bigfile
+[ 84%] Built target _wallclock
+[ 84%] Built target _randtest
+[ 84%] Built target _bigfile
+[ 85%] Linking C executable _symlinktest
+[ 85%] Built target _symlinktest
+[ 87%] Creating file system image with user programs and README
+[ 87%] Building all user programs
+[ 87%] Built target user_programs
+nmeta 280 (boot, super, log blocks 240 inode blocks 13, bitmap blocks 25) blocks 199720 total 200000
+[ 87%] Compressing fs.img -> fs.img.gz
+[ 88%] Creating file system images
+[ 91%] Built target fs_img
+    Finished `release` profile [optimized] target(s) in 6.42s
+[ 91%] Built target xv6_rust
+[ 92%] Linking C executable kernel_with_symbols_elf
+[ 92%] Linking C executable kernel
+[ 93%] Built target kernel
+[ 93%] Built target kernel_with_symbols_elf
+[ 95%] Generating symbols from kernel with placeholder
+[ 95%] Decompiling kernel binary
+[ 96%] Embedding symbols into kernel ELF
+Embedded 30118 bytes into .ksymbols section (offset: 0xaa000, size: 2097152, addr: 0x802aa000)
+[ 96%] Built target kernel_with_symbols
+[ 96%] Built target kernel.asm
+[ 98%] Generating symbols from kernel with placeholder
+[ 98%] Generating xv6.bin (qemu)
+Patched image_size=2793472 (0x2aa000) at offset 0x10 in xv6.bin
+[ 98%] Generating xv6.sym
+[100%] Compressing xv6.bin -> xv6.bin.gz
+[100%] Built target kernel_all
