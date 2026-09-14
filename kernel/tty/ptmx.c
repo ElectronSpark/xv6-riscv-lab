@@ -643,6 +643,24 @@ static int ptmx_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
         return -ENXIO;
 
     switch (cmd) {
+    case 0x541B: { /* FIONREAD / TIOCINQ: bytes readable on the master */
+        struct pipe *outp = pair->slave ? pair->slave->output_pipe : NULL;
+        if (outp == NULL)
+            return -ENXIO;
+
+        /* Keep the read cursor stable while sampling the published write
+         * cursor.  A terminal may query this before every read; returning
+         * ENOTTY makes KPty disable its read notifier as if at EOF. */
+        spin_lock(&outp->reader_lock);
+        int count = (int)(smp_load_acquire(&outp->nwrite) - outp->nread);
+        spin_unlock(&outp->reader_lock);
+
+        /* This ioctl is passed through by sys_vfs_ioctl with a user
+         * pointer, unlike the explicitly marshalled termios requests. */
+        if (either_copyout(1, (uint64)arg, &count, sizeof(count)) < 0)
+            return -EFAULT;
+        return 0;
+    }
     case TIOCGPTN: {
         kstats_konsole_prepty_mark_pty();
         /* Return the slave PTY index (what N in /dev/pts/N) */

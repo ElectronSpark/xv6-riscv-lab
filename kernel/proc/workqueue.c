@@ -12,6 +12,7 @@
 #include <mm/slab.h>
 #include "proc/tq.h"
 #include "proc/workqueue.h"
+#include "proc/bottleneck_hooks.h"
 
 static slab_cache_t __workqueue_cache;
 static slab_cache_t __work_struct_cache;
@@ -75,6 +76,18 @@ void init_work_struct(struct work_struct *work,
     list_entry_init(&work->entry);
     work->func = func;
     work->data = data;
+    work->bt_id = 0;
+    work->bt_ticket = 0;
+}
+
+/* Queue lock held. Each counter occupies 16 bits; pool size is capped at 64.
+ * Pending is saturated in this diagnostic field, never in queue accounting. */
+static uint64 workqueue_bt_counts(struct workqueue *wq)
+{
+    uint64 pending = wq->pending_works > 65535 ? 65535 : wq->pending_works;
+    return pending | ((uint64)wq->running_works << 16) |
+           ((uint64)tq_size(&wq->idle_queue) << 32) |
+           ((uint64)wq->nr_workers << 48);
 }
 
 // Dynamically allocate a work struct and initialize it with the given function
@@ -186,10 +199,22 @@ static void __worker_routine(void) {
         }
         // Found a work to do
         wq->running_works++;
+        /* Callbacks may free their own work storage. Retain only scalar IDs
+         * across the call, never dereference work to record completion. */
+        uint64 bt_id = work->bt_id;
+        uint64 bt_ticket = work->bt_ticket;
+        if (bt_id)
+            bt_record(BT_WORK_START, bt_id, bt_ticket, wq->bt_id,
+                      (uint64)work, workqueue_bt_counts(wq), 0);
         __wq_unlock(wq);
+        struct bt_cause_scope bt_scope = bt_cause_enter(bt_id, bt_ticket);
         work->func(work);
+        bt_cause_leave(bt_scope);
         __wq_lock(wq);
         wq->running_works--;
+        if (bt_id)
+            bt_record(BT_WORK_END, bt_id, bt_ticket, wq->bt_id,
+                      0, workqueue_bt_counts(wq), 0);
         assert(wq->running_works >= 0, "Workqueue running_works underflow");
     }
     __wq_unlock(wq);
@@ -231,6 +256,10 @@ static void __manager_routine(void) {
         exit(-EINVAL);
     }
     for (;;) {
+        if (wq->bt_id)
+            bt_record(BT_MANAGER_DISPATCH, wq->bt_id, 0,
+                      current->pid, current->pid_seq,
+                      workqueue_bt_counts(wq), 0);
         assert(wq->nr_workers >= 0, "Worker thread count is invalid\n");
         while (wq->nr_workers < wq->min_active ||
                (wq->pending_works > wq->nr_workers &&
@@ -246,7 +275,9 @@ static void __manager_routine(void) {
                wq->nr_workers - tq_size(&wq->idle_queue) - wq->running_works <
                    wq->pending_works) {
             // Wake up an idle worker if any
+            struct bt_cause_scope bt_scope = bt_cause_enter(wq->bt_id, 0);
             struct thread *p = tq_wakeup(&wq->idle_queue, 0, 0);
+            bt_cause_leave(bt_scope);
             if (IS_ERR_OR_NULL(p)) {
                 printf("warning: Failed to wake up idle worker\n");
             }
@@ -283,6 +314,10 @@ static int __create_manager(struct workqueue *wq) {
 // Try to wake up the manager thread of a work queue
 // Note: pi_lock is acquired internally by scheduler_wakeup
 static void __wakeup_manager(struct workqueue *wq) {
+    if (wq->bt_id)
+        bt_record(BT_MANAGER_WAKE, wq->bt_id, 0,
+                  wq->manager->pid, wq->manager->pid_seq,
+                  workqueue_bt_counts(wq), 0);
     scheduler_wakeup(wq->manager);
 }
 
@@ -379,7 +414,17 @@ bool queue_work(struct workqueue *wq, struct work_struct *work) {
     }
 
     __enqueue_work(wq, work);
+    if (work->bt_id) {
+        if (!wq->bt_id)
+            wq->bt_id = bt_new_id();
+        work->bt_ticket = bt_new_id();
+        bt_record(BT_WORK_ENQUEUE, work->bt_id, work->bt_ticket,
+                  wq->bt_id, (uint64)work, workqueue_bt_counts(wq), 0);
+    }
+    struct bt_cause_scope bt_scope = bt_cause_enter(work->bt_id,
+                                                   work->bt_ticket);
     __wakeup_manager(wq);
+    bt_cause_leave(bt_scope);
     __wq_unlock(wq);
     return true;
 }

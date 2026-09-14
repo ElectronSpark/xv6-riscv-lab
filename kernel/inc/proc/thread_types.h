@@ -151,6 +151,14 @@ struct thread {
     spinlock_t kqueue_proc_lock;
     list_node_t kqueue_proc_knotes;
 
+    /* bottleneck_trace=1 only. Cause scope belongs to this thread and the
+     * recorded interrupt depth; nested interrupts must not inherit it.
+     * bt_watched is an advisory atomic flag, retained across captures. */
+    uint64 bt_cause_id;
+    uint64 bt_cause_generation;
+    int bt_cause_depth;
+    int bt_watched;
+
     /* kde_wake_to_run_trace=1 diagnostic only: wakeup stamp for
      * Konsole-scoped threads, consumed when the thread next runs.
      * Written under sched_entity->pi_lock in the wakeup path. */

@@ -40,6 +40,7 @@
 #include "proc/thread_group.h"
 #include "proc/rq.h"
 #include "proc/sched.h"
+#include "proc/bottleneck_trace.h"
 #include "maple_tree.h"
 #include "printf.h"
 #include "procfs_private.h"
@@ -75,6 +76,7 @@ static const struct procfs_static_entry procfs_root_entries[] = {
     {"cpuinfo", PROCFS_INO_CPUINFO},
     {"crashes", PROCFS_INO_CRASHES},
     {"kmsg", PROCFS_INO_KMSG},
+    {"bottleneck_trace", PROCFS_INO_BOTTLENECK_TRACE},
     {"kmemleak", PROCFS_INO_KMEMLEAK},
     {"cmdline", PROCFS_INO_CMDLINE},
     {"zoneinfo", PROCFS_INO_ZONEINFO},
@@ -2771,6 +2773,139 @@ out_unlock:
     return 0;
 }
 
+/* The trace has one fixed, stopped snapshot lease. Keeping it pinned through
+ * release bounds export memory and permits copyout with no trace lock held.
+ * A control descriptor does not acquire a lease; O_RDWR is not supported.
+ */
+struct procfs_bt_snapshot {
+    const void *data;
+    size_t bytes;
+};
+
+static ssize_t procfs_bt_read(struct vfs_file *file, char *buf, size_t count,
+                             bool user)
+{
+    struct procfs_bt_snapshot *snap = file->private_data;
+    if (snap == NULL)
+        return -EBADF;
+    loff_t pos = file->f_pos;
+    if (pos < 0)
+        return -EINVAL;
+    if ((uint64)pos >= snap->bytes)
+        return 0;
+    size_t left = snap->bytes - (size_t)pos;
+    size_t chunk = count < left ? count : left;
+    const char *source = (const char *)snap->data + pos;
+    if (user) {
+        int ret = either_copyout(1, (uint64)buf, (void *)source, chunk);
+        if (ret < 0)
+            return ret;
+    } else {
+        memmove(buf, source, chunk);
+    }
+    return (ssize_t)chunk;
+}
+
+static loff_t procfs_bt_seek(struct vfs_file *file, loff_t offset, int whence)
+{
+    struct procfs_bt_snapshot *snap = file->private_data;
+    if (snap == NULL)
+        return -EBADF;
+    loff_t size = (loff_t)snap->bytes;
+    loff_t base;
+    switch (whence) {
+    case SEEK_SET: base = 0; break;
+    case SEEK_CUR: base = file->f_pos; break;
+    case SEEK_END: base = size; break;
+    default: return -EINVAL;
+    }
+    /* Compare before addition so a hostile offset cannot overflow loff_t. */
+    if (offset < -base)
+        file->f_pos = 0;
+    else if (offset > size - base)
+        file->f_pos = size;
+    else
+        file->f_pos = base + offset;
+    return file->f_pos;
+}
+
+static int procfs_bt_release(struct vfs_inode *inode, struct vfs_file *file)
+{
+    (void)inode;
+    if (file->private_data != NULL) {
+        bt_snapshot_release();
+        kvfree(file->private_data);
+        file->private_data = NULL;
+    }
+    return 0;
+}
+
+static ssize_t procfs_bt_write(struct vfs_file *file, const char *buf,
+                              size_t count, bool user)
+{
+    (void)file;
+    char command[6];
+    if (count == 0 || count > sizeof(command))
+        return -EINVAL;
+    if (user) {
+        int ret = either_copyin(command, 1, (uint64)buf, count);
+        if (ret < 0)
+            return ret;
+    } else {
+        memmove(command, buf, count);
+    }
+    size_t len = count;
+    if (command[len - 1] == '\n')
+        len--;
+    enum bt_control operation;
+    if (len == 5 && memcmp(command, "reset", 5) == 0)
+        operation = BT_CONTROL_RESET;
+    else if (len == 5 && memcmp(command, "start", 5) == 0)
+        operation = BT_CONTROL_START;
+    else if (len == 4 && memcmp(command, "stop", 4) == 0)
+        operation = BT_CONTROL_STOP;
+    else
+        return -EINVAL;
+    int ret = bt_control(operation);
+    return ret < 0 ? ret : (ssize_t)count;
+}
+
+static struct vfs_file_ops procfs_bt_snapshot_ops = {
+    .read = procfs_bt_read,
+    .llseek = procfs_bt_seek,
+    .release = procfs_bt_release,
+};
+
+static struct vfs_file_ops procfs_bt_control_ops = {
+    .write = procfs_bt_write,
+};
+
+static int procfs_bt_open(struct vfs_file *file, int f_flags)
+{
+    struct thread *p = current;
+    if (p == NULL || p->thread_group == NULL || p->thread_group->euid != 0)
+        return -EACCES;
+    if (!bt_enabled())
+        return -ENODEV;
+    if ((f_flags & O_ACCMODE) == O_WRONLY) {
+        file->ops = &procfs_bt_control_ops;
+        return 0;
+    }
+    if ((f_flags & O_ACCMODE) != O_RDONLY)
+        return -EINVAL;
+    struct procfs_bt_snapshot *snap = kvmalloc(sizeof(*snap));
+    if (snap == NULL)
+        return -ENOMEM;
+    int ret = bt_snapshot_acquire(&snap->data, &snap->bytes);
+    if (ret != 0) {
+        kvfree(snap);
+        return ret;
+    }
+    file->private_data = snap;
+    file->ops = &procfs_bt_snapshot_ops;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  procfs_open – set file ops; generate content for regular files   */
 /* ------------------------------------------------------------------ */
@@ -2788,6 +2923,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         /* Symlinks: readlink is invoked by VFS, no file ops needed */
         return 0;
     }
+
+    if (pi->type == PROC_BOTTLENECK_TRACE)
+        return procfs_bt_open(file, f_flags);
 
     if (pi->type == PROC_PID_OOM_SCORE_ADJ) {
         struct procfs_pid_file *pf = kvmalloc(sizeof(*pf));

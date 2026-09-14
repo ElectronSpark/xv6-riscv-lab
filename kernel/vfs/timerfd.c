@@ -34,6 +34,7 @@
 #include "proc/workqueue.h"
 #include "timer/goldfish_rtc.h"
 #include "cmdline.h"
+#include "proc/bottleneck_hooks.h"
 
 /* Flags from <sys/timerfd.h> — match musl */
 #define TFD_NONBLOCK      O_NONBLOCK
@@ -80,10 +81,23 @@ struct timerfd_ctx {
     struct vfs_file *file;      /* back-pointer for kqueue notification */
     char            owner_name[16];
     pid_t           owner_pid;
+    uint64          bt_generation; /* observer only; not cancellation fencing */
+    uint64          bt_owner_seq;
+    uint64          bt_owner_start;
 };
 
 static struct vfs_file_ops timerfd_file_ops;
 static struct workqueue *timerfd_wq;
+
+/* Repeat identity at observed boundaries: a capture can start after creation.
+ * Numeric cookies remain useful after task exit or pointer/PID reuse. */
+static void timerfd_bt_identity(struct timerfd_ctx *ctx)
+{
+    if (ctx->rearm_work.bt_id)
+        bt_record(BT_CREATE, ctx->rearm_work.bt_id, ctx->bt_generation,
+                  ctx->clockid, ctx->owner_pid, ctx->bt_owner_seq,
+                  ctx->bt_owner_start);
+}
 
 static int webkit_timerfd_trace_enabled(void)
 {
@@ -200,8 +214,11 @@ static void timerfd_rearm_work(struct work_struct *work)
         struct vfs_file *notify_file = NULL;
         bool do_rearm = false;
         uint64 delay_ms = 0;
+        uint64 bt_id = 0, bt_generation = 0;
 
         spin_lock(&ctx->lock);
+        bt_id = ctx->rearm_work.bt_id;
+        bt_generation = ctx->bt_generation;
         if (ctx->cancelled) {
             ctx->rearm_pending = false;
             ctx->notify_pending = false;
@@ -223,9 +240,13 @@ static void timerfd_rearm_work(struct work_struct *work)
             ctx->rearm_pending = false;
             if (ctx->armed && ctx->interval_ns != 0) {
                 uint64 now_ns = timerfd_now_ns(ctx->clockid);
+                uint64 old_next_ns = ctx->next_expiration_ns;
                 if (ctx->next_expiration_ns <= now_ns)
                     ctx->next_expiration_ns = now_ns + ctx->interval_ns;
                 delay_ms = ns_to_ms_ceil(ctx->next_expiration_ns - now_ns);
+                if (bt_id)
+                    bt_record(BT_REARM, bt_id, bt_generation, old_next_ns,
+                              now_ns, ctx->next_expiration_ns, delay_ms);
                 do_rearm = true;
             }
         }
@@ -239,7 +260,15 @@ static void timerfd_rearm_work(struct work_struct *work)
         spin_unlock(&ctx->lock);
 
         if (notify_file) {
+            if (bt_id)
+                bt_record(BT_NOTIFY_BEGIN, bt_id, bt_generation,
+                          (uint64)notify_file, 0, 0, 0);
+            struct bt_cause_scope bt_scope = bt_cause_enter(bt_id, bt_generation);
             vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
+            bt_cause_leave(bt_scope);
+            if (bt_id)
+                bt_record(BT_NOTIFY_END, bt_id, bt_generation,
+                          (uint64)notify_file, 0, 0, 0);
             vfs_fput(notify_file);
         }
 
@@ -247,8 +276,13 @@ static void timerfd_rearm_work(struct work_struct *work)
             /* Remove the old timer node first (it may still be in the tree if
              * retry_limit > 1), then re-arm with a fresh node. */
             sched_timer_done(&ctx->timer);
-            if (sched_timer_set_cb(&ctx->timer, delay_ms ? delay_ms : 1,
-                                   timerfd_timer_callback, ctx) < 0) {
+            int timer_ret = sched_timer_set_cb(&ctx->timer,
+                                               delay_ms ? delay_ms : 1,
+                                               timerfd_timer_callback, ctx);
+            if (bt_id)
+                bt_record(BT_ARM, bt_id, bt_generation, delay_ms,
+                          (uint64)(int64)timer_ret, 1, 0);
+            if (timer_ret < 0) {
                 spin_lock(&ctx->lock);
                 ctx->armed = false;
                 spin_unlock(&ctx->lock);
@@ -268,7 +302,8 @@ static void timerfd_rearm_work(struct work_struct *work)
     }
 }
 
-/* ── timer callback (runs in timer-tick context with timer lock held) ─ */
+/* Retry-one timers are detached and the timer-root lock is dropped before
+ * this callback. Context storage lifetime is a separate cancellation concern. */
 static void timerfd_timer_callback(struct timer_node *tn)
 {
     struct timerfd_ctx *ctx = tn->data;
@@ -279,6 +314,10 @@ static void timerfd_timer_callback(struct timer_node *tn)
     if (ctx->interval_ns != 0 && now_ns > ctx->next_expiration_ns)
         count += (now_ns - ctx->next_expiration_ns) / ctx->interval_ns;
     ctx->expirations += count;
+    timerfd_bt_identity(ctx);
+    if (ctx->rearm_work.bt_id)
+        bt_record(BT_EXPIRE, ctx->rearm_work.bt_id, ctx->bt_generation,
+                  ctx->next_expiration_ns, now_ns, count, ctx->expirations);
     if (ctx->interval_ns != 0)
         ctx->next_expiration_ns += count * ctx->interval_ns;
 
@@ -294,7 +333,10 @@ static void timerfd_timer_callback(struct timer_node *tn)
     }
 
     /* Wake readers */
+    struct bt_cause_scope bt_scope = bt_cause_enter(ctx->rearm_work.bt_id,
+                                                   ctx->bt_generation);
     tq_wakeup_all(&ctx->rq, 0, 0);
+    bt_cause_leave(bt_scope);
     spin_unlock(&ctx->lock);
 
     if (webkit_timerfd_trace_ctx(ctx)) {
@@ -363,6 +405,10 @@ static ssize_t timerfd_read(struct vfs_file *file, char *buf, size_t count,
 
     uint64 val = ctx->expirations;
     ctx->expirations = 0;
+    timerfd_bt_identity(ctx);
+    if (ctx->rearm_work.bt_id)
+        bt_record(BT_READ, ctx->rearm_work.bt_id, ctx->bt_generation,
+                  val, ctx->next_expiration_ns, ctx->interval_ns, ctx->clockid);
     spin_unlock(&ctx->lock);
 
     if (webkit_timerfd_trace_ctx(ctx)) {
@@ -403,6 +449,9 @@ static int timerfd_release(struct vfs_inode *ip, struct vfs_file *file)
     struct timerfd_ctx *ctx = file->private_data;
     if (ctx) {
         spin_lock(&ctx->lock);
+        if (ctx->rearm_work.bt_id)
+            bt_record(BT_RELEASE, ctx->rearm_work.bt_id, ctx->bt_generation,
+                      ctx->expirations, ctx->armed, ctx->work_pending, 0);
         ctx->cancelled = true;
         ctx->file = NULL;
         if (ctx->armed) {
@@ -492,6 +541,7 @@ uint64 sys_timerfd_create(void)
     spin_init(&ctx->lock, "timerfd");
     tq_init(&ctx->rq, "timerfd_rq", NULL);
     init_work_struct(&ctx->rearm_work, timerfd_rearm_work, (uint64)ctx);
+    ctx->rearm_work.bt_id = bt_new_id();
     ctx->clockid = clockid;
     ctx->armed = false;
     ctx->cancelled = false;
@@ -500,6 +550,8 @@ uint64 sys_timerfd_create(void)
         memmove(ctx->owner_name, current->name, sizeof(ctx->owner_name));
         ctx->owner_name[sizeof(ctx->owner_name) - 1] = '\0';
         ctx->owner_pid = current->pid;
+        ctx->bt_owner_seq = current->pid_seq;
+        ctx->bt_owner_start = current->sched_entity->start_time;
     }
 
     int file_flags = O_RDWR;
@@ -519,6 +571,7 @@ uint64 sys_timerfd_create(void)
     if (flags & TFD_CLOEXEC)
         vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
     spin_unlock(&current->fdtable->lock);
+    timerfd_bt_identity(ctx);
 
     if (webkit_timerfd_trace_ctx(ctx)) {
         printf("timerfd: create owner=%s pid=%d fd=%d clock=%d flags=0x%x\n",
@@ -577,6 +630,7 @@ uint64 sys_timerfd_settime(void)
     uint64 trace_delay_ms = 0;
     uint64 trace_next_ns = 0;
     uint64 trace_expirations = 0;
+    uint64 bt_request_generation = 0;
 
     spin_lock(&ctx->lock);
 
@@ -602,6 +656,18 @@ uint64 sys_timerfd_settime(void)
         }
 
         spin_lock(&ctx->lock);
+    }
+
+    /* Trace generation labels observed settime requests only. They do not
+     * serialize the existing unlock/rearm window or repair cancellation. */
+    if (ctx->rearm_work.bt_id) {
+        ctx->bt_generation++;
+        bt_request_generation = ctx->bt_generation;
+        timerfd_bt_identity(ctx);
+        bt_record(BT_SETTIME, ctx->rearm_work.bt_id, ctx->bt_generation,
+                  value_ns, interval_ns,
+                  (uint64)(uint32)flags | ((uint64)(uint32)ctx->clockid << 32),
+                  timerfd_now_ns(ctx->clockid));
     }
 
     /* Disarm existing timer */
@@ -633,7 +699,10 @@ uint64 sys_timerfd_settime(void)
                     count += (now_ns - value_ns) / interval_ns;
                 ctx->expirations = count;
                 notify_now = true;
+                struct bt_cause_scope bt_scope =
+                    bt_cause_enter(ctx->rearm_work.bt_id, ctx->bt_generation);
                 tq_wakeup_all(&ctx->rq, 0, 0);
+                bt_cause_leave(bt_scope);
                 if (interval_ns != 0)
                     ctx->next_expiration_ns = value_ns + count * interval_ns;
             }
@@ -670,10 +739,15 @@ uint64 sys_timerfd_settime(void)
             trace_armed = true;
 
             ctx->armed = true;
+            uint64 bt_arm_deadline = ctx->next_expiration_ns;
             spin_unlock(&ctx->lock);
             int timer_ret = sched_timer_set_cb(&ctx->timer, delay_ms,
                                                timerfd_timer_callback, ctx);
             spin_lock(&ctx->lock);
+            if (ctx->rearm_work.bt_id)
+                bt_record(BT_ARM, ctx->rearm_work.bt_id, bt_request_generation,
+                          delay_ms, (uint64)(int64)timer_ret, 0,
+                          bt_arm_deadline);
             if (timer_ret < 0) {
                 ctx->armed = false;
                 spin_unlock(&ctx->lock);
@@ -756,5 +830,6 @@ uint64 sys_timerfd_gettime(void)
 /* ── init ─────────────────────────────────────────────────────────────── */
 void timerfd_init(void)
 {
+    bt_init();
     timerfd_wq = workqueue_create("timerfd", 2);
 }

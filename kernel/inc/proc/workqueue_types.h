@@ -13,6 +13,9 @@ struct work_struct {
     list_node_t entry;
     void (*func)(struct work_struct *);
     uint64 data;
+    /* Opt-in bottleneck tracing: immutable source ID and enqueue ticket. */
+    uint64 bt_id;
+    uint64 bt_ticket;
 };
 
 struct workqueue {
@@ -30,6 +33,7 @@ struct workqueue {
     int nr_workers;
     int min_active;
     int max_active;
+    uint64 bt_id; /* allocated only after a traced work item uses this queue */
 };
 
 #endif // __KERNEL_WORKQUEUE_TYPES_H

@@ -83,6 +83,10 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     p->ptrace_real_parent_seq = 0;
     p->ptrace_real_parent_listed = 0;
     p->ptrace_options = 0;
+    p->bt_cause_id = 0;
+    p->bt_cause_generation = 0;
+    p->bt_cause_depth = 0;
+    p->bt_watched = 0;
     p->kde_wake_trace_ms = 0;
     p->kde_wake_trace_waker_pid = 0;
     p->kde_wake_trace_waker_irq = 0;

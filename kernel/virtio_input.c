@@ -83,6 +83,7 @@ struct virtio_input_queue {
     uint16 used_idx;
     uint16 notify_off;
     spinlock_t lock;
+    int draining; /* protected by lock; also serializes packet assembly */
 };
 
 struct virtio_input {
@@ -279,6 +280,15 @@ static void virtio_input_drain(struct virtio_input *in)
     struct virtio_input_queue *q = &in->eventq;
 
     spin_lock(&q->lock);
+    /* Both the IRQ handler and the fallback poller drain this queue.  Keep
+     * one owner while dropping the queue lock for downstream input delivery;
+     * otherwise another caller can process a later SYN or button transition
+     * before this caller has applied the record it just dequeued. */
+    if (q->draining) {
+        spin_unlock(&q->lock);
+        return;
+    }
+    q->draining = 1;
     while (q->used_idx != q->used->idx) {
         uint16 used_slot = q->used_idx % q->size;
         uint32 id = q->used->ring[used_slot].id;
@@ -292,6 +302,7 @@ static void virtio_input_drain(struct virtio_input *in)
             spin_lock(&q->lock);
         }
     }
+    q->draining = 0;
     spin_unlock(&q->lock);
     virtio_input_notify(in, 0);
 }
@@ -363,6 +374,7 @@ static int virtio_input_queue_init(struct virtio_input *in)
     cfg->queue_enable = 1;
     q->size = qsize;
     q->notify_off = cfg->queue_notify_off;
+    q->draining = 0;
     spin_init(&q->lock, "virtio_inputq");
 
     for (uint16 i = 0; i < qsize; i++)

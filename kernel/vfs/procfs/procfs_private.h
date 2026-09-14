@@ -101,6 +101,7 @@ enum procfs_entry_type {
     PROC_RESOURCES,   /* /proc/<tgid>/resources */
     PROC_CRASHES,     /* /proc/crashes          */
     PROC_KMSG,        /* /proc/kmsg             */
+    PROC_BOTTLENECK_TRACE, /* /proc/bottleneck_trace */
     PROC_KMEMLEAK,    /* /proc/kmemleak         */
     PROC_CMDLINE,     /* /proc/cmdline          */
     PROC_VERSION,     /* /proc/version          */
@@ -223,6 +224,7 @@ enum procfs_entry_type {
 #define PROCFS_INO_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS 40ULL
 #define PROCFS_INO_KMSG 41ULL
 #define PROCFS_INO_KMEMLEAK 42ULL
+#define PROCFS_INO_BOTTLENECK_TRACE 43ULL
 
 /* Each pid occupies 64 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL

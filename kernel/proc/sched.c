@@ -22,6 +22,7 @@
 #include "mm/vm.h"
 #include "string.h"
 #include "kde_ready_trace.h"
+#include "proc/bottleneck_hooks.h"
 /* ================================================================== */
 /*  Linux-style global load averages (1s / 5s / 16s)                  */
 /* ================================================================== */
@@ -433,6 +434,38 @@ static void __scheduler_wakeup_assertion(struct thread *p) {
     pop_off();
 }
 
+/* Attempt fields are advisory atomic samples, not a locked joint snapshot.
+ * Commit callers already hold their normal pi/rq locks. IRQ masking pins
+ * current and its cause scope while recording; it adds no target lock. */
+static void bt_scheduler_wake(uint32 event, struct thread *p, uint32 path)
+{
+    if (!bt_enabled())
+        return;
+    push_off();
+    struct cpu_local *cpu = mycpu();
+    struct thread *source = cpu->proc;
+    uint64 id = 0;
+    uint64 generation = 0;
+    if (source != NULL && source->bt_cause_id != 0 &&
+        source->bt_cause_depth == cpu->intr_depth) {
+        id = source->bt_cause_id;
+        generation = source->bt_cause_generation;
+        __atomic_store_n(&p->bt_watched, 1, __ATOMIC_RELEASE);
+    }
+    if (id == 0 &&
+        !__atomic_load_n(&p->bt_watched, __ATOMIC_ACQUIRE)) {
+        pop_off();
+        return;
+    }
+    struct sched_entity *se = p->sched_entity;
+    uint64 placement = (uint64)!!smp_load_acquire(&se->on_rq) |
+                       ((uint64)!!smp_load_acquire(&se->on_cpu) << 1);
+    uint64 state = (uint32)smp_load_acquire(&p->state);
+    bt_record(event, id, generation, (uint64)p->pid, p->pid_seq,
+              placement, state | ((uint64)path << 32));
+    pop_off();
+}
+
 // Internal function to wake up a sleeping or stopped process.
 // New pattern: CAS to WAKENING, select RQ, then either:
 // - If not on_cpu: enqueue directly and set to RUNNING
@@ -469,6 +502,7 @@ static void __do_scheduler_wakeup(struct thread *p, bool from_stopped) {
         }
         // Set state to RUNNING - no CAS needed since we're the current process
         smp_store_release(&p->state, THREAD_RUNNING);
+        bt_scheduler_wake(BT_WAKE_COMMIT, p, BT_WAKE_COMMIT_SELF);
         spin_unlock(&se->pi_lock);
         return;
     }
@@ -584,6 +618,7 @@ retry:
         // runnable entity; this became visible when EEVDF stopped mistaking a
         // busy CPU with an empty internal rb-tree for an idle CPU.
         smp_store_release(&p->state, THREAD_RUNNING);
+        bt_scheduler_wake(BT_WAKE_COMMIT, p, BT_WAKE_COMMIT_QUEUED);
         spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
         if (origin_cpuid == cpuid())
@@ -601,6 +636,7 @@ retry:
         // context_switch_finish. Use origin_cpuid (already validated) rather
         // than re-reading cpu_id.
         rq_add_wake_list_locked(origin_cpuid, se);
+        bt_scheduler_wake(BT_WAKE_COMMIT, p, BT_WAKE_COMMIT_WAKELIST);
         spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
         // Send IPI to origin CPU to process the wake list
@@ -611,6 +647,7 @@ retry:
     // on_rq=0 and on_cpu=0: task is fully off CPU, enqueue directly
     rq_enqueue_task(rq, se);
     smp_store_release(&p->state, THREAD_RUNNING);
+    bt_scheduler_wake(BT_WAKE_COMMIT, p, BT_WAKE_COMMIT_DIRECT);
     spin_unlock(&se->pi_lock);
     rq_unlock_two(origin_cpuid, target_cpu);
     if (target_cpu == cpuid())
@@ -622,6 +659,7 @@ retry:
 // unconditionally wake up a process from the sleep queue.
 void scheduler_wakeup(struct thread *p) {
     __scheduler_wakeup_assertion(p);
+    bt_scheduler_wake(BT_WAKE, p, 0);
     if (!THREAD_SLEEPING(p)) {
         return; // Process is not sleeping, nothing to do
     }
@@ -631,6 +669,7 @@ void scheduler_wakeup(struct thread *p) {
 // Wake up a process sleeping in timer, timer_killable or interruptible state.
 void scheduler_wakeup_timeout(struct thread *p) {
     __scheduler_wakeup_assertion(p);
+    bt_scheduler_wake(BT_WAKE, p, 0);
     if (!THREAD_TIMER(p)) {
         return; // Process is not in timer, timer_killable or interruptible
                 // state, nothing to do
@@ -640,6 +679,7 @@ void scheduler_wakeup_timeout(struct thread *p) {
 
 void scheduler_wakeup_killable(struct thread *p) {
     __scheduler_wakeup_assertion(p);
+    bt_scheduler_wake(BT_WAKE, p, 0);
     if (!THREAD_KILLABLE(p)) {
         return; // Process is not in killable state, nothing to do
     }
@@ -648,6 +688,7 @@ void scheduler_wakeup_killable(struct thread *p) {
 
 void scheduler_wakeup_interruptible(struct thread *p) {
     __scheduler_wakeup_assertion(p);
+    bt_scheduler_wake(BT_WAKE, p, 0);
     if (!THREAD_INTERRUPTIBLE(p)) {
         return; // Process is not in interruptible state, nothing to do
     }
@@ -657,6 +698,7 @@ void scheduler_wakeup_interruptible(struct thread *p) {
 // Wake up a stopped process (continue from THREAD_STOPPED).
 void scheduler_wakeup_stopped(struct thread *p) {
     __scheduler_wakeup_assertion(p);
+    bt_scheduler_wake(BT_WAKE, p, 0);
     if (!THREAD_STOPPED(p)) {
         return; // Process is not stopped, nothing to do
     }
@@ -846,6 +888,13 @@ void context_switch_prepare(struct thread *prev, struct thread *next) {
     // Mark the next process as on the CPU
     smp_store_release(&next->sched_entity->on_cpu, 1);
     next->sched_entity->cpu_id = cpuid();
+    if (bt_enabled() &&
+        __atomic_load_n(&next->bt_watched, __ATOMIC_ACQUIRE)) {
+        /* Selection for dispatch, not proof that a preceding wake caused it.
+         * Identity is the target PID plus its non-reused pid_seq cookie. */
+        bt_record(BT_DISPATCH, 0, 0, (uint64)next->pid, next->pid_seq,
+                  (uint64)cpuid(), (uint32)smp_load_acquire(&next->state));
+    }
     if (THREAD_ZOMBIE(prev)) {
         // Previous process is exiting, clean up scheduler resources
         rq_task_dead(prev->sched_entity);

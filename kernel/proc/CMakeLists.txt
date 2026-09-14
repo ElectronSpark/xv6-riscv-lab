@@ -11,6 +11,7 @@ set(PROC_C_SRCS
     pidfd.c
     workqueue.c
     workqueue_selftest.c
+    bottleneck_trace.c
     exit.c
     pid.c
     pgroup.c

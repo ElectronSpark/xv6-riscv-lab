@@ -31,6 +31,7 @@
 #include "printf.h"
 #include "procfs_private.h"
 #include "klog.h"
+#include "proc/bottleneck_trace.h"
 
 /* ------------------------------------------------------------------ */
 /*  Module globals                                                     */
@@ -183,6 +184,15 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         pi->vfs_inode.mode    = S_IFREG | 0400;
         pi->vfs_inode.n_links = 1;
         pi->vfs_inode.size    = KLOG_RING_SIZE;
+        return &pi->vfs_inode;
+    }
+
+    if (ino == PROCFS_INO_BOTTLENECK_TRACE) {
+        pi->type              = PROC_BOTTLENECK_TRACE;
+        pi->vfs_inode.mode    = S_IFREG | 0600;
+        pi->vfs_inode.n_links = 1;
+        pi->vfs_inode.size    = sizeof(struct bt_trace_header) +
+                               BT_TRACE_CAPACITY * sizeof(struct bt_record);
         return &pi->vfs_inode;
     }
 
