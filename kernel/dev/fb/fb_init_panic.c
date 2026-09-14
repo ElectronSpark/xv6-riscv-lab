@@ -178,6 +178,10 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
     fb_state.scanout_mappable = 0;
     fb_state.xres = width;
     fb_state.yres = height;
+    if (fb_state.kms_boot_width == 0) {
+        fb_state.kms_boot_width = width;
+        fb_state.kms_boot_height = height;
+    }
     fb_state.bpp = 32;
     fb_state.pitch = width * 4;
     fb_state.fb_size = (uint32)size;
@@ -225,6 +229,10 @@ int fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
         fb_kernel_range_has_pages((uint64)(uintptr_t)backing, size);
     fb_state.xres = width;
     fb_state.yres = height;
+    if (fb_state.kms_boot_width == 0) {
+        fb_state.kms_boot_width = width;
+        fb_state.kms_boot_height = height;
+    }
     fb_state.bpp = 32;
     fb_state.pitch = pitch;
     fb_state.fb_size = (uint32)size;

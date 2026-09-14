@@ -114,14 +114,8 @@ static int gpu_drm_mode_getblob(uint64 arg)
     return 0;
 }
 
-/*
- * Atomic clients do not reuse the driver's immutable MODE_ID blob.  libdrm
- * creates a new property blob containing the selected connector mode and
- * passes that returned id back in the CRTC MODE_ID property.  xv6 does not
- * yet carry a changed mode through atomic commit into backend resize state,
- * so accept only a dynamic copy of the active mode.  Other advertised modes
- * must fail instead of reporting a successful-but-ignored modeset.
- */
+/* libdrm creates a private blob for the selected connector mode. Compare
+ * timing fields with the stable supported catalog, not with its blob id. */
 static int gpu_drm_mode_timings_equal(
     const struct drm_mode_modeinfo_compat *a,
     const struct drm_mode_modeinfo_compat *b)
@@ -153,18 +147,40 @@ static int gpu_drm_user_blob_has_size_locked(uint32 id, uint32 size)
     return 0;
 }
 
-static int gpu_drm_validate_mode_blob(uint64 value)
+static int gpu_drm_mode_supported(
+    const struct drm_mode_modeinfo_compat *selected,
+    struct drm_mode_modeinfo_compat *canonical)
+{
+    struct drm_mode_modeinfo_compat modes[GPU_DRM_CONNECTOR_MODE_CAP];
+    uint32 count = gpu_drm_build_connector_modes(modes);
+
+    for (uint32 i = 0; i < count; i++) {
+        if (gpu_drm_mode_timings_equal(selected, &modes[i])) {
+            if (canonical != NULL)
+                *canonical = modes[i];
+            return 0;
+        }
+    }
+    return -EINVAL;
+}
+
+static int gpu_drm_resolve_mode_blob(uint64 value,
+    struct drm_mode_modeinfo_compat *mode)
 {
     struct drm_mode_modeinfo_compat selected;
-    struct drm_mode_modeinfo_compat active;
     int found = 0;
 
-    if (value == 0 || value == GPU_DRM_MODE_BLOB_ID)
+    memset(&selected, 0, sizeof(selected));
+    if (value == 0) {
+        *mode = selected;
         return 0;
+    }
+    if (value == GPU_DRM_MODE_BLOB_ID) {
+        gpu_drm_fill_mode(mode);
+        return 0;
+    }
     if (value > 0xffffffffULL)
         return -EINVAL;
-
-    memset(&selected, 0, sizeof(selected));
     spin_lock(&fb_state.lock);
     for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
         if (fb_state.user_blobs[i].in_use &&
@@ -179,12 +195,14 @@ static int gpu_drm_validate_mode_blob(uint64 value)
         }
     }
     spin_unlock(&fb_state.lock);
-    if (!found)
-        return -EINVAL;
+    return found ? gpu_drm_mode_supported(&selected, mode) : -EINVAL;
+}
 
-    memset(&active, 0, sizeof(active));
-    gpu_drm_fill_mode(&active);
-    return gpu_drm_mode_timings_equal(&selected, &active) ? 0 : -EINVAL;
+static int gpu_drm_validate_mode_blob(uint64 value)
+{
+    struct drm_mode_modeinfo_compat mode;
+
+    return gpu_drm_resolve_mode_blob(value, &mode);
 }
 
 static uint32 gpu_drm_alloc_user_blob_id_locked(void)
@@ -1049,7 +1067,7 @@ static struct work_struct gpu_kms_async_present_work;
  * Async present worker (single-threaded workqueue, process context). Runs the
  * present for the one in-flight flip, then delivers its completion event.
  */
-static void gpu_kms_async_present_worker(struct work_struct *work)
+static void gpu_kms_async_present_worker_locked(struct work_struct *work)
 {
     struct fb_gpu_bo_entry *bo;
     struct fb_gpu_render_owner *owner;
@@ -1222,6 +1240,23 @@ static void gpu_kms_async_present_worker(struct work_struct *work)
     gpu_kms_async_present.bo = NULL;
     gpu_kms_async_present.reserved = 0;
     spin_unlock(&fb_state.lock);
+}
+
+static int gpu_kms_modeset_busy(void)
+{
+    int busy;
+
+    spin_lock(&fb_state.lock);
+    busy = gpu_kms_async_present.inflight;
+    spin_unlock(&fb_state.lock);
+    return busy;
+}
+
+static void gpu_kms_async_present_worker(struct work_struct *work)
+{
+    gpu_kms_lock();
+    gpu_kms_async_present_worker_locked(work);
+    gpu_kms_unlock();
 }
 
 static void gpu_kms_async_present_init(void)

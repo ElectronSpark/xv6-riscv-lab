@@ -2537,6 +2537,8 @@ bo_copy_out:
 
     case FBIOPUT_VSCREENINFO: {
         struct fb_var_screeninfo req;
+        uint32 old_width, old_height;
+        int ret;
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
 
@@ -2545,8 +2547,30 @@ bo_copy_out:
             req.yres < 480 || req.yres > 1600)
             return -EINVAL;
 
+        gpu_kms_lock();
+        if (gpu_kms_modeset_busy()) {
+            gpu_kms_unlock();
+            return -EBUSY;
+        }
+        spin_lock(&fb_state.lock);
+        old_width = fb_state.xres;
+        old_height = fb_state.yres;
+        if (fb_state.kms_boot_width == 0) {
+            fb_state.kms_boot_width = old_width;
+            fb_state.kms_boot_height = old_height;
+        }
+        spin_unlock(&fb_state.lock);
         if (fb_state.virtio_backed) {
-            int ret = virtio_gpu_resize_scanout(req.xres, req.yres);
+            ret = virtio_gpu_resize_scanout(req.xres, req.yres);
+            if (ret == 0 &&
+                (old_width != req.xres || old_height != req.yres)) {
+                spin_lock(&fb_state.lock);
+                fb_state.kms_mode_valid = 0;
+                fb_state.kms_primary_valid = 0;
+                fb_state.current_kms_fb_id = 0;
+                spin_unlock(&fb_state.lock);
+            }
+            gpu_kms_unlock();
             if (ret == 0)
                 printf("FB: virtio resolution changed to %dx%d\n",
                        req.xres, req.yres);
@@ -2555,6 +2579,9 @@ bo_copy_out:
 
         spin_lock(&fb_state.lock);
         bga_set_mode(req.xres, req.yres, FB_DEFAULT_BPP);
+        fb_state.kms_mode_valid = 0;
+        fb_state.kms_primary_valid = 0;
+        fb_state.current_kms_fb_id = 0;
 
         /* Clear framebuffer to black after mode change */
         volatile uint32 *pixels = (volatile uint32 *)fb_state.fb_virt;
@@ -2566,6 +2593,7 @@ bo_copy_out:
                                    0, 0, fb_state.xres, fb_state.yres);
 
         printf("FB: resolution changed to %dx%d\n", fb_state.xres, fb_state.yres);
+        gpu_kms_unlock();
         return 0;
     }
 

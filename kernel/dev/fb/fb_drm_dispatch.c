@@ -1549,6 +1549,44 @@ static const struct drm_core_ioctl_desc gpu_drm_ioctls[] = {
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GEM_INFO, DRM_CORE_IOCTL_ANY),
 };
 
+/* Keep mode readback, blob lifetime, framebuffer membership and changes in
+ * one sleepable transaction domain. Event reads/waits never take this mutex. */
+static int gpu_drm_ioctl_serializes_kms(uint64 cmd)
+{
+    switch (cmd) {
+    case DRM_IOCTL_GEM_CLOSE:
+    case DRM_IOCTL_MODE_DESTROY_DUMB:
+    case DRM_IOCTL_MODE_GETRESOURCES:
+    case DRM_IOCTL_MODE_GETCRTC:
+    case DRM_IOCTL_MODE_SETCRTC:
+    case DRM_IOCTL_MODE_GETENCODER:
+    case DRM_IOCTL_MODE_GETCONNECTOR:
+    case DRM_IOCTL_MODE_GETPROPERTY:
+    case DRM_IOCTL_MODE_GETPROPBLOB:
+    case DRM_IOCTL_MODE_CREATEPROPBLOB:
+    case DRM_IOCTL_MODE_DESTROYPROPBLOB:
+    case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
+    case DRM_IOCTL_MODE_OBJ_SETPROPERTY:
+    case DRM_IOCTL_MODE_GETPLANERESOURCES:
+    case DRM_IOCTL_MODE_GETPLANE:
+    case DRM_IOCTL_MODE_SETPLANE:
+    case DRM_IOCTL_MODE_ADDFB:
+    case DRM_IOCTL_MODE_ADDFB2:
+    case DRM_IOCTL_MODE_RMFB:
+    case DRM_IOCTL_MODE_CLOSEFB:
+    case DRM_IOCTL_MODE_GETFB:
+    case DRM_IOCTL_MODE_GETFB2:
+    case DRM_IOCTL_MODE_PAGE_FLIP:
+    case DRM_IOCTL_MODE_ATOMIC:
+    case DRM_IOCTL_MODE_DIRTYFB:
+    case DRM_IOCTL_MODE_CURSOR:
+    case DRM_IOCTL_MODE_CURSOR2:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
                          uint64 arg)
 {
@@ -1564,11 +1602,15 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         fb_state.stats.drm_ioctls++;
         spin_unlock(&fb_state.lock);
     }
+    if (gpu_drm_ioctl_serializes_kms(cmd))
+        gpu_kms_lock();
     ret = drm_core_dispatch_ioctl(&owner->drm, owner, cmd, arg,
                                   gpu_drm_ioctls,
                                   sizeof(gpu_drm_ioctls) /
                                       sizeof(gpu_drm_ioctls[0]),
                                   &name, &known);
+    if (gpu_drm_ioctl_serializes_kms(cmd))
+        gpu_kms_unlock();
     if (!known) {
         spin_lock(&fb_state.lock);
         fb_state.stats.drm_unknown_ioctls++;
@@ -1653,6 +1695,12 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
         uint64 stale_syncobjs;
         uint64 stale_gem_handles;
         enum drm_core_node_type node_type = owner->drm.node_type;
+        int take_kms = !gpu_kms_mutex_ready || !holding_mutex(&gpu_kms_mutex);
+
+        /* An event-file reference can become the last reference in a KMS
+         * worker; avoid recursively taking the mutex in that case. */
+        if (take_kms)
+            gpu_kms_lock();
 
         spin_lock(&fb_state.lock);
         owner->drm_event_file = NULL;
@@ -1672,6 +1720,8 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
                                 stale_syncobjs, stale_events);
         (void)gpu_release_node(node_type);
         kvfree(owner);
+        if (take_kms)
+            gpu_kms_unlock();
         return 0;
     }
     return gpu_release(&gpu_cdev);

@@ -162,7 +162,7 @@ static void gpu_drm_get_mode_size(uint32 *width, uint32 *height)
     spin_unlock(&fb_state.lock);
     if (w < 640)
         w = FB_DEFAULT_WIDTH;
-    if (h < 480)
+    if (h < 400)
         h = FB_DEFAULT_HEIGHT;
     if (width)
         *width = w;
@@ -220,6 +220,15 @@ static void gpu_drm_fill_mode(struct drm_mode_modeinfo_compat *mode)
 {
     uint32 w, h;
 
+    spin_lock(&fb_state.lock);
+    if (fb_state.kms_mode_valid &&
+        fb_state.kms_mode.hdisplay == fb_state.xres &&
+        fb_state.kms_mode.vdisplay == fb_state.yres) {
+        *mode = fb_state.kms_mode;
+        spin_unlock(&fb_state.lock);
+        return;
+    }
+    spin_unlock(&fb_state.lock);
     gpu_drm_get_mode_size(&w, &h);
     gpu_drm_fill_mode_size(mode, w, h, 60000, 1);
 }

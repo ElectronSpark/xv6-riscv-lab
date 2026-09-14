@@ -33,6 +33,7 @@
 #include <proc/workqueue.h>
 #include <printf.h>
 #include <lock/spinlock.h>
+#include <lock/mutex.h>
 #include <cmdline.h>
 #include <vfs/file.h>
 #include <vfs/poll.h>

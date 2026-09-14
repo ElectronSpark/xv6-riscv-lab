@@ -568,6 +568,12 @@ int virtio_gpu_probe_scanout(uint32 *width, uint32 *height);
 int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
                                uint32 *refresh_millihz);
 int virtio_gpu_resize_scanout(uint32 width, uint32 height);
+int virtio_gpu_scanout_mode_supported(uint32 width, uint32 height);
+/* The caller pins/validates the direct BO or supplies a CPU-only fill callback.
+ * fill runs under the GPU op mutex, without a framebuffer spinlock, and must
+ * not call back into virtio-gpu.  Commit publishes geometry only after present. */
+int virtio_gpu_modeset_scanout(uint32 width, uint32 height, uint32 resource_id,
+                              int (*fill)(void *, void *, uint32), void *opaque);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
 int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,

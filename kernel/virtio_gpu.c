@@ -109,6 +109,8 @@
 #define VIRTIO_GPU_RESOURCE_MAX_CONTEXT_ATTACHMENTS 8
 #define VIRTIO_GPU_MAX_CAPSETS 8
 #define VIRTIO_GPU_PAGE_FLIP_SCANOUT_SET_MAX 4
+/* PFN-mapped fbdev backing cannot be freed on a mode change. */
+#define VIRTIO_GPU_SCANOUT_BACKING_CACHE_MAX 8
 #define VIRGL_CCMD_NOP 0
 #define VIRGL_CCMD_CREATE_OBJECT 1
 #define VIRGL_CCMD_BIND_OBJECT 2
@@ -802,6 +804,10 @@ struct virtio_gpu {
     uint32 next_resource_id;
     struct virtio_gpu_resource resources[VIRTIO_GPU_MAX_RESOURCES];
     struct virtio_gpu_resource *scanout_resource;
+    struct virtio_gpu_resource *scanout_backing_cache[
+        VIRTIO_GPU_SCANOUT_BACKING_CACHE_MAX];
+    uint32 scanout_backing_cache_count;
+    uint64 scanout_backing_cache_bytes;
     struct virtio_gpu_stats stats;
     /* IRQ-owned statistic: never take g->lock from interrupt context. */
     uint64 irq_completions;
@@ -832,6 +838,11 @@ struct virtio_gpu {
     uint32 present_flip_index;
     uint32 present_base_generation;
     uint32 bound_scanout_resource_id;
+    uint32 bound_scanout_x;
+    uint32 bound_scanout_y;
+    uint32 bound_scanout_width;
+    uint32 bound_scanout_height;
+    int scanout_binding_uncertain;
     uint32 page_flip_scanout_set[VIRTIO_GPU_PAGE_FLIP_SCANOUT_SET_MAX];
     uint32 page_flip_scanout_set_count;
     uint32 page_flip_scanout_width;
@@ -4659,6 +4670,22 @@ int virtio_gpu_resize_scanout(uint32 width, uint32 height)
 {
     (void)width;
     (void)height;
+    return -ENODEV;
+}
+int virtio_gpu_scanout_mode_supported(uint32 width, uint32 height)
+{
+    (void)width;
+    (void)height;
+    return 0;
+}
+int virtio_gpu_modeset_scanout(uint32 width, uint32 height, uint32 resource_id,
+                              int (*fill)(void *, void *, uint32), void *opaque)
+{
+    (void)width;
+    (void)height;
+    (void)resource_id;
+    (void)fill;
+    (void)opaque;
     return -ENODEV;
 }
 int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,

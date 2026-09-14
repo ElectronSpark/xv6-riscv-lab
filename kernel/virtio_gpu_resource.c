@@ -650,6 +650,19 @@ static int virtio_gpu_resource_attach_pages(struct virtio_gpu *g,
     return 0;
 }
 
+static void virtio_gpu_note_scanout_binding(struct virtio_gpu *g,
+                                            uint32 resource_id, uint32 x,
+                                            uint32 y, uint32 width,
+                                            uint32 height)
+{
+    g->bound_scanout_resource_id = resource_id;
+    g->bound_scanout_x = resource_id ? x : 0;
+    g->bound_scanout_y = resource_id ? y : 0;
+    g->bound_scanout_width = resource_id ? width : 0;
+    g->bound_scanout_height = resource_id ? height : 0;
+    g->scanout_binding_uncertain = 0;
+}
+
 static int virtio_gpu_set_scanout(struct virtio_gpu *g, uint32 scanout_id,
                                   struct virtio_gpu_resource *res,
                                   uint32 x, uint32 y, uint32 width,
@@ -659,6 +672,7 @@ static int virtio_gpu_set_scanout(struct virtio_gpu *g, uint32 scanout_id,
         (struct virtio_gpu_set_scanout *)g->cmd_page;
     struct virtio_gpu_ctrl_hdr *resp =
         (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+    int ret;
 
     memset(set_scanout, 0, sizeof(*set_scanout));
     set_scanout->hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
@@ -669,51 +683,17 @@ static int virtio_gpu_set_scanout(struct virtio_gpu *g, uint32 scanout_id,
     set_scanout->scanout_id = scanout_id;
     set_scanout->resource_id = res ? res->id : 0;
 
-    return virtio_gpu_submit(g, set_scanout, sizeof(*set_scanout), NULL, 0,
-                             false, resp, sizeof(*resp),
-                             VIRTIO_GPU_RESP_OK_NODATA);
-}
-
-static int virtio_gpu_set_scanout_async_prepare(
-    uint32 scanout_id, uint32 resource_id, uint32 x, uint32 y, uint32 width,
-    uint32 height, struct virtio_gpu_async_submit *prep)
-{
-    struct virtio_gpu_set_scanout *cmd;
-    struct virtio_gpu_ctrl_hdr *resp;
-
-    memset(prep, 0, sizeof(*prep));
-    cmd = kalloc();
-    resp = kalloc();
-    if (cmd == NULL || resp == NULL) {
-        if (cmd != NULL)
-            kfree(cmd);
-        if (resp != NULL)
-            kfree(resp);
-        return -ENOMEM;
-    }
-
-    memset(cmd, 0, sizeof(*cmd));
-    memset(resp, 0, sizeof(*resp));
-    cmd->hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
-    cmd->r.x = x;
-    cmd->r.y = y;
-    cmd->r.width = width;
-    cmd->r.height = height;
-    cmd->scanout_id = scanout_id;
-    cmd->resource_id = resource_id;
-
-    prep->ctx_id = 0;
-    prep->fence_id = 0;
-    prep->type = VIRTIO_GPU_CMD_SET_SCANOUT;
-    prep->expected = VIRTIO_GPU_RESP_OK_NODATA;
-    prep->cmd = cmd;
-    prep->cmd_len = sizeof(*cmd);
-    prep->data = NULL;
-    prep->data_len = 0;
-    prep->data_order = 0;
-    prep->resp = resp;
-    prep->resp_len = sizeof(*resp);
-    return 0;
+    ret = virtio_gpu_submit(g, set_scanout, sizeof(*set_scanout), NULL, 0,
+                            false, resp, sizeof(*resp),
+                            VIRTIO_GPU_RESP_OK_NODATA);
+    if (scanout_id == 0 && ret == 0)
+        virtio_gpu_note_scanout_binding(g, res ? res->id : 0,
+                                        x, y, width, height);
+    else if (scanout_id == 0)
+        /* The request may have timed out after reaching the device.  Even
+         * callers that ignore its error must not leave a confirmed shadow. */
+        g->scanout_binding_uncertain = 1;
+    return ret;
 }
 
 static int virtio_gpu_resource_transfer_2d_fenced(
@@ -1034,6 +1014,14 @@ static int virtio_gpu_resource_unref(struct virtio_gpu *g,
     void *backing = res->backing;
     page_t **pages = res->pages;
     uint32 npages = res->npages;
+
+    /* These PFNs may still have direct fbdev aliases from an earlier mode.
+     * Only device teardown may reclaim them; no ordinary BO/context cleanup
+     * is allowed to invalidate the bounded persistent backing cache. */
+    for (uint32 i = 0; i < g->scanout_backing_cache_count; i++) {
+        if (g->scanout_backing_cache[i] == res)
+            return -EBUSY;
+    }
 
     if (res->host_visible_mapped &&
         virtio_gpu_resource_unmap_blob(g, res) != 0)

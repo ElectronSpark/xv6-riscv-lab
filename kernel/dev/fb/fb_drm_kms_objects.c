@@ -122,20 +122,35 @@ static void gpu_drm_connector_add_mode(
 static uint32 gpu_drm_build_connector_modes(
     struct drm_mode_modeinfo_compat modes[GPU_DRM_CONNECTOR_MODE_CAP])
 {
-    uint32 current_w = 0, current_h = 0;
+    static const uint32 common[][2] = {
+        {640, 480}, {800, 600}, {1024, 768}, {1280, 720},
+        {1280, 800}, {1600, 900}, {1920, 1080},
+    };
+    uint32 boot_w, boot_h;
     uint32 count = 0;
+    int virtio;
 
-    /*
-     * Every mode returned by GETCONNECTOR is a promise that an atomic client
-     * may create a MODE_ID blob for it and successfully TEST_ONLY that state.
-     * The backend cannot yet carry a mode change through resize and scanout
-     * reconfiguration, so advertise only the active mode.  Listing EDID or
-     * convenience modes here while rejecting them later recreates KWin's
-     * opening-logo stall when a saved output configuration selects one.
-     */
-    gpu_drm_get_mode_size(&current_w, &current_h);
-    gpu_drm_connector_add_mode(modes, &count, current_w, current_h,
-                               60000, 1);
+    /* Freeze the preferred boot mode before the first modeset. Changing the
+     * active mode must not rewrite the connector's catalog or preferred mode. */
+    spin_lock(&fb_state.lock);
+    if (fb_state.kms_boot_width == 0) {
+        fb_state.kms_boot_width = fb_state.xres;
+        fb_state.kms_boot_height = fb_state.yres;
+    }
+    boot_w = fb_state.kms_boot_width;
+    boot_h = fb_state.kms_boot_height;
+    virtio = fb_state.virtio_backed;
+    spin_unlock(&fb_state.lock);
+    gpu_drm_connector_add_mode(modes, &count, boot_w, boot_h, 60000, 1);
+    if (virtio) {
+        for (uint32 i = 0; i < sizeof(common) / sizeof(common[0]); i++) {
+            /* Follow the backend's bounded backing/size capability. */
+            if (!virtio_gpu_scanout_mode_supported(common[i][0], common[i][1]))
+                continue;
+            gpu_drm_connector_add_mode(modes, &count, common[i][0],
+                                       common[i][1], 60000, 0);
+        }
+    }
     return count;
 }
 

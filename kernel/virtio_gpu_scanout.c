@@ -196,6 +196,13 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
         goto fail;
 
     g->scanout_resource = res;
+    /* Keep the boot backing in the same bounded cache as later modes.  Direct
+     * fbdev PFN mappings do not pin individual pages and may outlive a resize. */
+    spin_lock(&g->lock);
+    g->scanout_backing_cache[0] = res;
+    g->scanout_backing_cache_count = 1;
+    g->scanout_backing_cache_bytes = res->alloc_len;
+    spin_unlock(&g->lock);
     printf("virtio_gpu: persistent scanout resource=%u kind=%s size=%ux%u bytes=%u alloc=%u\n",
            res->id, res->is_3d ? "3d" : "2d", width, height,
            res->backing_len, res->alloc_len);
@@ -1451,25 +1458,66 @@ int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
     return ret == 0 ? 0 : -EIO;
 }
 
-int virtio_gpu_resize_scanout(uint32 width, uint32 height)
+static int virtio_gpu_scanout_dimensions_valid(uint32 width, uint32 height)
 {
+    uint64 bytes = (uint64)width * height * sizeof(uint32);
+
+    /* The fallback uses one buddy allocation, not the sparse user-BO path. */
+    return width >= 640 && width <= 2560 && height >= 400 && height <= 1600 &&
+           bytes <= ((uint64)PGSIZE << PAGE_BUDDY_MAX_ORDER);
+}
+
+int virtio_gpu_scanout_mode_supported(uint32 width, uint32 height)
+{
+    /* Keep in step with the stable connector catalog.  Admitting arbitrary
+     * fbdev sizes into this PFN-preserving cache could exhaust its slots and
+     * make a subsequently requested advertised mode impossible to prepare. */
+    static const uint32 common[][2] = {
+        {640, 480}, {800, 600}, {1024, 768}, {1280, 720},
+        {1280, 800}, {1600, 900}, {1920, 1080},
+    };
     struct virtio_gpu *g = &gpu;
-    struct virtio_gpu_resource *res;
-    struct virtio_gpu_resource *old;
-    int ret = -EIO;
-    int bound = 0;
+    int supported = 0;
 
-    if (width < 640 || width > 2560 || height < 400 || height > 1600)
-        return -EINVAL;
-    if (!g->initialized)
-        return -ENODEV;
+    if (!g->initialized || !virtio_gpu_scanout_dimensions_valid(width, height))
+        return 0;
+    /* No op mutex: KMS may query this while holding fb_state.lock. */
+    spin_lock(&g->lock);
+    if (g->scanout_backing_cache_count != 0) {
+        struct virtio_gpu_resource *res = g->scanout_backing_cache[0];
 
-    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESIZE);
-    old = g->scanout_resource;
-    if (old != NULL && old->width == width && old->height == height) {
-        ret = 0;
-        goto out;
+        if (res->width == width && res->height == height)
+            supported = 1;
     }
+    spin_unlock(&g->lock);
+    for (uint32 i = 0; i < NELEM(common); i++) {
+        if (common[i][0] == width && common[i][1] == height)
+            supported = 1;
+    }
+    return supported;
+}
+
+/* op_lock held.  These resources are kernel-owned and never exported as BOs.
+ * Cache lifetime is the device lifetime: freeing an old successful backing
+ * would invalidate existing /dev/fb0 PFN aliases.  Eight entries bound total
+ * retained allocation to 64 MiB, and repeated supported-mode cycles reuse it.
+ * A failed preparation is retained in its slot too, so failed host cleanup
+ * cannot turn retries into an unbounded series of abandoned allocations. */
+static int virtio_gpu_modeset_backing(struct virtio_gpu *g, uint32 width,
+                                      uint32 height,
+                                      struct virtio_gpu_resource **out)
+{
+    struct virtio_gpu_resource *res;
+
+    for (uint32 i = 0; i < g->scanout_backing_cache_count; i++) {
+        res = g->scanout_backing_cache[i];
+        if (res->width == width && res->height == height) {
+            *out = res;
+            return 0;
+        }
+    }
+    if (g->scanout_backing_cache_count == VIRTIO_GPU_SCANOUT_BACKING_CACHE_MAX)
+        return -ENOSPC;
 
     if (virtio_gpu_use_3d_scanout(g) &&
         virtio_gpu_resource_create_3d_backing(
@@ -1481,63 +1529,165 @@ int virtio_gpu_resize_scanout(uint32 width, uint32 height)
             VIRTIO_GPU_PIPE_BIND_SHARED |
             VIRTIO_GPU_PIPE_BIND_LINEAR,
             &res) == 0) {
-        printf("virtio_gpu: using Alpine-style virgl 3D scanout resource for mode set\n");
+        /* The CPU fallback remains usable by the existing virgl copy path. */
     } else if (virtio_gpu_resource_create_2d(
                    g, width, height, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
                    &res) != 0) {
-        goto out;
+        return -EIO;
     }
     memset(res->backing, 0, res->backing_len);
+    spin_lock(&g->lock);
+    g->scanout_backing_cache[g->scanout_backing_cache_count++] = res;
+    g->scanout_backing_cache_bytes += res->alloc_len;
+    spin_unlock(&g->lock);
+    *out = res;
+    return 0;
+}
 
-    if (virtio_gpu_resource_attach_backing(g, res) != 0)
-        goto fail_new;
-    if (virtio_gpu_set_scanout(g, 0, res, 0, 0, width, height) != 0)
-        goto fail_new;
-    bound = 1;
-    g->bound_scanout_resource_id = res->id;
-    if (virtio_gpu_resource_transfer_scanout(g, res, 0, 0, width, height) != 0)
-        goto fail_new;
-    if (virtio_gpu_resource_flush(g, res, 0, 0, width, height) != 0)
-        goto fail_new;
+int virtio_gpu_modeset_scanout(uint32 width, uint32 height, uint32 resource_id,
+                              int (*fill)(void *, void *, uint32), void *opaque)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *backing = NULL;
+    struct virtio_gpu_resource *target = NULL;
+    struct virtio_gpu_resource *old_bound = NULL;
+    uint32 old_width, old_height, old_bound_id;
+    uint32 old_x, old_y, old_w, old_h;
+    int bind_attempted = 0;
+    int ret;
 
-    g->scanout_resource = res;
+    if (!g->initialized)
+        return -ENODEV;
+    if (!virtio_gpu_scanout_mode_supported(width, height) ||
+        (resource_id != 0 && fill != NULL))
+        return -EINVAL;
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESIZE);
+    /* Settle asynchronous rendering/flush work before preparing a transaction.
+     * Unlike ordinary context-zero commands, a modeset must not ignore a
+     * drain error.  Framebuffer selection itself is synchronous below. */
+    if (virtio_gpu_drain_async_submit(g, 1) != 0) {
+        ret = -EIO;
+        goto out;
+    }
+    old_width = g->scanout_width;
+    old_height = g->scanout_height;
+    old_bound_id = g->bound_scanout_resource_id;
+    old_x = g->bound_scanout_x;
+    old_y = g->bound_scanout_y;
+    old_w = g->bound_scanout_width;
+    old_h = g->bound_scanout_height;
+    if (g->scanout_binding_uncertain) {
+        ret = -EIO;
+        goto out;
+    }
+    if (resource_id == 0 && width == old_width && height == old_height) {
+        /* A CPU same-mode present belongs to the ordinary blit path: filling
+         * the active PFN backing here could change the old display on error. */
+        ret = fill == NULL ? 0 : -EINVAL;
+        goto out;
+    }
+    spin_lock(&g->lock);
+    if (old_bound_id != 0)
+        old_bound = virtio_gpu_lookup_resource_locked(g, old_bound_id);
+    if (resource_id != 0)
+        target = virtio_gpu_lookup_resource_locked(g, resource_id);
+    if ((old_bound_id != 0 && old_bound == NULL) ||
+        (resource_id != 0 &&
+         (target == NULL || !target->attached || target->width != width ||
+          target->height != height))) {
+        spin_unlock(&g->lock);
+        ret = -EINVAL;
+        goto out;
+    }
+    spin_unlock(&g->lock);
+
+    ret = virtio_gpu_modeset_backing(g, width, height, &backing);
+    if (ret != 0)
+        goto out;
+    if (!backing->attached && virtio_gpu_resource_attach_backing(g, backing) != 0) {
+        ret = -EIO;
+        goto out;
+    }
+    if (target == NULL) {
+        target = backing;
+        if (backing == old_bound) {
+            /* A diagnostic partial scanout can bind a backing whose size
+             * differs from g's geometry.  Do not overwrite a visible target
+             * while preparing a transaction that may still fail. */
+            ret = -EBUSY;
+            goto out;
+        }
+        if (fill != NULL) {
+            ret = fill(opaque, backing->backing, width * sizeof(uint32));
+            if (ret != 0)
+                goto out;
+        }
+        if (virtio_gpu_resource_transfer_scanout(g, backing, 0, 0,
+                                                 width, height) != 0) {
+            ret = -EIO;
+            goto out;
+        }
+    } else if (target->last_submit_fence != 0 && virtio_gpu_async_pending(g) &&
+               virtio_gpu_drain_async_until_fence(g, target->last_submit_fence) != 0) {
+        ret = -EIO;
+        goto out;
+    }
+
+    /* In particular, never TRANSFER_TO_HOST into a rendered KWin BO: its
+     * sparse CPU backing is not the authoritative GL-rendered surface. */
+    bind_attempted = 1;
+    ret = virtio_gpu_set_scanout(g, 0, target, 0, 0, width, height);
+    if (ret != 0)
+        goto rollback;
+    ret = virtio_gpu_resource_flush(g, target, 0, 0, width, height);
+    if (ret != 0)
+        goto rollback;
+
+    /* This helper validates first and cannot fail after changing fb_state.
+     * All potentially failing GPU work is complete before either geometry is
+     * published; the caller must likewise commit KMS bookkeeping only now. */
+    ret = fb_replace_virtio_gpu_scanout_backing(width, height, backing->backing,
+                                               backing->backing_len,
+                                               width * sizeof(uint32));
+    if (ret != 0)
+        goto rollback;
+    g->scanout_resource = target;
     g->scanout_width = width;
     g->scanout_height = height;
     virtio_gpu_drop_present_flip_resources(g);
     virtio_gpu_page_flip_scanout_set_reset(g);
     g->present_scanout_ctx_id = 0;
     g->present_scanout_resource_id = 0;
-    g->bound_scanout_resource_id = res->id;
-    ret = fb_replace_virtio_gpu_scanout_backing(width, height, res->backing,
-                                                res->backing_len,
-                                                res->width * sizeof(uint32));
-    if (ret != 0) {
-        g->scanout_resource = old;
-        goto fail_new;
-    }
-
-    /*
-     * Existing userspace may still have the old direct scanout mmap.  Keep the
-     * old resource alive instead of freeing pages that might still be mapped;
-     * the compositor remaps the current scanout after FBIOPUT succeeds.
-     */
+    printf("virtio_gpu: modeset %ux%u -> %ux%u path=%s resource=%u fallback=%u cache=%u/%u alloc_bytes=%lu\n",
+           old_width, old_height, width, height,
+           resource_id != 0 ? "direct-bo" : "cpu-fallback", target->id,
+           backing->id, g->scanout_backing_cache_count,
+           VIRTIO_GPU_SCANOUT_BACKING_CACHE_MAX, g->scanout_backing_cache_bytes);
     ret = 0;
     goto out;
 
-fail_new:
-    if (bound) {
-        if (old != NULL) {
-            virtio_gpu_set_scanout(g, 0, old, 0, 0, old->width, old->height);
-            g->bound_scanout_resource_id = old->id;
-        } else {
-            virtio_gpu_set_scanout(g, 0, NULL, 0, 0, 0, 0);
-            g->bound_scanout_resource_id = 0;
-        }
+rollback:
+    /* Restore the actual selected resource/rectangle, which need not equal
+     * scanout_resource after a resource-copy or diagnostic scanout.  Attempt
+     * restoration even when SET_SCANOUT failed: a timeout has unknown effect. */
+    if (bind_attempted &&
+        (virtio_gpu_set_scanout(g, 0, old_bound, old_x, old_y, old_w, old_h) != 0 ||
+         (old_bound != NULL &&
+          virtio_gpu_resource_flush(g, old_bound, old_x, old_y, old_w, old_h) != 0))) {
+        g->scanout_binding_uncertain = 1;
+        printf("virtio_gpu: modeset rollback failed old_resource=%u target=%u; binding uncertain\n",
+               old_bound_id, target->id);
     }
-    virtio_gpu_resource_unref(g, res);
+    ret = -EIO;
 out:
     virtio_gpu_op_unlock(g);
     return ret;
+}
+
+int virtio_gpu_resize_scanout(uint32 width, uint32 height)
+{
+    return virtio_gpu_modeset_scanout(width, height, 0, NULL, NULL);
 }
 
 int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
@@ -1612,7 +1762,8 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
      */
     scanout_w = g->scanout_width;
     scanout_h = g->scanout_height;
-    already_bound = g->bound_scanout_resource_id == res->id;
+    already_bound = !g->scanout_binding_uncertain &&
+                    g->bound_scanout_resource_id == res->id;
     full_size_resource = res->width == scanout_w && res->height == scanout_h;
     if (already_bound &&
         ((uint64)x + w > scanout_w || (uint64)y + h > scanout_h)) {
@@ -1735,14 +1886,12 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     int already_bound;
     int registered;
     int rebind = 0;
-    int async_scanout = 0;
     uint64 src_submit_fence = 0;
     uint64 completed_fence = 0;
     int should_wait_src_fence = 0;
     int ordered_async_src_fence = 0;
     uint64 present_fence = 0;
     int ret;
-    struct virtio_gpu_async_submit scanout_prep;
     static int flip_logs;
     static int wait_logs;
 
@@ -1753,7 +1902,6 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     if (!g->initialized)
         return -ENODEV;
 
-    memset(&scanout_prep, 0, sizeof(scanout_prep));
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PAGE_FLIP);
     spin_lock(&g->lock);
     res = virtio_gpu_lookup_resource_locked(g, resource_id);
@@ -1786,8 +1934,9 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
      * With ordered page flip (default-on since 2026-07-04; opt out with
      * virtio_gpu_ordered_page_flip=0), the SET_SCANOUT/RESOURCE_FLUSH
      * below is posted after the pending producer submit on the same virtio
-     * control queue, so queue ordering preserves producer-before-present
-     * without stalling the compositor here.
+     * control queue, so queue ordering preserves producer-before-present.
+     * Selecting a different framebuffer waits for SET_SCANOUT acknowledgement
+     * below; rendering submissions and resource flushes can remain async.
      */
     if (should_wait_src_fence && !ordered_async_src_fence) {
         ret = virtio_gpu_drain_async_until_fence(g, src_submit_fence);
@@ -1812,7 +1961,8 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     if (g->page_flip_scanout_width != scanout_w ||
         g->page_flip_scanout_height != scanout_h)
         virtio_gpu_page_flip_scanout_set_reset(g);
-    already_bound = g->bound_scanout_resource_id == res->id;
+    already_bound = !g->scanout_binding_uncertain &&
+                    g->bound_scanout_resource_id == res->id;
     registered = virtio_gpu_page_flip_scanout_set_contains(g, res->id);
     /*
      * SET_SCANOUT selects one current resource; it does not register a BO
@@ -1821,33 +1971,15 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
      * different BO and turning later flushes into stale/no-op presents.
      */
     if (!already_bound) {
-        if ((virtio_gpu_cmdline_enabled(
-                 "virtio_gpu_async_page_flip_scanout") ||
-             virtio_gpu_cmdline_enabled("vgpu_async_pf")) &&
-            virtio_gpu_async_scanout_flush_enabled() &&
-            virtio_gpu_set_scanout_async_prepare(
-                0, res->id, 0, 0, scanout_w, scanout_h,
-                &scanout_prep) == 0) {
-            if (virtio_gpu_async_post_prepared(
-                    g, &scanout_prep,
-                    VIRTIO_GPU_ASYNC_REASON_OTHER, 0) != 0) {
-                virtio_gpu_async_submit_free(&scanout_prep);
-                if (virtio_gpu_set_scanout(g, 0, res, 0, 0,
-                                           scanout_w, scanout_h) != 0) {
-                    ret = -EIO;
-                    goto out;
-                }
-            } else {
-                async_scanout = 1;
-            }
-        } else {
-            if (virtio_gpu_set_scanout(g, 0, res, 0, 0,
-                                       scanout_w, scanout_h) != 0) {
-                ret = -EIO;
-                goto out;
-            }
+        /* A queued SET_SCANOUT cannot be the rollback target of a later
+         * modeset: an independent reaper may consume its error or abandon it.
+         * Keep framebuffer selection synchronous until confirmed async
+         * binding state is tracked separately from queued presentation. */
+        if (virtio_gpu_set_scanout(g, 0, res, 0, 0,
+                                   scanout_w, scanout_h) != 0) {
+            ret = -EIO;
+            goto out;
         }
-        g->bound_scanout_resource_id = res->id;
         g->scanout_resource = res;
         virtio_gpu_page_flip_scanout_set_note(g, res->id, scanout_w,
                                               scanout_h);
@@ -1875,9 +2007,9 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
         spin_unlock(&g->lock);
     }
     if (ret == 0 && flip_logs < 8) {
-        printf("virtio_gpu: page-flip present resource=%u size=%ux%u already_bound=%d registered=%d rebind=%d set_count=%u async_scanout=%d\n",
+        printf("virtio_gpu: page-flip present resource=%u size=%ux%u already_bound=%d registered=%d rebind=%d set_count=%u async_scanout=0\n",
                res->id, scanout_w, scanout_h, already_bound, registered,
-               rebind, g->page_flip_scanout_set_count, async_scanout);
+               rebind, g->page_flip_scanout_set_count);
         flip_logs++;
     }
     if (ret == 0 && flags_out != NULL) {
@@ -1887,9 +2019,6 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
             *flags_out |= FB_GPU_PAGE_FLIP_F_SCANOUT_CACHED;
     }
 out:
-    if (scanout_prep.cmd != NULL || scanout_prep.resp != NULL ||
-        scanout_prep.data != NULL)
-        virtio_gpu_async_submit_free(&scanout_prep);
     virtio_gpu_op_unlock(g);
     return ret;
 }

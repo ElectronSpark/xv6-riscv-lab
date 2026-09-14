@@ -324,10 +324,193 @@ static int gpu_drm_mode_lease_fail_closed(struct fb_gpu_render_owner *owner,
     return -EOPNOTSUPP;
 }
 
+struct gpu_kms_mode_pixels {
+    struct fb_gpu_bo_entry *bo;
+    struct fb_gpu_kms_fb_entry fb;
+};
+
+static int gpu_kms_mode_fill(void *opaque, void *dst, uint32 pitch)
+{
+    struct gpu_kms_mode_pixels *pixels = opaque;
+    struct fb_gpu_bo_entry *bo = pixels->bo;
+    struct fb_gpu_kms_fb_entry *fb = &pixels->fb;
+    int swap_rb = fb_scanout_format_needs_rb_swap(fb->pixel_format);
+
+    /* Page presence, bounds and all formats were validated before the driver
+     * changes anything. The BO reference pins the page array across this copy. */
+    for (uint32 row = 0; row < fb->height; row++) {
+        uint64 off = fb->offsets[0] + (uint64)row * fb->pitch;
+        uint32 remain = fb->width * 4;
+        uint8 *target = (uint8 *)dst + (uint64)row * pitch;
+
+        while (remain != 0) {
+            uint32 page_index = off / PGSIZE;
+            uint32 page_offset = off & (PGSIZE - 1);
+            uint32 chunk = PGSIZE - page_offset;
+            uint8 *src;
+
+            if (chunk > remain)
+                chunk = remain;
+            src = (uint8 *)PA2VA(__page_to_pa(bo->pages[page_index])) +
+                  page_offset;
+            fb_copy_scanout_chunk(target, src, chunk, swap_rb);
+            target += chunk;
+            off += chunk;
+            remain -= chunk;
+        }
+    }
+    return 0;
+}
+
+static int gpu_kms_mode_fb_get(struct fb_gpu_render_owner *owner,
+                                uint32 fb_id,
+                                const struct drm_mode_modeinfo_compat *mode,
+                                struct gpu_kms_mode_pixels *pixels)
+{
+    struct fb_gpu_bo_entry *bo;
+    uint64 end;
+    int ret;
+
+    memset(pixels, 0, sizeof(*pixels));
+    if (!virtio_gpu_scanout_mode_supported(mode->hdisplay, mode->vdisplay))
+        return -EOPNOTSUPP;
+    ret = gpu_kms_copy_fb_for_owner(owner, fb_id, &pixels->fb);
+    if (ret != 0)
+        return ret;
+    if (pixels->fb.width != mode->hdisplay ||
+        pixels->fb.height != mode->vdisplay ||
+        !gpu_kms_primary_scanout_format_supported(pixels->fb.pixel_format,
+                                                   pixels->fb.modifier) ||
+        pixels->fb.pitch < pixels->fb.width * 4 ||
+        (pixels->fb.pitch & 3) != 0 || (pixels->fb.offsets[0] & 3) != 0)
+        return -EINVAL;
+    bo = fb_bo_get_owned(pixels->fb.bo_handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    end = pixels->fb.offsets[0] +
+          (uint64)(pixels->fb.height - 1) * pixels->fb.pitch +
+          (uint64)pixels->fb.width * 4;
+    if (end > bo->size) {
+        ret = -EINVAL;
+        goto fail;
+    }
+    if (bo->virtio_resource_id != 0) {
+        if (bo->width != pixels->fb.width || bo->height != pixels->fb.height ||
+            bo->pitch != pixels->fb.pitch || pixels->fb.offsets[0] != 0 ||
+            fb_scanout_format_needs_rb_swap(pixels->fb.pixel_format)) {
+            ret = -EOPNOTSUPP;
+            goto fail;
+        }
+    } else {
+        if (bo->pages == NULL || end > (uint64)bo->npages * PGSIZE) {
+            ret = -EINVAL;
+            goto fail;
+        }
+        for (uint64 i = pixels->fb.offsets[0] / PGSIZE;
+             i < (end + PGSIZE - 1) / PGSIZE; i++) {
+            if (bo->pages[i] == NULL) {
+                ret = -EINVAL;
+                goto fail;
+            }
+        }
+    }
+    pixels->bo = bo;
+    return 0;
+fail:
+    fb_bo_put(bo);
+    return ret;
+}
+
+static int gpu_kms_modeset_fb(struct fb_gpu_render_owner *owner, uint32 fb_id,
+                               const struct drm_mode_modeinfo_compat *mode,
+                               int test_only)
+{
+    struct gpu_kms_mode_pixels pixels;
+    int ret = gpu_kms_mode_fb_get(owner, fb_id, mode, &pixels);
+
+    if (ret != 0)
+        return ret;
+    if (!test_only) {
+        ret = virtio_gpu_modeset_scanout(mode->hdisplay, mode->vdisplay,
+                pixels.bo->virtio_resource_id,
+                pixels.bo->virtio_resource_id != 0 ? NULL : gpu_kms_mode_fill,
+                &pixels);
+        if (ret == 0) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.bo_presents++;
+            if (pixels.bo->virtio_resource_id != 0) {
+                fb_state.stats.virgl_bo_presents++;
+                fb_state.stats.virgl_bo_present_pixels +=
+                    (uint64)mode->hdisplay * mode->vdisplay;
+                fb_state.stats.virgl_bo_present_last_resource =
+                    pixels.bo->virtio_resource_id;
+            }
+            fb_note_display_complete_locked();
+            (void)fb_bo_signal_present_locked(pixels.bo);
+            spin_unlock(&fb_state.lock);
+        }
+    }
+    fb_bo_put(pixels.bo);
+    return ret;
+}
+
+static void gpu_kms_primary_snapshot_locked(struct gpu_kms_primary_state *state)
+{
+    memset(state, 0, sizeof(*state));
+    if (fb_state.kms_primary_valid)
+        *state = fb_state.kms_primary;
+    else {
+        state->src_w = (uint64)fb_state.xres << 16;
+        state->src_h = (uint64)fb_state.yres << 16;
+        state->crtc_w = fb_state.xres;
+        state->crtc_h = fb_state.yres;
+    }
+    state->fb_id = fb_state.current_kms_fb_id;
+    state->crtc_id = state->fb_id != 0 ? GPU_DRM_CRTC_ID : 0;
+    state->touched = 0;
+}
+
+static int gpu_kms_primary_validate(struct fb_gpu_render_owner *owner,
+                                    struct gpu_kms_primary_state *state,
+                                    const struct drm_mode_modeinfo_compat *mode,
+                                    int changing_mode)
+{
+    struct fb_gpu_kms_fb_entry fb;
+    int ret;
+
+    if (state->fb_id == 0)
+        return state->crtc_id == 0 ? 0 : -EINVAL;
+    if (state->crtc_id != GPU_DRM_CRTC_ID)
+        return -EINVAL;
+    ret = gpu_kms_copy_fb_for_owner(owner, state->fb_id, &fb);
+    if (ret != 0)
+        return ret;
+    /* Preserve the existing same-mode small-framebuffer compatibility path.
+     * Real modesets need a complete frame; explicit hardware crop/scaling is
+     * rejected because the backend does not implement it. */
+    if (state->touched || changing_mode) {
+        if (state->src_x != 0 || state->src_y != 0 ||
+            state->crtc_x != 0 || state->crtc_y != 0 ||
+            state->src_w != ((uint64)fb.width << 16) ||
+            state->src_h != ((uint64)fb.height << 16) ||
+            state->crtc_w != fb.width || state->crtc_h != fb.height ||
+            fb.width > mode->hdisplay || fb.height > mode->vdisplay)
+            return -EINVAL;
+    }
+    if (changing_mode &&
+        (fb.width != mode->hdisplay || fb.height != mode->vdisplay))
+        return -EINVAL;
+    return 0;
+}
+
 static int gpu_drm_mode_setcrtc(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_mode_crtc_compat req;
-    int ret = 0;
+    struct drm_mode_modeinfo_compat mode, active;
+    struct gpu_kms_primary_state primary;
+    uint32 connector;
+    int changing_mode;
+    int ret;
 
     if (!gpu_drm_is_primary_like(owner))
         return -EOPNOTSUPP;
@@ -335,16 +518,49 @@ static int gpu_drm_mode_setcrtc(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EFAULT;
     if (req.crtc_id != GPU_DRM_CRTC_ID)
         return -ENOENT;
-    if (req.fb_id != 0) {
-        ret = gpu_kms_fb_presentable_for_owner(owner, req.fb_id);
-        if (ret != 0)
-            return ret;
-        spin_lock(&fb_state.lock);
-        fb_state.current_kms_fb_id = req.fb_id;
-        spin_unlock(&fb_state.lock);
-        ret = gpu_kms_present_fb(owner, req.fb_id);
+    if (req.count_connectors > 1 || req.x != 0 || req.y != 0 ||
+        req.mode_valid > 1)
+        return -EINVAL;
+    if (req.count_connectors == 1) {
+        if (either_copyin(&connector, 1, req.set_connectors_ptr,
+                          sizeof(connector)) < 0)
+            return -EFAULT;
+        if (connector != GPU_DRM_CONNECTOR_ID)
+            return -EINVAL;
     }
-    return ret;
+    gpu_drm_fill_mode(&active);
+    mode = active;
+    if (req.mode_valid && gpu_drm_mode_supported(&req.mode, &mode) != 0)
+        return -EINVAL;
+    changing_mode = !gpu_drm_mode_timings_equal(&mode, &active);
+    if (changing_mode && (req.fb_id == 0 || req.count_connectors != 1))
+        return -EINVAL;
+    if (gpu_kms_modeset_busy())
+        return -EBUSY;
+    ret = gpu_kms_fb_presentable_for_owner(owner, req.fb_id);
+    if (ret != 0)
+        return ret;
+    if (changing_mode)
+        ret = gpu_kms_modeset_fb(owner, req.fb_id, &mode, 0);
+    else
+        ret = gpu_kms_present_fb(owner, req.fb_id);
+    if (ret != 0)
+        return ret;
+    memset(&primary, 0, sizeof(primary));
+    primary.crtc_id = req.fb_id != 0 ? GPU_DRM_CRTC_ID : 0;
+    primary.fb_id = req.fb_id;
+    primary.src_w = (uint64)mode.hdisplay << 16;
+    primary.src_h = (uint64)mode.vdisplay << 16;
+    primary.crtc_w = mode.hdisplay;
+    primary.crtc_h = mode.vdisplay;
+    spin_lock(&fb_state.lock);
+    fb_state.current_kms_fb_id = req.fb_id;
+    fb_state.kms_mode = mode;
+    fb_state.kms_mode_valid = 1;
+    fb_state.kms_primary = primary;
+    fb_state.kms_primary_valid = 1;
+    spin_unlock(&fb_state.lock);
+    return 0;
 }
 
 static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
@@ -486,9 +702,15 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
     int has_new_fb = 0;
     int32 out_fence_fd = -1;
     struct gpu_kms_prepared_out_fence prepared_out_fence;
-    struct gpu_kms_cursor_atomic_state cursor_state;
+    struct gpu_kms_cursor_atomic_state cursor_state, old_cursor;
+    struct gpu_kms_primary_state primary;
+    struct drm_mode_modeinfo_compat active_mode, selected_mode;
+    int changing_mode = 0;
+    int cursor_applied = 0;
     uint64 proposed_mode_id;
     uint32 proposed_active;
+    uint32 old_active;
+    int primary_crtc_supplied = 0;
     uint32 proposed_primary_fb;
     int ret = 0;
 
@@ -537,9 +759,16 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         }
     }
 
+    gpu_drm_fill_mode(&active_mode);
+    selected_mode = active_mode;
     spin_lock(&fb_state.lock);
     gpu_kms_cursor_atomic_snapshot_locked(&cursor_state);
+    old_cursor = cursor_state;
+    old_cursor.touched = 1;
+    old_cursor.fb_touched = 1;
+    gpu_kms_primary_snapshot_locked(&primary);
     proposed_active = fb_state.current_kms_fb_id != 0;
+    old_active = proposed_active;
     proposed_mode_id = proposed_active ? GPU_DRM_MODE_BLOB_ID : 0;
     proposed_primary_fb = fb_state.current_kms_fb_id;
     total_props = 0;
@@ -564,9 +793,50 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                     proposed_active = (uint32)value;
                 else if (prop == GPU_DRM_PROP_MODE_ID)
                     proposed_mode_id = value;
-            } else if (obj_ids[i] == GPU_DRM_PRIMARY_PLANE_ID &&
-                       prop == GPU_DRM_PROP_FB_ID) {
-                proposed_primary_fb = (uint32)value;
+            } else if (obj_ids[i] == GPU_DRM_PRIMARY_PLANE_ID) {
+                switch (prop) {
+                case GPU_DRM_PROP_FB_ID:
+                    proposed_primary_fb = (uint32)value;
+                    primary.fb_id = (uint32)value;
+                    break;
+                case GPU_DRM_PROP_CRTC_ID:
+                    primary.crtc_id = (uint32)value;
+                    primary_crtc_supplied = 1;
+                    break;
+                case GPU_DRM_PROP_SRC_X:
+                    primary.src_x = value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_SRC_Y:
+                    primary.src_y = value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_SRC_W:
+                    primary.src_w = value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_SRC_H:
+                    primary.src_h = value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_CRTC_X:
+                    primary.crtc_x = (int64)value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_CRTC_Y:
+                    primary.crtc_y = (int64)value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_CRTC_W:
+                    primary.crtc_w = value;
+                    primary.touched = 1;
+                    break;
+                case GPU_DRM_PROP_CRTC_H:
+                    primary.crtc_h = value;
+                    primary.touched = 1;
+                    break;
+                default: break;
+                }
             }
         }
         total_props += prop_counts[i];
@@ -578,6 +848,22 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
     spin_unlock(&fb_state.lock);
     if (ret != 0)
         return ret;
+    if (proposed_mode_id != 0) {
+        ret = gpu_drm_resolve_mode_blob(proposed_mode_id, &selected_mode);
+        if (ret != 0)
+            return ret;
+    }
+    changing_mode = proposed_active != 0 &&
+        !gpu_drm_mode_timings_equal(&selected_mode, &active_mode);
+    if ((changing_mode || proposed_active != old_active) &&
+        (req.flags & DRM_MODE_ATOMIC_ALLOW_MODESET) == 0)
+        return -EINVAL;
+    if (changing_mode && (req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        gpu_kms_modeset_busy())
+        return -EBUSY;
+    /* Preserve the existing unsupported-framebuffer failure contract before
+     * the stricter geometry checks: invalidate the requested out-fence slot
+     * without acquiring input fences or preparing/exporting an output fence. */
     if (has_new_fb) {
         ret = gpu_kms_fb_presentable_for_owner(owner, new_fb);
         if (ret != 0) {
@@ -589,6 +875,25 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
             }
             return ret;
         }
+    }
+    primary.fb_id = proposed_primary_fb;
+    if (!proposed_active && !primary_crtc_supplied)
+        primary.crtc_id = 0;
+    /* The legacy small-buffer tests may enable a plane using only FB_ID.
+     * An enabled CRTC is the sole possible routing on this device. */
+    else if (proposed_active && primary.crtc_id == 0 &&
+             !primary_crtc_supplied)
+        primary.crtc_id = GPU_DRM_CRTC_ID;
+    ret = gpu_kms_primary_validate(owner, &primary, &selected_mode,
+                                   changing_mode);
+    if (ret != 0)
+        return ret;
+    if (changing_mode) {
+        ret = gpu_kms_modeset_fb(owner, proposed_primary_fb, &selected_mode, 1);
+        if (ret != 0)
+            return ret;
+        new_fb = proposed_primary_fb;
+        has_new_fb = 1;
     }
 
     for (uint32 i = 0; i < in_fence_count; i++) {
@@ -674,22 +979,6 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         }
     }
 
-    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
-        cursor_state.touched) {
-        ret = gpu_kms_apply_cursor_atomic_state(owner, &cursor_state);
-        if (ret != 0) {
-            gpu_kms_put_in_fence_file_refs(in_fence_files,
-                                           in_fence_ref_count);
-            if (out_fence_ptr != 0) {
-                int32 failed_fd = -1;
-
-                (void)either_copyout(1, out_fence_ptr, &failed_fd,
-                                     sizeof(failed_fd));
-            }
-            return ret;
-        }
-    }
-
     if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && out_fence_ptr != 0) {
         out_fence_fd = gpu_kms_export_out_fence_fd(&prepared_out_fence,
                                                    has_new_fb);
@@ -742,26 +1031,48 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                 return -ENOENT;
             }
         }
-        fb_state.stats.kms_atomic_commits++;
-    } else {
-        fb_state.stats.kms_atomic_commits++;
     }
     spin_unlock(&fb_state.lock);
-    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && has_new_fb) {
-        ret = gpu_kms_present_fb(owner, new_fb);
-        if (ret != 0) {
-            gpu_kms_cancel_prepared_out_fence(&prepared_out_fence, ret);
-            gpu_kms_cleanup_prepared_out_fence(&prepared_out_fence);
-            if (out_fence_ptr != 0) {
-                int32 failed_fd = -1;
-
-                (void)either_copyout(1, out_fence_ptr, &failed_fd,
-                                     sizeof(failed_fd));
-            }
-            gpu_kms_put_in_fence_file_refs(in_fence_files,
-                                           in_fence_ref_count);
-            return ret;
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        cursor_state.touched) {
+        ret = gpu_kms_apply_cursor_atomic_state(owner, &cursor_state);
+        if (ret == 0)
+            cursor_applied = 1;
+    }
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        ret == 0 && has_new_fb) {
+        ret = changing_mode ?
+            gpu_kms_modeset_fb(owner, new_fb, &selected_mode, 0) :
+            gpu_kms_present_fb(owner, new_fb);
+    }
+    if (ret != 0) {
+        if (changing_mode && cursor_applied) {
+            int restore = gpu_kms_apply_cursor_atomic_state(owner, &old_cursor);
+            if (restore != 0)
+                printf("DRM: modeset cursor rollback failed: %d\n", restore);
         }
+        gpu_kms_cancel_prepared_out_fence(&prepared_out_fence, ret);
+        gpu_kms_cleanup_prepared_out_fence(&prepared_out_fence);
+        if (out_fence_ptr != 0) {
+            int32 failed_fd = -1;
+
+            (void)either_copyout(1, out_fence_ptr, &failed_fd,
+                                 sizeof(failed_fd));
+        }
+        gpu_kms_put_in_fence_file_refs(in_fence_files, in_fence_ref_count);
+        return ret;
+    }
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0) {
+        spin_lock(&fb_state.lock);
+        if (proposed_active) {
+            fb_state.kms_mode = selected_mode;
+            fb_state.kms_mode_valid = 1;
+        }
+        fb_state.stats.kms_atomic_commits++;
+        fb_state.kms_primary = primary;
+        fb_state.kms_primary.touched = 0;
+        fb_state.kms_primary_valid = 1;
+        spin_unlock(&fb_state.lock);
     }
     if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && has_new_fb) {
         int want_event = (req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0;

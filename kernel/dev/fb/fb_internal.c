@@ -454,6 +454,20 @@ static uint16 bga_read_reg(uint16 index)
     return fb_inw(VBE_DISPI_IOPORT_DATA);
 }
 
+/* Primary scanout is 1:1 and origin-aligned. KWin renders output scaling
+ * into its full-resolution GBM buffer. */
+struct gpu_kms_primary_state {
+    uint32 crtc_id;
+    uint32 fb_id;
+    uint64 src_x, src_y, src_w, src_h;
+    int64 crtc_x, crtc_y;
+    uint64 crtc_w, crtc_h;
+    int touched;
+};
+
+static mutex_t gpu_kms_mutex;
+static int gpu_kms_mutex_ready;
+
 /* ── Module state ─────────────────────────────────────────────────── */
 
 static struct {
@@ -495,6 +509,11 @@ static struct {
     int         kms_pending_out_fences_ready;
     struct fb_gpu_render_owner *render_owners[FB_GPU_MAX_RENDER_OWNERS];
     uint32      current_kms_fb_id;
+    uint32      kms_boot_width, kms_boot_height;
+    struct drm_mode_modeinfo_compat kms_mode;
+    int         kms_mode_valid;
+    struct gpu_kms_primary_state kms_primary;
+    int         kms_primary_valid;
     uint32      current_cursor_fb_id;
     int32       current_cursor_x;
     int32       current_cursor_y;
@@ -607,6 +626,26 @@ static uint64 gpu_kms_monotonic_ns(void)
 
     return (ticks / freq) * 1000000000ULL +
            ((ticks % freq) * 1000000000ULL) / freq;
+}
+
+/* Serialize sleepable KMS transactions. Never acquire this mutex while
+ * holding fb_state.lock or a virtio operation lock. */
+static void gpu_kms_lock(void)
+{
+    spin_lock(&fb_state.lock);
+    if (!gpu_kms_mutex_ready) {
+        mutex_init(&gpu_kms_mutex, "kms-commit");
+        gpu_kms_mutex_ready = 1;
+    }
+    spin_unlock(&fb_state.lock);
+    mutex_lock(&gpu_kms_mutex);
+}
+
+static int gpu_kms_modeset_busy(void);
+
+static void gpu_kms_unlock(void)
+{
+    mutex_unlock(&gpu_kms_mutex);
 }
 
 static uint64 fb_gpu_fence_next_context_locked(void)

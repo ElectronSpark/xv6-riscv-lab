@@ -105,7 +105,7 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
     h = fb_state.yres;
     if (w < 640)
         w = FB_DEFAULT_WIDTH;
-    if (h < 480)
+    if (h < 400)
         h = FB_DEFAULT_HEIGHT;
     if (obj_type == DRM_MODE_OBJECT_ANY) {
         if (obj_id == GPU_DRM_CRTC_ID)
@@ -178,14 +178,19 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
                               DRM_PLANE_TYPE_PRIMARY);
             gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_ID, GPU_DRM_CRTC_ID);
             gpu_kms_push_prop(out, GPU_DRM_PROP_FB_ID, current_fb);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_X, 0);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_Y, 0);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_W, (uint64)w << 16);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_H, (uint64)h << 16);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_X, 0);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_Y, 0);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_W, w);
-            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_H, h);
+            struct gpu_kms_primary_state *p = &fb_state.kms_primary;
+            int valid = fb_state.kms_primary_valid;
+
+            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_X, valid ? p->src_x : 0);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_Y, valid ? p->src_y : 0);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_W,
+                              valid ? p->src_w : (uint64)w << 16);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_H,
+                              valid ? p->src_h : (uint64)h << 16);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_X, valid ? p->crtc_x : 0);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_Y, valid ? p->crtc_y : 0);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_W, valid ? p->crtc_w : w);
+            gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_H, valid ? p->crtc_h : h);
             gpu_kms_push_prop(out, GPU_DRM_PROP_IN_FENCE_FD, (uint64)-1);
             gpu_kms_push_prop(out, GPU_DRM_PROP_IN_FORMATS,
                               GPU_DRM_IN_FORMATS_BLOB_ID);
@@ -421,9 +426,17 @@ static int gpu_drm_mode_obj_setproperty(struct fb_gpu_render_owner *owner,
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     if (req.prop_id == GPU_DRM_PROP_MODE_ID) {
-        ret = gpu_drm_validate_mode_blob(req.value);
+        struct drm_mode_modeinfo_compat requested, active;
+
+        ret = gpu_drm_resolve_mode_blob(req.value, &requested);
         if (ret != 0)
             return ret;
+        gpu_drm_fill_mode(&active);
+        /* A single property write cannot supply a replacement framebuffer.
+         * Require ATOMIC or SETCRTC for a real mode transition. */
+        if (req.value != 0 &&
+            !gpu_drm_mode_timings_equal(&requested, &active))
+            return -EINVAL;
     }
     spin_lock(&fb_state.lock);
     ret = gpu_kms_validate_prop_locked(owner, req.obj_id, req.obj_type,
