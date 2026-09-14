@@ -196,6 +196,7 @@ static const char *kill_code_name(int code) {
     case 5: return "invalid-handler";
     case 6: return "pending-delivery";
     case 7: return "forced-trap-return";
+    case 8: return "signal-frame-failure";
     default: return "unknown";
     }
 }
@@ -1379,6 +1380,8 @@ static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info,
         // If the thread has user space, push the signal to its user stack
         // This may call vm_try_growstack which needs vm_wlock (sleep lock)
         ret = push_sigframe(p, signo, sa, info);
+        if (ret != 0)
+            return ret;
         if (ret == 0 && p->signal.sig_sigsuspend_active &&
             p->signal.sig_sigsuspend_ucontext == 0) {
             p->signal.sig_sigsuspend_ucontext = p->signal.sig_ucontext;
@@ -1407,6 +1410,44 @@ static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info,
     sigacts_unlock(sigacts);
 
     return ret;
+}
+
+/* Failed user-stack writes are process faults, not kernel invariants. */
+static void force_sigsegv_after_frame_failure(struct thread *p, int signo)
+{
+    sigacts_t *sa = p->sigacts;
+    sigacts_lock(sa);
+
+    /* A blocked/ignored SIGSEGV cannot be used as a recovery handler. */
+    bool fatal = signo == SIGSEGV ||
+                 sigismember(&p->signal.sig_mask, SIGSEGV) ||
+                 sa->sa[SIGSEGV].sa_handler == SIG_IGN ||
+                 sa->sa[SIGSEGV].sa_handler == SIG_DFL;
+    ksiginfo_t *info = NULL;
+    if (!fatal && (sa->sa[SIGSEGV].sa_flags & SA_SIGINFO)) {
+        info = ksiginfo_alloc();
+        if (info == NULL)
+            fatal = true;
+    }
+
+    /* Replace any thread-local SIGSEGV payload with this synchronous fault. */
+    sigpending_empty(p, SIGSEGV);
+    sigdelset(&p->signal.sig_mask, SIGSEGV);
+    if (fatal) {
+        __sig_setdefault(sa, SIGSEGV);
+        mark_thread_killed(p, SIGSEGV, 8);
+    } else {
+        if (info != NULL) {
+            info->signo = SIGSEGV;
+            info->info.si_signo = SIGSEGV;
+            info->info.si_code = 128; /* Linux SI_KERNEL */
+            list_node_push(&p->signal.sig_pending[SIGSEGV - 1].queue,
+                           info, list_entry);
+        }
+        sigaddset(&p->signal.sig_pending_mask, SIGSEGV);
+    }
+    recalc_sigpending_tsk(p);
+    sigacts_unlock(sa);
 }
 
 void handle_signal(void) {
@@ -1598,8 +1639,21 @@ void handle_signal(void) {
         // to acquire vm_wlock (sleep lock) via push_sigframe/vm_try_growstack
         sigacts_unlock(sa);
 
-        assert(__deliver_signal(p, signo, info, &sa_copy, &repeat) == 0,
-               "handle_signal: __deliver_signal failed");
+        int delivery_error = __deliver_signal(p, signo, info, &sa_copy,
+                                              &repeat);
+        if (delivery_error != 0) {
+#ifdef __x86_64__
+            uint64 sp = p->trapframe->trapframe.rsp;
+#else
+            uint64 sp = p->trapframe->trapframe.sp;
+#endif
+            printf("signal: frame setup failed pid=%d tgid=%d signo=%d "
+                   "sp=0x%lx error=%d\n", p->pid, p->tgid, signo, sp,
+                   delivery_error);
+            ksiginfo_free(info);
+            force_sigsegv_after_frame_failure(p, signo);
+            continue;
+        }
 
         // Check repeat condition with sigacts_lock only
         if (sa_copy.sa_flags & SA_SIGINFO) {
