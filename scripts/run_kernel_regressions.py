@@ -34,7 +34,8 @@ CASES = {
 }
 PROMPT = re.compile(rb"(?:^|\n)/ \$ ")
 FAILURE = re.compile(r"(?:\bFAIL(?:ED)?\b|TESTS FAILED|kernel panic|panic:|: failed|"
-                     r"ASSERTION_FAILURE|spin_lock reentry|deadlock detected|exception preempted interrupt)")
+                     r"ASSERTION_FAILURE|IPI_REASON_CRASH|spin_lock reentry|deadlock detected|exception preempted interrupt)",
+                     re.IGNORECASE)
 
 
 def main():
