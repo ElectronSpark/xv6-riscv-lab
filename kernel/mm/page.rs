@@ -2421,11 +2421,18 @@ const MEMSTAT_INCLUDE_SLAB: u32 = 1 << 2;
 const MEMSTAT_INCLUDE_BUDDY: u32 = 1 << 3;
 const MEMSTAT_ADD_FREE: u32 = 1 << 4;
 const MEMSTAT_ADD_USED: u32 = 1 << 5;
+const MEMSTAT_RECLAIM: u32 = 1 << 6;
 
 pub(crate) extern "C" fn sys_memstat() -> u64 {
     let mut flags_arg: c_int = 0;
     ffi::Syscall::argint(0, &mut flags_arg);
     let flags = flags_arg as u32;
+
+    if flags & MEMSTAT_RECLAIM != 0 {
+        // Reclaim only completely empty slab allocations. Live objects and
+        // partially occupied slabs remain owned by their existing caches.
+        crate::mm::slab::SlabCache::slab_shrink_all();
+    }
 
     let mut total_free_pages: u64 = 0;
     let mut total_cached_pages: u64 = 0;

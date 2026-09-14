@@ -818,9 +818,9 @@ fn unregister_cache(cache: &mut SlabCache) {
 }
 }
 
-/// Drop up to half the free slabs of every registered cache under memory
-/// pressure (the OOM-shrink hook `Slab::make` falls back to on allocation
-/// failure). C-called via `kernel/inc/mm/slab.h`.
+/// Reclaim empty slabs in batches under memory pressure. After each batch,
+/// restart the registry walk; with no concurrent producers this drains the
+/// free lists. Also used by the explicit diagnostic reclaim operation.
 impl SlabCache {
 pub(crate) fn slab_shrink_all() {
     SlabCache::ensure_registry_init();
@@ -830,16 +830,25 @@ pub(crate) fn slab_shrink_all() {
     // the registry lock is race-free.
     let mut cur = unsafe { (*head).next };
     while cur != head {
-        let cache = unsafe { &mut *SlabCache::cache_from_entry(cur) };
-        let free_count = cache.global_free_count.load(Ordering::Acquire);
+        let cache = SlabCache::cache_from_entry(cur);
+        // SAFETY: the registry lock pins this cache. Only the atomic field
+        // is borrowed; other harts may concurrently allocate from the cache.
+        let free_count = unsafe { (*cache).global_free_count.load(Ordering::Acquire) };
         let next = unsafe { (*cur).next };
         if free_count > 0 {
             let to_shrink = ((free_count + 1) / 2) as c_int;
             if to_shrink > 0 {
+                let mut detached = ListNode::new();
+                ffi::list_init(&mut detached);
+                // SAFETY: retain the registry lock until the free slabs no
+                // longer reference this cache. The helper takes only its
+                // global free-list lock; no page/descriptor freeing occurs.
+                let count = unsafe { Self::shrink_unlocked(cache, to_shrink, &mut detached) };
                 drop(guard);
-                // SAFETY: `cache` is a live, registered cache; shrinking it
-                // takes only its own locks, not the registry lock.
-                unsafe { slab_cache_shrink(cache as *mut SlabCache, to_shrink); }
+                // Detached slabs are exclusively ours and cache-independent.
+                // Freeing their metadata can enter other slab caches, so do
+                // it with neither registry nor cache-global lock held.
+                Self::free_tmp_list(&mut detached, count);
                 guard = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
                 // Restart iteration: `next` may now be stale.
                 cur = unsafe { (*head).next };
@@ -1263,19 +1272,28 @@ impl SlabCache {
     /// Detach a slab from this cache and update the counters atomically.
     /// The slab must be empty and currently owned by `self`.
     fn detach_counters(&mut self, slab: &mut Slab) {
-        if slab.cache != (self as *mut SlabCache) {
+        // SAFETY: existing cache-owned free paths exclusively own this slab.
+        unsafe { Self::detach_counters_raw(self, slab) };
+    }
+
+    /// # Safety
+    /// The cache is live and owns this exclusively detached, empty slab.
+    /// Cache geometry is immutable; only atomic counters are accessed here.
+    unsafe fn detach_counters_raw(cache: *mut Self, slab: &mut Slab) {
+        if slab.cache != cache {
             ffi::panic(b"slab_detach: wrong SLAB cache\0");
         }
         if !slab.is_empty() {
             ffi::panic(b"slab_detach: detach non-empty SLAB\0");
         }
-        let total = self.slab_total.load(Ordering::Acquire);
-        let obj_total = self.obj_total.load(Ordering::Acquire);
-        if total == 0 || obj_total < self.slab_obj_num as u64 {
+        let objects = unsafe { (*cache).slab_obj_num as u64 };
+        // Validate the values actually decremented. A separate before/after
+        // comparison can falsely panic when another hart adds a new slab.
+        let obj_total = unsafe { (*cache).obj_total.fetch_sub(objects, Ordering::Release) };
+        let total = unsafe { (*cache).slab_total.fetch_sub(1, Ordering::Release) };
+        if total <= 0 || obj_total < objects {
             ffi::panic(b"slab_detach: counter error\0");
         }
-        self.obj_total.fetch_sub(self.slab_obj_num as u64, Ordering::Release);
-        self.slab_total.fetch_sub(1, Ordering::Release);
         slab.cache = ptr::null_mut();
     }
 
@@ -1347,9 +1365,17 @@ impl SlabCache {
     /// Drop up to `nums` slabs from the global free list, parking the
     /// detached slabs in `tmp_list` for the caller to actually free
     /// outside the cache lock. Returns the number actually moved.
-    fn shrink_unlocked(&mut self, nums: c_int, tmp_list: &mut ListNode) -> c_int {
-        let _g = KSpinlock::from_ptr(self.global_lock_ptr()).lock();
-        let free_count = self.global_free_count.load(Ordering::Acquire);
+    ///
+    /// # Safety
+    /// `cache` stays live for this call; its immutable geometry is initialized.
+    /// The caller owns `tmp_list`. No exclusive cache borrow is required.
+    unsafe fn shrink_unlocked(cache: *mut Self, nums: c_int, tmp_list: &mut ListNode) -> c_int {
+        let lock = unsafe { ptr::addr_of_mut!((*cache).global_free_lock_bytes).cast::<Spinlock>() };
+        let _g = KSpinlock::from_ptr(lock).lock();
+        let free_count = unsafe { (*cache).global_free_count.load(Ordering::Acquire) };
+        // SAFETY: only this list is borrowed, under its own lock. Per-hart
+        // lists and atomic cache counters can still change concurrently.
+        let free_list = unsafe { &mut *ptr::addr_of_mut!((*cache).global_free_list) };
         let target_after: i64 = if nums == 0 || (nums as i64) > free_count {
             0
         } else {
@@ -1358,21 +1384,18 @@ impl SlabCache {
 
         let mut counter: c_int = 0;
         loop {
-            let now = self.global_free_count.load(Ordering::Acquire);
+            let now = unsafe { (*cache).global_free_count.load(Ordering::Acquire) };
             if now <= target_after { break; }
-            if ffi::list_is_empty(&self.global_free_list) {
+            if ffi::list_is_empty(free_list) {
                 ffi::panic(b"slab_shrink: list empty but count > 0\0");
             }
-            let Some(node) = ffi::list_pop_front(&mut self.global_free_list) else {
+            let Some(node) = ffi::list_pop_front(free_list) else {
                 ffi::panic(b"slab_shrink: pop NULL\0");
             };
             let slab = Slab::slab_from_list_entry(node);
-            self.global_free_count.fetch_sub(1, Ordering::Release);
-            let total_before = self.slab_total.load(Ordering::Acquire);
-            self.detach_counters(slab);
-            if self.slab_total.load(Ordering::Acquire) >= total_before {
-                ffi::panic(b"slab_shrink: slab_total did not decrease\0");
-            }
+            unsafe { (*cache).global_free_count.fetch_sub(1, Ordering::Release) };
+            // SAFETY: the popped slab is exclusively owned and cache-pinned.
+            unsafe { Self::detach_counters_raw(cache, slab) };
             ffi::list_push_front(tmp_list, &mut slab.list_entry);
             counter += 1;
         }
@@ -1432,7 +1455,8 @@ impl SlabCache {
         let free_count = self.global_free_count.load(Ordering::Acquire);
         let mut tmp = ListNode { prev: ptr::null_mut(), next: ptr::null_mut() };
         ffi::list_init(&mut tmp);
-        let shrink_ret = self.shrink_unlocked(free_count as c_int, &mut tmp);
+        // SAFETY: destruction owns the cache until unregistering it below.
+        let shrink_ret = unsafe { Self::shrink_unlocked(self, free_count as c_int, &mut tmp) };
         if shrink_ret as i64 != free_count {
             SlabCache::free_tmp_list(&mut tmp, shrink_ret);
             return -1;
@@ -1513,10 +1537,12 @@ pub(crate) unsafe fn slab_cache_shrink(
     cache: *mut SlabCache,
     nums: c_int,
 ) -> c_int {
-    let Some(cache) = cache.as_mut() else { return -1; };
+    if cache.is_null() { return -1; }
     let mut tmp = ListNode { prev: ptr::null_mut(), next: ptr::null_mut() };
     ffi::list_init(&mut tmp);
-    let ret = cache.shrink_unlocked(nums, &mut tmp);
+    // SAFETY: the caller pins the initialized cache; the helper borrows only
+    // its locked free list and atomic fields, not the shared cache as a whole.
+    let ret = unsafe { SlabCache::shrink_unlocked(cache, nums, &mut tmp) };
     SlabCache::free_tmp_list(&mut tmp, ret);
     ret
 }

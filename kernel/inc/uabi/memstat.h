@@ -7,6 +7,9 @@
 #define MEMSTAT_INCLUDE_BUDDY (1U << 3)
 #define MEMSTAT_ADD_FREE (1U << 4)
 #define MEMSTAT_ADD_USED (1U << 5)
+// Explicitly reclaim unused slab capacity before sampling. Reporting flag
+// groups below intentionally exclude this side effect.
+#define MEMSTAT_RECLAIM (1U << 6)
 
 #define MEMSTAT_DEFAULT_FLAGS                                                  \
     (MEMSTAT_VERBOSE | MEMSTAT_INCLUDE_SLAB | MEMSTAT_INCLUDE_BUDDY |          \
