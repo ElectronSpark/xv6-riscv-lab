@@ -1,24 +1,9 @@
-//! Ramdisk driver -- Rust port of `kernel/ramdisk.c` (Phase 2 Wave 28,
-//! sub-wave A -- see `docs/rustify/phase2_plan.md`). A block device
-//! backed by pre-loaded memory (the FDT-described initrd region on real
-//! hardware; unused on the qemu boot path, which uses [`super::
-//! virtio_disk`] instead).
+//! Memory-backed block device using the shared BIO submission lifecycle.
 //!
-//! No MMIO, no DMA rings, no interrupts -- this is a straight `memmove`
-//! into/out of a contiguous physical-memory region located by
-//! `platform.ramdisk_base`/`platform.ramdisk_size` (`dev/fdt.rs`,
-//! Phase 2 Wave 23). `dev/bio.h`'s `static-inline` iteration helpers
-//! (`bio_iter_*`, `bio_dir_write`, `bio_start_io_acct`) are reimplemented
-//! natively here, same precedent as [`super::virtio_disk`]/
-//! `kernel/dev/x1_sdhci.rs`/`kernel/bufcache.rs` -- this port does not
-//! reuse `virtio_disk.rs`'s private copies, since neither file exposes
-//! its (deliberately internal, non-`pub`) helpers across module
-//! boundaries, matching this crate's established per-file convention for
-//! `static inline` reimplementation.
-//!
-//! Unlike [`super::virtio_disk`], `submit_bio` completes synchronously
-//! (no interrupt, no sleeping wait) -- it calls [`bio_complete`] itself,
-//! at the end of the same call, exactly as the C original did.
+//! A checked request iterator supplies page-bounded segments and advances in
+//! 512-byte sectors. Copies complete synchronously under the ramdisk lock;
+//! dropping the submission sentinel after unlocking publishes completion once.
+//! The FDT initrd region remains reserved for the lifetime of the device.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
@@ -26,9 +11,8 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
-use core::sync::atomic::{fence, Ordering};
 
-use crate::bindings::{bio, bio_vec, blkdev_t, mode_t, page_t, platform_info, EINVAL};
+use crate::bindings::{bio, blkdev_t, mode_t};
 
 use crate::dev::blkdev::BlkdevOps;
 use crate::kstd::{Errno, KResult};
@@ -42,14 +26,7 @@ use crate::kstd::{Errno, KResult};
 use crate::printf::Printf;
 
 unsafe extern "C" {
-    // printf.rs -- variadic, cannot be marked `safe`.
-
-    // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-
-    // string.rs.
-    fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
-
 }
 
 // P3-D3c: `dev/fdt.rs`'s boot-probed platform config is a plain
@@ -58,158 +35,14 @@ unsafe extern "C" {
 // stay `unsafe` either way).
 use crate::dev::fdt::platform;
 
-// P3-D3a: `__page_to_pa` is genuinely `unsafe fn` in `crate::mm::page`
-// now that its `#[no_mangle]` export is gone; this file's original
-// extern declaration asserted `safe fn` (usual FFI facade) with the
-// bindgen `page_t` view rather than page.rs's own `Page` struct (same
-// layout, different Rust name). The thin wrapper preserves both.
-/// SAFETY: `page` must be a live `Page`
-/// (see [`crate::mm::page::__page_to_pa`]'s contract).
-#[inline]
-fn __page_to_pa(page: *mut page_t) -> u64 {
-    unsafe { crate::mm::page::Page::__page_to_pa(page as *mut crate::mm::page::Page) }
-}
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
 use crate::dev::blkdev::Blkdev;
-// P3-D3b: lock/completion.rs's entry points are plain safe Rust fns now
-// that their `#[no_mangle]` exports are gone; reached by crate path.
-use crate::lock::completion::RawCompletion;
-
 /// `kernel/inc/uabi/stat.h` `S_IFBLK`, same local copy as other `dev/*.rs`.
 const S_IFBLK: u32 = 0o060_000;
 
-// ===========================================================================
-// `dev/bio.h`'s static-inline helpers, reimplemented natively (this
-// file's only consumer -- see module doc).
-// ===========================================================================
-
-struct BioIter {
-    blkno: u64,
-    size: u16,
-    size_done: u16,
-    bvec_idx: i16,
-}
-
-const BLK_SIZE_SHIFT: u32 = 9;
-
-/// KERNEL-OO (N-METH): `bio_iter_*(bio_ptr, it: &mut BioIter, ...)` become
-/// `impl BioIter` methods taking `&mut self`/`&self` in place of `it` --
-/// `BioIter` is a plain per-call stack local (never shared cross-hart),
-/// so `&mut self`/`&self` introduces no freeze-noalias hazard (unlike
-/// [`Ramdisk`], this file's driver state type, whose methods below keep
-/// raw params/no receiver).
-impl BioIter {
-    /// # Safety
-    /// `bio_ptr` must be live.
-    unsafe fn start(&mut self, bio_ptr: *mut bio) {
-        // SAFETY: caller contract.
-        unsafe {
-            self.blkno = (*bio_ptr).blkno;
-            self.bvec_idx = 0;
-            if (*bio_ptr).vec_length > 0 {
-                self.size = (*(*bio_ptr).bvecs.as_ptr()).len;
-                self.size_done = 0;
-            } else {
-                self.size = 0;
-                self.size_done = 0;
-            }
-        }
-    }
-
-    /// # Safety
-    /// `bio_ptr` must be live.
-    unsafe fn next_seg(&mut self, bio_ptr: *mut bio) {
-        let bvec_idx = self.bvec_idx + 1;
-        // SAFETY: caller contract.
-        if bvec_idx > unsafe { (*bio_ptr).vec_length } || bvec_idx < 0 {
-            return;
-        }
-        // SAFETY: caller contract; `bvec_idx` bounds-checked above.
-        unsafe {
-            let len = (*(*bio_ptr).bvecs.as_ptr().add(bvec_idx as usize)).len;
-            self.size -= len;
-            self.size_done += len;
-            (*bio_ptr).done_size += len;
-            self.blkno = (*bio_ptr).blkno
-                + (((*bio_ptr).done_size as u64) >> (BLK_SIZE_SHIFT + (*bio_ptr).block_shift as u32));
-            self.bvec_idx = bvec_idx;
-        }
-    }
-
-    /// # Safety
-    /// `bio_ptr` must be live; `bvec` must be a live, writable `bio_vec`.
-    unsafe fn copy_bvec(&self, bio_ptr: *mut bio, bvec: *mut bio_vec) -> bool {
-        // SAFETY: caller contract.
-        if self.bvec_idx >= unsafe { (*bio_ptr).vec_length } {
-            return false;
-        }
-        // SAFETY: caller contract; `self.bvec_idx` bounds-checked above.
-        unsafe { *bvec = *(*bio_ptr).bvecs.as_ptr().add(self.bvec_idx as usize) };
-        true
-    }
-}
-
-/// Zero-sized driver-state type for the ramdisk (P3-10c precedent's ZST
-/// shape, e.g. `VirtioDiskOps`/`RamdiskOps` below) -- KERNEL-OO home for
-/// this file's free fns that aren't naturally owned by [`BioIter`]. Raw
-/// params kept, NO `&self` receiver (see module doc: this file has no
-/// interrupts/MMIO, but keeps the same driver-state discipline as its
-/// sibling `virtio_disk.rs`/`e1000.rs`/`uart.rs` for uniformity).
 pub(crate) struct Ramdisk;
-
-impl Ramdisk {
-    /// # Safety
-    /// `bio_ptr` must be live.
-    #[inline(always)]
-    unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
-        // SAFETY: caller contract.
-        unsafe { (*bio_ptr).flags.rw() != 0 }
-    }
-
-    /// # Safety
-    /// `bio_ptr` must be live.
-    unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
-        // SAFETY: caller contract.
-        unsafe {
-            (*bio_ptr).flags.set_done(0);
-            (*bio_ptr).done_size = 0;
-            (*bio_ptr).error = 0;
-            RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
-        }
-        fence(Ordering::SeqCst);
-    }
-
-    /// # Safety
-    /// `bio_ptr` must be live.
-    unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
-        // SAFETY: caller contract.
-        unsafe { (*bio_ptr).flags.set_done(1) };
-        fence(Ordering::SeqCst);
-    }
-
-    /// # Safety
-    /// `bio_ptr` must be live.
-    unsafe fn bio_endio(bio_ptr: *mut bio) {
-        // SAFETY: caller contract.
-        if let Some(cb) = unsafe { (*bio_ptr).end_io } {
-            // SAFETY: `cb` is the bio owner's completion callback.
-            unsafe { cb.end_io(bio_ptr) };
-        }
-    }
-
-    /// # Safety
-    /// `bio_ptr` must be live.
-    unsafe fn bio_complete(bio_ptr: *mut bio) {
-        // SAFETY: caller contract.
-        unsafe {
-            Self::bio_end_io_acct(bio_ptr);
-            Self::bio_endio(bio_ptr);
-            RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
-        }
-    }
-}
 
 // ===========================================================================
 // State.
@@ -233,8 +66,14 @@ struct RamdiskState {
     size_blocks: u64,
 }
 
-static RAMDISK: crate::sync::SpinLock<RamdiskState> =
-    crate::sync::SpinLock::new(c"ramdisk", RamdiskState { base: 0, size_bytes: 0, size_blocks: 0 });
+static RAMDISK: crate::sync::SpinLock<RamdiskState> = crate::sync::SpinLock::new(
+    c"ramdisk",
+    RamdiskState {
+        base: 0,
+        size_bytes: 0,
+        size_blocks: 0,
+    },
+);
 
 #[repr(transparent)]
 struct SyncCell<T>(UnsafeCell<T>);
@@ -246,7 +85,8 @@ impl<T> SyncCell<T> {
     }
 }
 
-static RAMDISK_DEV: SyncCell<MaybeUninit<blkdev_t>> = SyncCell(UnsafeCell::new(MaybeUninit::uninit()));
+static RAMDISK_DEV: SyncCell<MaybeUninit<blkdev_t>> =
+    SyncCell(UnsafeCell::new(MaybeUninit::uninit()));
 
 impl Ramdisk {
     #[inline(always)]
@@ -275,160 +115,118 @@ impl BlkdevOps for RamdiskOps {
         Ok(())
     }
     unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
-        Ramdisk::submit_bio(blkdev, bio_ptr)
+        // SAFETY: the block layer forwards its validated submission contract.
+        unsafe { Ramdisk::submit_bio(blkdev, bio_ptr) }
     }
 }
 
 impl Ramdisk {
-fn submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
-    let rd = RAMDISK.lock();
-
-    // SAFETY: `bio_ptr` live (blkdev_submit_bio's contract).
-    unsafe { Self::bio_start_io_acct(bio_ptr) };
-
-    let mut iter = BioIter { blkno: 0, size: 0, size_done: 0, bvec_idx: 0 };
-    // SAFETY: `bio_ptr` live.
-    unsafe { iter.start(bio_ptr) };
-    let mut bvec: bio_vec = bio_vec { bv_page: ptr::null_mut(), len: 0, offset: 0 };
-    // SAFETY: `bio_ptr` live; `bvec` local and live.
-    while unsafe { iter.copy_bvec(bio_ptr, &raw mut bvec) } {
-        let sector = iter.blkno;
-        let page: *mut page_t = bvec.bv_page;
-
-        if page.is_null() {
-            // Release the lock before invoking the completion callback
-            // (matches the original's lock-hold window: never call out
-            // to `bio_complete` while still holding `RAMDISK`).
-            drop(rd);
-            // SAFETY: `bio_ptr` live.
-            unsafe {
-                (*bio_ptr).error = -(EINVAL as c_int);
-                Self::bio_complete(bio_ptr);
+    /// # Safety
+    /// The block layer pins the BIO, device and segment pages until completion.
+    unsafe fn submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> KResult<()> {
+        // The dispatcher's caller pins the request and its pages through completion.
+        let mut request = unsafe { crate::dev::bio::Bio::begin(bio_ptr) }?;
+        let rd = RAMDISK.lock();
+        let mut result = Ok(());
+        for part in request.by_ref() {
+            let address = part
+                .sector()
+                .checked_mul(512)
+                .filter(|&offset| {
+                    offset
+                        .checked_add(part.len() as u64)
+                        .is_some_and(|end| end <= rd.size_bytes)
+                })
+                .and_then(|offset| rd.base.checked_add(offset))
+                .filter(|&address| address.checked_add(part.len() as u64).is_some());
+            if let Some(address) = address {
+                let disk_data = address as *mut u8;
+                // RAMDISK's lock serializes access to its validated mapped region.
+                // The part pins an in-bounds page span until its copy completes.
+                // copy permits overlap without constructing aliased byte slices.
+                unsafe {
+                    if part.write() {
+                        ptr::copy(part.data_ptr(), disk_data, part.len());
+                    } else {
+                        ptr::copy(disk_data, part.data_ptr(), part.len());
+                    }
+                }
+                part.complete(Ok(()));
+            } else {
+                part.complete(Err(Errno::Inval));
+                result = Err(Errno::Inval);
+                break;
             }
-            return Err(Errno::Inval);
+        }
+        drop(rd);
+        // Release the submission sentinel only after releasing the device lock;
+        // this may run the final callback and wake the waiting buffer owner.
+        drop(request);
+        result
+    }
+
+    /// `void ramdisk_init(void)`.
+    // P3-1D mesh sweep: caller (`start_kernel.rs`) reaches this via a
+    // crate-path `use` of `Ramdisk::init` (not an `extern` redeclaration).
+    pub(crate) extern "C" fn init() {
+        // `RAMDISK` starts life already in the `{ base: 0, size_bytes: 0,
+        // size_blocks: 0 }` state (its `SpinLock::new` is a `const fn`), so
+        // there is no separate "zero it, then `spin_init` the lock" step
+        // left to do here -- unlike the C original / this file's pre-P3-8b
+        // Rust port.
+
+        // SAFETY: `platform` populated by `fdt_apply_platform_config` before
+        // this runs.
+        let (has_ramdisk, ramdisk_base, ramdisk_size) = unsafe {
+            (
+                platform.has_ramdisk,
+                platform.ramdisk_base,
+                platform.ramdisk_size,
+            )
+        };
+        if has_ramdisk == 0 || ramdisk_base == 0 || ramdisk_size == 0 {
+            return;
         }
 
-        // Calculate offset in ramdisk.
-        let offset = sector * 512;
+        {
+            let mut rd = RAMDISK.lock();
+            rd.base = ramdisk_base;
+            rd.size_bytes = ramdisk_size;
+            rd.size_blocks = ramdisk_size / 512;
 
-        // Check bounds. `rd.size_bytes` -- plain field read through the
-        // guard, no `unsafe` (the lock proves exclusive access).
-        if offset + bvec.len as u64 > rd.size_bytes {
-            // SAFETY: format string matches its three arguments.
             crate::kprintln!(
-                "ramdisk: access beyond end of device (offset={:x}, len={}, size={:x})",
-                offset,
-                bvec.len as c_int,
-                rd.size_bytes,
+                "ramdisk: initialized {} KB ramdisk ({} sectors) at 0x{:x}",
+                rd.size_bytes / 1024,
+                rd.size_blocks,
+                rd.base,
             );
-            drop(rd);
-            // SAFETY: `bio_ptr` live.
-            unsafe {
-                (*bio_ptr).error = -(EINVAL as c_int);
-                Self::bio_complete(bio_ptr);
-            }
-            return Err(Errno::Inval);
         }
 
-        let pa = __page_to_pa(page) as *mut c_void;
-        if pa.is_null() {
-            drop(rd);
-            // SAFETY: `bio_ptr` live.
-            unsafe {
-                (*bio_ptr).error = -(EINVAL as c_int);
-                Self::bio_complete(bio_ptr);
-            }
-            return Err(Errno::Inval);
+        // Register the ramdisk as a block device.
+        let dev = Self::dev_ptr();
+        // SAFETY: `dev` exclusively owned at this point (not yet registered/
+        // published); zero it first (matches the C static initializer's
+        // implicit zero-fill for every field the designated initializer
+        // doesn't list), same precedent as `kernel/virtio_disk.rs`.
+        unsafe {
+            memset(dev as *mut c_void, 0, core::mem::size_of::<blkdev_t>());
+            (*dev).dev.major = 3;
+            (*dev).dev.minor = 1;
+            (*dev).dev.devname = c"ramdisk".as_ptr();
+            (*dev).dev.devmode = (S_IFBLK | 0o600) as mode_t;
+            (*dev).flags.set_readable(1);
+            (*dev).flags.set_writable(1);
+            (*dev).block_shift = 0; // 2^0 * 512 = 512 bytes per block
+            (*dev).ops = Some(&RAMDISK_OPS);
         }
 
-        // Direct access to contiguous physical memory.
-        let ramdisk_addr = (rd.base + offset) as *mut c_void;
-
-        // SAFETY: `bio_ptr` live.
-        if unsafe { Self::bio_dir_write(bio_ptr) } {
-            // Write to ramdisk.
-            // SAFETY: `pa + bvec.offset` valid for `bvec.len` bytes (the
-            // page this segment was built against); `ramdisk_addr`
-            // valid for `bvec.len` bytes (bounds-checked above).
-            unsafe { memmove(ramdisk_addr, (pa as u64 + bvec.offset as u64) as *const c_void, bvec.len as usize) };
-        } else {
-            // Read from ramdisk.
-            // SAFETY: same as above, reversed direction.
-            unsafe { memmove((pa as u64 + bvec.offset as u64) as *mut c_void, ramdisk_addr, bvec.len as usize) };
+        // `dev` fully initialised above.
+        let errno = Blkdev::register(dev);
+        if errno != 0 {
+            Printf::__panic_start();
+            // SAFETY: format string matches its one argument.
+            crate::kprintln!("ramdisk_init: blkdev_register failed: {}", errno);
+            Printf::__panic_end();
         }
-
-        iter.size_done += bvec.len;
-        // SAFETY: `bio_ptr` live.
-        unsafe { iter.next_seg(bio_ptr) };
     }
-
-    drop(rd);
-
-    // SAFETY: `bio_ptr` live.
-    unsafe {
-        (*bio_ptr).error = 0;
-        Self::bio_complete(bio_ptr);
-    }
-    Ok(())
-}
-
-/// `void ramdisk_init(void)`.
-// P3-1D mesh sweep: caller (`start_kernel.rs`) reaches this via a
-// crate-path `use` of `Ramdisk::init` (not an `extern` redeclaration).
-pub(crate) extern "C" fn init() {
-    // `RAMDISK` starts life already in the `{ base: 0, size_bytes: 0,
-    // size_blocks: 0 }` state (its `SpinLock::new` is a `const fn`), so
-    // there is no separate "zero it, then `spin_init` the lock" step
-    // left to do here -- unlike the C original / this file's pre-P3-8b
-    // Rust port.
-
-    // SAFETY: `platform` populated by `fdt_apply_platform_config` before
-    // this runs.
-    let (has_ramdisk, ramdisk_base, ramdisk_size) =
-        unsafe { (platform.has_ramdisk, platform.ramdisk_base, platform.ramdisk_size) };
-    if has_ramdisk == 0 || ramdisk_base == 0 || ramdisk_size == 0 {
-        return;
-    }
-
-    {
-        let mut rd = RAMDISK.lock();
-        rd.base = ramdisk_base;
-        rd.size_bytes = ramdisk_size;
-        rd.size_blocks = ramdisk_size / 512;
-
-        crate::kprintln!(
-            "ramdisk: initialized {} KB ramdisk ({} sectors) at 0x{:x}",
-            rd.size_bytes / 1024,
-            rd.size_blocks,
-            rd.base,
-        );
-    }
-
-    // Register the ramdisk as a block device.
-    let dev = Self::dev_ptr();
-    // SAFETY: `dev` exclusively owned at this point (not yet registered/
-    // published); zero it first (matches the C static initializer's
-    // implicit zero-fill for every field the designated initializer
-    // doesn't list), same precedent as `kernel/virtio_disk.rs`.
-    unsafe {
-        memset(dev as *mut c_void, 0, core::mem::size_of::<blkdev_t>());
-        (*dev).dev.major = 3;
-        (*dev).dev.minor = 1;
-        (*dev).dev.devname = c"ramdisk".as_ptr();
-        (*dev).dev.devmode = (S_IFBLK | 0o600) as mode_t;
-        (*dev).flags.set_readable(1);
-        (*dev).flags.set_writable(1);
-        (*dev).block_shift = 0; // 2^0 * 512 = 512 bytes per block
-        (*dev).ops = Some(&RAMDISK_OPS);
-    }
-
-    // `dev` fully initialised above.
-    let errno = Blkdev::register(dev);
-    if errno != 0 {
-        Printf::__panic_start();
-        // SAFETY: format string matches its one argument.
-        crate::kprintln!("ramdisk_init: blkdev_register failed: {}", errno);
-        Printf::__panic_end();
-    }
-}
 } // impl Ramdisk (submit_bio/init)

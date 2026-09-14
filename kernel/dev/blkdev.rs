@@ -104,13 +104,14 @@ pub trait BlkdevOps: Sync {
     /// reference.
     unsafe fn release(&self, blkdev: *mut Blkdev) -> KResult<()>;
 
-    /// Submit a block I/O request. Completion may be asynchronous
-    /// (`bio_complete` from an interrupt handler) or synchronous.
+    /// Submit a block I/O request through the shared BIO lifecycle. Completion
+    /// may run from an interrupt handler or before submission returns.
     ///
     /// # Safety
     /// `blkdev` as in [`BlkdevOps::open`]; `bio` must be a live,
-    /// validated bio (`bio_validate` has passed) whose pages remain
-    /// valid until `bio_complete` fires.
+    /// validated BIO whose device and pages stay pinned until all BioParts
+    /// complete. The caller exclusively controls submission and does not
+    /// access the data buffers while DMA is active.
     unsafe fn submit_bio(&self, blkdev: *mut Blkdev, bio: *mut bio) -> KResult<()>;
 }
 
@@ -326,7 +327,11 @@ impl Blkdev {
     // `virtio_disk.rs`, `dev/x1_sdhci.rs`, `vfs/xv6fs/superblock.rs`) now
     // import this via crate-path `use` instead of an `extern` redeclaration --
     // demoted.
-    pub(crate) extern "C" fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+    /// # Safety
+    /// The caller holds live device and BIO references, exclusively controls
+    /// submission, and pins the segment pages for the requested access direction
+    /// until completion. Metadata and buffers must not be concurrently modified.
+    pub(crate) unsafe fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
         if blkdev.is_null() || bio_ptr.is_null() {
             return neg(EINVAL);
         }

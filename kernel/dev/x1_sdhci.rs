@@ -1,88 +1,15 @@
-//! SpacemiT X1 SDHCI SD/eMMC controller driver -- Rust port of
-//! `kernel/dev/x1_sdhci.c` (Phase 2 Wave 25, see
-//! `docs/rustify/phase2_plan.md`; the last C in `kernel/dev/`, ported
-//! together with `yt8531.rs`/`x1_emac.rs` in the same wave; the most
-//! MMIO-heavy file in the tree, 15 `volatile` sites in the C original).
+//! SpacemiT X1 SDHCI driver for SD cards and eMMC; SDIO/WiFi is skipped.
 //!
-//! Supports up to 3 SDHCI instances on the Orange Pi RV2 (SpacemiT X1
-//! SoC): SDH0 (SD card slot, 4-bit), SDH1 (SDIO/WiFi, skipped -- not a
-//! block device), SDH2 (eMMC, 8-bit, HS400-capable). Supports SDMA
-//! (Simple DMA) for data transfers when the controller advertises the
-//! capability; falls back to PIO otherwise.
+//! Shared `BioRequest`/`BioPart` ownership pins each page through synchronous
+//! SDMA or PIO completion. SDMA uses checked 32-bit, cache-aligned buffer ranges;
+//! other buffers use PIO. Failed DMA must stop the command/data engines before
+//! its BIO token can complete. A reset that cannot stop DMA is fatal.
 //!
-//! Key data flow: `bio` (file system) -> `blkdev` -> `submit_bio` ->
-//! [`sdhci_rw_blocks`](sdhci_read_blocks)/[`SdhciSoftc::write_blocks`] ->
-//! SDMA/PIO.
-//!
-//! # QEMU verifiability (Wave 25 charter)
-//!
-//! [`SdhciSoftc::init`] -- the only entry point `start_kernel.c` calls --
-//! early-returns when `platform.has_sdhci` is false, which it always is
-//! on QEMU's generated device tree (Wave 23 finding: no SDHCI-compatible
-//! node in `-machine virt`'s DTB). **Compile-verify + boot-no-regression
-//! only**, flagged lower confidence per the plan's §3. Additionally --
-//! per `RUST_REWRITE.md`'s Iteration 34 finding, reconfirmed here rather
-//! than "fixed": the FDT compat/phandle hash tables `fdt.rs` builds are
-//! *always empty* (a preserved C bug -- `fdt_node::fdt_type` is never
-//! assigned `FDT_BEGIN_NODE`, so the indexing pass is dead code), which
-//! means `platform.sdhci[i].apmu_base`/`apbc_base` can never be resolved
-//! via the clock-controller-phandle path even on real hardware unless
-//! some other probe path fills them in. This port does not touch that
-//! logic -- preserving current (non-)behaviour, not fixing probing, is
-//! explicitly this wave's charter. Functional verification of the whole
-//! driver needs real Orange-Pi-RV2 hardware with an SD card or eMMC
-//! wired up.
-//!
-//! # Diff-review attestation
-//!
-//! Every function below was reviewed line-by-line against
-//! `kernel/dev/x1_sdhci.c` at port time: register field masks/shifts,
-//! command/response handling (including the R2/136-bit response word
-//! mapping comment block in [`SdhciSoftc::enumerate_sd`]/
-//! [`SdhciSoftc::enumerate_emmc`]), timeout-loop bounds, SDMA boundary-
-//! reprogramming logic, and log message text/argument order all match.
-//! C `do { ... } while (cond)` loops (the ACMD41 and CMD1 polling loops)
-//! are ported as `loop { ...; if cond_to_exit { break; } }` -- same
-//! at-least-once execution and continuation predicate, just restated as
-//! "break when done" instead of "continue while not done" (Rust has no
-//! post-condition loop with an inverted test built in the same way C's
-//! `do-while` reads, but the control-flow shape -- body, then test, then
-//! maybe-loop -- is identical).
-//!
-//! # MMIO ordering
-//!
-//! `x1_sdhci.c` itself has 7 `__sync_synchronize()` calls: 1 in
-//! [`SdhciSoftc::aib_enable`], 6 in [`SdhciSoftc::apmu_enable`] (one per clock/reset
-//! configuration step that touches a register the DMA/clock hardware
-//! also reads). Every one is preserved below as
-//! `core::sync::atomic::fence(Ordering::SeqCst)` at the exact same call
-//! site (this crate's established `__sync_synchronize()` ->
-//! `fence(SeqCst)` mapping). Two more `fence(SeqCst)` calls appear in
-//! this file's local reimplementation of `dev/bio.h`'s
-//! `bio_start_io_acct`/`bio_end_io_acct` (one apiece) -- these mirror
-//! that header's own `__atomic_thread_fence(__ATOMIC_SEQ_CST)` calls,
-//! not an addition invented by this port; 9 `fence(SeqCst)` call sites
-//! total in this file, from two distinct C sources (`x1_sdhci.c`'s 7,
-//! `bio.h`'s 2). Every MMIO register access goes through
-//! [`SdhciSoftc::readb`]/[`SdhciSoftc::readw`]/[`SdhciSoftc::readl`]/[`SdhciSoftc::writeb`]/
-//! [`SdhciSoftc::writew`]/[`SdhciSoftc::writel`] or a direct `read_volatile`/
-//! `write_volatile` on an already-dereferenced `apmu_reg`/`aib_reg`
-//! pointer, so the compiler can never reorder or elide any of them,
-//! matching the C `volatile uint8/16/32 *` semantics 1:1. The C
-//! original's own comment about `SDHCI_SOFTWARE_RESET`/
-//! `SDHCI_HOST_VERSION` needing byte/half-word-width accesses (not a
-//! 4-byte `readl`, to avoid a RISC-V unaligned-MMIO load fault) is
-//! preserved exactly -- [`SdhciSoftc::reset`] uses [`SdhciSoftc::readb`]/
-//! [`SdhciSoftc::writeb`], never [`SdhciSoftc::wait_bit`] (which is `readl`-only),
-//! and `SdhciSoftc::init_one`'s alive-probe uses [`SdhciSoftc::readw`] on
-//! `SDHCI_HOST_VERSION` (offset `0xFE`, not 4-byte aligned).
-//!
-//! `dev/bio.h`'s several `static inline` helpers (`bio_iter_*`,
-//! `bio_dir_write`, `bio_start_io_acct`/`bio_end_io_acct`, `bio_endio`,
-//! `bio_complete`) have no external linkage in C; reimplemented natively
-//! here (this file's only caller of them), matching the established
-//! precedent (`kernel/bufcache.rs`'s `bio_await`, `kernel/dev/bio.rs`'s
-//! module doc).
+//! Register accesses retain their required volatile byte/halfword/word widths.
+//! FDT discovery now resolves clock-controller phandles through checked borrowed
+//! nodes; the old empty-index bug is fixed. The default QEMU machine has no X1
+//! SDHCI device: compilation and absent-device boot checks do not validate real
+//! SDMA, cache maintenance, reset timing, or card enumeration on this hardware.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
@@ -92,7 +19,12 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{fence, AtomicI32, Ordering};
 
-use crate::bindings::{bio, bio_vec, blkdev_t, mode_t, mutex_t, page_t, platform_info};
+mod transfer;
+use transfer::{block_transfer, sdma_address, BLOCK_SIZE as SDHCI_BLOCK_SIZE_VAL,
+    CACHE_BLOCK_SIZE as CBOM_BLOCK_SIZE, SDMA_BOUNDARY as SDHCI_SDMA_BOUNDARY,
+    SDMA_BOUNDARY_ARGUMENT as SDHCI_SDMA_BOUNDARY_ARG};
+
+use crate::bindings::{bio, blkdev_t, mode_t, mutex_t};
 use crate::machine;
 use crate::sync::KMutex;
 // P3-D2a: proc/sched.rs entry points, reached as plain crate-path items
@@ -103,7 +35,6 @@ use crate::proc::Scheduler;
 // P3-D3b: lock/mutex.rs's `mutex_init` and lock/completion.rs's entry
 // points are plain safe Rust fns now that their `#[no_mangle]` exports
 // are gone; reached by crate path.
-use crate::lock::completion::RawCompletion;
 use crate::lock::mutex::RawMutex;
 
 // ---------------------------------------------------------------------------
@@ -125,17 +56,6 @@ unsafe extern "C" {
 // stay `unsafe` either way).
 use crate::dev::fdt::platform;
 
-// P3-D3a: `__page_to_pa` is genuinely `unsafe fn` in `crate::mm::page`
-// now that its `#[no_mangle]` export is gone; this file's original
-// extern declaration asserted `safe fn` (usual FFI facade) with the
-// bindgen `page_t` view rather than page.rs's own `Page` struct (same
-// layout, different Rust name). The thin wrapper preserves both.
-/// SAFETY: `page` must be a live `Page`
-/// (see [`crate::mm::page::__page_to_pa`]'s contract).
-#[inline]
-fn __page_to_pa(page: *mut page_t) -> u64 {
-    unsafe { crate::mm::page::Page::__page_to_pa(page as *mut crate::mm::page::Page) }
-}
 // P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
@@ -274,8 +194,6 @@ const MMC_RCA_DEFAULT: u32 = 0x0001;
 // -- Driver constants --
 const SDHCI_TIMEOUT_MS: c_int = 1000;
 const SDHCI_CLK_TIMEOUT_MS: c_int = 200;
-const SDHCI_BLOCK_SIZE_VAL: u32 = 512;
-const SDHCI_SDMA_BOUNDARY: u32 = 512 * 1024;
 
 // -- Card type constants (`kernel/dev/x1_sdhci.c`-local) --
 const CARD_TYPE_SD: c_int = 0;
@@ -416,8 +334,6 @@ impl SdhciSoftc {
 // DMA cache maintenance (Zicbom `cbo.clean`/`cbo.inval`). Local copy,
 // same rationale as `x1_emac.rs`'s identical block.
 // ===========================================================================
-const CBOM_BLOCK_SIZE: usize = 64;
-
 /// # Safety
 /// See `x1_emac.rs`'s [`cbo_clean`](super::x1_emac) doc (identical
 /// instruction, identical contract).
@@ -678,6 +594,22 @@ impl SdhciSoftc {
             ((mask as c_int) as i32 as i64) as u64,
         );
         -1
+    }
+
+    /// # Safety
+    /// Caller holds the controller mutex and retains the failed transfer's
+    /// page token. Returning is permission to release that storage; a reset
+    /// timeout cannot be treated as ordinary I/O failure while DMA may continue.
+    unsafe fn stop_failed_transfer(sc: *mut SdhciSoftc) {
+        // SAFETY: exclusive live controller and still-pinned transfer storage.
+        let result = unsafe { Self::reset(sc, SDHCI_RESET_CMD | SDHCI_RESET_DATA) };
+        assert!(result == 0, "x1_sdhci: cannot stop failed DMA transfer");
+        // SAFETY: reset completed; clear stale status before the next command.
+        unsafe {
+            Self::writew(sc, SDHCI_INT_STATUS, SDHCI_INT_ALL_MASK);
+            Self::writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+        }
+        fence(Ordering::SeqCst);
     }
 
     /// Set SD clock to a target frequency. Uses the 10-bit divided clock
@@ -981,9 +913,11 @@ impl SdhciSoftc {
     /// address to resume, until `SDHCI_INT_DATA_END` signals completion.
     ///
     /// # Safety
-    /// `sc` must be live.
-    unsafe fn sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool) -> c_int {
+    /// `sc` is locked and live; this validated 32-bit DMA extent stays pinned.
+    /// On error the caller must stop the engine before releasing its storage.
+    unsafe fn sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, dma_len: u32, is_write: bool) -> c_int {
         let mut dma_addr = dma_addr_in;
+        let dma_end = dma_addr_in + u64::from(dma_len);
         let deadline = machine::Riscv::read_time() + machine::Riscv::tick_s() * SDHCI_TIMEOUT_MS as u64 / 1000;
 
         while machine::Riscv::read_time() < deadline {
@@ -1004,7 +938,6 @@ impl SdhciSoftc {
                 // SAFETY: caller contract.
                 unsafe {
                     SdhciSoftc::writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
-                    SdhciSoftc::reset(sc, SDHCI_RESET_DATA);
                 }
                 return neg(crate::bindings::EIO);
             }
@@ -1023,8 +956,14 @@ impl SdhciSoftc {
                 // Advance to next boundary.
                 dma_addr &= !(SDHCI_SDMA_BOUNDARY as u64 - 1);
                 dma_addr += SDHCI_SDMA_BOUNDARY as u64;
+                // Never resume DMA beyond this token's buffer or truncate a
+                // boundary address at 4GiB. Error cleanup resets both engines.
+                let next = match u32::try_from(dma_addr) {
+                    Ok(next) if dma_addr < dma_end => next,
+                    _ => return neg(crate::bindings::EIO),
+                };
                 // SAFETY: caller contract.
-                unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, dma_addr as u32) };
+                unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, next) };
             }
 
             Scheduler::yield_now();
@@ -1035,10 +974,6 @@ impl SdhciSoftc {
             unsafe { (*sc).index },
             if is_write { "write" } else { "read" },
         );
-        // SAFETY: caller contract.
-        unsafe {
-            SdhciSoftc::reset(sc, SDHCI_RESET_DATA);
-        }
         neg(crate::bindings::ETIMEDOUT)
     }
 
@@ -1050,7 +985,7 @@ impl SdhciSoftc {
     ///
     /// # Safety
     /// `sc` must be live; `buf` must point to `SDHCI_BLOCK_SIZE_VAL` (512)
-    /// writable bytes, 4-byte aligned.
+    /// writable bytes. The RAM buffer need not be word-aligned.
     unsafe fn pio_read_block(sc: *mut SdhciSoftc, buf: *mut c_void) -> c_int {
         let p = buf as *mut u32;
 
@@ -1067,8 +1002,9 @@ impl SdhciSoftc {
 
         // Read 512 / 4 = 128 words from data buffer port.
         for i in 0..(SDHCI_BLOCK_SIZE_VAL / 4) as usize {
-            // SAFETY: caller contract; `p` valid for 128 `u32`s.
-            unsafe { *p.add(i) = SdhciSoftc::readl(sc, SDHCI_BUFFER) };
+            // SAFETY: byte extent holds 128 words; only the MMIO port requires
+            // alignment. BIO offsets can make the RAM destination unaligned.
+            unsafe { p.add(i).write_unaligned(SdhciSoftc::readl(sc, SDHCI_BUFFER)) };
         }
 
         0
@@ -1078,7 +1014,7 @@ impl SdhciSoftc {
     ///
     /// # Safety
     /// `sc` must be live; `buf` must point to `SDHCI_BLOCK_SIZE_VAL` (512)
-    /// readable bytes, 4-byte aligned.
+    /// readable bytes. The RAM buffer need not be word-aligned.
     unsafe fn pio_write_block(sc: *mut SdhciSoftc, buf: *const c_void) -> c_int {
         let p = buf as *const u32;
 
@@ -1095,8 +1031,8 @@ impl SdhciSoftc {
 
         // Write 128 words to data buffer port.
         for i in 0..(SDHCI_BLOCK_SIZE_VAL / 4) as usize {
-            // SAFETY: caller contract; `p` valid for 128 `u32`s.
-            unsafe { SdhciSoftc::writel(sc, SDHCI_BUFFER, *p.add(i)) };
+            // SAFETY: 128 readable words in RAM, with no alignment required.
+            unsafe { SdhciSoftc::writel(sc, SDHCI_BUFFER, p.add(i).read_unaligned()) };
         }
 
         0
@@ -1148,16 +1084,17 @@ impl SdhciSoftc {
     /// # Safety
     /// `sc` must be live; `buf` must point to `nblocks * 512` writable bytes.
     unsafe fn read_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *mut c_void) -> c_int {
-        let total = nblocks * SDHCI_BLOCK_SIZE_VAL;
-
         // SDHC/SDXC/eMMC uses block addressing; SD uses byte addressing.
         // SAFETY: caller contract.
-        let card_addr = if unsafe { (*sc).card_type } == CARD_TYPE_SD { lba * 512 } else { lba };
+        let (card_addr, total) = match block_transfer(lba, nblocks, unsafe { (*sc).card_type } == CARD_TYPE_SD) {
+            Some(transfer) => transfer,
+            None => return neg(crate::bindings::EINVAL),
+        };
 
         // Set block size and count.
         // SAFETY: caller contract.
         unsafe {
-            SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
+            SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(SDHCI_SDMA_BOUNDARY_ARG, SDHCI_BLOCK_SIZE_VAL as u16));
             SdhciSoftc::writew(sc, SDHCI_BLOCK_COUNT, nblocks as u16);
         }
 
@@ -1168,15 +1105,15 @@ impl SdhciSoftc {
         }
 
         // SAFETY: caller contract.
-        let use_dma = unsafe { (*sc).use_dma } != 0;
-        if use_dma {
+        let dma = (unsafe { (*sc).use_dma } != 0).then(|| sdma_address(buf as u64, total)).flatten();
+        if let Some(address) = dma {
             // Invalidate cache before device writes to memory.
             // SAFETY: caller contract.
             unsafe { dma_cache_inval(buf, total as usize) };
 
             // Program SDMA system address.
             // SAFETY: caller contract.
-            unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, buf as u64 as u32) };
+            unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, address) };
             mode |= SDHCI_TRNS_DMA;
         }
 
@@ -1193,9 +1130,9 @@ impl SdhciSoftc {
             return ret;
         }
 
-        if use_dma {
+        if dma.is_some() {
             // SAFETY: caller contract.
-            let ret = unsafe { SdhciSoftc::sdma_wait(sc, buf as u64, false) };
+            let ret = unsafe { SdhciSoftc::sdma_wait(sc, buf as u64, total, false) };
             if ret < 0 {
                 return ret;
             }
@@ -1204,7 +1141,6 @@ impl SdhciSoftc {
             unsafe { dma_cache_inval(buf, total as usize) };
             0
         } else {
-            crate::kprintln!("sdhci_read_blocks: fallback to bio.");
             // Read blocks via PIO.
             for i in 0..nblocks {
                 // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
@@ -1224,14 +1160,15 @@ impl SdhciSoftc {
     /// # Safety
     /// `sc` must be live; `buf` must point to `nblocks * 512` readable bytes.
     unsafe fn write_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *const c_void) -> c_int {
-        let total = nblocks * SDHCI_BLOCK_SIZE_VAL;
-
         // SAFETY: caller contract.
-        let card_addr = if unsafe { (*sc).card_type } == CARD_TYPE_SD { lba * 512 } else { lba };
+        let (card_addr, total) = match block_transfer(lba, nblocks, unsafe { (*sc).card_type } == CARD_TYPE_SD) {
+            Some(transfer) => transfer,
+            None => return neg(crate::bindings::EINVAL),
+        };
 
         // SAFETY: caller contract.
         unsafe {
-            SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
+            SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(SDHCI_SDMA_BOUNDARY_ARG, SDHCI_BLOCK_SIZE_VAL as u16));
             SdhciSoftc::writew(sc, SDHCI_BLOCK_COUNT, nblocks as u16);
         }
 
@@ -1243,15 +1180,15 @@ impl SdhciSoftc {
         }
 
         // SAFETY: caller contract.
-        let use_dma = unsafe { (*sc).use_dma } != 0;
-        if use_dma {
+        let dma = (unsafe { (*sc).use_dma } != 0).then(|| sdma_address(buf as u64, total)).flatten();
+        if let Some(address) = dma {
             // Clean cache so device reads CPU's latest data.
             // SAFETY: caller contract.
             unsafe { dma_cache_clean(buf as *mut c_void, total as usize) };
 
             // Program SDMA system address.
             // SAFETY: caller contract.
-            unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, buf as u64 as u32) };
+            unsafe { SdhciSoftc::writel(sc, SDHCI_DMA_ADDRESS, address) };
             mode |= SDHCI_TRNS_DMA;
         }
 
@@ -1267,11 +1204,10 @@ impl SdhciSoftc {
             return ret;
         }
 
-        if use_dma {
+        if dma.is_some() {
             // SAFETY: caller contract.
-            unsafe { SdhciSoftc::sdma_wait(sc, buf as u64, true) }
+            unsafe { SdhciSoftc::sdma_wait(sc, buf as u64, total, true) }
         } else {
-            crate::kprintln!("sdhci_write_blocks: fallback to bio.");
             // Write blocks via PIO.
             for i in 0..nblocks {
                 // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
@@ -1629,7 +1565,7 @@ impl SdhciSoftc {
             let mut ext_csd = [0u8; 512];
             // SAFETY: caller contract.
             unsafe {
-                SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(7, SDHCI_BLOCK_SIZE_VAL as u16));
+                SdhciSoftc::writew(sc, SDHCI_BLOCK_SIZE, sdhci_make_blksz(SDHCI_SDMA_BOUNDARY_ARG, SDHCI_BLOCK_SIZE_VAL as u16));
                 SdhciSoftc::writew(sc, SDHCI_BLOCK_COUNT, 1);
                 SdhciSoftc::writew(sc, SDHCI_TRANSFER_MODE, SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN);
             }
@@ -1707,120 +1643,7 @@ impl SdhciSoftc {
 }
 
 // ===========================================================================
-// `dev/bio.h`'s static-inline helpers, reimplemented natively (this
-// file's only consumer -- see module doc).
-// ===========================================================================
-
-struct BioIter {
-    blkno: u64,
-    size: u16,
-    size_done: u16,
-    bvec_idx: i16,
-}
-
-const BLK_SIZE_SHIFT: u32 = 9;
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_iter_start(bio_ptr: *mut bio, it: &mut BioIter) {
-    // SAFETY: caller contract.
-    unsafe {
-        it.blkno = (*bio_ptr).blkno;
-        it.bvec_idx = 0;
-        if (*bio_ptr).vec_length > 0 {
-            it.size = (*(*bio_ptr).bvecs.as_ptr()).len;
-            it.size_done = 0;
-        } else {
-            it.size = 0;
-            it.size_done = 0;
-        }
-    }
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_iter_next_seg(bio_ptr: *mut bio, it: &mut BioIter) {
-    let bvec_idx = it.bvec_idx + 1;
-    // SAFETY: caller contract.
-    if bvec_idx > unsafe { (*bio_ptr).vec_length } || bvec_idx < 0 {
-        return;
-    }
-    // SAFETY: caller contract; `bvec_idx` bounds-checked above.
-    unsafe {
-        let len = (*(*bio_ptr).bvecs.as_ptr().add(bvec_idx as usize)).len;
-        it.size -= len;
-        it.size_done += len;
-        (*bio_ptr).done_size += len;
-        it.blkno = (*bio_ptr).blkno + (((*bio_ptr).done_size as u64) >> (BLK_SIZE_SHIFT + (*bio_ptr).block_shift as u32));
-        it.bvec_idx = bvec_idx;
-    }
-}
-
-/// # Safety
-/// `bio_ptr` must be live; `bvec` must be a live, writable `bio_vec`.
-unsafe fn bio_iter_copy_bvec(bio_ptr: *mut bio, it: &BioIter, bvec: *mut bio_vec) -> bool {
-    // SAFETY: caller contract.
-    if it.bvec_idx >= unsafe { (*bio_ptr).vec_length } {
-        return false;
-    }
-    // SAFETY: caller contract; `it.bvec_idx` bounds-checked above.
-    unsafe { *bvec = *(*bio_ptr).bvecs.as_ptr().add(it.bvec_idx as usize) };
-    true
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-#[inline(always)]
-unsafe fn bio_dir_write(bio_ptr: *mut bio) -> bool {
-    // SAFETY: caller contract.
-    unsafe { (*bio_ptr).flags.rw() != 0 }
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_start_io_acct(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe {
-        (*bio_ptr).flags.set_done(0);
-        (*bio_ptr).done_size = 0;
-        (*bio_ptr).error = 0;
-        RawCompletion::reinit(&raw mut (*bio_ptr).io_completion);
-    }
-    fence(Ordering::SeqCst);
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_end_io_acct(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe { (*bio_ptr).flags.set_done(1) };
-    fence(Ordering::SeqCst);
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_endio(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    if let Some(cb) = unsafe { (*bio_ptr).end_io } {
-        // SAFETY: `cb` is the bio owner's completion callback, invoked
-        // with the same `bio_ptr` per the C `end_io(bio)` contract.
-        unsafe { cb.end_io(bio_ptr) };
-    }
-}
-
-/// # Safety
-/// `bio_ptr` must be live.
-unsafe fn bio_complete(bio_ptr: *mut bio) {
-    // SAFETY: caller contract.
-    unsafe {
-        bio_end_io_acct(bio_ptr);
-        bio_endio(bio_ptr);
-        RawCompletion::complete_all(&raw mut (*bio_ptr).io_completion);
-    }
-}
-
-// ===========================================================================
-// Block device interface.
+// Shared BIO request ownership and block-device dispatch.
 // ===========================================================================
 
 /// Zero-sized [`BlkdevOps`](crate::dev::blkdev::BlkdevOps) implementor
@@ -1840,7 +1663,9 @@ impl crate::dev::blkdev::BlkdevOps for SdhciBlkOps {
         Ok(())
     }
     unsafe fn submit_bio(&self, blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> crate::kstd::KResult<()> {
-        match SdhciSoftc::submit_bio(blkdev, bio_ptr) {
+        // SAFETY: the dispatch contract supplies the registered device and
+        // retains the request/page ownership through synchronous completion.
+        match unsafe { SdhciSoftc::submit_bio(blkdev, bio_ptr) } {
             0 => Ok(()),
             // `Errno::Raw` carries the already-negative cross-module
             // `c_int` verbatim (`Raw(n).neg() == n`), so the dispatch
@@ -1853,7 +1678,11 @@ impl crate::dev::blkdev::BlkdevOps for SdhciBlkOps {
 impl SdhciSoftc {
     /// `submit_bio` -- process a block I/O request. Iterates over bio
     /// segments and reads/writes blocks via SDMA/PIO.
-    fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+    ///
+    /// # Safety
+    /// `blkdev` belongs to a live registered SdhciSoftc; `bio_ptr` satisfies
+    /// Bio::begin's immutable metadata and pinned page-storage contract.
+    unsafe fn submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
         // SAFETY: `blkdev` is `(*sc).bdev`'s address for the `sc` that
         // registered it (`SdhciSoftc::init_one`'s `blkdev_register(&(*sc).bdev)`
         // call, mirrored below) -- `bdev` is `SdhciSoftc`'s field, so this
@@ -1861,66 +1690,59 @@ impl SdhciSoftc {
         // `container_of` macro.
         let sc = crate::mm::cffi::container_of::<SdhciSoftc, blkdev_t>(blkdev, core::mem::offset_of!(SdhciSoftc, bdev));
 
-        let mut ret: c_int = 0;
-
-        // SAFETY: `(*sc).lock` a live, initialised `mutex_t`.
-        let _guard = KMutex::from_ptr(unsafe { &raw mut (*sc).lock }).lock();
-        // SAFETY: `bio_ptr` live (caller/blkdev_submit_bio contract).
-        unsafe { bio_start_io_acct(bio_ptr) };
-
-        let mut iter = BioIter { blkno: 0, size: 0, size_done: 0, bvec_idx: 0 };
-        // SAFETY: `bio_ptr` live.
-        unsafe { bio_iter_start(bio_ptr, &mut iter) };
-        let mut bvec: bio_vec = bio_vec { bv_page: ptr::null_mut(), len: 0, offset: 0 };
-        // SAFETY: `bio_ptr` live; `bvec` local and live.
-        while unsafe { bio_iter_copy_bvec(bio_ptr, &iter, &raw mut bvec) } {
-            let sector = iter.blkno;
-            let page = bvec.bv_page;
-
-            if page.is_null() {
-                ret = neg(crate::bindings::EINVAL);
-                break;
-            }
-
-            let pa = __page_to_pa(page) as *mut c_void;
-            if pa.is_null() {
-                ret = neg(crate::bindings::EINVAL);
-                break;
-            }
-
-            let data = (pa as u64 + bvec.offset as u64) as *mut c_void;
-            let nblocks = bvec.len as u32 / SDHCI_BLOCK_SIZE_VAL;
-
-            if nblocks == 0 {
-                ret = neg(crate::bindings::EINVAL);
-                break;
-            }
-
-            // SAFETY: `bio_ptr` live.
-            ret = if unsafe { bio_dir_write(bio_ptr) } {
-                // SAFETY: `sc` live, exclusively accessed under `_guard`;
-                // `data` valid for `nblocks * 512` bytes per `bvec`'s
-                // contract (validated by `bio_validate` before submission).
-                unsafe { SdhciSoftc::write_blocks(sc, sector as u32, nblocks, data) }
-            } else {
-                // SAFETY: same as above.
-                unsafe { SdhciSoftc::read_blocks(sc, sector as u32, nblocks, data) }
+        // The caller pins the validated BIO and page storage until completion.
+        let mut request = match unsafe { crate::dev::bio::Bio::begin(bio_ptr) } {
+            Ok(request) => request,
+            Err(error) => return error.neg(),
+        };
+        let guard = KMutex::from_ptr(unsafe { &raw mut (*sc).lock }).lock();
+        let mut ret = 0;
+        for part in request.by_ref() {
+            let sector = match u32::try_from(part.sector()) {
+                Ok(sector) => sector,
+                Err(_) => {
+                    ret = neg(crate::bindings::EINVAL);
+                    part.complete(Err(crate::kstd::Errno::Inval));
+                    break;
+                }
             };
-
-            if ret < 0 {
+            let blocks = (part.len() / SDHCI_BLOCK_SIZE_VAL as usize) as u32;
+            // Reject register arithmetic before any command or DMA can start.
+            if block_transfer(sector, blocks, unsafe { (*sc).card_type } == CARD_TYPE_SD).is_none() {
+                ret = neg(crate::bindings::EINVAL);
+                part.complete(Err(crate::kstd::Errno::Inval));
                 break;
             }
-
-            iter.size_done += bvec.len;
+            let uses_dma = unsafe { (*sc).use_dma } != 0
+                && sdma_address(part.data_ptr() as u64, part.len() as u32).is_some();
+            // The controller is locked and the checked part retains the page
+            // storage throughout this synchronous DMA/PIO operation.
+            ret = unsafe {
+                if part.write() { Self::write_blocks(sc, sector, blocks, part.data_ptr().cast()) }
+                else { Self::read_blocks(sc, sector, blocks, part.data_ptr().cast()) }
+            };
+            if ret != 0 {
+                if uses_dma {
+                    // SAFETY: mutex and BIO page token remain held. Even a
+                    // command failure may leave DATA running after SDMA setup.
+                    unsafe { Self::stop_failed_transfer(sc); }
+                } else {
+                    // SAFETY: locked PIO controller. Try to restore protocol
+                    // state; failed PIO never grants hardware access to RAM.
+                    let _ = unsafe { Self::reset(sc, SDHCI_RESET_CMD | SDHCI_RESET_DATA) };
+                }
+                if !part.write() && uses_dma {
+                    // SAFETY: DMA is stopped; discard any cached copy of the
+                    // partial device write before returning the page to its owner.
+                    unsafe { dma_cache_inval(part.data_ptr().cast(), part.len()); }
+                    fence(Ordering::SeqCst);
+                }
+            }
+            part.complete(if ret == 0 { Ok(()) } else { Err(crate::kstd::Errno::Raw(ret)) });
+            if ret != 0 { break; }
         }
-
-        drop(_guard);
-
-        // SAFETY: `bio_ptr` live.
-        unsafe {
-            (*bio_ptr).error = ret;
-            bio_complete(bio_ptr);
-        }
+        drop(guard);
+        drop(request);
         ret
     }
 }

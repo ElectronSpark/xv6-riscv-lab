@@ -132,6 +132,30 @@ pub mod bindings {
     pub type list_node_t = crate::list::ListNode;
 }
 
+#[cfg(test)]
+#[path = "mm/mm_safe.rs"]
+mod mm_safe;
+
+#[cfg(test)]
+#[path = "mm/buffer.rs"]
+mod kernel_buffer;
+
+#[cfg(test)]
+#[path = "dev/fdt/wire.rs"]
+mod fdt_wire;
+
+#[cfg(test)]
+#[path = "dev/bio/transfer.rs"]
+mod bio_transfer;
+
+#[cfg(test)]
+#[path = "dev/x1_sdhci/transfer.rs"]
+mod sdhci_transfer;
+
+#[cfg(test)]
+#[path = "virtio_disk/queue.rs"]
+mod virtio_queue;
+
 // Hardware and per-CPU types are kernel-only. List algorithms below are
 // portable and compile unchanged in the host suite.
 #[path = "machine/machine.rs"]

@@ -401,27 +401,6 @@ const BSIZE_PER_PAGE: u32 = PGSIZE as u32 / super::BSIZE;
 /// `BLK512_PER_BSIZE` (`BSIZE / 512`) — 2.
 const BLK512_PER_BSIZE: u64 = super::BSIZE as u64 / 512;
 
-impl Xv6fs {
-    /// Mirrors `bio_await()` (`dev/bio.h`, `static inline` -- no external
-    /// linkage, reimplemented here per this crate's established convention
-    /// for non-exported `static inline` helpers).
-    ///
-    /// # Safety
-    /// `bio` must point to a live, submitted `struct bio`.
-    unsafe fn bio_await(bio: *mut bio) -> c_int {
-        unsafe {
-            let ret = RawCompletion::wait_interruptible(ptr::addr_of_mut!((*bio).io_completion));
-            if ret == Xv6fs::neg(crate::bindings::EINTR) {
-                // Signal received but I/O is in flight -- must let it finish
-                // so the bio/buffer resources are safe to release.
-                RawCompletion::wait(ptr::addr_of_mut!((*bio).io_completion));
-                return if (*bio).error != 0 { (*bio).error } else { Xv6fs::neg(crate::bindings::EINTR) };
-            }
-            (*bio).error
-        }
-    }
-}
-
 /// Zero-sized [`PcacheOps`] implementor for xv6fs regular-file pcaches
 /// (fn-pointer-ops-table -> trait dispatch campaign; was the `static
 /// pcache_ops XV6FS_PCACHE_OPS` fn-pointer table with two `extern "C"`
@@ -471,7 +450,7 @@ impl PcacheOps for Xv6fsPcacheOps {
                 if ret != 0 {
                     return ret; // `b` drops here, releasing the reference.
                 }
-                let ret = Xv6fs::bio_await(bp);
+                let ret = Bio::wait(bp);
                 if ret != 0 {
                     return ret; // `b` drops here (release either way).
                 }
@@ -522,7 +501,7 @@ impl PcacheOps for Xv6fsPcacheOps {
                 if ret != 0 {
                     return ret; // `b` drops here, releasing the reference.
                 }
-                let ret = Xv6fs::bio_await(bp);
+                let ret = Bio::wait(bp);
                 if ret != 0 {
                     return ret; // `b` drops here (release either way).
                 }

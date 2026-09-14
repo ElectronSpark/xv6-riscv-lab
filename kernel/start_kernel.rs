@@ -535,6 +535,9 @@ pub(crate) fn start_kernel_post_init() {
     #[cfg(feature = "rcu_test")]
     crate::lock::rcu_test::rcu_test_launch_tests();
 
+    #[cfg(feature = "bio_test")]
+    crate::virtio_disk::Disk::run_tests();
+
     // #ifdef RQ_RUNTIME_TEST
     // Run queue priority tests
     // void rq_test_run(void);

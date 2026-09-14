@@ -297,6 +297,12 @@ const THREAD_UNINTERRUPTIBLE: c_int = 6;
 // ===========================================================================
 
 impl LogInner {
+    /// The journal cannot proceed after a failed block read. Establish the
+    /// locked, nonnull buffer before any raw payload/header access below.
+    fn read_required(dev: u32, block: u32) -> core::ptr::NonNull<Buf> {
+        core::ptr::NonNull::new(Buf::read(dev, block)).expect("xv6fs log: block read failed")
+    }
+
     /// Mirrors `__xv6fs_install_trans()`. Copy committed blocks from log to
     /// their home location.
     ///
@@ -310,8 +316,8 @@ impl LogInner {
             // bread/memmove/bwrite disk op stays byte-identical (e3cb8a0 precedent).
             let n = (*log).lh.n;
             for tail in 0..n {
-                let lbuf = Buf::read((*log).dev as u32, ((*log).start + tail + 1) as u32); // read log block
-                let dbuf = Buf::read((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // read dst
+                let lbuf = Self::read_required((*log).dev as u32, ((*log).start + tail + 1) as u32).as_ptr(); // read log block
+                let dbuf = Self::read_required((*log).dev as u32, (*log).lh.block[tail as usize] as u32).as_ptr(); // read dst
                 memmove((*dbuf).data as *mut c_void, (*lbuf).data as *const c_void, super::BSIZE as usize); // copy block to dst
                 if recovering {
                     // During recovery, use synchronous writes for safety.
@@ -327,7 +333,9 @@ impl LogInner {
 
             // Flush all async writes to disk.
             if !recovering && n > 0 {
-                BufCache::sync();
+                // Do not clear the committed journal while home blocks are
+                // still dirty. Recovery must be able to replay this record.
+                BufCache::sync().expect("xv6fs log: installing transaction failed");
             }
         }
     }
@@ -339,7 +347,7 @@ impl LogInner {
     /// `log` must point to a live `LogInner`.
     unsafe fn read_head(log: *mut LogInner) {
         unsafe {
-            let b = Buf::read((*log).dev as u32, (*log).start as u32);
+            let b = Self::read_required((*log).dev as u32, (*log).start as u32).as_ptr();
             let lh = (*b).data as *const xv6fs_logheader;
             (*log).lh.n = (*lh).n;
             // `lh.n` just set from disk and invariant for this copy -> range walk.
@@ -357,7 +365,7 @@ impl LogInner {
     /// `log` must point to a live `LogInner`.
     unsafe fn write_head(log: *mut LogInner) {
         unsafe {
-            let b = Buf::read((*log).dev as u32, (*log).start as u32);
+            let b = Self::read_required((*log).dev as u32, (*log).start as u32).as_ptr();
             let hb = (*b).data as *mut xv6fs_logheader;
             (*hb).n = (*log).lh.n;
             // `lh.n` invariant for this copy -> range walk (structure only).
@@ -391,8 +399,8 @@ impl LogInner {
             // accessor) -> capture once, walk the tail range. Structure only.
             let n = (*log).lh.n;
             for tail in 0..n {
-                let to = Buf::read((*log).dev as u32, ((*log).start + tail + 1) as u32); // log block
-                let from = Buf::read((*log).dev as u32, (*log).lh.block[tail as usize] as u32); // cache block
+                let to = Self::read_required((*log).dev as u32, ((*log).start + tail + 1) as u32).as_ptr(); // log block
+                let from = Self::read_required((*log).dev as u32, (*log).lh.block[tail as usize] as u32).as_ptr(); // cache block
                 memmove((*to).data as *mut c_void, (*from).data as *const c_void, super::BSIZE as usize);
                 Buf::write_async(to); // mark dirty, will flush at end
                 Buf::release(from);
@@ -401,7 +409,9 @@ impl LogInner {
 
             // Flush all log writes before writing header.
             if n > 0 {
-                BufCache::sync();
+                // A commit header must never name log blocks that failed to
+                // reach the device. This interface cannot return an I/O error.
+                BufCache::sync().expect("xv6fs log: writing transaction failed");
             }
         }
     }

@@ -35,9 +35,7 @@
 //!    `crate::sync::KMutex` RAII: no stack-scoped guard can span two
 //!    separate C-ABI calls. Every acquire/release site below mirrors
 //!    the C original's exact placement.
-//! 3. Disk I/O completion, awaited via [`bio_await`] (this file's own
-//!    reimplementation of `dev/bio.h`'s `static inline int
-//!    bio_await(struct bio *)` -- see below).
+//! 3. Disk I/O completion, awaited through the shared [`Bio::wait`] lifecycle.
 //!
 //! `bread()` may block (mutex sleep, then disk I/O wait); callers must
 //! not hold other sleeping locks that the disk interrupt/completion path
@@ -129,12 +127,6 @@
 //! cross-module by `backtrace.rs`/`vfs/fs.rs`/`tty/ptmx.rs`) recovers a
 //! `*mut buf` from a `*mut list_node_t`/`*mut hlist_entry_t` member
 //! pointer.
-//!
-//! # `dev/bio.h`'s `bio_await` -- reimplemented, not called
-//!
-//! `bio_await()` is `static inline` in `dev/bio.h` (see
-//! `kernel/dev/bio.rs`'s module doc) -- this file reimplements it
-//! natively ([`bio_await`] below), matching its C body exactly.
 //!
 //! # Panic-message fidelity (deliberate simplification)
 //!
@@ -237,6 +229,9 @@ const _: () = {
 // imports instead of `extern "C"` redeclarations.
 use crate::dev::blkdev::Blkdev;
 use crate::dev::bio::Bio;
+
+#[cfg(feature = "bio_test")]
+pub(crate) mod runtime_test;
 pub(crate) use crate::hlist::Hlist;
 pub(crate) use crate::lock::completion::RawCompletion;
 pub(crate) use crate::lock::mutex::RawMutex;
@@ -385,6 +380,41 @@ const fn zeroed_bcache_hash() -> BCacheHash {
 
 static BCACHE: SpinLock<BCacheHash> = SpinLock::new(c"bcache", zeroed_bcache_hash());
 
+/// Serializes sleeping flush passes across all mounted filesystems. An empty
+/// dirty list must not let a second caller return while the first has popped
+/// its buffers but has not yet completed their writes.
+struct FlushGate {
+    raw: core::cell::UnsafeCell<core::mem::MaybeUninit<mutex_t>>,
+    ready: core::sync::atomic::AtomicBool,
+}
+
+// SAFETY: storage is permanent, initialized once before publication, and all
+// subsequent mutation follows RawMutex's internal synchronization protocol.
+unsafe impl Sync for FlushGate {}
+
+impl FlushGate {
+    /// # Safety
+    /// Initialize once during exclusive buffer-cache boot setup.
+    unsafe fn init(&'static self) {
+        let raw = self.raw.get().cast::<mutex_t>();
+        // SAFETY: exclusive aligned storage. RawMutex contains only integer,
+        // raw-pointer and lock fields for which zero is a valid initial value.
+        unsafe { raw.write_bytes(0, 1) };
+        RawMutex::init(raw, c"bcache_flush".as_ptr().cast_mut());
+        self.ready.store(true, Ordering::Release);
+    }
+
+    fn lock(&'static self) -> crate::sync::KMutexGuard {
+        assert!(self.ready.load(Ordering::Acquire), "buffer cache not initialized");
+        crate::sync::KMutex::from_ptr(self.raw.get().cast()).lock()
+    }
+}
+
+static FLUSH_GATE: FlushGate = FlushGate {
+    raw: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
+    ready: core::sync::atomic::AtomicBool::new(false),
+};
+
 /// The `buf` array -- kept outside [`BCACHE`] (see module doc's "Data
 /// structures" section for why). Same zero-init rationale as before:
 /// `bget`'s buffer-recycling path depends on a not-yet-recycled buffer
@@ -490,21 +520,6 @@ impl Buf {
 // `dev/bio.h`'s `bio_await` -- reimplemented natively (see module doc).
 // ---------------------------------------------------------------------------
 
-fn bio_await(bio_ptr: *mut bio) -> c_int {
-    /// `EINTR` (`kernel/inc/errno.h`).
-    const EINTR: c_int = 4;
-    // SAFETY: `bio_ptr` is a live bio this file just submitted and owns
-    // exclusively until this wait completes; `io_completion` is a plain
-    // embedded field.
-    let ret = unsafe { RawCompletion::wait_interruptible(&raw mut (*bio_ptr).io_completion) };
-    if ret == -EINTR {
-        unsafe { RawCompletion::wait(&raw mut (*bio_ptr).io_completion) };
-        let err = unsafe { (*bio_ptr).error };
-        return if err != 0 { err } else { -EINTR };
-    }
-    unsafe { (*bio_ptr).error }
-}
-
 // ---------------------------------------------------------------------------
 // bio helpers. Mirrors `__buf_alloc_bio`/`__buf_bio_cleanup`. Relocated
 // onto `impl Buf` (both take `b: *mut buf`/pair with a buffer's own
@@ -517,7 +532,8 @@ fn bio_await(bio_ptr: *mut bio) -> c_int {
 
 impl Buf {
     fn alloc_bio(b: *mut buf, blkdev: *mut blkdev_t, write: bool) -> *mut bio {
-        let bio_ptr = Bio::alloc(blkdev, 1, write as bool_, None, core::ptr::null_mut());
+        // SAFETY: the caller holds a live block-device reference.
+        let bio_ptr = unsafe { Bio::alloc(blkdev, 1, write as bool_, None, core::ptr::null_mut()) };
         if is_err_or_null(bio_ptr) {
             return core::ptr::null_mut();
         }
@@ -539,7 +555,8 @@ impl Buf {
 
     fn bio_cleanup(bio_ptr: *mut bio) {
         if !bio_ptr.is_null() {
-            Bio::release(bio_ptr);
+            // SAFETY: this helper consumes the caller's allocated BIO reference.
+            unsafe { Bio::release(bio_ptr) };
         }
     }
 }
@@ -596,9 +613,13 @@ impl BufCache {
 // ---------------------------------------------------------------------------
 
 impl BufCache {
-    /// Initialise the buffer cache. Must be called exactly once, at boot,
-    /// before any other entry point in this file.
-    pub(crate) fn init() {
+    /// Initialise the buffer cache.
+    /// # Safety
+    /// Call exactly once at boot before any other entry point in this file,
+    /// with exclusive access to the cache and initialized page allocation.
+    pub(crate) unsafe fn init() {
+        // SAFETY: exclusive, once-only boot initialization, before any sync.
+        unsafe { FLUSH_GATE.init() };
         // `BCACHE` starts life already in the "locked struct with zeroed
         // contents" state (`SpinLock::new` is a `const fn`) -- unlike the
         // pre-P3-8c version there is no separate `spin_init` call needed
@@ -735,8 +756,11 @@ impl BufCache {
         b
     }
 
-    /// Flush all dirty buffers to disk. Called periodically or on `sync()`.
-    pub(crate) fn sync() {
+    /// Flush dirty buffers, retaining failed writes and propagating errors.
+    /// Callers must not hold buffer locks: the whole pass sleeps under a gate
+    /// before taking individual buffer locks, then briefly takes BCACHE.
+    pub(crate) fn sync() -> crate::kstd::KResult<()> {
+        let _flush = FLUSH_GATE.lock();
         loop {
             let mut bc = BCACHE.lock();
             if ln_is_empty(&raw mut bc.dirty_list) {
@@ -768,19 +792,38 @@ impl BufCache {
 
             // SAFETY: `b` locked (mutex held by this thread, just above).
             let valid = unsafe { (*b).valid } != 0;
+            let mut error = crate::kstd::Errno::Io.neg();
             if valid {
                 // SAFETY: `b` locked.
                 let dev = unsafe { (*b).dev };
                 let blkdev = Blkdev::get(dev_major(dev), dev_minor(dev));
-                if !is_err(blkdev) {
+                if is_err(blkdev) {
+                    error = crate::kstd::ptr_err(blkdev) as c_int;
+                } else {
                     let bio_ptr = Buf::alloc_bio(b, blkdev, true);
-                    if !is_err_or_null(bio_ptr) {
-                        Blkdev::submit_bio(blkdev, bio_ptr);
-                        bio_await(bio_ptr);
+                    if is_err_or_null(bio_ptr) {
+                        error = crate::kstd::Errno::NoMem.neg();
+                    } else {
+                        // SAFETY: the locked, referenced buffer pins its page;
+                        // both request and device references survive waiting.
+                        error = unsafe { Blkdev::submit_bio(blkdev, bio_ptr) };
+                        if error == 0 {
+                            error = unsafe { Bio::wait(bio_ptr) };
+                            // Cancellation was drained after submission.
+                            if error == crate::kstd::Errno::Intr.neg() { error = 0; }
+                        }
+                        // wait drains DMA even when interrupted; no device
+                        // error means the requested write still completed.
                         Buf::bio_cleanup(bio_ptr);
                     }
                     Blkdev::put(blkdev);
                 }
+            }
+
+            if error != 0 {
+                // Retain dirty data for a later sync instead of silently
+                // discarding it. Stop this pass below to avoid an error loop.
+                Buf::write_async(b);
             }
 
             // SAFETY: `b` live.
@@ -791,13 +834,15 @@ impl BufCache {
             // SAFETY: `b` live, `bc` held.
             let (refcnt_zero, fe) = unsafe {
                 (*b).refcnt -= 1;
-                ((*b).refcnt == 0, &raw mut (*b).free_entry)
+                ((*b).refcnt == 0 && (*b).dirty == 0, &raw mut (*b).free_entry)
             };
             if refcnt_zero {
                 ln_push_back(&raw mut bc.free_list, fe);
             }
             drop(bc);
+            if error != 0 { return Err(crate::kstd::Errno::Raw(error)); }
         }
+        Ok(())
     }
 
     /// Get the count of dirty buffers (for debugging/stats).
@@ -830,9 +875,10 @@ impl Buf {
                 Self::release(b);
                 return core::ptr::null_mut();
             }
-            let mut err = Blkdev::submit_bio(blkdev, bio_ptr);
+            // SAFETY: b is locked and its page stays pinned through the wait.
+            let mut err = unsafe { Blkdev::submit_bio(blkdev, bio_ptr) };
             if err == 0 {
-                err = bio_await(bio_ptr);
+                err = unsafe { Bio::wait(bio_ptr) };
             }
             Self::bio_cleanup(bio_ptr);
             let ret = Blkdev::put(blkdev);
@@ -867,9 +913,20 @@ impl Buf {
         if is_err_or_null(bio_ptr) {
             xv6_panic(c"bwrite: bio_alloc failed".as_ptr());
         }
-        Blkdev::submit_bio(blkdev, bio_ptr);
-        bio_await(bio_ptr);
+        // SAFETY: b remains locked and referenced until all transfers finish.
+        let mut error = unsafe { Blkdev::submit_bio(blkdev, bio_ptr) };
+        if error == 0 {
+            error = unsafe { Bio::wait(bio_ptr) };
+            if error == crate::kstd::Errno::Intr.neg() { error = 0; }
+        }
         Self::bio_cleanup(bio_ptr);
+        let ret = Blkdev::put(blkdev);
+        assert_blkdev_put_ok(ret);
+        if error != 0 {
+            // This synchronous interface cannot return an error to its
+            // filesystem callers. Never report a failed write as clean.
+            xv6_panic(c"bwrite: I/O failed".as_ptr());
+        }
 
         // Clear dirty flag after successful write.
         {
@@ -889,8 +946,6 @@ impl Buf {
             }
         }
 
-        let ret = Blkdev::put(blkdev);
-        assert_blkdev_put_ok(ret);
     }
 
     /// Mark buffer as dirty for later writeback. Must be locked. Much
@@ -937,8 +992,8 @@ impl Buf {
         // the C original's single conditional block.
         unsafe {
             (*b).refcnt -= 1;
-            if (*b).refcnt == 0 {
-                // No one is waiting for it -- add to free list (most
+            if (*b).refcnt == 0 && (*b).dirty == 0 {
+                // Clean, unreferenced buffers may be recycled (most
                 // recently used at head, oldest at tail).
                 ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
             }
@@ -967,7 +1022,7 @@ impl Buf {
         // the C original's single conditional block.
         unsafe {
             (*b).refcnt -= 1;
-            if (*b).refcnt == 0 {
+            if (*b).refcnt == 0 && (*b).dirty == 0 {
                 ln_push_back(&raw mut bc.free_list, &raw mut (*b).free_entry);
             }
         }
