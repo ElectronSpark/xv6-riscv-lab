@@ -870,22 +870,38 @@ fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: t
     Scheduler::thread_set_flag(cur, THREAD_FLAG_ONCHAN);
     Scheduler::thread_state_set(cur, state);
 
-    let lk_holding = lk.is_some_and(|l| l.holding());
-    if lk_holding {
-        lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").unlock();
+    let caller_lock = lk.filter(|lock| lock.holding());
+    let caller_intena = Scheduler::cpu_access().intena();
+    if let Some(lock) = caller_lock {
+        // SLEEP_LOCK uses irqsave, which does not contribute to cpu.noff.
+        // Releasing the caller's outermost push_off lock must therefore not
+        // restore interrupts while SLEEP_LOCK is still held: a device IRQ
+        // could otherwise recurse into wakeup_on_chan and acquire it again.
+        Scheduler::cpu_access().set_intena(0);
+        lock.unlock();
+        Scheduler::cpu_access().set_intena(caller_intena);
     }
 
     let ret = TtreeRef::from_ptr(Scheduler::chan_queue_ptr())
         .map_or(-(crate::bindings::EINVAL as c_int), |r| r.wait(chan as u64, core::ptr::null_mut(), core::ptr::null_mut()));
 
-    Scheduler::sleep_lock_irqsave_impl();
+    // A real context switch releases SLEEP_LOCK in context_switch_finish.
+    // If yield returns without switching, this hart still owns it.
+    if Scheduler::chan_holding_impl() == 0 {
+        Scheduler::sleep_lock_irqsave_impl();
+    }
     Scheduler::thread_clear_flag(cur, THREAD_FLAG_ONCHAN);
     // SAFETY: `cur` is proven non-null by the diverging `kassert!` above.
     unsafe { ThreadAccess::assume(cur) }.set_chan(core::ptr::null_mut());
-    Scheduler::sleep_unlock_irqrestore_impl(intr);
+    Scheduler::sleep_unlock_irqrestore_impl(0);
 
-    if lk_holding {
-        lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").lock();
+    if let Some(lock) = caller_lock {
+        lock.lock();
+        // Reacquisition happened with interrupts disabled. Preserve the
+        // original caller guard's restoration state for its eventual Drop.
+        Scheduler::cpu_access().set_intena(caller_intena);
+    } else {
+        Riscv::intr_restore(intr);
     }
     ret
 }

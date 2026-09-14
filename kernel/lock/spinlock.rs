@@ -265,8 +265,11 @@ impl RawSpinlock {
     /// Spin until `lk` is acquired by the current hart. Caller must have
     /// interrupts disabled (the public entry point `lock` does that).
     pub(crate) unsafe fn acquire(lk: *mut spinlock_t) {
-        if lk.is_null() || Self::holding(Self::as_native(lk)) {
+        if lk.is_null() {
             Self::fixed_msg_panic(MSG_REENTRY);
+        }
+        if Self::holding(Self::as_native(lk)) {
+            Self::deadlock_panic(Self::read_name(lk));
         }
         let lk = Self::as_native(lk);
         let locked = Self::locked_atomic(lk);
