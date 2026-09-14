@@ -1,128 +1,62 @@
-//! Bit-manipulation lookup tables.
+//! Historical byte lookup tables generated with Rust integer operations.
 //!
-//! Rust port of the original `kernel/bits.c`. Exposes the same four 256-byte
-//! tables under their original C symbol names so that
-//! `kernel/inc/bits.h` (compiled with `USE_SOFTWARE_FFS=1`) can keep using
-//! them unchanged:
+//! These crate-private tables currently have no production consumers; they
+//! retain the old byte-level results for exhaustive host regression tests.
+//! They are Rust symbols, not exports for `kernel/inc/bits.h`'s optional C
+//! software fallback. Kernel Rust code should use integer methods directly.
 //!
-//! * `__uint8_bits_count[i]`     = popcount(i)
-//! * `__uint8_trailing_zeros[i]` = ctz(i), or -1 when i == 0
-//! * `__uint8_leading_zeros[i]`  = clz(i) within a byte, or -1 when i == 0
-//! * `__uint8_inverse[i]`        = bit-reverse of i
-//!
-//! The C header declares all four arrays as `const int8 [256]`. The values in
-//! `__uint8_inverse` exceed the i8 range, but the underlying byte
-//! representation is identical, so the C side reads exactly what the original
-//! `bits.c` produced.
+//! The zero-count tables preserve the historical `-1` sentinel for zero,
+//! rather than the `8` returned by `u8::{leading_zeros, trailing_zeros}`.
+//! Reversed bytes use `u8` so every result is represented without sign loss.
 
 const fn build_popcount() -> [i8; 256] {
-    let mut t = [0i8; 256];
-    let mut i: usize = 0;
-    while i < 256 {
-        let mut x = i as u8;
-        let mut c: i8 = 0;
-        while x != 0 {
-            c += (x & 1) as i8;
-            x >>= 1;
-        }
-        t[i] = c;
-        i += 1;
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < table.len() {
+        table[index] = (index as u8).count_ones() as i8;
+        index += 1;
     }
-    t
+    table
 }
 
 const fn build_trailing_zeros() -> [i8; 256] {
-    let mut t = [-1i8; 256];
-    let mut i: usize = 1;
-    while i < 256 {
-        let mut x = i as u8;
-        let mut c: i8 = 0;
-        while (x & 1) == 0 {
-            c += 1;
-            x >>= 1;
-        }
-        t[i] = c;
-        i += 1;
+    let mut table = [-1; 256];
+    let mut index = 1;
+    while index < table.len() {
+        table[index] = (index as u8).trailing_zeros() as i8;
+        index += 1;
     }
-    t
+    table
 }
 
 const fn build_leading_zeros() -> [i8; 256] {
-    let mut t = [-1i8; 256];
-    let mut i: usize = 1;
-    while i < 256 {
-        let x = i as u8;
-        let mut c: i8 = 0;
-        let mut mask: u8 = 0x80;
-        while (x & mask) == 0 {
-            c += 1;
-            mask >>= 1;
-        }
-        t[i] = c;
-        i += 1;
+    let mut table = [-1; 256];
+    let mut index = 1;
+    while index < table.len() {
+        table[index] = (index as u8).leading_zeros() as i8;
+        index += 1;
     }
-    t
+    table
 }
 
 const fn build_inverse() -> [u8; 256] {
-    let mut t = [0u8; 256];
-    let mut i: usize = 0;
-    while i < 256 {
-        let mut x = i as u8;
-        let mut r: u8 = 0;
-        let mut k = 0;
-        while k < 8 {
-            r = (r << 1) | (x & 1);
-            x >>= 1;
-            k += 1;
-        }
-        t[i] = r;
-        i += 1;
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < table.len() {
+        table[index] = (index as u8).reverse_bits();
+        index += 1;
     }
-    t
+    table
 }
 
-// Place tables in `.rodata` to match the original C `const` arrays and avoid
-// occupying RAM. `#[no_mangle]` preserves the exact C symbol names referenced
-// by `kernel/inc/bits.h`.
+// Immutable statics naturally live in read-only storage. Unused tables may
+// be discarded; no symbol export or forced linker section is required.
+pub(crate) static BYTE_POPCOUNTS: [i8; 256] = build_popcount();
+pub(crate) static BYTE_TRAILING_ZEROS: [i8; 256] = build_trailing_zeros();
+pub(crate) static BYTE_LEADING_ZEROS: [i8; 256] = build_leading_zeros();
+pub(crate) static BYTE_REVERSED_BITS: [u8; 256] = build_inverse();
 
-#[link_section = ".rodata"]
-pub(crate) static __uint8_bits_count: [i8; 256] = build_popcount();
-
-#[link_section = ".rodata"]
-pub(crate) static __uint8_trailing_zeros: [i8; 256] = build_trailing_zeros();
-
-#[link_section = ".rodata"]
-pub(crate) static __uint8_leading_zeros: [i8; 256] = build_leading_zeros();
-
-// Stored as `[u8; 256]` because some entries exceed the i8 range. The C side
-// declares it as `const int8 [256]`, but only the byte representation matters
-// since the symbol is never dereferenced in the current code base; this
-// preserves backward ABI compatibility for any future caller.
-#[link_section = ".rodata"]
-pub(crate) static __uint8_inverse: [u8; 256] = build_inverse();
-
-// ---------------------------------------------------------------------------
-// Host-test suite (`cargo test --target x86_64-unknown-linux-gnu`; see
-// `kernel/lib.rs`'s "Host-test seam" doc). Verifies the four `const fn`
-// table-generators (and therefore the `#[no_mangle] pub static` tables built
-// from them) against independent, naively-written reimplementations of the
-// same bit operations, exhaustively over all 256 byte values.
-//
-// Reference-coverage note: `test/src/ut_bits_main.c` has 40 cmocka cases, but
-// most of them (`bits_ctzg`/`bits_clzg`/`bits_popcountg`/`bits_ffsg`'s
-// multi-width generics, the `bits_ctz_ptr*` family, `bits_foreach_set_bit`,
-// `bits_next_bit_set`) exercise `kernel/inc/bits.h`'s C `static inline`
-// wrapper macros/functions built *on top of* these tables -- there is no
-// Rust port of that layer (`bits.rs` only ever produced the four lookup
-// tables the C header already consumed; see this file's module doc), so
-// those ~36 cases have no Rust surface to test here and remain covered by
-// the existing (already-fixed, see `docs/rustify/test_port_plan.md`'s Phase
-// 0) `ut_bits` C cmocka suite, unaffected by this addition. The four cases
-// that *do* have a direct Rust equivalent (`test_bits_ffs8_matches_naive`,
-// `test_bits_ctz8_matches_naive`, `test_bits_clz8_matches_naive`,
-// `test_bits_popcount8_matches_naive`) are reproduced below against the
-// tables those four C functions read from.
+// Exercise every byte against independent bit-by-bit reference algorithms.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,11 +101,7 @@ mod tests {
         count
     }
 
-    /// Bit-reversal within a byte, independently written (no C reference
-    /// test exercises `__uint8_inverse` directly -- it has no current
-    /// caller in the tree per this file's module doc -- but it is one of
-    /// the four `build_*` tables this file promises byte-for-byte, so it
-    /// gets the same naive-vs-table treatment as the other three).
+    /// Independent bit-by-bit reference for all 256 reversed byte values.
     fn naive_reverse8(value: u8) -> u8 {
         let mut x = value;
         let mut result: u8 = 0;
@@ -187,7 +117,7 @@ mod tests {
         for value in 0u16..256 {
             let x = value as u8;
             assert_eq!(
-                __uint8_bits_count[x as usize],
+                BYTE_POPCOUNTS[x as usize],
                 naive_popcount8(x),
                 "popcount mismatch for byte {x:#04x}"
             );
@@ -199,7 +129,7 @@ mod tests {
         for value in 0u16..256 {
             let x = value as u8;
             assert_eq!(
-                __uint8_trailing_zeros[x as usize],
+                BYTE_TRAILING_ZEROS[x as usize],
                 naive_trailing_zeros8(x),
                 "ctz mismatch for byte {x:#04x}"
             );
@@ -211,7 +141,7 @@ mod tests {
         for value in 0u16..256 {
             let x = value as u8;
             assert_eq!(
-                __uint8_leading_zeros[x as usize],
+                BYTE_LEADING_ZEROS[x as usize],
                 naive_leading_zeros8(x),
                 "clz mismatch for byte {x:#04x}"
             );
@@ -223,7 +153,7 @@ mod tests {
         for value in 0u16..256 {
             let x = value as u8;
             assert_eq!(
-                __uint8_inverse[x as usize],
+                BYTE_REVERSED_BITS[x as usize],
                 naive_reverse8(x),
                 "bit-reverse mismatch for byte {x:#04x}"
             );
@@ -234,20 +164,16 @@ mod tests {
     fn zero_is_the_documented_sentinel_for_ctz_and_clz_tables() {
         // Matches the C reference's convention (`naive_ctz8`/`naive_clz8`
         // both special-case 0 to -1) and this file's own module doc.
-        assert_eq!(__uint8_trailing_zeros[0], -1);
-        assert_eq!(__uint8_leading_zeros[0], -1);
+        assert_eq!(BYTE_TRAILING_ZEROS[0], -1);
+        assert_eq!(BYTE_LEADING_ZEROS[0], -1);
     }
 
     #[test]
-    fn build_functions_reproduce_the_exported_static_tables_exactly() {
-        // Regression guard: the `#[no_mangle] pub static`s above are each
-        // `build_*()` evaluated at compile time. Re-invoking the const fns
-        // here and comparing against the statics catches anyone changing
-        // one but not the other (e.g. hand-editing a static's initializer
-        // to no longer literally be a call to its `build_*` function).
-        assert_eq!(build_popcount(), __uint8_bits_count);
-        assert_eq!(build_trailing_zeros(), __uint8_trailing_zeros);
-        assert_eq!(build_leading_zeros(), __uint8_leading_zeros);
-        assert_eq!(build_inverse(), __uint8_inverse);
+    fn build_functions_reproduce_the_static_tables_exactly() {
+        // Compile-time and runtime evaluations must produce the same bytes.
+        assert_eq!(build_popcount(), BYTE_POPCOUNTS);
+        assert_eq!(build_trailing_zeros(), BYTE_TRAILING_ZEROS);
+        assert_eq!(build_leading_zeros(), BYTE_LEADING_ZEROS);
+        assert_eq!(build_inverse(), BYTE_REVERSED_BITS);
     }
 }
