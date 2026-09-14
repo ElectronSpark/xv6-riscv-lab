@@ -1,128 +1,32 @@
-//! Lifetime-bound, RAII-style safe wrappers around the mm crate's
-//! C-ABI page/slab/kmm allocators.
+//! Owned page runs and typed slab allocations at the raw allocator boundary.
 //!
-//! The xv6 mm subsystem is fundamentally pointer-based: every allocator
-//! (`page_alloc` / `slab_alloc` / `kmm_alloc`) returns a raw pointer and
-//! the caller is responsible for an eventual matching `free`. From C
-//! that's the only option; from Rust we can do much better.
+//! `PageHandle` owns a page run until it is transferred into a page table or
+//! returned to the buddy allocator. `SlabCacheRef<T>` validates the immutable
+//! cache geometry before allocating `MaybeUninit<T>` slots; `SlabBox` runs an
+//! initialized value's destructor before returning its storage to the cache.
 //!
-//! This module introduces lifetime-bound *handles* whose `Drop` impl
-//! returns the resource to its owning allocator, and whose lifetime
-//! parameter ties the handle to a borrow of that allocator. This
-//! mirrors the `FrameTracker` / `MappedPages` pattern used in
-//! rCore-tutorial and Theseus OS:
-//!
-//! * **`BuddyAllocator`** — ZST representing the global page allocator;
-//!   the static instance [`BUDDY`] is what callers borrow from.
-//! * **`PageHandle<'pool>`** — owned page run with `Drop = page_free`,
-//!   parameterised by the lifetime of the borrow of [`BUDDY`] that
-//!   produced it.
-//! * **`SlabCacheRef<'a>`** — borrowed view of a `SlabCache`; the only
-//!   way to obtain a [`SlabBox`].
-//! * **`SlabBox<'cache, T>`** — typed slab object whose `Drop` calls
-//!   `slab_free` and which cannot outlive its cache.
-//!
-//! None of these change the existing `extern "C"` surface used by the
-//! C kernel — they are additional, Rust-only entry points. The intent
-//! is that *new* Rust code in this crate uses the handles, and over
-//! time the internal helpers migrate to them.
-//!
-//! # WP4 status (mm refactor plan)
-//!
-//! `PageHandle` is wired into `vm.rs`'s file-backed fault path:
-//! `vma_fault_file_page` owns the freshly allocated page through every
-//! early-return (cache miss / read error), and `vma_validate` re-wraps
-//! the pointer `xv6_vm_call_vma_fault` hands back so the race-loser
-//! branch's cleanup is a `Drop` instead of a manual `page_free`; the
-//! race-winner and the two `vma_fault_file_page` success paths call
-//! `into_raw()` where ownership moves to the page table / the caller.
-//! `SlabBox` is wired into `pcache.rs`'s `pcache_page_alloc`: the node
-//! allocation's error path (page alloc failing) is now a `Drop`, and
-//! `into_raw()` fires once the node is linked into the returned page's
-//! `pcache.pcache_node` field (a C-visible pointer walked from many
-//! other sites).
-//!
-//! `KBox<T>` was deleted in the WP4 pass: no site in `kernel/mm/*.rs`
-//! needed a single-fixed-`T`-value heap box. The one live internal
-//! `kmm_alloc` caller outside this file's own FFI declarations
-//! (`slab.rs`'s per-slab bitmap buffer) allocates a runtime-sized `[u64]`
-//! rather than a `T`, doesn't fit `KBox`'s shape, and already has its
-//! own local RAII rollback guards (`PageRollback`/`DescRollback` in
-//! `Slab::make`) predating this module. Re-add `KBox` if a real
-//! fixed-size `kmm_alloc` site turns up.
-//!
-//! A handful of `PageHandle`/`SlabBox` accessors (`as_page`,
-//! `as_bytes[_mut]`, `byte_len`, `page_count`, `physical_address`,
-//! `SlabCacheRef::alloc` for the non-`MaybeUninit` case, ...) still have
-//! no caller — kept as prepared API surface for the next site rather
-//! than deleted, hence the crate-wide `#![allow(dead_code)]` below
-//! staying in place for this file.
-//!
-//! WP5 deleted this file's `PreemptGuard`, `SpinGuard`, and `PerCpu`
-//! types: they were exact-duplicate reimplementations of
-//! `crate::machine::PreemptGuard` (used crate-wide) and
-//! `crate::sync::KSpinlock`/`KSpinGuard` (the RAII lock type all other
-//! `mm` submodules already standardised on in WP1); `PerCpu` only
-//! existed to borrow from the now-deleted local `PreemptGuard`. Keeping
-//! two live implementations of the same RAII primitive would have been
-//! a correctness hazard (e.g. code accidentally taking the "wrong" spin
-//! guard type), so they are gone rather than merely marked dead.
+//! Adopting raw pages or cache pointers remains unsafe: the caller establishes
+//! exclusive allocation ownership or pins the cache for the chosen lifetime.
+//! No shared reference to the concurrently mutable cache is constructed here.
+//! These handles do not repair the allocator's separate internal aliasing and
+//! synchronization contracts.
 
-#![allow(dead_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
+use core::alloc::Layout;
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
+#[cfg(not(test))]
 use crate::mm::page::{Page, PAGE_BUDDY_MAX_ORDER, PAGE_SIZE};
-use crate::mm::slab::SlabCache;
-
-// ---------------------------------------------------------------------------
-// FFI surface
-//
-// The page / slab / kmm cross-Rust helpers below operate on `Page` /
-// `SlabCache` types owned by their respective modules and stay declared
-// locally to avoid a circular dependency on those types from `cffi`.
-// ---------------------------------------------------------------------------
-mod ffi {
-    use super::*;
-
-    // `crate::mm::page::{__page_alloc,__page_free,__page_to_pa,__pa_to_page}`
-    // and `crate::mm::slab::{slab_alloc,slab_free}` are all genuinely
-    // `unsafe fn` (`pub(crate)` since P3-D3a — no `#[no_mangle]` export
-    // surface remains anywhere in the mm cluster); this
-    // module's original extern declaration asserted `pub safe fn` (usual
-    // FFI-facade convention) and, unlike most other consumers in this
-    // crate, already used the exact canonical `Page`/`SlabCache` types
-    // (this file imports them directly), so only the safety facade needs
-    // preserving here, no pointer-type cast.
-    /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
-    pub fn __page_alloc(order: u64, flags: u64) -> *mut Page {
-        unsafe { crate::mm::page::Page::__page_alloc(order, flags) }
-    }
-    /// SAFETY: `page` must originate from `__page_alloc` above.
-    pub fn __page_free(page: *mut Page, order: u64) {
-        unsafe { crate::mm::page::Page::__page_free(page, order) };
-    }
-    /// SAFETY: `page` must be a live `Page`.
-    pub fn __page_to_pa(page: *mut Page) -> u64 {
-        unsafe { crate::mm::page::Page::__page_to_pa(page) }
-    }
-    /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
-    pub fn __pa_to_page(physical: u64) -> *mut Page {
-        unsafe { crate::mm::page::Page::__pa_to_page(physical) }
-    }
-    /// SAFETY: `cache` must be a live `SlabCache`.
-    pub fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {
-        unsafe { crate::mm::slab::slab_alloc(cache) }
-    }
-    /// SAFETY: `obj` must originate from `slab_alloc` above.
-    pub fn slab_free(obj: *mut c_void) {
-        unsafe { crate::mm::slab::slab_free(obj) };
-    }
-}
+#[cfg(not(test))]
+use crate::mm::slab::{slab_alloc, slab_free, SlabCache};
+#[cfg(test)]
+use test_backend::{slab_alloc, slab_free, Page, SlabCache, PAGE_BUDDY_MAX_ORDER, PAGE_SIZE};
 
 // ===========================================================================
 // BuddyAllocator + PageHandle
@@ -157,7 +61,8 @@ impl BuddyAllocator {
         if order > PAGE_BUDDY_MAX_ORDER {
             return None;
         }
-        let raw = ffi::__page_alloc(order, flags);
+        // SAFETY: allocation begins after the global buddy allocator is initialized.
+        let raw = unsafe { Page::__page_alloc(order, flags) };
         NonNull::new(raw).map(|page| PageHandle {
             page,
             order,
@@ -188,20 +93,6 @@ pub struct PageHandle<'pool> {
 unsafe impl<'pool> Send for PageHandle<'pool> {}
 
 impl<'pool> PageHandle<'pool> {
-    /// Borrow the head [`Page`] descriptor.
-    #[inline]
-    pub fn as_page(&self) -> &Page {
-        // SAFETY: We own the allocation for the duration of `&self`.
-        unsafe { self.page.as_ref() }
-    }
-
-    /// Mutably borrow the head [`Page`] descriptor.
-    #[inline]
-    pub fn as_page_mut(&mut self) -> &mut Page {
-        // SAFETY: We own the allocation for the duration of `&mut self`.
-        unsafe { self.page.as_mut() }
-    }
-
     /// Raw `*mut Page` pointer (head). Does **not** transfer ownership.
     #[inline]
     pub fn as_ptr(&self) -> *mut Page {
@@ -229,7 +120,8 @@ impl<'pool> PageHandle<'pool> {
     /// Physical address of the first byte.
     #[inline]
     pub fn physical_address(&self) -> u64 {
-        ffi::__page_to_pa(self.page.as_ptr())
+        // SAFETY: the handle owns a live page allocation.
+        unsafe { Page::__page_to_pa(self.page.as_ptr()) }
     }
 
     /// Direct-mapped kernel virtual pointer to the data region.
@@ -241,17 +133,23 @@ impl<'pool> PageHandle<'pool> {
     /// Borrow the page data as a `[u8]` slice.
     ///
     /// # Safety
-    /// The caller must ensure no other code is concurrently mutating
-    /// the page (e.g., DMA in flight or another CPU holding a mapping).
+    /// All bytes must be initialized, and no other accessor (including DMA
+    /// and mapped users) may mutate them for the returned borrow's lifetime.
     #[inline]
     pub unsafe fn as_bytes(&self) -> &[u8] {
-        core::slice::from_raw_parts(self.data_ptr(), self.byte_len())
+        // SAFETY: the caller supplies initialization and shared-access guarantees.
+        unsafe { core::slice::from_raw_parts(self.data_ptr(), self.byte_len()) }
     }
 
-    /// Mutable byte view. Same safety contract as [`as_bytes`].
+    /// Mutable byte view.
+    ///
+    /// # Safety
+    /// All bytes must be initialized, and the caller must exclude every other
+    /// accessor, including DMA and mapped users, for the returned borrow.
     #[inline]
     pub unsafe fn as_bytes_mut(&mut self) -> &mut [u8] {
-        core::slice::from_raw_parts_mut(self.data_ptr(), self.byte_len())
+        // SAFETY: the caller supplies initialization and exclusive-access guarantees.
+        unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), self.byte_len()) }
     }
 
     /// Relinquish ownership *without* freeing. The returned pointer
@@ -268,7 +166,9 @@ impl<'pool> PageHandle<'pool> {
     ///
     /// # Safety
     /// `ptr` must be the result of a prior `into_raw` (or equivalent
-    /// `__page_alloc(order, _)`), and must not yet have been freed.
+    /// `__page_alloc(order, _)`), with the exact allocation order. Ownership
+    /// must be transferred exclusively: no second owner, active mapping, DMA,
+    /// or borrowed reference may remain when this handle frees the run.
     #[inline]
     pub unsafe fn from_raw(ptr: *mut Page, order: u64) -> Option<Self> {
         NonNull::new(ptr).map(|page| Self {
@@ -291,10 +191,14 @@ impl<'pool> PageHandle<'pool> {
     /// `pa` must be a live, order-`order` page owned by the buddy
     /// allocator that has not yet been freed (i.e. the result of a
     /// prior `page_alloc(order, _)`, or a value handed back by a fault
-    /// handler that itself allocated the page that way).
+    /// handler that itself allocated the page that way). It must be the head
+    /// address, with the exact allocation order. Ownership is transferred
+    /// exclusively; outstanding mappings, DMA, and references must end before
+    /// the handle can free the run.
     #[inline]
     pub unsafe fn from_pa(pa: *mut c_void, order: u64) -> Option<Self> {
-        let raw = ffi::__pa_to_page(pa as u64);
+        // SAFETY: the caller transfers the specified live page run.
+        let raw = unsafe { Page::__pa_to_page(pa as u64) };
         NonNull::new(raw).map(|page| Self {
             page,
             order,
@@ -306,7 +210,8 @@ impl<'pool> PageHandle<'pool> {
 impl<'pool> Drop for PageHandle<'pool> {
     #[inline]
     fn drop(&mut self) {
-        ffi::__page_free(self.page.as_ptr(), self.order);
+        // SAFETY: this handle owns the allocation at its recorded order.
+        unsafe { Page::__page_free(self.page.as_ptr(), self.order) };
     }
 }
 
@@ -314,62 +219,54 @@ impl<'pool> Drop for PageHandle<'pool> {
 // SlabCacheRef + SlabBox
 // ===========================================================================
 
-/// Borrowed handle to a `SlabCache`. The only way to obtain a
-/// [`SlabBox`] is through this type, so a slab object cannot outlive
-/// the `&'a SlabCache` it came from.
-#[derive(Copy, Clone)]
-pub struct SlabCacheRef<'a> {
+/// A typed allocation capability for a live, externally pinned slab cache.
+///
+/// The unsafe constructor establishes the cache lifetime; this type does not
+/// borrow the cache's mutable metadata. Size and alignment are checked once,
+/// so subsequent allocation can safely return uninitialized `T` storage.
+pub struct SlabCacheRef<'cache, T> {
     cache: NonNull<SlabCache>,
-    _borrow: PhantomData<&'a SlabCache>,
+    _lifetime: PhantomData<&'cache UnsafeCell<SlabCache>>,
+    _value: PhantomData<fn() -> T>,
 }
 
-impl<'a> SlabCacheRef<'a> {
-    /// Wrap a raw cache pointer.
-    ///
-    /// # Safety
-    /// The cache must be initialised, live for at least `'a`, and not
-    /// be concurrently destroyed.
-    #[inline]
-    pub unsafe fn from_raw(cache: &'a SlabCache) -> Self {
-        Self {
-            cache: NonNull::from(cache),
-            _borrow: PhantomData,
-        }
-    }
+/// Every slot starts at page_base + offset + index * stride. The allocator
+/// guarantees page alignment, so all three terms must preserve T's alignment.
+fn layout_fits_slot(layout: Layout, stride: usize, offset: usize) -> bool {
+    stride != 0
+        && layout.size() <= stride
+        && layout.align() <= PAGE_SIZE as usize
+        && offset % layout.align() == 0
+        && stride % layout.align() == 0
+}
 
-    /// Allocate one zero-initialised object of type `T` from the cache.
-    ///
-    /// Returns `None` if the cache cannot satisfy the request. The
-    /// returned [`SlabBox`] cannot outlive `'a`.
+impl<'cache, T> SlabCacheRef<'cache, T> {
+    /// Validate a raw cache's geometry for `T`; reject null or incompatible
+    /// cache pointers without allocating an object.
     ///
     /// # Safety
-    /// The caller must ensure `size_of::<T>() <= cache.obj_size` and
-    /// `align_of::<T>() <= cache.alignment`. There is no run-time check
-    /// (the cache stores its object size opaquely from Rust's view).
-    /// Additionally, `T` must be valid when every byte is zero (this
-    /// function hands back all-zero-bits memory without running any
-    /// `T`-specific initializer): sound for plain-old-data structs and
-    /// integer/array types, unsound for `bool`, `char`, `NonZero*`,
-    /// references, or enums whose discriminant `0` is not a valid
-    /// variant. Prefer [`alloc_uninit`](Self::alloc_uninit) followed by
-    /// explicit field initialization for any `T` that is not
-    /// known-zeroable.
-    pub unsafe fn alloc<T>(self) -> Option<SlabBox<'a, T>> {
-        let raw = ffi::slab_alloc(self.cache.as_ptr());
-        let ptr = NonNull::new(raw)?.cast::<T>();
-        Some(SlabBox {
-            ptr,
-            _cache: PhantomData,
+    /// A nonnull pointer must name an initialized cache. Its geometry must
+    /// remain immutable and its allocation must remain live throughout
+    /// `'cache`, including every allocation returned through this capability.
+    /// The caller supplies that lifetime; this function does not create a
+    /// cache owner or synchronize destruction. The global allocators must
+    /// already be initialized.
+    pub unsafe fn from_raw(cache: *mut SlabCache) -> Option<Self> {
+        let cache = NonNull::new(cache)?;
+        // SAFETY: the caller pins the cache and its immutable geometry.
+        let (stride, offset) = unsafe { SlabCache::object_geometry(cache.as_ptr()) };
+        layout_fits_slot(Layout::new::<T>(), stride, offset).then_some(Self {
+            cache,
+            _lifetime: PhantomData,
+            _value: PhantomData,
         })
     }
 
-    /// Allocate an uninitialised `MaybeUninit<T>` slot.
-    ///
-    /// # Safety
-    /// Same size/alignment contract as [`alloc`](Self::alloc).
-    pub unsafe fn alloc_uninit<T>(self) -> Option<SlabBox<'a, MaybeUninit<T>>> {
-        let raw = ffi::slab_alloc(self.cache.as_ptr());
-        let ptr = NonNull::new(raw)?.cast::<MaybeUninit<T>>();
+    /// Allocate one uninitialized slot. Dropping it before initialization
+    /// releases the storage without running a `T` destructor.
+    pub fn alloc_uninit(&self) -> Option<SlabBox<'cache, MaybeUninit<T>>> {
+        // SAFETY: construction validated geometry and established cache life.
+        let ptr = NonNull::new(unsafe { slab_alloc(self.cache.as_ptr()) })?.cast();
         Some(SlabBox {
             ptr,
             _cache: PhantomData,
@@ -378,12 +275,13 @@ impl<'a> SlabCacheRef<'a> {
 }
 
 /// Owned object allocated from a slab cache. `Drop` returns the object
-/// via `slab_free`. The `'cache` lifetime prevents the box from
-/// outliving the cache borrow that produced it.
+/// via `slab_free`. The `'cache` lifetime retains the unsafe constructor's
+/// requirement that the backing cache remain live, without borrowing its
+/// concurrently mutable metadata.
 #[must_use = "slab allocations leak unless freed via the handle's Drop"]
 pub struct SlabBox<'cache, T: ?Sized> {
     ptr: NonNull<T>,
-    _cache: PhantomData<&'cache SlabCache>,
+    _cache: PhantomData<&'cache UnsafeCell<SlabCache>>,
 }
 
 impl<'cache, T> SlabBox<'cache, MaybeUninit<T>> {
@@ -396,7 +294,8 @@ impl<'cache, T> SlabBox<'cache, MaybeUninit<T>> {
         let raw = self.ptr.as_ptr() as *mut T;
         core::mem::forget(self);
         SlabBox {
-            ptr: NonNull::new_unchecked(raw),
+            // SAFETY: the original owning pointer was nonnull.
+            ptr: unsafe { NonNull::new_unchecked(raw) },
             _cache: PhantomData,
         }
     }
@@ -441,26 +340,269 @@ impl<'cache, T: ?Sized> Drop for SlabBox<'cache, T> {
         // SAFETY: we own the allocation; T's destructor runs first.
         unsafe {
             core::ptr::drop_in_place(self.ptr.as_ptr());
-            ffi::slab_free(self.ptr.as_ptr() as *mut c_void);
+            slab_free(self.ptr.as_ptr() as *mut c_void);
         }
     }
 }
 
-// ===========================================================================
-// Compile-time documentation of the lifetime guarantees
-// ===========================================================================
-//
-// The patterns below intentionally fail to compile and are commented
-// out; they document what the lifetime parameters actually prevent.
-//
-//     // Cannot leak a PageHandle past the BuddyAllocator borrow:
-//     fn bad<'a>() -> PageHandle<'a> {
-//         let b = BuddyAllocator { _private: () };
-//         b.alloc(0, 0).unwrap()  // ERROR: `b` does not live long enough
-//     }
-//
-//     // Cannot retain a SlabBox after dropping its cache borrow:
-//     fn outlive_cache(c: &SlabCache) -> SlabBox<'static, u64> {
-//         let r = { SlabCacheRef::from_raw(c) };
-//         { r.alloc::<u64>() }.unwrap()  // ERROR: lifetime mismatch
-//     }
+// Only allocation is substituted in host tests. Geometry checks, initialization,
+// ownership transfers, dereferencing, and destruction use the production code.
+#[cfg(test)]
+mod test_backend {
+    use super::*;
+    use std::alloc::{alloc, dealloc};
+    use std::boxed::Box;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+
+    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_BUDDY_MAX_ORDER: u64 = 10;
+
+    std::thread_local! {
+        static OBJECTS: RefCell<HashMap<usize, Layout>> = RefCell::new(HashMap::new());
+        static PAGES: RefCell<HashMap<usize, *mut Page>> = RefCell::new(HashMap::new());
+    }
+
+    pub struct SlabCache {
+        pub stride: usize,
+        pub offset: usize,
+        pub fail: Cell<bool>,
+    }
+
+    impl SlabCache {
+        pub fn new(stride: usize, offset: usize) -> Self {
+            Self {
+                stride,
+                offset,
+                fail: Cell::new(false),
+            }
+        }
+
+        pub unsafe fn object_geometry(cache: *const Self) -> (usize, usize) {
+            // SAFETY: the test's stack-owned cache outlives the capability.
+            unsafe { ((*cache).stride, (*cache).offset) }
+        }
+    }
+
+    pub unsafe fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {
+        // SAFETY: the tested capability carries the cache lifetime contract.
+        let cache = unsafe { &*cache };
+        if cache.fail.get() {
+            return core::ptr::null_mut();
+        }
+        let layout = Layout::from_size_align(cache.stride, PAGE_SIZE as usize).unwrap();
+        // SAFETY: the layout is nonzero and every allocation is tracked below.
+        let raw = unsafe { alloc(layout) };
+        if !raw.is_null() {
+            // Deliberately dirty storage: typed allocation promises no zeroing.
+            unsafe { raw.write_bytes(0xa5, cache.stride) };
+            OBJECTS.with(|objects| {
+                assert!(objects.borrow_mut().insert(raw as usize, layout).is_none())
+            });
+        }
+        raw.cast()
+    }
+
+    pub unsafe fn slab_free(raw: *mut c_void) {
+        let layout = OBJECTS
+            .with(|objects| objects.borrow_mut().remove(&(raw as usize)))
+            .expect("slab pointer must have one live owner");
+        // SAFETY: remove above enforces one matching free for the allocation.
+        unsafe { dealloc(raw.cast(), layout) };
+    }
+
+    pub fn live_objects() -> usize {
+        OBJECTS.with(|objects| objects.borrow().len())
+    }
+
+    pub struct Page {
+        data: *mut u8,
+        order: u64,
+    }
+
+    impl Page {
+        pub unsafe fn __page_alloc(order: u64, _flags: u64) -> *mut Self {
+            let layout =
+                Layout::from_size_align((PAGE_SIZE << order) as usize, PAGE_SIZE as usize).unwrap();
+            // SAFETY: the nonzero layout is retained by the Page's order.
+            let data = unsafe { alloc(layout) };
+            if data.is_null() {
+                return core::ptr::null_mut();
+            }
+            let page = Box::into_raw(Box::new(Self { data, order }));
+            PAGES.with(|pages| assert!(pages.borrow_mut().insert(data as usize, page).is_none()));
+            page
+        }
+
+        pub unsafe fn __page_free(page: *mut Self, order: u64) {
+            // SAFETY: each test transfers a uniquely owned page into its handle.
+            let page = unsafe { Box::from_raw(page) };
+            assert_eq!(page.order, order);
+            assert!(PAGES
+                .with(|pages| pages.borrow_mut().remove(&(page.data as usize)))
+                .is_some());
+            let layout =
+                Layout::from_size_align((PAGE_SIZE << order) as usize, PAGE_SIZE as usize).unwrap();
+            // SAFETY: order and allocation ownership were verified above.
+            unsafe { dealloc(page.data, layout) };
+        }
+
+        pub unsafe fn __page_to_pa(page: *mut Self) -> u64 {
+            // SAFETY: the PageHandle owns this live descriptor.
+            unsafe { (*page).data as u64 }
+        }
+
+        pub unsafe fn __pa_to_page(address: u64) -> *mut Self {
+            PAGES
+                .with(|pages| pages.borrow().get(&(address as usize)).copied())
+                .unwrap_or(core::ptr::null_mut())
+        }
+    }
+
+    pub fn live_pages() -> usize {
+        PAGES.with(|pages| pages.borrow().len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    std::thread_local! {
+        static DROPS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct DropProbe(u64);
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            assert_eq!(
+                test_backend::live_objects(),
+                1,
+                "storage must remain live during T::drop"
+            );
+            DROPS.set(DROPS.get() + 1);
+        }
+    }
+
+    #[test]
+    fn geometry_checks_size_offset_stride_and_page_alignment() {
+        let aligned = Layout::from_size_align(64, 64).unwrap();
+        assert!(layout_fits_slot(aligned, 128, 128));
+        assert!(!layout_fits_slot(aligned, 32, 128));
+        assert!(!layout_fits_slot(aligned, 128, 80));
+        assert!(!layout_fits_slot(aligned, 80, 128));
+        let over_aligned = Layout::from_size_align(8192, 8192).unwrap();
+        assert!(!layout_fits_slot(over_aligned, 8192, 0));
+        assert!(!layout_fits_slot(Layout::new::<()>(), 0, 0));
+    }
+
+    #[test]
+    fn typed_cache_rejects_null_and_incompatible_geometry_before_allocation() {
+        // SAFETY: null is an explicitly supported input.
+        assert!(unsafe { SlabCacheRef::<u64>::from_raw(core::ptr::null_mut()) }.is_none());
+        let mut cache = SlabCache::new(64, 0);
+        // SAFETY: the stack cache remains live and unchanged for this check.
+        assert!(unsafe { SlabCacheRef::<[u8; 65]>::from_raw(&raw mut cache) }.is_none());
+        assert_eq!(test_backend::live_objects(), 0);
+    }
+
+    #[test]
+    fn uninitialized_slot_drop_frees_storage_without_dropping_t() {
+        DROPS.set(0);
+        let mut cache = SlabCache::new(64, 0);
+        // SAFETY: the cache outlives both the capability and its allocation.
+        let typed = unsafe { SlabCacheRef::<DropProbe>::from_raw(&raw mut cache) }.unwrap();
+        let slot = typed.alloc_uninit().unwrap();
+        assert_eq!(test_backend::live_objects(), 1);
+        drop(slot);
+        assert_eq!(DROPS.get(), 0);
+        assert_eq!(test_backend::live_objects(), 0);
+    }
+
+    #[test]
+    fn initialized_value_is_dropped_once_before_storage_release() {
+        DROPS.set(0);
+        let mut cache = SlabCache::new(64, 0);
+        // SAFETY: the cache outlives both the capability and its allocation.
+        let typed = unsafe { SlabCacheRef::<DropProbe>::from_raw(&raw mut cache) }.unwrap();
+        let mut slot = typed.alloc_uninit().unwrap();
+        slot.write(DropProbe(73));
+        // SAFETY: MaybeUninit::write just initialized the full value.
+        let mut value = unsafe { slot.assume_init() };
+        assert_eq!(value.0, 73);
+        value.0 = 91;
+        assert_eq!(value.0, 91);
+        drop(value);
+        assert_eq!(DROPS.get(), 1);
+        assert_eq!(test_backend::live_objects(), 0);
+    }
+
+    #[test]
+    fn allocation_failure_preserves_cache_and_leaves_no_owned_storage() {
+        let mut cache = SlabCache::new(64, 0);
+        cache.fail.set(true);
+        // SAFETY: the cache lives until the capability and any allocations end.
+        let typed = unsafe { SlabCacheRef::<u64>::from_raw(&raw mut cache) }.unwrap();
+        assert!(typed.alloc_uninit().is_none());
+        assert_eq!(test_backend::live_objects(), 0);
+        cache.fail.set(false);
+        assert!(typed.alloc_uninit().is_some());
+        assert_eq!(test_backend::live_objects(), 0);
+    }
+
+    #[test]
+    fn raw_transfer_defers_destruction_to_the_new_owner() {
+        DROPS.set(0);
+        let mut cache = SlabCache::new(64, 0);
+        // SAFETY: the cache remains live until manual teardown below.
+        let typed = unsafe { SlabCacheRef::<DropProbe>::from_raw(&raw mut cache) }.unwrap();
+        let mut slot = typed.alloc_uninit().unwrap();
+        slot.write(DropProbe(42));
+        // SAFETY: the value was fully initialized above.
+        let raw = unsafe { slot.assume_init() }.into_raw();
+        assert_eq!(DROPS.get(), 0);
+        assert_eq!(test_backend::live_objects(), 1);
+        // SAFETY: into_raw transferred exclusive ownership to this test.
+        unsafe {
+            core::ptr::drop_in_place(raw);
+            slab_free(raw.cast());
+        }
+        assert_eq!(DROPS.get(), 1);
+        assert_eq!(test_backend::live_objects(), 0);
+    }
+
+    #[test]
+    fn early_unwind_drops_initialized_value_and_allocation() {
+        DROPS.set(0);
+        let mut cache = SlabCache::new(64, 0);
+        // SAFETY: the cache outlives the closure and its owned allocation.
+        let typed = unsafe { SlabCacheRef::<DropProbe>::from_raw(&raw mut cache) }.unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut slot = typed.alloc_uninit().unwrap();
+            slot.write(DropProbe(1));
+            // SAFETY: write initialized the value.
+            let _value = unsafe { slot.assume_init() };
+            panic!("exercise rollback");
+        }));
+        assert!(result.is_err());
+        assert_eq!(DROPS.get(), 1);
+        assert_eq!(test_backend::live_objects(), 0);
+    }
+
+    #[test]
+    fn page_transfer_and_adoption_preserve_order_and_single_ownership() {
+        assert!(BUDDY.alloc(PAGE_BUDDY_MAX_ORDER + 1, 0).is_none());
+        let page = BUDDY.alloc(2, 0).unwrap();
+        assert_eq!(page.page_count(), 4);
+        let data = page.data_ptr();
+        let raw = page.into_raw();
+        assert_eq!(test_backend::live_pages(), 1);
+        // SAFETY: the prior owner transferred this exact order-2 allocation.
+        let page = unsafe { PageHandle::from_pa(data.cast(), 2) }.unwrap();
+        assert_eq!(page.as_ptr(), raw);
+        drop(page);
+        assert_eq!(test_backend::live_pages(), 0);
+    }
+}

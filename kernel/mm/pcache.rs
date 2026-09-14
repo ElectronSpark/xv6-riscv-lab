@@ -2509,19 +2509,13 @@ impl Pcache {
 // ---------------------------------------------------------------------------
 impl Pcache {
     fn page_alloc() -> *mut Page {
-        // Borrow the node cache through the layout-verified bindgen<->slab.rs
-        // view (same pointer-cast pattern the `ffi::slab_alloc` redeclaration
-        // above already relies on; sizes are cross-checked by static asserts
-        // in slab.rs). SAFETY: `Pcache::node_slab()` is initialised once at pcache
-        // subsystem startup (`xv6_pcache_node_slab_init`) and lives for the
-        // rest of the kernel's lifetime — the `'static`-equivalent borrow is
-        // always valid.
+        // SAFETY: the node cache is initialized once at pcache startup and
+        // stays live for every node allocation. Construction reads only its
+        // immutable geometry; no reference to shared cache metadata is made.
         let cache_ref = unsafe {
-            SlabCacheRef::from_raw(&*(Pcache::node_slab() as *mut crate::mm::slab::SlabCache))
-        };
-        // SAFETY: the cache was created with `size_of::<PcacheNode>()` as its
-        // object size (see `xv6_pcache_node_slab_init` above), matching `T`.
-        let node_box: SlabBox<'_, MaybeUninit<PcacheNode>> = match unsafe { cache_ref.alloc_uninit() } {
+            SlabCacheRef::<PcacheNode>::from_raw(Pcache::node_slab().cast())
+        }.expect("pcache node cache has incompatible object geometry");
+        let node_box: SlabBox<'_, MaybeUninit<PcacheNode>> = match cache_ref.alloc_uninit() {
             Some(b) => b,
             None => return ptr::null_mut(),
         };

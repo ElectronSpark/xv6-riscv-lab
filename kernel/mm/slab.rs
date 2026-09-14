@@ -118,6 +118,17 @@ impl PercpuCache {
 }
 
 impl SlabCache {
+    /// Read the immutable allocation stride and first-object offset without
+    /// borrowing the concurrently mutable cache metadata.
+    ///
+    /// # Safety
+    /// `cache` must point to an initialized cache whose geometry stays fixed
+    /// and whose allocation remains live for this call.
+    pub(crate) unsafe fn object_geometry(cache: *const Self) -> (usize, usize) {
+        // SAFETY: initialization and cache lifetime are the caller's contract.
+        unsafe { (ptr::addr_of!((*cache).obj_size).read(), ptr::addr_of!((*cache).offset).read()) }
+    }
+
     #[inline]
     fn global_lock_ptr(&mut self) -> *mut Spinlock {
         core::ptr::addr_of_mut!(self.global_free_lock_bytes) as *mut Spinlock
