@@ -1585,15 +1585,22 @@ static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
                 break; /* short read */
             }
 
-            /* Check if peer is gone (broken pipe = EOF) */
+            /* Check EOF without skipping data published after the empty read. */
             bool eof;
             spin_lock(&sk->lock);
-            eof = sk->peer == NULL;
+            eof = sk->peer == NULL ||
+                  (sk->shutdown_flags & UNIX_SHUT_RD) != 0;
             spin_unlock(&sk->lock);
             if (!eof) {
                 spin_lock(&peer->lock);
+                bool retry_read = sk->type == SOCK_STREAM &&
+                                  RING_READABLE(&peer->tx) != 0;
                 eof = (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
                 spin_unlock(&peer->lock);
+                if (retry_read) {
+                    unix_sock_put(peer);
+                    continue;
+                }
             }
             if (eof) {
                 unix_sock_put(peer);
@@ -1620,13 +1627,35 @@ static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
             unix_seqpacket_trace("read-wait", sk, peer, count, 0,
                                  sk->state, sk->shutdown_flags);
             unix_wayland_trace("read-wait", sk, (long)count, (long)total);
-            unix_sock_put(peer);
             uint64 read_wait_start_ms = kde_ipc_trace_enabled() ?
                 sched_timer_now_ms() : 0;
             spin_lock(&sk->lock);
+            /*
+             * Writers publish peer->tx.nwrite before taking sk->lock to wake
+             * this queue.  Recheck under that wake/enrollment lock: an earlier
+             * write is visible here, while a later writer must wake us after
+             * tq_wait_in_state has enrolled the reader and released the lock.
+             * Only inspect release-published indices, not the ring storage;
+             * taking peer->lock here would invert simultaneous peer reads.
+             * Keep the peer reference until after this check/wait, including
+             * close and shutdown races.  Retry through the locked read/EOF
+             * path so data queued immediately before SHUT_WR is drained first.
+             */
+            if (sk->type == SOCK_STREAM &&
+                (sk->peer != peer ||
+                 (sk->shutdown_flags & UNIX_SHUT_RD) != 0 ||
+                 (__atomic_load_n(&peer->shutdown_flags, __ATOMIC_ACQUIRE) &
+                  UNIX_SHUT_WR) != 0 ||
+                 smp_load_acquire(&peer->tx.nread) !=
+                     smp_load_acquire(&peer->tx.nwrite))) {
+                spin_unlock(&sk->lock);
+                unix_sock_put(peer);
+                continue;
+            }
             tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
                              THREAD_INTERRUPTIBLE);
             spin_unlock(&sk->lock);
+            unix_sock_put(peer);
             if (kde_ipc_trace_enabled())
                 unix_ipc_trace("read-wait-exit", sk, (long)count,
                                (long)(sched_timer_now_ms() -
